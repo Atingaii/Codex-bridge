@@ -1,4 +1,4 @@
-const CACHE_NAME = "codex-bridge-shell-v20260523-visible-events";
+const CACHE_NAME = "codex-bridge-shell-v20260523-timeline-bottom";
 const STATIC_CACHE_PATHS = [
   "/",
   "/icon.svg",

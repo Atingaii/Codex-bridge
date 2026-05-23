@@ -63,6 +63,9 @@ without repeating full timestamps inside the run list.
 Assistant deltas are rendered as separate timeline entries in event sequence
 order. Command events are also rendered in the timeline with expandable command
 details so users can confirm which command/output payload arrived from Hub.
+When the user scrolls away from the latest orchestration event, the timeline
+shows a floating jump-to-bottom control; if the user is already at the bottom,
+new events continue to follow automatically.
 
 ## Implementation Steps
 
@@ -79,6 +82,8 @@ details so users can confirm which command/output payload arrived from Hub.
 8. Render event times in the main timeline and run dates in the sidebar.
 9. Render detailed `turn.delta` and `command.*` events directly in the timeline
    instead of relying on `turn.start` cards or nested command-only sections.
+10. Preserve a bottom-following timeline by default, and show a jump-to-bottom
+    button when the user has scrolled up.
 
 ## Exit Gates
 
@@ -97,6 +102,8 @@ details so users can confirm which command/output payload arrived from Hub.
   dates.
 - Persisted assistant deltas and command outputs returned from `/events` are
   visible in the timeline.
+- Scrolling up in the orchestration timeline exposes a jump-to-bottom button,
+  and clicking it returns to the latest event.
 
 ## Reviewer Q&A
 

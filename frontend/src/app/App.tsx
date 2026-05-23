@@ -2010,10 +2010,12 @@ function OrchestrationWorkspace({
   const [error, setError] = useState('');
   const [creating, setCreating] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState(t.disconnected);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const activeRunIdRef = useRef('');
+  const stickToBottomRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const taskInputRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -2062,6 +2064,30 @@ function OrchestrationWorkspace({
     });
     return incoming;
   }, []);
+
+  const scrollTimelineToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    const container = scrollRef.current;
+    if (!container) return;
+    const target = endRef.current;
+    if (target) {
+      target.scrollIntoView({ block: 'end', behavior });
+    } else {
+      container.scrollTo({ top: container.scrollHeight, behavior });
+    }
+    stickToBottomRef.current = true;
+    setShowScrollBottom(false);
+  }, []);
+
+  const updateTimelineScrollState = useCallback(() => {
+    const container = scrollRef.current;
+    if (!container) {
+      setShowScrollBottom(false);
+      return;
+    }
+    const nearBottom = isNearBottom(container);
+    stickToBottomRef.current = nearBottom;
+    setShowScrollBottom(visibleEvents.length > 0 && !nearBottom);
+  }, [visibleEvents.length]);
 
   const clearReconnect = useCallback(() => {
     if (reconnectTimerRef.current !== null) {
@@ -2198,10 +2224,16 @@ function OrchestrationWorkspace({
 
   useEffect(() => {
     const id = window.requestAnimationFrame(() => {
-      endRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' });
+      const container = scrollRef.current;
+      if (!container) return;
+      if (stickToBottomRef.current) {
+        scrollTimelineToBottom('auto');
+        return;
+      }
+      setShowScrollBottom(visibleEvents.length > 0 && !isNearBottom(container));
     });
     return () => window.cancelAnimationFrame(id);
-  }, [events]);
+  }, [activeRunId, visibleEvents, scrollTimelineToBottom]);
 
   useEffect(() => {
     if (!workingDirs.length) {
@@ -2396,17 +2428,37 @@ function OrchestrationWorkspace({
         </div>
 
         <div className="grid flex-1 min-h-0 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px]">
-          <div ref={scrollRef} className="min-h-0 overflow-y-auto p-4 md:p-6 space-y-3 elegant-scrollbar">
-            {!visibleEvents.length ? (
-              <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4">
-                <div className="h-12 w-12 rounded-2xl bg-primary/5 border border-border flex items-center justify-center">
-                  <GitBranch className="h-6 w-6 text-primary" />
+          <div className="relative min-h-0">
+            <div
+              ref={scrollRef}
+              onScroll={updateTimelineScrollState}
+              className="h-full overflow-y-auto p-4 md:p-6 space-y-3 elegant-scrollbar"
+            >
+              {!visibleEvents.length ? (
+                <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4">
+                  <div className="h-12 w-12 rounded-2xl bg-primary/5 border border-border flex items-center justify-center">
+                    <GitBranch className="h-6 w-6 text-primary" />
+                  </div>
+                  <h2 className="text-lg font-medium">{t.coordinateClaudeCodex}</h2>
+                  <p className="text-sm text-muted-foreground">{t.startCollaborationHint}</p>
                 </div>
-                <h2 className="text-lg font-medium">{t.coordinateClaudeCodex}</h2>
-                <p className="text-sm text-muted-foreground">{t.startCollaborationHint}</p>
-              </div>
-            ) : visibleEvents.map((event) => <OrchestrationEventItem key={event.key} item={event} t={t} />)}
-            <div ref={endRef} className="h-4" />
+              ) : visibleEvents.map((event) => <OrchestrationEventItem key={event.key} item={event} t={t} />)}
+              <div ref={endRef} className="h-4" />
+            </div>
+
+            {showScrollBottom && (
+              <Button
+                variant="secondary"
+                size="icon"
+                type="button"
+                className="absolute bottom-4 left-1/2 z-20 h-9 w-9 -translate-x-1/2 rounded-full border border-border bg-card/95 text-muted-foreground shadow-lg backdrop-blur hover:text-foreground"
+                onClick={() => scrollTimelineToBottom()}
+                aria-label={t.jumpToLatestMessage}
+                title={t.jumpToBottom}
+              >
+                <ArrowDownToLine className="h-4 w-4" />
+              </Button>
+            )}
           </div>
 
           <aside className="border-t lg:border-t-0 lg:border-l border-border bg-background/95 p-4 overflow-y-auto elegant-scrollbar">

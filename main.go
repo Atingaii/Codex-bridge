@@ -186,8 +186,13 @@ func runUser(cfg *config.Config, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *username == "" || *password == "" {
+	userName := strings.TrimSpace(*username)
+	passwordValue := *password
+	if userName == "" || passwordValue == "" {
 		return errors.New("user requires --username and --password")
+	}
+	if isQuotedEmptyPassword(passwordValue) {
+		return errors.New("user --password looks like a quoted empty config value; provide the actual password")
 	}
 
 	st, err := store.Open(cfg.Hub.DBPath)
@@ -198,12 +203,17 @@ func runUser(cfg *config.Config, args []string) error {
 	if err := st.Migrate(context.Background()); err != nil {
 		return err
 	}
-	user, err := st.UpsertUser(context.Background(), *username, *password)
+	user, err := st.UpsertUser(context.Background(), userName, passwordValue)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("user ready: %s (%s)\n", user.Username, user.ID)
 	return nil
+}
+
+func isQuotedEmptyPassword(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return trimmed == `""` || trimmed == `''`
 }
 
 func runEnroll(cfg *config.Config, args []string) error {

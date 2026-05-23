@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Terminal, User, Lock, Globe, ChevronDown,
+  Terminal, User, Lock, Globe, ChevronDown, ArrowDownToLine,
   PanelLeftClose, PanelLeft, Plus, MessageSquare,
   Settings, LogOut, Search,
   ImagePlus, Send, Square, AlertCircle,
@@ -144,6 +144,10 @@ function initials(username: string) {
 
 function activeStatus(status?: string) {
   return status === 'queued' || status === 'running' || status === 'canceling';
+}
+
+function isNearBottom(element: HTMLElement, threshold = 120) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
 }
 
 async function copyText(value: string) {
@@ -442,8 +446,12 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
   const [renameDraft, setRenameDraft] = useState('');
   const [renameError, setRenameError] = useState('');
   const [renaming, setRenaming] = useState(false);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const messageScrollRef = useRef<HTMLDivElement | null>(null);
+  const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
   const activeSessionIdRef = useRef('');
   const assistantItemIdRef = useRef<string | null>(null);
   const assistantTextRef = useRef('');
@@ -486,6 +494,30 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
     assistantItemIdRef.current = null;
     assistantTextRef.current = '';
   }, []);
+
+  const scrollMessagesToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    const container = messageScrollRef.current;
+    if (!container) return;
+    const target = messageEndRef.current;
+    if (target) {
+      target.scrollIntoView({ block: 'end', behavior });
+    } else {
+      container.scrollTo({ top: container.scrollHeight, behavior });
+    }
+    stickToBottomRef.current = true;
+    setShowScrollBottom(false);
+  }, []);
+
+  const updateMessageScrollState = useCallback(() => {
+    const container = messageScrollRef.current;
+    if (!container) {
+      setShowScrollBottom(false);
+      return;
+    }
+    const nearBottom = isNearBottom(container);
+    stickToBottomRef.current = nearBottom;
+    setShowScrollBottom(items.length > 0 && !nearBottom);
+  }, [items.length]);
 
   const loadRuns = useCallback(async (sessionId: string) => {
     const data = await api<{ runs: Run[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/runs`);
@@ -608,6 +640,8 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
   }, [closeWS, handleEnvelope]);
 
   const selectSession = useCallback(async (sessionId: string) => {
+    stickToBottomRef.current = true;
+    setShowScrollBottom(false);
     setActiveSessionId(sessionId);
     activeSessionIdRef.current = sessionId;
     setRunner('-');
@@ -634,6 +668,19 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const container = messageScrollRef.current;
+      if (!container) return;
+      if (stickToBottomRef.current) {
+        scrollMessagesToBottom('auto');
+        return;
+      }
+      setShowScrollBottom(items.length > 0 && !isNearBottom(container));
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeSessionId, items, scrollMessagesToBottom]);
 
   const createSession = async (title = 'New Session') => {
     const agent = agents.find((item) => item.online) || agents[0];
@@ -738,6 +785,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
     const userContent = attachments.length
       ? `${promptText}\n\n${attachments.map((item) => `![${item.name}](${item.previewUrl})`).join('\n')}`
       : promptText;
+    stickToBottomRef.current = true;
     setItems((current) => [...current, { id: promptId, type: 'message', role: 'user', content: userContent, createdAt: Math.floor(Date.now() / 1000) }]);
     assistantItemIdRef.current = null;
     assistantTextRef.current = '';
@@ -876,34 +924,54 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 scroll-smooth elegant-scrollbar">
-          {!items.length ? (
-            <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4 animate-in fade-in zoom-in-95 duration-500">
-              <div className="h-12 w-12 rounded-2xl bg-primary/5 border border-border flex items-center justify-center mb-2">
-                <Terminal className="h-6 w-6 text-primary" />
+        <div className="relative flex-1 min-h-0">
+          <div
+            ref={messageScrollRef}
+            onScroll={updateMessageScrollState}
+            className="h-full overflow-y-auto p-4 md:p-6 space-y-4 scroll-smooth elegant-scrollbar"
+          >
+            {!items.length ? (
+              <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4 animate-in fade-in zoom-in-95 duration-500">
+                <div className="h-12 w-12 rounded-2xl bg-primary/5 border border-border flex items-center justify-center mb-2">
+                  <Terminal className="h-6 w-6 text-primary" />
+                </div>
+                <h2 className="text-lg font-medium">How can I help you today?</h2>
+                <p className="text-sm text-muted-foreground mb-4">
+                  I can execute code, read files, run terminal commands, and help you build your project.
+                </p>
+                <div className="grid grid-cols-2 gap-2 w-full">
+                  <Button variant="secondary" className="h-auto py-3 px-4 justify-start text-left flex-col items-start gap-1" onClick={() => setInputVal('Read project files')}>
+                    <span className="text-sm font-medium">Read project files</span>
+                    <span className="text-xs text-muted-foreground font-normal">Explore current directory</span>
+                  </Button>
+                  <Button variant="secondary" className="h-auto py-3 px-4 justify-start text-left flex-col items-start gap-1" onClick={() => setInputVal('Run test suite')}>
+                    <span className="text-sm font-medium">Run test suite</span>
+                    <span className="text-xs text-muted-foreground font-normal">Execute configured tests</span>
+                  </Button>
+                </div>
               </div>
-              <h2 className="text-lg font-medium">How can I help you today?</h2>
-              <p className="text-sm text-muted-foreground mb-4">
-                I can execute code, read files, run terminal commands, and help you build your project.
-              </p>
-              <div className="grid grid-cols-2 gap-2 w-full">
-                <Button variant="secondary" className="h-auto py-3 px-4 justify-start text-left flex-col items-start gap-1" onClick={() => setInputVal('Read project files')}>
-                  <span className="text-sm font-medium">Read project files</span>
-                  <span className="text-xs text-muted-foreground font-normal">Explore current directory</span>
-                </Button>
-                <Button variant="secondary" className="h-auto py-3 px-4 justify-start text-left flex-col items-start gap-1" onClick={() => setInputVal('Run test suite')}>
-                  <span className="text-sm font-medium">Run test suite</span>
-                  <span className="text-xs text-muted-foreground font-normal">Execute configured tests</span>
-                </Button>
-              </div>
-            </div>
-          ) : (
-            items.map((item) => item.type === 'message'
-              ? <MessageItem key={item.id} msg={item} />
-              : <ToolItem key={item.id} tool={item.tool} />
-            )
+            ) : (
+              items.map((item) => item.type === 'message'
+                ? <MessageItem key={item.id} msg={item} />
+                : <ToolItem key={item.id} tool={item.tool} />
+              )
+            )}
+            <div ref={messageEndRef} className="h-4" />
+          </div>
+
+          {showScrollBottom && (
+            <Button
+              variant="secondary"
+              size="icon"
+              type="button"
+              className="absolute bottom-4 left-1/2 z-20 h-9 w-9 -translate-x-1/2 rounded-full border border-border bg-card/95 text-muted-foreground shadow-lg backdrop-blur hover:text-foreground"
+              onClick={() => scrollMessagesToBottom()}
+              aria-label="Jump to latest message"
+              title="Jump to bottom"
+            >
+              <ArrowDownToLine className="h-4 w-4" />
+            </Button>
           )}
-          <div className="h-4" />
         </div>
 
         <div className="shrink-0 p-4 border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">

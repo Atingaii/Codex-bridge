@@ -155,6 +155,8 @@ const uiText = {
     signIn: 'Sign in',
     haveAccount: 'Already have an account?',
     needAccount: 'Need an account?',
+    switchToRegister: 'Create a new account',
+    switchToLogin: 'Back to sign in',
     passwordHint: 'At least 8 characters',
     connectToWorkspace: 'Connect to Workspace',
     connectionFailed: 'Connection failed.',
@@ -234,6 +236,7 @@ const uiText = {
     generating: 'Generating',
     installCommand: 'Install',
     connectCommand: 'Connect',
+    enrollToken: 'Token',
     expiresIn24h: 'Expires in 24h',
     failedCreateBridgeToken: 'Failed to create CLI token',
     online: 'online',
@@ -274,6 +277,8 @@ const uiText = {
     signIn: '登录',
     haveAccount: '已有账户？',
     needAccount: '需要账户？',
+    switchToRegister: '注册新账户',
+    switchToLogin: '返回登录',
     passwordHint: '至少 8 个字符',
     connectToWorkspace: '连接工作区',
     connectionFailed: '连接失败。',
@@ -353,6 +358,7 @@ const uiText = {
     generating: '生成中',
     installCommand: '安装',
     connectCommand: '连接',
+    enrollToken: 'Token',
     expiresIn24h: '24 小时内有效',
     failedCreateBridgeToken: '创建 CLI token 失败',
     online: '在线',
@@ -1006,6 +1012,22 @@ function LoginScreen({
             {loading ? <RefreshCw className="h-4 w-4 animate-spin" /> : registering ? t.createAccount : t.connectToWorkspace}
           </Button>
         </form>
+
+        <div className="flex items-center justify-center gap-2 text-sm">
+          <span className="text-muted-foreground">{registering ? t.haveAccount : t.needAccount}</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            type="button"
+            className="h-8 px-2 text-primary hover:text-primary"
+            onClick={() => {
+              setRegistering(!registering);
+              setError('');
+            }}
+          >
+            {registering ? t.switchToLogin : t.switchToRegister}
+          </Button>
+        </div>
 
         <div className="flex justify-center mt-4">
           <Button variant="ghost" size="sm" className="text-muted-foreground gap-2" onClick={() => setLanguage(language === 'zh' ? 'en' : 'zh')}>
@@ -2813,6 +2835,13 @@ function SettingsModal({
               )}
               {tokenInfo && (
                 <div className="space-y-2">
+                  <CommandBlock
+                    label={t.enrollToken}
+                    value={tokenInfo.token}
+                    copied={copiedCommand === 'token'}
+                    onCopy={() => copyCommand(tokenInfo.token, 'token').catch(() => undefined)}
+                    t={t}
+                  />
                   <CommandBlock
                     label={t.installCommand}
                     value={tokenInfo.installCommand}

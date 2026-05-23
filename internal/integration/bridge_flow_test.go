@@ -688,18 +688,20 @@ func TestRegistrationBridgeTokenBindsAgentToUser(t *testing.T) {
 	}, http.StatusCreated)
 	token := tokenBody["token"].(string)
 	commands := tokenBody["commands"].([]any)
-	if len(commands) != 2 || !strings.Contains(commands[0].(string), "/install.sh") || !strings.Contains(commands[1].(string), "codex-bridge connect") {
+	if len(commands) != 2 || !strings.Contains(commands[0].(string), "/install.sh") || !strings.Contains(commands[1].(string), "codex-bridge") {
 		t.Fatalf("commands = %#v", commands)
 	}
 	connectCommand := commands[1].(string)
 	for _, want := range []string{
-		`nohup ~/.local/bin/codex-bridge connect`,
-		`--cwd "$CB_CWD"`,
-		`--name "${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}"`,
-		`--machine-id-file "$HOME/.codex-bridge/machines/${CB_HASH}"`,
-		`CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"`,
-		`> "$CB_LOG" 2>&1 & CB_PID=$!`,
-		`codex-bridge started in background`,
+		`CB_SERVICE_NAME="codex-bridge-${CB_HASH}.service"`,
+		`systemctl --user daemon-reload && systemctl --user enable "$CB_SERVICE_NAME" && systemctl --user restart "$CB_SERVICE_NAME"`,
+		`loginctl enable-linger "$(id -un)"`,
+		`ExecStart=%h/.codex-bridge/services/${CB_HASH}.sh`,
+		`nohup "$CB_START" > "$CB_LOG" 2>&1 &`,
+		`--cwd "\$CB_CWD"`,
+		`--name "\$CB_NAME"`,
+		`--machine-id-file "\$CB_HOME/machines/\${CB_HASH}"`,
+		`codex-bridge user service enabled`,
 	} {
 		if !strings.Contains(connectCommand, want) {
 			t.Fatalf("connect command missing %q: %s", want, connectCommand)

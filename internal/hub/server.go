@@ -509,7 +509,56 @@ func (s *Server) bridgeConnectCommand(hubURL, token string) string {
 	if hubURL != strings.TrimRight(s.cfg.Bridge.HubURL, "/") {
 		hubArg = " --hub " + shellQuote(hubURL)
 	}
-	return fmt.Sprintf(`CB_CWD="${PWD:-.}"; CB_DIR="$(basename "$CB_CWD")"; CB_HASH="$(printf '%%s' "$CB_CWD" | cksum | awk '{print $1}')"; CB_LOG_DIR="$HOME/.codex-bridge/logs"; CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"; mkdir -p "$HOME/.codex-bridge/machines" "$CB_LOG_DIR"; nohup ~/.local/bin/codex-bridge connect%s --cwd "$CB_CWD" --name "${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}" --machine-id-file "$HOME/.codex-bridge/machines/${CB_HASH}" %s > "$CB_LOG" 2>&1 & CB_PID=$!; echo "codex-bridge started in background: pid=$CB_PID log=$CB_LOG"`, hubArg, shellQuote(token))
+	return fmt.Sprintf(`CB_CWD="${PWD:-.}"
+CB_DIR="$(basename "$CB_CWD")"
+CB_HASH="$(printf '%%s' "$CB_CWD" | cksum | awk '{print $1}')"
+CB_NAME="${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}"
+CB_HOME="$HOME/.codex-bridge"
+CB_LOG_DIR="$CB_HOME/logs"
+CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"
+CB_START="$CB_HOME/services/${CB_HASH}.sh"
+CB_SERVICE_DIR="$HOME/.config/systemd/user"
+CB_SERVICE_NAME="codex-bridge-${CB_HASH}.service"
+mkdir -p "$CB_HOME/machines" "$CB_LOG_DIR" "$CB_HOME/services" "$CB_SERVICE_DIR"
+printf '%%s\n' "$CB_CWD" > "$CB_HOME/services/${CB_HASH}.cwd"
+printf '%%s\n' "$CB_NAME" > "$CB_HOME/services/${CB_HASH}.name"
+cat > "$CB_START" <<EOF
+#!/bin/sh
+set -eu
+CB_HASH="$CB_HASH"
+CB_HOME="\${HOME}/.codex-bridge"
+CB_CWD=\$(cat "\$CB_HOME/services/\${CB_HASH}.cwd")
+CB_NAME=\$(cat "\$CB_HOME/services/\${CB_HASH}.name")
+exec "\$HOME/.local/bin/codex-bridge" connect%s --cwd "\$CB_CWD" --name "\$CB_NAME" --machine-id-file "\$CB_HOME/machines/\${CB_HASH}" %s
+EOF
+chmod 700 "$CB_START"
+if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  cat > "$CB_SERVICE_DIR/$CB_SERVICE_NAME" <<EOF
+[Unit]
+Description=Codex Bridge endpoint for $CB_CWD
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%%h/.codex-bridge/services/${CB_HASH}.sh
+Restart=always
+RestartSec=5
+StandardOutput=append:%%h/.codex-bridge/logs/${CB_HASH}.log
+StandardError=append:%%h/.codex-bridge/logs/${CB_HASH}.log
+
+[Install]
+WantedBy=default.target
+EOF
+  if systemctl --user daemon-reload && systemctl --user enable "$CB_SERVICE_NAME" && systemctl --user restart "$CB_SERVICE_NAME"; then
+    loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
+    echo "codex-bridge user service enabled: $CB_SERVICE_NAME log=$CB_LOG"
+    exit 0
+  fi
+fi
+nohup "$CB_START" > "$CB_LOG" 2>&1 &
+CB_PID=$!
+echo "codex-bridge started in background: pid=$CB_PID log=$CB_LOG"`, hubArg, shellQuote(token))
 }
 
 func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {

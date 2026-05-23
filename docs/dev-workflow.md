@@ -55,8 +55,9 @@ Open `http://127.0.0.1:8088`.
 ## CLI Install Flow
 
 `POST /api/bridge-tokens` returns two commands for the settings UI: an install
-command and a connect command. The connect command starts Bridge in the
-background with `nohup`, writes logs under `~/.codex-bridge/logs/`, and keeps a
+command and a connect command. The connect command prefers a restartable
+`systemd --user` service, falls back to `nohup` when user systemd is not
+available, writes logs under `~/.codex-bridge/logs/`, and keeps a
 per-working-directory machine id under `~/.codex-bridge/machines/`.
 
 For deterministic tests use `bridge.runner=echo`. For real Codex:

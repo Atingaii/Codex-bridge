@@ -14,13 +14,15 @@ WSL2/Linux 终端一般就是：
 
 ```bash
 curl -fsSL https://sparkapi.tech/install.sh | sh
-CB_CWD="${PWD:-.}"; CB_DIR="$(basename "$CB_CWD")"; CB_HASH="$(printf '%s' "$CB_CWD" | cksum | awk '{print $1}')"; CB_LOG_DIR="$HOME/.codex-bridge/logs"; CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"; mkdir -p "$HOME/.codex-bridge/machines" "$CB_LOG_DIR"; nohup ~/.local/bin/codex-bridge connect --cwd "$CB_CWD" --name "${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}" --machine-id-file "$HOME/.codex-bridge/machines/${CB_HASH}" '<TOKEN>' > "$CB_LOG" 2>&1 & CB_PID=$!; echo "codex-bridge started in background: pid=$CB_PID log=$CB_LOG"
+# 执行网页生成的连接命令
 ```
 
-页面生成的连接命令默认用 `nohup` 后台启动 Bridge，并把日志写到
+页面生成的连接命令会优先安装并启动 `systemd --user` 服务，并 best-effort 开启
+linger；在 user systemd 和 linger 可用时，机器重启后可自动恢复。如果当前环境
+没有 user systemd，会退回 `nohup` 后台启动，但 `nohup` 不能跨机器重启。日志写到
 `~/.codex-bridge/logs/<当前目录hash>.log`。`connect` 默认连接
-`https://sparkapi.tech`，默认使用当前目录作为工作目录，默认 runner 是
-`codex`。如果要前台调试，可以手动执行：
+`https://sparkapi.tech`，默认使用当前目录作为工作目录，默认 runner 是 `codex`。
+如果要前台调试，可以手动执行：
 
 ```bash
 ~/.local/bin/codex-bridge connect '<TOKEN>' --cwd "$PWD" --name wsl2-main --runner codex
@@ -36,7 +38,7 @@ token 由网页生成，默认 24 小时内有效。一个 token 绑定一个 CL
 
 ```bash
 curl -fsSL https://sparkapi.tech/install.sh | sh
-CB_CWD="${PWD:-.}"; CB_DIR="$(basename "$CB_CWD")"; CB_HASH="$(printf '%s' "$CB_CWD" | cksum | awk '{print $1}')"; CB_LOG_DIR="$HOME/.codex-bridge/logs"; CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"; mkdir -p "$HOME/.codex-bridge/machines" "$CB_LOG_DIR"; nohup ~/.local/bin/codex-bridge connect --cwd "$CB_CWD" --name "${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}" --machine-id-file "$HOME/.codex-bridge/machines/${CB_HASH}" '<TOKEN>' > "$CB_LOG" 2>&1 & CB_PID=$!; echo "codex-bridge started in background: pid=$CB_PID log=$CB_LOG"
+# 执行网页生成的连接命令
 ```
 
 如果只是验证连接链路，可以用 echo runner：
@@ -50,6 +52,8 @@ CB_CWD="${PWD:-.}"; CB_DIR="$(basename "$CB_CWD")"; CB_HASH="$(printf '%s' "$CB_
 - 登录后在设置里可以看到自己已接入的 CLI 端。
 - 在线/离线状态会显示在 CLI 端列表里。
 - 主对话和编排页顶部都有 CLI 端选择器，可以在多个 WSL2/服务器终端之间切换。
+- 删除 CLI 端会让 Hub 断开该端连接并让已消费 token 失效；如果本地仍有后台进程，
+  可以用 `systemctl --user list-units 'codex-bridge-*'` 找到并停止对应服务。
 - 非管理员只能看到自己接入的 CLI 端；管理员可以看到所有 CLI 端。
 - Orchestrate 页面只有点击“新运行”才会开启新的编排会话；在当前任务框继续输入会沿用当前 run，并把历史事件压缩成上下文继续运行。
 

@@ -169,7 +169,7 @@ Detailed "change X -> edit Y" guidance is in [docs/code-map.md](docs/code-map.md
 
 ```bash
 /usr/local/go/bin/go test ./...
-/usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .
+CGO_ENABLED=0 /usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .
 make doc-lint
 ```
 

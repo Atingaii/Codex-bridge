@@ -692,7 +692,15 @@ func TestRegistrationBridgeTokenBindsAgentToUser(t *testing.T) {
 		t.Fatalf("commands = %#v", commands)
 	}
 	connectCommand := commands[1].(string)
-	for _, want := range []string{`--cwd "$CB_CWD"`, `--name "${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}"`, `--machine-id-file "$HOME/.codex-bridge/machines/${CB_HASH}"`} {
+	for _, want := range []string{
+		`nohup ~/.local/bin/codex-bridge connect`,
+		`--cwd "$CB_CWD"`,
+		`--name "${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}"`,
+		`--machine-id-file "$HOME/.codex-bridge/machines/${CB_HASH}"`,
+		`CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"`,
+		`> "$CB_LOG" 2>&1 & CB_PID=$!`,
+		`codex-bridge started in background`,
+	} {
 		if !strings.Contains(connectCommand, want) {
 			t.Fatalf("connect command missing %q: %s", want, connectCommand)
 		}

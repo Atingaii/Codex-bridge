@@ -149,6 +149,30 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 	if offline.Status != RunFailed || offline.Error != "offline" {
 		t.Fatalf("offline-marked run = %#v", offline)
 	}
+	if err := st.DeleteAgent(ctx, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AgentByID(ctx, agent.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected deleted agent to be hidden, got %v", err)
+	}
+	if _, err := st.AgentByMachineID(ctx, "machine-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected deleted machine to be hidden, got %v", err)
+	}
+	agents, err := st.ListAgents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range agents {
+		if item.ID == agent.ID {
+			t.Fatalf("deleted agent listed: %#v", agents)
+		}
+	}
+	if _, err := st.SessionByID(ctx, session.ID, user.ID); err != nil {
+		t.Fatalf("session history should remain after deleting agent: %v", err)
+	}
+	if _, err := st.UpsertAgent(ctx, "bridge", "machine-1", "host", "inst-3", nil); err != nil {
+		t.Fatalf("re-enroll deleted machine: %v", err)
+	}
 	if err := st.DeleteSession(ctx, session.ID, user.ID); err != nil {
 		t.Fatal(err)
 	}

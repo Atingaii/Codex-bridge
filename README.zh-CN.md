@@ -14,10 +14,13 @@ WSL2/Linux 终端一般就是：
 
 ```bash
 curl -fsSL https://sparkapi.tech/install.sh | sh
-~/.local/bin/codex-bridge connect '<TOKEN>'
+CB_CWD="${PWD:-.}"; CB_DIR="$(basename "$CB_CWD")"; CB_HASH="$(printf '%s' "$CB_CWD" | cksum | awk '{print $1}')"; CB_LOG_DIR="$HOME/.codex-bridge/logs"; CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"; mkdir -p "$HOME/.codex-bridge/machines" "$CB_LOG_DIR"; nohup ~/.local/bin/codex-bridge connect --cwd "$CB_CWD" --name "${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}" --machine-id-file "$HOME/.codex-bridge/machines/${CB_HASH}" '<TOKEN>' > "$CB_LOG" 2>&1 & CB_PID=$!; echo "codex-bridge started in background: pid=$CB_PID log=$CB_LOG"
 ```
 
-`connect` 默认连接 `https://sparkapi.tech`，默认使用当前目录作为工作目录，默认 runner 是 `codex`。如果要显式指定：
+页面生成的连接命令默认用 `nohup` 后台启动 Bridge，并把日志写到
+`~/.codex-bridge/logs/<当前目录hash>.log`。`connect` 默认连接
+`https://sparkapi.tech`，默认使用当前目录作为工作目录，默认 runner 是
+`codex`。如果要前台调试，可以手动执行：
 
 ```bash
 ~/.local/bin/codex-bridge connect '<TOKEN>' --cwd "$PWD" --name wsl2-main --runner codex
@@ -33,7 +36,7 @@ token 由网页生成，默认 24 小时内有效。一个 token 绑定一个 CL
 
 ```bash
 curl -fsSL https://sparkapi.tech/install.sh | sh
-~/.local/bin/codex-bridge connect '<TOKEN>'
+CB_CWD="${PWD:-.}"; CB_DIR="$(basename "$CB_CWD")"; CB_HASH="$(printf '%s' "$CB_CWD" | cksum | awk '{print $1}')"; CB_LOG_DIR="$HOME/.codex-bridge/logs"; CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"; mkdir -p "$HOME/.codex-bridge/machines" "$CB_LOG_DIR"; nohup ~/.local/bin/codex-bridge connect --cwd "$CB_CWD" --name "${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}" --machine-id-file "$HOME/.codex-bridge/machines/${CB_HASH}" '<TOKEN>' > "$CB_LOG" 2>&1 & CB_PID=$!; echo "codex-bridge started in background: pid=$CB_PID log=$CB_LOG"
 ```
 
 如果只是验证连接链路，可以用 echo runner：
@@ -56,7 +59,7 @@ curl -fsSL https://sparkapi.tech/install.sh | sh
 
 ```bash
 /usr/local/go/bin/go test ./...
-/usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .
+CGO_ENABLED=0 /usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .
 ```
 
 初始化生产配置：

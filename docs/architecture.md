@@ -83,7 +83,7 @@ Orchestration continuity:
 SQLite tables:
 
 - `users`
-- `agents`
+- `agents` (`deleted_at` soft-deletes CLI endpoints while preserving history)
 - `sessions`
 - `messages`
 - `runs`

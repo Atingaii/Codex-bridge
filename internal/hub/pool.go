@@ -49,6 +49,18 @@ func (p *Pool) AgentOnline(agentID string) bool {
 	return p.agents[agentID] != nil
 }
 
+func (p *Pool) DisconnectAgent(agentID string) {
+	p.mu.Lock()
+	conn := p.agents[agentID]
+	if conn != nil {
+		delete(p.agents, agentID)
+	}
+	p.mu.Unlock()
+	if conn != nil {
+		conn.Close()
+	}
+}
+
 func (p *Pool) SendToAgent(agentID string, env protocol.Envelope) error {
 	p.mu.RLock()
 	conn := p.agents[agentID]

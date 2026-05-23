@@ -278,6 +278,8 @@ const uiText = {
     cliEndpoint: 'CLI Endpoint',
     selectEndpoint: 'Select endpoint',
     addCliEndpoint: 'Add CLI Endpoint',
+    deleteCliEndpoint: 'Delete CLI Endpoint',
+    deleteCliEndpointConfirm: 'Delete this CLI endpoint? Running background bridge processes for this endpoint should also be stopped locally.',
     endpointLabel: 'Endpoint label',
     generating: 'Generating',
     installCommand: 'Install',
@@ -285,6 +287,7 @@ const uiText = {
     enrollToken: 'Token',
     expiresIn24h: 'Expires in 24h',
     failedCreateBridgeToken: 'Failed to create CLI token',
+    failedDeleteAgent: 'Failed to delete CLI endpoint',
     online: 'online',
     offline: 'offline',
     cancel: 'Cancel',
@@ -403,6 +406,8 @@ const uiText = {
     cliEndpoint: 'CLI 端',
     selectEndpoint: '选择 CLI 端',
     addCliEndpoint: '添加 CLI 端',
+    deleteCliEndpoint: '删除 CLI 端',
+    deleteCliEndpointConfirm: '确定删除这个 CLI 端？这个端对应的本地后台 bridge 进程也应该在本机停止。',
     endpointLabel: '端名称',
     generating: '生成中',
     installCommand: '安装',
@@ -410,6 +415,7 @@ const uiText = {
     enrollToken: 'Token',
     expiresIn24h: '24 小时内有效',
     failedCreateBridgeToken: '创建 CLI token 失败',
+    failedDeleteAgent: '删除 CLI 端失败',
     online: '在线',
     offline: '离线',
     cancel: '取消',
@@ -1312,6 +1318,7 @@ function Workspace({
     setSelectedAgentId((current) => {
       const next = nextAgents.some((agent) => agent.id === current) ? current : defaultAgentID(nextAgents);
       if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
+      else localStorage.removeItem('codexBridge.selectedAgentId');
       return next;
     });
   }, []);
@@ -1677,6 +1684,7 @@ function Workspace({
   const selectAgent = (agentId: string) => {
     setSelectedAgentId(agentId);
     if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
+    else localStorage.removeItem('codexBridge.selectedAgentId');
   };
 
   const openSettings = (focus: 'cli' | '' = '') => {
@@ -2050,6 +2058,7 @@ function OrchestrationWorkspace({
     setSelectedAgentId((current) => {
       const next = nextAgents.some((agent) => agent.id === current) ? current : defaultAgentID(nextAgents);
       if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
+      else localStorage.removeItem('codexBridge.selectedAgentId');
       return next;
     });
   }, []);
@@ -2316,6 +2325,7 @@ function OrchestrationWorkspace({
   const selectAgent = (agentId: string) => {
     setSelectedAgentId(agentId);
     if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
+    else localStorage.removeItem('codexBridge.selectedAgentId');
   };
 
   const openSettings = (focus: 'cli' | '' = '') => {
@@ -3032,6 +3042,7 @@ function SettingsModal({
   const [tokenInfo, setTokenInfo] = useState<BridgeTokenResponse | null>(null);
   const [tokenError, setTokenError] = useState('');
   const [generatingToken, setGeneratingToken] = useState(false);
+  const [deletingAgentId, setDeletingAgentId] = useState('');
   const [copiedCommand, setCopiedCommand] = useState('');
   const cliSectionRef = useRef<HTMLDivElement | null>(null);
   const generateToken = async () => {
@@ -3054,6 +3065,23 @@ function SettingsModal({
     await copyText(value);
     setCopiedCommand(key);
     window.setTimeout(() => setCopiedCommand(''), 1200);
+  };
+  const deleteAgent = async (agent: Agent) => {
+    if (!window.confirm(t.deleteCliEndpointConfirm)) return;
+    setDeletingAgentId(agent.id);
+    setTokenError('');
+    try {
+      await api(`/api/agents/${encodeURIComponent(agent.id)}`, { method: 'DELETE' });
+      if (selectedAgentId === agent.id) {
+        localStorage.removeItem('codexBridge.selectedAgentId');
+        onSelectAgent('');
+      }
+      await onAgentsChanged();
+    } catch (err) {
+      setTokenError(err instanceof Error ? err.message : t.failedDeleteAgent);
+    } finally {
+      setDeletingAgentId('');
+    }
   };
 
   useEffect(() => {
@@ -3136,19 +3164,17 @@ function SettingsModal({
             <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.agentsRuntime}</h3>
             <div className="space-y-2">
               {agents.length ? agents.map((agent) => (
-                <button
+                <div
                   key={agent.id}
-                  type="button"
-                  onClick={() => onSelectAgent(agent.id)}
                   className={cn(
                     "w-full flex items-center justify-between gap-2 p-2.5 rounded-lg border bg-muted/20 text-left transition-colors",
                     selectedAgentId === agent.id ? "border-primary/40 bg-primary/5" : "border-border hover:bg-muted/40"
                   )}
                 >
-                  <div className="flex flex-col min-w-0">
+                  <button type="button" onClick={() => onSelectAgent(agent.id)} className="flex flex-col min-w-0 flex-1 text-left">
                     <span className="text-sm font-medium truncate">{agent.name}</span>
                     <span className="text-xs text-muted-foreground font-mono mt-0.5 truncate">{agent.hostname || agent.machineId}</span>
-                  </div>
+                  </button>
                   <div className="flex items-center gap-2 shrink-0">
                     {selectedAgentId === agent.id && <Check className="h-3.5 w-3.5 text-primary" />}
                     <div className={cn(
@@ -3159,8 +3185,20 @@ function SettingsModal({
                     )}>
                       {agent.online ? t.online : t.offline}
                     </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      type="button"
+                      className="h-7 w-7 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                      onClick={() => deleteAgent(agent)}
+                      disabled={deletingAgentId === agent.id}
+                      aria-label={t.deleteCliEndpoint}
+                      title={t.deleteCliEndpoint}
+                    >
+                      {deletingAgentId === agent.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                    </Button>
                   </div>
-                </button>
+                </div>
               )) : (
                 <div className="text-sm text-muted-foreground p-2.5 rounded-lg border border-border bg-muted/20">{t.noAgentsEnrolled}</div>
               )}

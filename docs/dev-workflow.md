@@ -52,6 +52,13 @@ cp configs/dev.yaml.example configs/dev.yaml
 
 Open `http://127.0.0.1:8088`.
 
+## CLI Install Flow
+
+`POST /api/bridge-tokens` returns two commands for the settings UI: an install
+command and a connect command. The connect command starts Bridge in the
+background with `nohup`, writes logs under `~/.codex-bridge/logs/`, and keeps a
+per-working-directory machine id under `~/.codex-bridge/machines/`.
+
 For deterministic tests use `bridge.runner=echo`. For real Codex:
 
 ```yaml
@@ -77,7 +84,7 @@ Then run Go verification:
 
 ```bash
 /usr/local/go/bin/go test ./...
-/usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .
+CGO_ENABLED=0 /usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .
 ```
 
 ## Documentation Check

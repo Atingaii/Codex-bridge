@@ -70,12 +70,14 @@ func (s *Store) Migrate(ctx context.Context) error {
 			hostname TEXT,
 			instance TEXT,
 			working_dirs_json TEXT,
+			deleted_at INTEGER,
 			last_seen_at INTEGER NOT NULL,
 			FOREIGN KEY (user_id) REFERENCES users(id)
 		);`,
 		`ALTER TABLE agents ADD COLUMN user_id TEXT;`,
 		`ALTER TABLE agents ADD COLUMN instance TEXT;`,
 		`ALTER TABLE agents ADD COLUMN working_dirs_json TEXT;`,
+		`ALTER TABLE agents ADD COLUMN deleted_at INTEGER;`,
 		`CREATE INDEX IF NOT EXISTS idx_agents_user_seen ON agents(user_id, last_seen_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
@@ -329,6 +331,7 @@ type Agent struct {
 	Hostname    string   `json:"hostname"`
 	Instance    string   `json:"instance,omitempty"`
 	WorkingDirs []string `json:"workingDirs,omitempty"`
+	DeletedAt   int64    `json:"deletedAt,omitempty"`
 	LastSeenAt  int64    `json:"lastSeenAt"`
 	Online      bool     `json:"online"`
 }
@@ -359,6 +362,7 @@ func (s *Store) UpsertAgentForUser(ctx context.Context, userID, name, machineID,
 			hostname = excluded.hostname,
 			instance = excluded.instance,
 			working_dirs_json = excluded.working_dirs_json,
+			deleted_at = NULL,
 			last_seen_at = excluded.last_seen_at
 	`, id, nullString(userID), name, machineID, hostname, instance, string(workingDirsJSON), now)
 	if err != nil {
@@ -368,12 +372,12 @@ func (s *Store) UpsertAgentForUser(ctx context.Context, userID, name, machineID,
 }
 
 func (s *Store) AgentByMachineID(ctx context.Context, machineID string) (Agent, error) {
-	row := s.db.QueryRowContext(ctx, agentSelectSQL()+` WHERE machine_id = ?`, machineID)
+	row := s.db.QueryRowContext(ctx, agentSelectSQL()+` WHERE machine_id = ? AND deleted_at IS NULL`, machineID)
 	return scanAgent(row)
 }
 
 func (s *Store) AgentByID(ctx context.Context, id string) (Agent, error) {
-	row := s.db.QueryRowContext(ctx, agentSelectSQL()+` WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, agentSelectSQL()+` WHERE id = ? AND deleted_at IS NULL`, id)
 	return scanAgent(row)
 }
 
@@ -384,23 +388,23 @@ func (s *Store) AgentByIDForUser(ctx context.Context, id, userID string, include
 	if userID == "" {
 		return s.AgentByID(ctx, id)
 	}
-	where := ` WHERE id = ? AND user_id = ?`
+	where := ` WHERE id = ? AND user_id = ? AND deleted_at IS NULL`
 	args := []any{id, userID}
 	if includeUnowned {
-		where = ` WHERE id = ? AND (user_id = ? OR user_id IS NULL OR user_id = '')`
+		where = ` WHERE id = ? AND (user_id = ? OR user_id IS NULL OR user_id = '') AND deleted_at IS NULL`
 	}
 	row := s.db.QueryRowContext(ctx, agentSelectSQL()+where, args...)
 	return scanAgent(row)
 }
 
 func agentSelectSQL() string {
-	return `SELECT id, COALESCE(user_id,''), name, machine_id, COALESCE(hostname,''), COALESCE(instance,''), COALESCE(working_dirs_json,'[]'), last_seen_at FROM agents`
+	return `SELECT id, COALESCE(user_id,''), name, machine_id, COALESCE(hostname,''), COALESCE(instance,''), COALESCE(working_dirs_json,'[]'), COALESCE(deleted_at,0), last_seen_at FROM agents`
 }
 
 func scanAgent(row interface{ Scan(dest ...any) error }) (Agent, error) {
 	var a Agent
 	var workingDirsJSON string
-	if err := row.Scan(&a.ID, &a.UserID, &a.Name, &a.MachineID, &a.Hostname, &a.Instance, &workingDirsJSON, &a.LastSeenAt); err != nil {
+	if err := row.Scan(&a.ID, &a.UserID, &a.Name, &a.MachineID, &a.Hostname, &a.Instance, &workingDirsJSON, &a.DeletedAt, &a.LastSeenAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Agent{}, ErrNotFound
 		}
@@ -414,12 +418,12 @@ func scanAgent(row interface{ Scan(dest ...any) error }) (Agent, error) {
 }
 
 func (s *Store) TouchAgent(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE agents SET last_seen_at = ? WHERE id = ?`, time.Now().Unix(), id)
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET last_seen_at = ? WHERE id = ? AND deleted_at IS NULL`, time.Now().Unix(), id)
 	return err
 }
 
 func (s *Store) ListAgents(ctx context.Context) ([]Agent, error) {
-	rows, err := s.db.QueryContext(ctx, agentSelectSQL()+` ORDER BY last_seen_at DESC`)
+	rows, err := s.db.QueryContext(ctx, agentSelectSQL()+` WHERE deleted_at IS NULL ORDER BY last_seen_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -430,15 +434,42 @@ func (s *Store) ListAgentsForUser(ctx context.Context, userID string, includeUno
 	if userID == "" {
 		return s.ListAgents(ctx)
 	}
-	where := ` WHERE user_id = ?`
+	where := ` WHERE user_id = ? AND deleted_at IS NULL`
 	if includeUnowned {
-		where = ` WHERE user_id = ? OR user_id IS NULL OR user_id = ''`
+		where = ` WHERE (user_id = ? OR user_id IS NULL OR user_id = '') AND deleted_at IS NULL`
 	}
 	rows, err := s.db.QueryContext(ctx, agentSelectSQL()+where+` ORDER BY last_seen_at DESC`, userID)
 	if err != nil {
 		return nil, err
 	}
 	return scanAgents(rows)
+}
+
+func (s *Store) DeleteAgent(ctx context.Context, id string) error {
+	if id == "" {
+		return ErrNotFound
+	}
+	now := time.Now().Unix()
+	res, err := s.db.ExecContext(ctx, `UPDATE agents SET deleted_at = ?, last_seen_at = ? WHERE id = ? AND deleted_at IS NULL`, now, now, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) RevokeEnrollTokensForMachine(ctx context.Context, machineID string) error {
+	if strings.TrimSpace(machineID) == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE enroll_tokens SET used_by_machine = ? WHERE used_by_machine = ?`, "deleted:"+machineID, machineID)
+	return err
 }
 
 func scanAgents(rows *sql.Rows) ([]Agent, error) {

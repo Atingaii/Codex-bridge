@@ -87,6 +87,7 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/me", s.withAuth(s.handleMe))
 	mux.HandleFunc("GET /api/agents", s.withAuth(s.handleAgents))
+	mux.HandleFunc("DELETE /api/agents/{agentID}", s.withAuth(s.handleDeleteAgent))
 	mux.HandleFunc("POST /api/bridge-tokens", s.withAuth(s.handleCreateBridgeToken))
 	mux.HandleFunc("GET /install.sh", s.handleInstallScript)
 	mux.HandleFunc("GET /downloads/codex-bridge-linux-amd64", s.handleBridgeBinaryDownload)
@@ -425,7 +426,36 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request, uid string
 	for i := range agents {
 		agents[i].Online = s.pool.AgentOnline(agents[i].ID)
 	}
+	if agents == nil {
+		agents = []store.Agent{}
+	}
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"agents": agents})
+}
+
+func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request, uid string) {
+	agentID := r.PathValue("agentID")
+	agent, err := s.visibleAgentByID(r.Context(), uid, agentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "agent not found")
+			return
+		}
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load agent")
+		return
+	}
+	if err := s.store.DeleteAgent(r.Context(), agent.ID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "agent not found")
+			return
+		}
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to delete agent")
+		return
+	}
+	if err := s.store.RevokeEnrollTokensForMachine(r.Context(), agent.MachineID); err != nil {
+		slog.Warn("[hub] revoke agent enroll token failed", "agent_id", agent.ID, "error", err)
+	}
+	s.pool.DisconnectAgent(agent.ID)
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"deleted": true, "agentId": agent.ID})
 }
 
 func (s *Server) handleCreateBridgeToken(w http.ResponseWriter, r *http.Request, uid string) {
@@ -461,10 +491,7 @@ func (s *Server) handleCreateBridgeToken(w http.ResponseWriter, r *http.Request,
 	}
 	hubURL := s.publicBaseURL(r)
 	installCommand := fmt.Sprintf("curl -fsSL %s/install.sh | sh", hubURL)
-	connectCommand := fmt.Sprintf("CB_CWD=\"${PWD:-.}\"; CB_DIR=\"$(basename \"$CB_CWD\")\"; CB_HASH=\"$(printf '%%s' \"$CB_CWD\" | cksum | awk '{print $1}')\"; ~/.local/bin/codex-bridge connect --cwd \"$CB_CWD\" --name \"${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}\" --machine-id-file \"$HOME/.codex-bridge/machines/${CB_HASH}\" %s", shellQuote(value))
-	if hubURL != strings.TrimRight(s.cfg.Bridge.HubURL, "/") {
-		connectCommand = fmt.Sprintf("CB_CWD=\"${PWD:-.}\"; CB_DIR=\"$(basename \"$CB_CWD\")\"; CB_HASH=\"$(printf '%%s' \"$CB_CWD\" | cksum | awk '{print $1}')\"; ~/.local/bin/codex-bridge connect --hub %s --cwd \"$CB_CWD\" --name \"${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}\" --machine-id-file \"$HOME/.codex-bridge/machines/${CB_HASH}\" %s", shellQuote(hubURL), shellQuote(value))
-	}
+	connectCommand := s.bridgeConnectCommand(hubURL, value)
 	serverutil.WriteJSON(w, http.StatusCreated, map[string]any{
 		"token":          value,
 		"expiresAt":      expiresAt.Unix(),
@@ -475,6 +502,14 @@ func (s *Server) handleCreateBridgeToken(w http.ResponseWriter, r *http.Request,
 		"connectCommand": connectCommand,
 		"commands":       []string{installCommand, connectCommand},
 	})
+}
+
+func (s *Server) bridgeConnectCommand(hubURL, token string) string {
+	hubArg := ""
+	if hubURL != strings.TrimRight(s.cfg.Bridge.HubURL, "/") {
+		hubArg = " --hub " + shellQuote(hubURL)
+	}
+	return fmt.Sprintf(`CB_CWD="${PWD:-.}"; CB_DIR="$(basename "$CB_CWD")"; CB_HASH="$(printf '%%s' "$CB_CWD" | cksum | awk '{print $1}')"; CB_LOG_DIR="$HOME/.codex-bridge/logs"; CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"; mkdir -p "$HOME/.codex-bridge/machines" "$CB_LOG_DIR"; nohup ~/.local/bin/codex-bridge connect%s --cwd "$CB_CWD" --name "${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}" --machine-id-file "$HOME/.codex-bridge/machines/${CB_HASH}" %s > "$CB_LOG" 2>&1 & CB_PID=$!; echo "codex-bridge started in background: pid=$CB_PID log=$CB_LOG"`, hubArg, shellQuote(token))
 }
 
 func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {

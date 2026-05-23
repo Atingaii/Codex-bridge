@@ -32,6 +32,15 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 4. Add frontend caller in `frontend/src/app/App.tsx` when UI-visible.
 5. Add or update a feature doc and tests.
 
+### Change CLI Endpoint Management
+
+1. `internal/hub/server.go:handleAgents` lists visible endpoints.
+2. `internal/hub/server.go:handleDeleteAgent` soft-deletes an endpoint and
+   disconnects its active Bridge connection.
+3. `internal/store/store.go:DeleteAgent` owns agent soft deletion.
+4. `frontend/src/app/App.tsx:SettingsModal` renders add/delete controls.
+5. Update the relevant feature doc and tests.
+
 ### Add A WebSocket Frame
 
 1. Define constants/payloads in `internal/protocol/envelope.go`.

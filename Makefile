@@ -7,7 +7,7 @@ tidy:
 	$(GO) mod tidy
 
 build:
-	$(GO) build -ldflags "-s -w" -o $(BINARY) .
+	CGO_ENABLED=0 $(GO) build -ldflags "-s -w" -o $(BINARY) .
 
 test:
 	$(GO) test ./...

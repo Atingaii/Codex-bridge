@@ -3,3 +3,5 @@ data/
 configs/*.yaml
 !configs/*.yaml.example
 *.zip
+frontend/node_modules/
+frontend/dist/

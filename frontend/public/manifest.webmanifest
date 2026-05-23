@@ -1,0 +1,19 @@
+{
+  "name": "Codex Bridge",
+  "short_name": "Bridge",
+  "description": "Secure mobile and desktop access to your Codex Bridge workspace.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

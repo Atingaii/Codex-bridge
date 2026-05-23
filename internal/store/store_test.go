@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
@@ -21,20 +23,37 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 	if _, err := st.AuthenticateUser(ctx, "admin", "secret"); err != nil {
 		t.Fatal(err)
 	}
+	var hash string
+	if err := st.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE username = ?`, "admin").Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	cost, err := bcrypt.Cost([]byte(hash))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost < passwordHashCost {
+		t.Fatalf("bcrypt cost = %d, want at least %d", cost, passwordHashCost)
+	}
 
-	agent, err := st.UpsertAgent(ctx, "bridge", "machine-1", "host", "inst-1")
+	agent, err := st.UpsertAgent(ctx, "bridge", "machine-1", "host", "inst-1", []string{"/work", "/work/project"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if agent.Instance != "inst-1" {
 		t.Fatalf("agent instance = %q", agent.Instance)
 	}
-	agent, err = st.UpsertAgent(ctx, "bridge", "machine-1", "host", "inst-2")
+	if len(agent.WorkingDirs) != 2 || agent.WorkingDirs[0] != "/work" || agent.WorkingDirs[1] != "/work/project" {
+		t.Fatalf("agent working dirs = %#v", agent.WorkingDirs)
+	}
+	agent, err = st.UpsertAgent(ctx, "bridge", "machine-1", "host", "inst-2", []string{"/next", "/next", " "})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if agent.Instance != "inst-2" {
 		t.Fatalf("updated agent instance = %q", agent.Instance)
+	}
+	if len(agent.WorkingDirs) != 1 || agent.WorkingDirs[0] != "/next" {
+		t.Fatalf("updated agent working dirs = %#v", agent.WorkingDirs)
 	}
 	session, err := st.CreateSession(ctx, user.ID, agent.ID, "chat")
 	if err != nil {
@@ -142,6 +161,70 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 	}
 	if len(messages) != 0 {
 		t.Fatalf("expected cascade-deleted messages, got %#v", messages)
+	}
+}
+
+func TestStoreOrchestrationRunEventFlow(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	user, err := st.UpsertUser(ctx, "admin", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgent(ctx, "bridge", "machine-orc", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := st.CreateOrchestrationRun(ctx, CreateOrchestrationRunParams{
+		UserID:   user.ID,
+		AgentID:  agent.ID,
+		Title:    "Debate",
+		Mode:     "debate",
+		Prompt:   "prove a theorem",
+		MaxTurns: 2,
+		Files:    []OrchestrationFile{{Name: "A.v", MimeType: "text/plain", Size: 10}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != OrchestrationQueued || run.Mode != "debate" || len(run.Files) != 1 {
+		t.Fatalf("unexpected run: %+v", run)
+	}
+	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "turn.start", Role: "proposer", CLI: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "turn.end", Role: "proposer", CLI: "claude", Status: "success"}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := st.ListOrchestrationEvents(ctx, run.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Seq != 1 || events[1].Seq != 2 {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := st.OrchestrationRunByID(ctx, run.ID, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != OrchestrationCompleted || loaded.FinishedAt == 0 {
+		t.Fatalf("unexpected loaded run: %+v", loaded)
+	}
+	if err := st.UpdateOrchestrationRunSettings(ctx, run.ID, agent.ID, run.Mode, run.CWD, run.MaxTurns, run.Files); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, OrchestrationRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = st.OrchestrationRunByID(ctx, run.ID, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != OrchestrationRunning || loaded.FinishedAt != 0 {
+		t.Fatalf("resumed run kept terminal state: %+v", loaded)
 	}
 }
 

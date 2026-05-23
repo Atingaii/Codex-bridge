@@ -66,13 +66,20 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/me", s.withAuth(s.handleMe))
 	mux.HandleFunc("GET /api/agents", s.withAuth(s.handleAgents))
-	mux.HandleFunc("GET /api/sessions", s.withAuth(s.handleListSessions))
-	mux.HandleFunc("POST /api/sessions", s.withAuth(s.handleCreateSession))
-	mux.HandleFunc("PATCH /api/sessions/{sid}", s.withAuth(s.handleUpdateSession))
-	mux.HandleFunc("DELETE /api/sessions/{sid}", s.withAuth(s.handleDeleteSession))
-	mux.HandleFunc("GET /api/sessions/{sid}/messages", s.withAuth(s.handleMessages))
-	mux.HandleFunc("GET /api/sessions/{sid}/runs", s.withAuth(s.handleRuns))
-	mux.HandleFunc("GET /ws/chat", s.withAuth(s.handleBrowserWS))
+	mux.HandleFunc("GET /api/sessions", s.withAdmin(s.handleListSessions))
+	mux.HandleFunc("POST /api/sessions", s.withAdmin(s.handleCreateSession))
+	mux.HandleFunc("PATCH /api/sessions/{sid}", s.withAdmin(s.handleUpdateSession))
+	mux.HandleFunc("DELETE /api/sessions/{sid}", s.withAdmin(s.handleDeleteSession))
+	mux.HandleFunc("GET /api/sessions/{sid}/messages", s.withAdmin(s.handleMessages))
+	mux.HandleFunc("GET /api/sessions/{sid}/runs", s.withAdmin(s.handleRuns))
+	mux.HandleFunc("GET /api/orchestrations", s.withAuth(s.handleListOrchestrations))
+	mux.HandleFunc("POST /api/orchestrations", s.withAuth(s.handleCreateOrchestration))
+	mux.HandleFunc("GET /api/orchestrations/{runID}", s.withAuth(s.handleGetOrchestration))
+	mux.HandleFunc("GET /api/orchestrations/{runID}/events", s.withAuth(s.handleOrchestrationEvents))
+	mux.HandleFunc("POST /api/orchestrations/{runID}/prompts", s.withAuth(s.handleContinueOrchestration))
+	mux.HandleFunc("POST /api/orchestrations/{runID}/cancel", s.withAuth(s.handleCancelOrchestration))
+	mux.HandleFunc("GET /ws/orchestrations", s.withAuth(s.handleOrchestrationWS))
+	mux.HandleFunc("GET /ws/chat", s.withAdmin(s.handleBrowserWS))
 	mux.HandleFunc("GET /api/agents/connect", s.handleBridgeWS)
 	mux.Handle("GET /", s.staticHandler())
 
@@ -136,8 +143,22 @@ func (s *Server) staticHandler() http.Handler {
 		default:
 			w.Header().Set("Cache-Control", "no-store")
 		}
+		if r.URL.Path != "/" && !strings.Contains(filepathBase(r.URL.Path), ".") {
+			if _, err := fs.Stat(sub, strings.TrimPrefix(r.URL.Path, "/")); err != nil {
+				r = r.Clone(r.Context())
+				r.URL.Path = "/"
+			}
+		}
 		fileServer.ServeHTTP(w, r)
 	})
+}
+
+func filepathBase(path string) string {
+	i := strings.LastIndex(path, "/")
+	if i >= 0 {
+		return path[i+1:]
+	}
+	return path
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -159,6 +180,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		serverutil.WriteError(w, http.StatusInternalServerError, "TOKEN_ERROR", "failed to issue token")
 		return
 	}
+	user.IsAdmin = s.isAdminUser(user)
 	http.SetCookie(w, &http.Cookie{
 		Name:     accessCookieName,
 		Value:    token,
@@ -197,6 +219,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, uid string) {
 		serverutil.WriteError(w, http.StatusUnauthorized, "INVALID_TOKEN", "invalid token")
 		return
 	}
+	user.IsAdmin = s.isAdminUser(user)
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"user": user})
 }
 
@@ -347,6 +370,29 @@ func (s *Server) withAuth(next func(http.ResponseWriter, *http.Request, string))
 		}
 		next(w, r, uid)
 	}
+}
+
+func (s *Server) withAdmin(next func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
+	return s.withAuth(func(w http.ResponseWriter, r *http.Request, uid string) {
+		user, err := s.store.UserByID(r.Context(), uid)
+		if err != nil {
+			serverutil.WriteError(w, http.StatusUnauthorized, "INVALID_TOKEN", "invalid token")
+			return
+		}
+		if !s.isAdminUser(user) {
+			serverutil.WriteError(w, http.StatusForbidden, "ADMIN_ONLY", "admin account required")
+			return
+		}
+		next(w, r, uid)
+	})
+}
+
+func (s *Server) isAdminUser(user store.User) bool {
+	admin := strings.TrimSpace(s.cfg.Auth.BootstrapUsername)
+	if admin == "" {
+		admin = "admin"
+	}
+	return strings.EqualFold(user.Username, admin)
 }
 
 func (s *Server) userIDFromRequest(r *http.Request) (string, error) {

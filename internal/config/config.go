@@ -46,6 +46,9 @@ type BridgeConfig struct {
 	CWD               string   `yaml:"cwd"`
 	Runner            string   `yaml:"runner"`
 	CodexPath         string   `yaml:"codex_path"`
+	ClaudePath        string   `yaml:"claude_path"`
+	ClaudeModel       string   `yaml:"claude_model"`
+	ClaudeEffort      string   `yaml:"claude_effort"`
 	Model             string   `yaml:"model"`
 	Sandbox           string   `yaml:"sandbox"`
 	ApprovalPolicy    string   `yaml:"approval_policy"`
@@ -100,6 +103,9 @@ func Default() Config {
 			CWD:               ".",
 			Runner:            "echo",
 			CodexPath:         "codex",
+			ClaudePath:        "claude",
+			ClaudeModel:       "",
+			ClaudeEffort:      "",
 			Sandbox:           "workspace-write",
 			ApprovalPolicy:    "never",
 			ReconnectMin:      Duration{Duration: 5_000_000_000},

@@ -12,15 +12,17 @@ import (
 var ErrAgentOffline = errors.New("agent offline")
 
 type Pool struct {
-	mu       sync.RWMutex
-	agents   map[string]*BridgeConn
-	browsers map[string]map[*BrowserConn]struct{}
+	mu                    sync.RWMutex
+	agents                map[string]*BridgeConn
+	browsers              map[string]map[*BrowserConn]struct{}
+	orchestrationBrowsers map[string]map[*BrowserConn]struct{}
 }
 
 func NewPool() *Pool {
 	return &Pool{
-		agents:   make(map[string]*BridgeConn),
-		browsers: make(map[string]map[*BrowserConn]struct{}),
+		agents:                make(map[string]*BridgeConn),
+		browsers:              make(map[string]map[*BrowserConn]struct{}),
+		orchestrationBrowsers: make(map[string]map[*BrowserConn]struct{}),
 	}
 }
 
@@ -93,6 +95,42 @@ func (p *Pool) BroadcastToBrowsers(sid string, env protocol.Envelope) {
 	p.mu.RLock()
 	var conns []*BrowserConn
 	for conn := range p.browsers[sid] {
+		conns = append(conns, conn)
+	}
+	p.mu.RUnlock()
+	for _, conn := range conns {
+		_ = conn.Send(env)
+	}
+}
+
+func (p *Pool) AddOrchestrationBrowser(runID string, conn *BrowserConn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	set := p.orchestrationBrowsers[runID]
+	if set == nil {
+		set = make(map[*BrowserConn]struct{})
+		p.orchestrationBrowsers[runID] = set
+	}
+	set[conn] = struct{}{}
+}
+
+func (p *Pool) RemoveOrchestrationBrowser(runID string, conn *BrowserConn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	set := p.orchestrationBrowsers[runID]
+	if set == nil {
+		return
+	}
+	delete(set, conn)
+	if len(set) == 0 {
+		delete(p.orchestrationBrowsers, runID)
+	}
+}
+
+func (p *Pool) BroadcastToOrchestrationBrowsers(runID string, env protocol.Envelope) {
+	p.mu.RLock()
+	var conns []*BrowserConn
+	for conn := range p.orchestrationBrowsers[runID] {
 		conns = append(conns, conn)
 	}
 	p.mu.RUnlock()

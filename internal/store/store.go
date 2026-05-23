@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -21,6 +22,8 @@ var (
 	ErrTokenConsumed = errors.New("enroll token consumed")
 	ErrConflict      = errors.New("conflict")
 )
+
+const passwordHashCost = 12
 
 type Store struct {
 	db *sql.DB
@@ -65,9 +68,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 			machine_id TEXT UNIQUE NOT NULL,
 			hostname TEXT,
 			instance TEXT,
+			working_dirs_json TEXT,
 			last_seen_at INTEGER NOT NULL
 		);`,
 		`ALTER TABLE agents ADD COLUMN instance TEXT;`,
+		`ALTER TABLE agents ADD COLUMN working_dirs_json TEXT;`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
 			agent_id TEXT NOT NULL,
@@ -111,6 +116,42 @@ func (s *Store) Migrate(ctx context.Context) error {
 			used_by_machine TEXT,
 			expires_at INTEGER
 		);`,
+		`CREATE TABLE IF NOT EXISTS orchestration_runs (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			title TEXT NOT NULL,
+			mode TEXT NOT NULL CHECK(mode IN ('collaboration','debate')),
+			prompt TEXT NOT NULL,
+			cwd TEXT,
+			max_turns INTEGER NOT NULL,
+			status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','canceled','canceling')),
+			error TEXT,
+			files_json TEXT,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			finished_at INTEGER,
+			FOREIGN KEY (user_id) REFERENCES users(id),
+			FOREIGN KEY (agent_id) REFERENCES agents(id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_orchestration_runs_user_updated ON orchestration_runs(user_id, updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS orchestration_events (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			kind TEXT NOT NULL,
+			role TEXT,
+			cli TEXT,
+			turn_id TEXT,
+			content TEXT,
+			status TEXT,
+			error TEXT,
+			data_json TEXT,
+			created_at INTEGER NOT NULL,
+			UNIQUE(run_id, seq),
+			FOREIGN KEY (run_id) REFERENCES orchestration_runs(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_orchestration_events_run_seq ON orchestration_events(run_id, seq);`,
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -169,6 +210,7 @@ type User struct {
 	ID        string `json:"id"`
 	Username  string `json:"username"`
 	CreatedAt int64  `json:"createdAt"`
+	IsAdmin   bool   `json:"isAdmin,omitempty"`
 }
 
 func (s *Store) UpsertUser(ctx context.Context, username, password string) (User, error) {
@@ -176,7 +218,7 @@ func (s *Store) UpsertUser(ctx context.Context, username, password string) (User
 		return User{}, errors.New("username and password are required")
 	}
 	now := time.Now().Unix()
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), passwordHashCost)
 	if err != nil {
 		return User{}, err
 	}
@@ -233,33 +275,39 @@ func (s *Store) AuthenticateUser(ctx context.Context, username, password string)
 }
 
 type Agent struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	MachineID  string `json:"machineId"`
-	Hostname   string `json:"hostname"`
-	Instance   string `json:"instance,omitempty"`
-	LastSeenAt int64  `json:"lastSeenAt"`
-	Online     bool   `json:"online"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	MachineID   string   `json:"machineId"`
+	Hostname    string   `json:"hostname"`
+	Instance    string   `json:"instance,omitempty"`
+	WorkingDirs []string `json:"workingDirs,omitempty"`
+	LastSeenAt  int64    `json:"lastSeenAt"`
+	Online      bool     `json:"online"`
 }
 
-func (s *Store) UpsertAgent(ctx context.Context, name, machineID, hostname, instance string) (Agent, error) {
+func (s *Store) UpsertAgent(ctx context.Context, name, machineID, hostname, instance string, workingDirs []string) (Agent, error) {
 	if machineID == "" {
 		return Agent{}, errors.New("machine id is required")
 	}
 	if name == "" {
 		name = machineID
 	}
+	workingDirsJSON, err := json.Marshal(cleanWorkingDirs(workingDirs))
+	if err != nil {
+		return Agent{}, err
+	}
 	now := time.Now().Unix()
 	id := NewID("agt")
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO agents (id, name, machine_id, hostname, instance, last_seen_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO agents (id, name, machine_id, hostname, instance, working_dirs_json, last_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(machine_id) DO UPDATE SET
 			name = excluded.name,
 			hostname = excluded.hostname,
 			instance = excluded.instance,
+			working_dirs_json = excluded.working_dirs_json,
 			last_seen_at = excluded.last_seen_at
-	`, id, name, machineID, hostname, instance, now)
+	`, id, name, machineID, hostname, instance, string(workingDirsJSON), now)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -267,22 +315,27 @@ func (s *Store) UpsertAgent(ctx context.Context, name, machineID, hostname, inst
 }
 
 func (s *Store) AgentByMachineID(ctx context.Context, machineID string) (Agent, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, machine_id, COALESCE(hostname,''), COALESCE(instance,''), last_seen_at FROM agents WHERE machine_id = ?`, machineID)
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, machine_id, COALESCE(hostname,''), COALESCE(instance,''), COALESCE(working_dirs_json,'[]'), last_seen_at FROM agents WHERE machine_id = ?`, machineID)
 	return scanAgent(row)
 }
 
 func (s *Store) AgentByID(ctx context.Context, id string) (Agent, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, machine_id, COALESCE(hostname,''), COALESCE(instance,''), last_seen_at FROM agents WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, machine_id, COALESCE(hostname,''), COALESCE(instance,''), COALESCE(working_dirs_json,'[]'), last_seen_at FROM agents WHERE id = ?`, id)
 	return scanAgent(row)
 }
 
 func scanAgent(row interface{ Scan(dest ...any) error }) (Agent, error) {
 	var a Agent
-	if err := row.Scan(&a.ID, &a.Name, &a.MachineID, &a.Hostname, &a.Instance, &a.LastSeenAt); err != nil {
+	var workingDirsJSON string
+	if err := row.Scan(&a.ID, &a.Name, &a.MachineID, &a.Hostname, &a.Instance, &workingDirsJSON, &a.LastSeenAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Agent{}, ErrNotFound
 		}
 		return Agent{}, err
+	}
+	if strings.TrimSpace(workingDirsJSON) != "" {
+		_ = json.Unmarshal([]byte(workingDirsJSON), &a.WorkingDirs)
+		a.WorkingDirs = cleanWorkingDirs(a.WorkingDirs)
 	}
 	return a, nil
 }
@@ -293,7 +346,7 @@ func (s *Store) TouchAgent(ctx context.Context, id string) error {
 }
 
 func (s *Store) ListAgents(ctx context.Context) ([]Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, machine_id, COALESCE(hostname,''), COALESCE(instance,''), last_seen_at FROM agents ORDER BY last_seen_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, machine_id, COALESCE(hostname,''), COALESCE(instance,''), COALESCE(working_dirs_json,'[]'), last_seen_at FROM agents ORDER BY last_seen_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -307,6 +360,26 @@ func (s *Store) ListAgents(ctx context.Context) ([]Agent, error) {
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+func cleanWorkingDirs(dirs []string) []string {
+	if len(dirs) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(dirs))
+	out := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		out = append(out, dir)
+	}
+	return out
 }
 
 type Session struct {
@@ -503,6 +576,64 @@ type Run struct {
 	UpdatedAt  int64  `json:"updatedAt"`
 }
 
+const (
+	OrchestrationQueued    = "queued"
+	OrchestrationRunning   = "running"
+	OrchestrationCompleted = "completed"
+	OrchestrationFailed    = "failed"
+	OrchestrationCanceled  = "canceled"
+	OrchestrationCanceling = "canceling"
+)
+
+type OrchestrationFile struct {
+	Name     string `json:"name"`
+	MimeType string `json:"mimeType"`
+	Size     int64  `json:"size"`
+}
+
+type OrchestrationRun struct {
+	ID         string              `json:"id"`
+	UserID     string              `json:"userId"`
+	AgentID    string              `json:"agentId"`
+	Title      string              `json:"title"`
+	Mode       string              `json:"mode"`
+	Prompt     string              `json:"prompt"`
+	CWD        string              `json:"cwd,omitempty"`
+	MaxTurns   int                 `json:"maxTurns"`
+	Status     string              `json:"status"`
+	Error      string              `json:"error,omitempty"`
+	Files      []OrchestrationFile `json:"files,omitempty"`
+	CreatedAt  int64               `json:"createdAt"`
+	UpdatedAt  int64               `json:"updatedAt"`
+	FinishedAt int64               `json:"finishedAt,omitempty"`
+}
+
+type OrchestrationEvent struct {
+	ID        string         `json:"id"`
+	RunID     string         `json:"runId"`
+	Seq       int64          `json:"seq"`
+	Kind      string         `json:"kind"`
+	Role      string         `json:"role,omitempty"`
+	CLI       string         `json:"cli,omitempty"`
+	TurnID    string         `json:"turnId,omitempty"`
+	Content   string         `json:"content,omitempty"`
+	Status    string         `json:"status,omitempty"`
+	Error     string         `json:"error,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+	CreatedAt int64          `json:"createdAt"`
+}
+
+type CreateOrchestrationRunParams struct {
+	UserID   string
+	AgentID  string
+	Title    string
+	Mode     string
+	Prompt   string
+	CWD      string
+	MaxTurns int
+	Files    []OrchestrationFile
+}
+
 func (s *Store) CreateRun(ctx context.Context, sessionID, promptID string) (Run, error) {
 	if sessionID == "" {
 		return Run{}, errors.New("session id is required")
@@ -593,6 +724,252 @@ func (s *Store) UpdateRunStatus(ctx context.Context, id, status, errText, usageJ
 		WHERE id = ?
 	`, status, nullString(errText), nullString(usageJSON), finished, now, id)
 	return err
+}
+
+func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchestrationRunParams) (OrchestrationRun, error) {
+	if params.UserID == "" || params.AgentID == "" {
+		return OrchestrationRun{}, errors.New("user id and agent id are required")
+	}
+	if params.Mode != "collaboration" && params.Mode != "debate" {
+		return OrchestrationRun{}, errors.New("mode must be collaboration or debate")
+	}
+	params.Prompt = strings.TrimSpace(params.Prompt)
+	if params.Prompt == "" {
+		return OrchestrationRun{}, errors.New("prompt is required")
+	}
+	params.Title = strings.TrimSpace(params.Title)
+	if params.Title == "" {
+		params.Title = params.Prompt
+	}
+	if runes := []rune(params.Title); len(runes) > 80 {
+		params.Title = string(runes[:80])
+	}
+	if params.MaxTurns <= 0 {
+		params.MaxTurns = 4
+	}
+	if params.MaxTurns > 12 {
+		params.MaxTurns = 12
+	}
+	filesJSON, err := json.Marshal(params.Files)
+	if err != nil {
+		return OrchestrationRun{}, err
+	}
+	now := time.Now().Unix()
+	run := OrchestrationRun{
+		ID:        NewID("orc"),
+		UserID:    params.UserID,
+		AgentID:   params.AgentID,
+		Title:     params.Title,
+		Mode:      params.Mode,
+		Prompt:    params.Prompt,
+		CWD:       params.CWD,
+		MaxTurns:  params.MaxTurns,
+		Status:    OrchestrationQueued,
+		Files:     params.Files,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO orchestration_runs
+			(id, user_id, agent_id, title, mode, prompt, cwd, max_turns, status, files_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, run.ID, run.UserID, run.AgentID, run.Title, run.Mode, run.Prompt, nullString(run.CWD), run.MaxTurns, run.Status, string(filesJSON), now, now)
+	if err != nil {
+		return OrchestrationRun{}, err
+	}
+	return run, nil
+}
+
+func (s *Store) OrchestrationRunByID(ctx context.Context, id, userID string) (OrchestrationRun, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, agent_id, title, mode, prompt, COALESCE(cwd,''), max_turns, status,
+			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+		FROM orchestration_runs
+		WHERE id = ? AND user_id = ?
+	`, id, userID)
+	return scanOrchestrationRun(row)
+}
+
+func (s *Store) OrchestrationRunByIDAnyUser(ctx context.Context, id string) (OrchestrationRun, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, agent_id, title, mode, prompt, COALESCE(cwd,''), max_turns, status,
+			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+		FROM orchestration_runs
+		WHERE id = ?
+	`, id)
+	return scanOrchestrationRun(row)
+}
+
+func (s *Store) ListOrchestrationRuns(ctx context.Context, userID string, limit int) ([]OrchestrationRun, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, user_id, agent_id, title, mode, prompt, COALESCE(cwd,''), max_turns, status,
+			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+		FROM orchestration_runs
+		WHERE user_id = ?
+		ORDER BY updated_at DESC, created_at DESC
+		LIMIT ?
+	`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OrchestrationRun
+	for rows.Next() {
+		run, err := scanOrchestrationRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateOrchestrationRunStatus(ctx context.Context, id, status, errText string) error {
+	now := time.Now().Unix()
+	var finishedAt any
+	if status == OrchestrationCompleted || status == OrchestrationFailed || status == OrchestrationCanceled {
+		finishedAt = now
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE orchestration_runs
+		SET status = ?, error = ?, finished_at = COALESCE(?, finished_at), updated_at = ?
+		WHERE id = ?
+	`, status, nullString(errText), finishedAt, now, id)
+	return err
+}
+
+func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID, mode, cwd string, maxTurns int, files []OrchestrationFile) error {
+	if id == "" || agentID == "" {
+		return errors.New("run id and agent id are required")
+	}
+	if mode != "collaboration" && mode != "debate" {
+		return errors.New("mode must be collaboration or debate")
+	}
+	if maxTurns <= 0 {
+		maxTurns = 4
+	}
+	if maxTurns > 12 {
+		maxTurns = 12
+	}
+	filesJSON, err := json.Marshal(files)
+	if err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE orchestration_runs
+		SET agent_id = ?, mode = ?, cwd = ?, max_turns = ?, files_json = ?, finished_at = NULL, updated_at = ?
+		WHERE id = ?
+	`, agentID, mode, nullString(cwd), maxTurns, string(filesJSON), now, id)
+	return err
+}
+
+func (s *Store) AddOrchestrationEvent(ctx context.Context, event OrchestrationEvent) (OrchestrationEvent, error) {
+	if event.RunID == "" || event.Kind == "" {
+		return OrchestrationEvent{}, errors.New("run id and kind are required")
+	}
+	now := time.Now().Unix()
+	if event.ID == "" {
+		event.ID = NewID("evt")
+	}
+	event.CreatedAt = now
+	dataJSON := ""
+	if event.Data != nil {
+		if b, err := json.Marshal(event.Data); err == nil {
+			dataJSON = string(b)
+		} else {
+			return OrchestrationEvent{}, err
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return OrchestrationEvent{}, err
+	}
+	defer tx.Rollback()
+	if event.Seq <= 0 {
+		row := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) + 1 FROM orchestration_events WHERE run_id = ?`, event.RunID)
+		if err := row.Scan(&event.Seq); err != nil {
+			return OrchestrationEvent{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO orchestration_events
+			(id, run_id, seq, kind, role, cli, turn_id, content, status, error, data_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, event.ID, event.RunID, event.Seq, event.Kind, nullString(event.Role), nullString(event.CLI),
+		nullString(event.TurnID), nullString(event.Content), nullString(event.Status), nullString(event.Error),
+		nullString(dataJSON), now); err != nil {
+		return OrchestrationEvent{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE orchestration_runs SET updated_at = ? WHERE id = ?`, now, event.RunID); err != nil {
+		return OrchestrationEvent{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return OrchestrationEvent{}, err
+	}
+	return event, nil
+}
+
+func (s *Store) ListOrchestrationEvents(ctx context.Context, runID string, limit int) ([]OrchestrationEvent, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, run_id, seq, kind, COALESCE(role,''), COALESCE(cli,''), COALESCE(turn_id,''),
+			COALESCE(content,''), COALESCE(status,''), COALESCE(error,''), COALESCE(data_json,''), created_at
+		FROM orchestration_events
+		WHERE run_id = ?
+		ORDER BY seq ASC
+		LIMIT ?
+	`, runID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OrchestrationEvent
+	for rows.Next() {
+		event, err := scanOrchestrationEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
+func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (OrchestrationRun, error) {
+	var run OrchestrationRun
+	var filesJSON string
+	if err := row.Scan(&run.ID, &run.UserID, &run.AgentID, &run.Title, &run.Mode, &run.Prompt, &run.CWD,
+		&run.MaxTurns, &run.Status, &run.Error, &filesJSON, &run.CreatedAt, &run.UpdatedAt, &run.FinishedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return OrchestrationRun{}, ErrNotFound
+		}
+		return OrchestrationRun{}, err
+	}
+	if strings.TrimSpace(filesJSON) != "" {
+		_ = json.Unmarshal([]byte(filesJSON), &run.Files)
+	}
+	return run, nil
+}
+
+func scanOrchestrationEvent(row interface{ Scan(dest ...any) error }) (OrchestrationEvent, error) {
+	var event OrchestrationEvent
+	var dataJSON string
+	if err := row.Scan(&event.ID, &event.RunID, &event.Seq, &event.Kind, &event.Role, &event.CLI, &event.TurnID,
+		&event.Content, &event.Status, &event.Error, &dataJSON, &event.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return OrchestrationEvent{}, ErrNotFound
+		}
+		return OrchestrationEvent{}, err
+	}
+	if strings.TrimSpace(dataJSON) != "" {
+		_ = json.Unmarshal([]byte(dataJSON), &event.Data)
+	}
+	return event, nil
 }
 
 func scanRun(row interface{ Scan(dest ...any) error }) (Run, error) {

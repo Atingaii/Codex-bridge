@@ -19,12 +19,13 @@ import (
 )
 
 type Client struct {
-	cfg       *config.Config
-	version   string
-	machineID string
-	hostname  string
-	instance  string
-	sessions  *SessionManager
+	cfg            *config.Config
+	version        string
+	machineID      string
+	hostname       string
+	instance       string
+	sessions       *SessionManager
+	orchestrations *OrchestrationManager
 }
 
 func NewClient(cfg *config.Config, version string) *Client {
@@ -45,6 +46,7 @@ func (c *Client) Run(ctx context.Context) error {
 	c.hostname = hostname
 	c.instance = store.NewID("bin")
 	c.sessions = NewSessionManager(c.cfg)
+	c.orchestrations = NewOrchestrationManager(c.cfg)
 
 	minDelay := c.cfg.Bridge.ReconnectMin.Duration
 	maxDelay := c.cfg.Bridge.ReconnectMax.Duration
@@ -92,11 +94,12 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 	defer ws.Close()
 
 	reg := protocol.RegisterPayload{
-		Name:      c.cfg.Bridge.Name,
-		MachineID: c.machineID,
-		Hostname:  c.hostname,
-		Version:   c.version,
-		Instance:  c.instance,
+		Name:        c.cfg.Bridge.Name,
+		MachineID:   c.machineID,
+		Hostname:    c.hostname,
+		Version:     c.version,
+		Instance:    c.instance,
+		WorkingDirs: DiscoverWorkingDirs(c.cfg),
 	}
 	if err := ws.WriteJSON(protocol.MustEnvelope(protocol.TypeRegister, "", reg)); err != nil {
 		return err
@@ -120,6 +123,7 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 
 	writec := make(chan protocol.Envelope, 128)
 	c.sessions.AttachOut(writec)
+	c.orchestrations.AttachOut(writec)
 	writeDone := make(chan struct{})
 	done := make(chan error, 2)
 	go func() {
@@ -150,12 +154,14 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 	defer ticker.Stop()
 	defer func() {
 		c.sessions.DetachOut(writec)
+		c.orchestrations.DetachOut(writec)
 		close(writeDone)
 	}()
 	for {
 		select {
 		case <-ctx.Done():
 			c.sessions.CloseAll()
+			c.orchestrations.CloseAll()
 			return ctx.Err()
 		case err := <-done:
 			return err
@@ -211,6 +217,19 @@ func (c *Client) handleEnvelope(ctx context.Context, env protocol.Envelope, out 
 		c.sessions.Cancel(env.Sid, payload.RunID, payload.PromptID)
 	case protocol.TypeCloseSession:
 		c.sessions.Close(env.Sid)
+	case protocol.TypeOrchestrationStart:
+		payload, err := protocol.Decode[protocol.OrchestrationStartPayload](env)
+		if err != nil {
+			send(out, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+				Kind:  "run.error",
+				Error: err.Error(),
+			}))
+			return
+		}
+		c.orchestrations.Start(ctx, payload)
+	case protocol.TypeOrchestrationCancel:
+		payload, _ := protocol.Decode[protocol.OrchestrationCancelPayload](env)
+		c.orchestrations.Cancel(payload.RunID)
 	default:
 		send(out, protocol.MustEnvelope(protocol.TypeError, env.Sid, protocol.ErrorPayload{Code: "BAD_TYPE", Message: "unsupported bridge frame"}))
 	}

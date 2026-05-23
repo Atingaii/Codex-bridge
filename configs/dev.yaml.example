@@ -33,6 +33,9 @@ bridge:
   cwd: .
   runner: echo
   codex_path: codex
+  claude_path: claude
+  claude_model: ""
+  claude_effort: ""
   model: ""
   sandbox: workspace-write
   approval_policy: never

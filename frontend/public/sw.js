@@ -1,4 +1,4 @@
-const CACHE_NAME = "codex-bridge-shell-v20260523-react1";
+const CACHE_NAME = "codex-bridge-shell-v20260523-live-events";
 const STATIC_CACHE_PATHS = [
   "/",
   "/icon.svg",

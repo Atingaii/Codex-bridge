@@ -49,7 +49,7 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prevAgent, prevErr := s.store.AgentByMachineID(r.Context(), reg.MachineID)
-	agent, err := s.store.UpsertAgent(r.Context(), reg.Name, reg.MachineID, reg.Hostname, reg.Instance)
+	agent, err := s.store.UpsertAgent(r.Context(), reg.Name, reg.MachineID, reg.Hostname, reg.Instance, reg.WorkingDirs)
 	if err != nil {
 		slog.Error("[hub] bridge agent upsert failed", "error", err)
 		_ = ws.WriteJSON(protocol.MustEnvelope(protocol.TypeError, "", protocol.ErrorPayload{Message: "failed to register agent"}))
@@ -150,6 +150,8 @@ func (s *Server) handleBridgeEnvelope(ctx context.Context, agentID string, env p
 		s.pool.BroadcastToBrowsers(env.Sid, env)
 	case protocol.TypePromptComplete:
 		s.handlePromptComplete(ctx, env)
+	case protocol.TypeOrchestrationEvent:
+		s.handleOrchestrationEvent(ctx, env)
 	case protocol.TypeError:
 		s.handleBridgeError(ctx, env)
 		s.pool.BroadcastToBrowsers(env.Sid, env)

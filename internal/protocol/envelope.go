@@ -6,18 +6,21 @@ import (
 )
 
 const (
-	TypeRegister       = "register"
-	TypeRegistered     = "registered"
-	TypeHeartbeat      = "heartbeat"
-	TypeOpenSession    = "open_session"
-	TypeSessionOpened  = "session_opened"
-	TypePrompt         = "prompt"
-	TypeSessionUpdate  = "session_update"
-	TypePromptComplete = "prompt_complete"
-	TypeCancel         = "cancel"
-	TypeCloseSession   = "close_session"
-	TypeError          = "error"
-	TypeStatus         = "status"
+	TypeRegister            = "register"
+	TypeRegistered          = "registered"
+	TypeHeartbeat           = "heartbeat"
+	TypeOpenSession         = "open_session"
+	TypeSessionOpened       = "session_opened"
+	TypePrompt              = "prompt"
+	TypeSessionUpdate       = "session_update"
+	TypePromptComplete      = "prompt_complete"
+	TypeCancel              = "cancel"
+	TypeCloseSession        = "close_session"
+	TypeOrchestrationStart  = "orchestration_start"
+	TypeOrchestrationEvent  = "orchestration_event"
+	TypeOrchestrationCancel = "orchestration_cancel"
+	TypeError               = "error"
+	TypeStatus              = "status"
 )
 
 type Envelope struct {
@@ -58,11 +61,12 @@ func Decode[T any](env Envelope) (T, error) {
 }
 
 type RegisterPayload struct {
-	Name      string `json:"name"`
-	MachineID string `json:"machineId"`
-	Hostname  string `json:"hostname"`
-	Version   string `json:"version"`
-	Instance  string `json:"instance,omitempty"`
+	Name        string   `json:"name"`
+	MachineID   string   `json:"machineId"`
+	Hostname    string   `json:"hostname"`
+	Version     string   `json:"version"`
+	Instance    string   `json:"instance,omitempty"`
+	WorkingDirs []string `json:"workingDirs,omitempty"`
 }
 
 type RegisteredPayload struct {
@@ -116,6 +120,37 @@ type ErrorPayload struct {
 	Code     string `json:"code,omitempty"`
 	RunID    string `json:"runId,omitempty"`
 	PromptID string `json:"promptId,omitempty"`
+}
+
+type OrchestrationStartPayload struct {
+	RunID     string              `json:"runId"`
+	Mode      string              `json:"mode"`
+	Prompt    string              `json:"prompt"`
+	Context   string              `json:"context,omitempty"`
+	Resume    bool                `json:"resume,omitempty"`
+	PromptSeq int64               `json:"promptSeq,omitempty"`
+	MaxTurns  int                 `json:"maxTurns,omitempty"`
+	CWD       string              `json:"cwd,omitempty"`
+	Files     []AttachmentPayload `json:"files,omitempty"`
+}
+
+type OrchestrationCancelPayload struct {
+	RunID string `json:"runId"`
+}
+
+type OrchestrationEventPayload struct {
+	ID        string         `json:"id,omitempty"`
+	RunID     string         `json:"runId"`
+	Seq       int64          `json:"seq,omitempty"`
+	TurnID    string         `json:"turnId,omitempty"`
+	Kind      string         `json:"kind"`
+	Role      string         `json:"role,omitempty"`
+	CLI       string         `json:"cli,omitempty"`
+	Content   string         `json:"content,omitempty"`
+	Status    string         `json:"status,omitempty"`
+	Error     string         `json:"error,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+	CreatedAt int64          `json:"createdAt,omitempty"`
 }
 
 type ToolEvent struct {

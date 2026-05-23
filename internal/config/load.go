@@ -96,6 +96,15 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("BRIDGE_CODEX_PATH"); v != "" {
 		cfg.Bridge.CodexPath = v
 	}
+	if v := os.Getenv("BRIDGE_CLAUDE_PATH"); v != "" {
+		cfg.Bridge.ClaudePath = v
+	}
+	if v := os.Getenv("BRIDGE_CLAUDE_MODEL"); v != "" {
+		cfg.Bridge.ClaudeModel = v
+	}
+	if v := os.Getenv("BRIDGE_CLAUDE_EFFORT"); v != "" {
+		cfg.Bridge.ClaudeEffort = v
+	}
 	if v := os.Getenv("BRIDGE_MODEL"); v != "" {
 		cfg.Bridge.Model = v
 	}

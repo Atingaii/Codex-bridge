@@ -6,7 +6,8 @@ import {
   ImagePlus, Send, Square, AlertCircle,
   RefreshCw, Check, Clipboard,
   Menu, X, Server, Activity, Command,
-  Trash2, Edit2
+  Trash2, Edit2, GitBranch, Swords, UsersRound, ArrowLeft,
+  FileUp, FileText, FolderInput
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -19,6 +20,7 @@ type UserAccount = {
   id: string;
   username: string;
   createdAt: number;
+  isAdmin?: boolean;
 };
 
 type Agent = {
@@ -27,6 +29,7 @@ type Agent = {
   machineId: string;
   hostname: string;
   instance?: string;
+  workingDirs?: string[];
   lastSeenAt: number;
   online: boolean;
 };
@@ -53,6 +56,43 @@ type Run = {
   id: string;
   promptId: string;
   status: string;
+};
+
+type OrchestrationFile = {
+  name: string;
+  mimeType: string;
+  size: number;
+};
+
+type OrchestrationRun = {
+  id: string;
+  agentId: string;
+  title: string;
+  mode: 'collaboration' | 'debate';
+  prompt: string;
+  cwd?: string;
+  maxTurns: number;
+  status: string;
+  error?: string;
+  files?: OrchestrationFile[];
+  createdAt: number;
+  updatedAt: number;
+  finishedAt?: number;
+};
+
+type OrchestrationEvent = {
+  id?: string;
+  runId: string;
+  seq?: number;
+  kind: string;
+  role?: string;
+  cli?: string;
+  turnId?: string;
+  content?: string;
+  status?: string;
+  error?: string;
+  data?: Record<string, any>;
+  createdAt?: number;
 };
 
 type ToolEvent = {
@@ -84,6 +124,231 @@ type ImageAttachment = {
   previewUrl: string;
 };
 
+type UploadAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  data: string;
+};
+
+type Language = 'en' | 'zh';
+
+const uiText = {
+  en: {
+    secureConnection: 'Secure connection to your workspace',
+    username: 'Username',
+    password: 'Password',
+    connectToWorkspace: 'Connect to Workspace',
+    connectionFailed: 'Connection failed.',
+    disconnected: 'Disconnected',
+    connected: 'Connected',
+    connecting: 'Connecting',
+    connectionError: 'Connection error',
+    ready: 'Ready',
+    error: 'Error',
+    idle: 'idle',
+    failedLoadOrchestration: 'Failed to load orchestration state',
+    failedStartOrchestration: 'Failed to start orchestration',
+    jumpToLatestMessage: 'Jump to latest message',
+    jumpToBottom: 'Jump to bottom',
+    uploadImages: 'Upload images',
+    commandEvent: 'command event',
+    agent: 'agent',
+    reviewCurrentRepository: 'Review the current repository, implement the requested change, and verify with tests.',
+    english: 'English',
+    chinese: 'Chinese',
+    language: 'Language',
+    newSession: 'New Session',
+    newRun: 'New Run',
+    orchestration: 'Orchestration',
+    codexBridge: 'Codex Bridge',
+    searchSessions: 'Search sessions...',
+    noSessions: 'No sessions',
+    settings: 'Settings',
+    agentOnline: 'Agent Online',
+    agentOffline: 'Agent Offline',
+    orchestrate: 'Orchestrate',
+    runner: 'Runner',
+    thread: 'Thread',
+    status: 'Status',
+    howCanIHelp: 'How can I help you today?',
+    codexCapability: 'I can execute code, read files, run terminal commands, and help you build your project.',
+    readProjectFiles: 'Read project files',
+    exploreCurrentDirectory: 'Explore current directory',
+    runTestSuite: 'Run test suite',
+    executeConfiguredTests: 'Execute configured tests',
+    askCodex: 'Ask Codex to read files, run commands, or write code...',
+    stopping: 'Stopping',
+    stop: 'Stop',
+    send: 'Send',
+    verifyNotice: 'Codex Bridge may produce inaccurate results. Verify important changes.',
+    noBridgeConnected: 'No bridge connected',
+    sessionNameRequired: 'Session name is required',
+    failedRenameSession: 'Failed to rename session',
+    deleteSessionConfirm: 'Delete this session? This cannot be undone.',
+    analyzeUploadedImage: 'Please analyze the uploaded image.',
+    today: 'Today',
+    yesterday: 'Yesterday',
+    previous7Days: 'Previous 7 Days',
+    older: 'Older',
+    user: 'You',
+    system: 'System',
+    copyMessage: 'Copy message',
+    copied: 'Copied',
+    copy: 'Copy',
+    copyOutput: 'Copy output',
+    run: 'Run',
+    bash: 'Bash',
+    running: 'running',
+    account: 'Account',
+    localAdministrator: 'Local Administrator',
+    logout: 'Logout',
+    appearance: 'Appearance',
+    theme: 'Theme',
+    light: 'Light',
+    dark: 'Dark',
+    agentsRuntime: 'Agents & Runtime',
+    noAgentsEnrolled: 'No agents enrolled',
+    online: 'online',
+    offline: 'offline',
+    cancel: 'Cancel',
+    savePreferences: 'Save Preferences',
+    save: 'Save',
+    renameSession: 'Rename Session',
+    sessionName: 'Session name',
+    cliOrchestration: 'CLI Orchestration',
+    workers: 'Workers',
+    stream: 'Stream',
+    coordinateClaudeCodex: 'Coordinate Claude Code and Codex',
+    startCollaborationHint: 'Start a collaboration or debate run from the panel on the right.',
+    mode: 'Mode',
+    collaborate: 'Collaborate',
+    debate: 'Debate',
+    task: 'Task',
+    taskPlaceholder: 'Describe the proof, code change, or review task...',
+    workingDirectory: 'Working directory',
+    bridgeDefaultCwd: 'Bridge default cwd',
+    noWorkingDirs: 'No workspace paths advertised',
+    removeFile: 'Remove file',
+    turns: 'Turns',
+    files: 'Files',
+    add: 'Add',
+    uploadProofFiles: 'Upload Coq, Lean, Isabelle, source, logs, or screenshots.',
+    stopRun: 'Stop Run',
+    start: 'Start',
+    noOrchestrationRuns: 'No orchestration runs',
+    continueRun: 'Continue',
+  },
+  zh: {
+    secureConnection: '安全连接到你的工作区',
+    username: '用户名',
+    password: '密码',
+    connectToWorkspace: '连接工作区',
+    connectionFailed: '连接失败。',
+    disconnected: '已断开',
+    connected: '已连接',
+    connecting: '连接中',
+    connectionError: '连接错误',
+    ready: '就绪',
+    error: '错误',
+    idle: '空闲',
+    failedLoadOrchestration: '加载编排状态失败',
+    failedStartOrchestration: '启动编排失败',
+    jumpToLatestMessage: '跳转到最新消息',
+    jumpToBottom: '跳到底部',
+    uploadImages: '上传图片',
+    commandEvent: '命令事件',
+    agent: 'agent',
+    reviewCurrentRepository: '审查当前仓库，完成请求的改动，并用测试验证。',
+    english: 'English',
+    chinese: '中文',
+    language: '语言',
+    newSession: '新会话',
+    newRun: '新运行',
+    orchestration: '编排',
+    codexBridge: 'Codex Bridge',
+    searchSessions: '搜索会话...',
+    noSessions: '暂无会话',
+    settings: '设置',
+    agentOnline: 'Agent 在线',
+    agentOffline: 'Agent 离线',
+    orchestrate: '编排',
+    runner: '运行器',
+    thread: '线程',
+    status: '状态',
+    howCanIHelp: '今天需要我做什么？',
+    codexCapability: '我可以执行代码、读取文件、运行终端命令，并协助构建项目。',
+    readProjectFiles: '读取项目文件',
+    exploreCurrentDirectory: '探索当前目录',
+    runTestSuite: '运行测试套件',
+    executeConfiguredTests: '执行已配置的测试',
+    askCodex: '让 Codex 读取文件、运行命令或编写代码...',
+    stopping: '正在停止',
+    stop: '停止',
+    send: '发送',
+    verifyNotice: 'Codex Bridge 可能产生不准确结果，请核验重要变更。',
+    noBridgeConnected: '没有已连接的 bridge',
+    sessionNameRequired: '会话名称不能为空',
+    failedRenameSession: '重命名会话失败',
+    deleteSessionConfirm: '确定删除这个会话？此操作无法撤销。',
+    analyzeUploadedImage: '请分析上传的图片。',
+    today: '今天',
+    yesterday: '昨天',
+    previous7Days: '过去 7 天',
+    older: '更早',
+    user: '你',
+    system: '系统',
+    copyMessage: '复制消息',
+    copied: '已复制',
+    copy: '复制',
+    copyOutput: '复制输出',
+    run: '运行',
+    bash: 'Bash',
+    running: '运行中',
+    account: '账户',
+    localAdministrator: '本地管理员',
+    logout: '退出登录',
+    appearance: '外观',
+    theme: '主题',
+    light: '浅色',
+    dark: '深色',
+    agentsRuntime: 'Agent 与运行时',
+    noAgentsEnrolled: '暂无已注册 Agent',
+    online: '在线',
+    offline: '离线',
+    cancel: '取消',
+    savePreferences: '保存偏好',
+    save: '保存',
+    renameSession: '重命名会话',
+    sessionName: '会话名称',
+    cliOrchestration: 'CLI 编排',
+    workers: '工作器',
+    stream: '流连接',
+    coordinateClaudeCodex: '协同 Claude Code 与 Codex',
+    startCollaborationHint: '从右侧面板启动协作或辩论运行。',
+    mode: '模式',
+    collaborate: '协作',
+    debate: '辩论',
+    task: '任务',
+    taskPlaceholder: '描述证明、代码改动或审查任务...',
+    workingDirectory: '工作目录',
+    bridgeDefaultCwd: 'Bridge 默认工作目录',
+    noWorkingDirs: '尚未上报可选工作区路径',
+    removeFile: '移除文件',
+    turns: '轮次',
+    files: '文件',
+    add: '添加',
+    uploadProofFiles: '上传 Coq、Lean、Isabelle、源码、日志或截图。',
+    stopRun: '停止运行',
+    start: '开始',
+    noOrchestrationRuns: '暂无编排运行',
+    continueRun: '继续',
+  },
+};
+
+type UIText = typeof uiText.en;
+
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(path, {
     credentials: 'include',
@@ -105,14 +370,14 @@ function newID(prefix: string) {
   return `${prefix}_${Array.from(random, (part) => part.toString(16).padStart(8, '0')).join('')}`;
 }
 
-function displaySessionTitle(session?: Session | null) {
-  if (!session?.title || session.title === 'New chat') return 'New Session';
+function displaySessionTitle(session: Session | null | undefined, t: UIText = uiText.en) {
+  if (!session?.title || session.title === 'New chat') return t.newSession;
   return session.title;
 }
 
-function titleFromPrompt(prompt: string) {
+function titleFromPrompt(prompt: string, t: UIText = uiText.en) {
   const compact = prompt.replace(/\s+/g, ' ').trim();
-  if (!compact) return 'New Session';
+  if (!compact) return t.newSession;
   return compact.length > 48 ? `${compact.slice(0, 48)}...` : compact;
 }
 
@@ -121,16 +386,16 @@ function formatTime(timestamp?: number) {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function sessionDateLabel(timestamp: number) {
+function sessionDateLabel(timestamp: number, t: UIText = uiText.en) {
   const date = new Date(timestamp * 1000);
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const target = new Date(date.getFullYear(), date.getMonth(), date.getDate());
   const diffDays = Math.round((today.getTime() - target.getTime()) / 86400000);
-  if (diffDays <= 0) return 'Today';
-  if (diffDays === 1) return 'Yesterday';
-  if (diffDays <= 7) return 'Previous 7 Days';
-  return 'Older';
+  if (diffDays <= 0) return t.today;
+  if (diffDays === 1) return t.yesterday;
+  if (diffDays <= 7) return t.previous7Days;
+  return t.older;
 }
 
 function initials(username: string) {
@@ -144,6 +409,115 @@ function initials(username: string) {
 
 function activeStatus(status?: string) {
   return status === 'queued' || status === 'running' || status === 'canceling';
+}
+
+function activeOrchestrationStatus(status?: string) {
+  return status === 'queued' || status === 'running' || status === 'canceling';
+}
+
+function canCancelOrchestrationStatus(status?: string) {
+  return status === 'queued' || status === 'running';
+}
+
+function orchestrationRunStatusFromEvent(event: OrchestrationEvent) {
+  switch (event.kind) {
+    case 'run.start':
+      return 'running';
+    case 'run.end':
+      return 'completed';
+    case 'run.error':
+      return 'failed';
+    case 'run.cancelled':
+      return 'canceled';
+    case 'run.canceling':
+      return 'canceling';
+    default:
+      return '';
+  }
+}
+
+function orchestrationEventKey(event: OrchestrationEvent, index = 0) {
+  if (event.id) return `id:${event.id}`;
+  if (event.seq && event.runId) return `seq:${event.runId}:${event.seq}`;
+  return `fallback:${event.runId}:${event.kind}:${event.turnId || ''}:${event.role || ''}:${event.cli || ''}:${event.createdAt || ''}:${index}`;
+}
+
+function compareOrchestrationEvents(a: OrchestrationEvent, b: OrchestrationEvent) {
+  if (a.runId !== b.runId) return a.runId.localeCompare(b.runId);
+  if (a.seq && b.seq && a.seq !== b.seq) return a.seq - b.seq;
+  if (a.createdAt && b.createdAt && a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+  return orchestrationEventKey(a).localeCompare(orchestrationEventKey(b));
+}
+
+function mergeOrchestrationEvents(current: OrchestrationEvent[], incoming: OrchestrationEvent[]) {
+  const merged = new Map<string, OrchestrationEvent>();
+  current.forEach((event, index) => merged.set(orchestrationEventKey(event, index), event));
+  incoming.forEach((event, index) => {
+    const key = orchestrationEventKey(event, current.length + index);
+    const previous = merged.get(key);
+    merged.set(key, previous ? { ...previous, ...event, data: event.data || previous.data } : event);
+  });
+  return Array.from(merged.values()).sort(compareOrchestrationEvents);
+}
+
+function upsertOrchestrationRun(current: OrchestrationRun[], next: OrchestrationRun) {
+  const found = current.some((run) => run.id === next.id);
+  const runs = found ? current.map((run) => run.id === next.id ? { ...run, ...next } : run) : [next, ...current];
+  return runs.slice().sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+}
+
+function orchestrationToolID(event: OrchestrationEvent) {
+  return typeof event.data?.id === 'string' ? event.data.id : '';
+}
+
+function mergeOrchestrationToolEvents(events: OrchestrationEvent[]) {
+  const merged: OrchestrationEvent[] = [];
+  const toolIndexes = new Map<string, number>();
+  events.forEach((event) => {
+    const toolID = event.kind.startsWith('command.') ? orchestrationToolID(event) : '';
+    if (!toolID) {
+      merged.push(event);
+      return;
+    }
+    const key = `${event.runId}:${event.turnId || ''}:${event.cli || ''}:${toolID}`;
+    const index = toolIndexes.get(key);
+    if (typeof index !== 'number') {
+      toolIndexes.set(key, merged.length);
+      merged.push(event);
+      return;
+    }
+    const previous = merged[index];
+    merged[index] = {
+      ...previous,
+      ...event,
+      data: {
+        ...(previous.data || {}),
+        ...(event.data || {}),
+      },
+      content: event.content || previous.content,
+      error: event.error || previous.error,
+      createdAt: event.createdAt || previous.createdAt,
+      seq: event.seq || previous.seq,
+    };
+  });
+  return merged;
+}
+
+function applyOrchestrationEventToRun(run: OrchestrationRun, event: OrchestrationEvent): OrchestrationRun {
+  const status = orchestrationRunStatusFromEvent(event);
+  const updatedAt = Math.max(run.updatedAt || 0, event.createdAt || Math.floor(Date.now() / 1000));
+  const next: OrchestrationRun = {
+    ...run,
+    updatedAt,
+    error: event.error || run.error,
+  };
+  if (status) {
+    next.status = status;
+    if (!next.finishedAt && !activeOrchestrationStatus(status)) {
+      next.finishedAt = event.createdAt || updatedAt;
+    }
+  }
+  return next;
 }
 
 function isNearBottom(element: HTMLElement, threshold = 120) {
@@ -205,6 +579,17 @@ function waitForOpen(ws: WebSocket, timeout = 3000) {
   });
 }
 
+function startWSHeartbeat(ws: WebSocket, sid?: string) {
+  const send = () => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'heartbeat', sid, payload: { ts: Date.now() } }));
+    }
+  };
+  send();
+  const id = window.setInterval(send, 15000);
+  return () => window.clearInterval(id);
+}
+
 function escapeBasic(value: string) {
   return value.replace(/[&<>"']/g, (ch) => ({
     '&': '&amp;',
@@ -248,6 +633,41 @@ function readImageAttachment(file: File): Promise<ImageAttachment> {
     };
     reader.readAsDataURL(file);
   });
+}
+
+function readUploadAttachment(file: File): Promise<UploadAttachment> {
+  return new Promise((resolve, reject) => {
+    if (file.size > 8 * 1024 * 1024) {
+      reject(new Error('Each file must be 8 MB or smaller'));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.onload = () => {
+      const value = String(reader.result || '');
+      const comma = value.indexOf(',');
+      resolve({
+        id: newID('file'),
+        name: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        size: file.size,
+        data: comma === -1 ? value : value.slice(comma + 1),
+      });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatBytes(size: number) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function initialLanguage(): Language {
+  const saved = localStorage.getItem('codexBridge.language');
+  if (saved === 'zh' || saved === 'en') return saved;
+  return navigator.language?.toLowerCase().startsWith('zh') ? 'zh' : 'en';
 }
 
 function MessageContent({ content }: { content: string }) {
@@ -310,6 +730,9 @@ export default function App() {
   const [user, setUser] = useState<UserAccount | null>(null);
   const [booting, setBooting] = useState(true);
   const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('codexBridge.theme') !== 'light');
+  const [language, setLanguage] = useState<Language>(initialLanguage);
+  const [path, setPath] = useState(() => window.location.pathname);
+  const t = uiText[language];
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDarkMode);
@@ -317,11 +740,39 @@ export default function App() {
   }, [isDarkMode]);
 
   useEffect(() => {
+    document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en';
+    localStorage.setItem('codexBridge.language', language);
+  }, [language]);
+
+  useEffect(() => {
     api<{ user: UserAccount }>('/api/me')
       .then((data) => setUser(data.user))
       .catch(() => setUser(null))
       .finally(() => setBooting(false));
   }, []);
+
+  useEffect(() => {
+    const handlePop = () => setPath(window.location.pathname);
+    window.addEventListener('popstate', handlePop);
+    return () => window.removeEventListener('popstate', handlePop);
+  }, []);
+
+  useEffect(() => {
+    if (user && !user.isAdmin && !path.startsWith('/orchestrate')) {
+      window.history.replaceState({}, '', '/orchestrate');
+      setPath('/orchestrate');
+    }
+  }, [path, user]);
+
+  const navigate = useCallback((nextPath: string) => {
+    if (user && !user.isAdmin && !nextPath.startsWith('/orchestrate')) {
+      nextPath = '/orchestrate';
+    }
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState({}, '', nextPath);
+      setPath(nextPath);
+    }
+  }, [user]);
 
   if (booting) {
     return (
@@ -332,7 +783,23 @@ export default function App() {
   }
 
   if (!user) {
-    return <LoginScreen onLogin={setUser} />;
+    return <LoginScreen onLogin={setUser} language={language} setLanguage={setLanguage} t={t} />;
+  }
+
+  if (!user.isAdmin || path.startsWith('/orchestrate')) {
+    return (
+      <OrchestrationWorkspace
+        user={user}
+        onLogout={() => setUser(null)}
+        isDarkMode={isDarkMode}
+        setIsDarkMode={setIsDarkMode}
+        language={language}
+        setLanguage={setLanguage}
+        t={t}
+        canOpenMain={Boolean(user.isAdmin)}
+        navigate={navigate}
+      />
+    );
   }
 
   return (
@@ -341,11 +808,25 @@ export default function App() {
       onLogout={() => setUser(null)}
       isDarkMode={isDarkMode}
       setIsDarkMode={setIsDarkMode}
+      language={language}
+      setLanguage={setLanguage}
+      t={t}
+      navigate={navigate}
     />
   );
 }
 
-function LoginScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
+function LoginScreen({
+  onLogin,
+  language,
+  setLanguage,
+  t,
+}: {
+  onLogin: (user: UserAccount) => void;
+  language: Language;
+  setLanguage: (value: Language) => void;
+  t: UIText;
+}) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -364,7 +845,7 @@ function LoginScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
       });
       onLogin(data.user);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Connection failed.');
+      setError(err instanceof Error ? err.message : t.connectionFailed);
     } finally {
       setLoading(false);
     }
@@ -378,14 +859,14 @@ function LoginScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
             <Terminal className="h-6 w-6" />
           </div>
           <h1 className="text-xl font-medium tracking-tight">Codex Bridge</h1>
-          <p className="text-sm text-muted-foreground">Secure connection to your workspace</p>
+          <p className="text-sm text-muted-foreground">{t.secureConnection}</p>
         </div>
 
         <form onSubmit={handleLogin} className="flex flex-col gap-4">
           <div className="space-y-4">
             <div className="space-y-2">
               <label className="text-sm font-medium leading-none" htmlFor="username">
-                Username
+                {t.username}
               </label>
               <div className="relative">
                 <User className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -394,7 +875,7 @@ function LoginScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium leading-none" htmlFor="password">
-                Password
+                {t.password}
               </label>
               <div className="relative">
                 <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -411,14 +892,14 @@ function LoginScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
           )}
 
           <Button type="submit" className="w-full" disabled={loading}>
-            {loading ? <RefreshCw className="h-4 w-4 animate-spin" /> : 'Connect to Workspace'}
+            {loading ? <RefreshCw className="h-4 w-4 animate-spin" /> : t.connectToWorkspace}
           </Button>
         </form>
 
         <div className="flex justify-center mt-4">
-          <Button variant="ghost" size="sm" className="text-muted-foreground gap-2">
+          <Button variant="ghost" size="sm" className="text-muted-foreground gap-2" onClick={() => setLanguage(language === 'zh' ? 'en' : 'zh')}>
             <Globe className="h-4 w-4" />
-            English
+            {language === 'zh' ? t.chinese : t.english}
             <ChevronDown className="h-3 w-3 opacity-50" />
           </Button>
         </div>
@@ -427,7 +908,25 @@ function LoginScreen({ onLogin }: { onLogin: (user: UserAccount) => void }) {
   );
 }
 
-function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAccount, onLogout: () => void, isDarkMode: boolean, setIsDarkMode: (v: boolean) => void }) {
+function Workspace({
+  user,
+  onLogout,
+  isDarkMode,
+  setIsDarkMode,
+  language,
+  setLanguage,
+  t,
+  navigate,
+}: {
+  user: UserAccount;
+  onLogout: () => void;
+  isDarkMode: boolean;
+  setIsDarkMode: (value: boolean) => void;
+  language: Language;
+  setLanguage: (value: Language) => void;
+  t: UIText;
+  navigate: (path: string) => void;
+}) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState('');
@@ -439,7 +938,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
   const [items, setItems] = useState<ChatItem[]>([]);
   const [runner, setRunner] = useState('-');
   const [thread, setThread] = useState('-');
-  const [connectionStatus, setConnectionStatus] = useState('Disconnected');
+  const [connectionStatus, setConnectionStatus] = useState(t.disconnected);
   const [activeRun, setActiveRun] = useState<Run | null>(null);
   const [search, setSearch] = useState('');
   const [renameTarget, setRenameTarget] = useState<Session | null>(null);
@@ -539,7 +1038,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
 
     switch (env.type) {
       case 'status':
-        setConnectionStatus(payload.status ? String(payload.status) : 'Connected');
+        setConnectionStatus(payload.status ? String(payload.status) : t.connected);
         if (payload.runId) {
           setActiveRun({ id: payload.runId, promptId: payload.promptId, status: payload.status || 'running' });
         }
@@ -550,7 +1049,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
       case 'session_opened':
         setRunner(payload.runner || '-');
         setThread(payload.remoteThreadId || '-');
-        setConnectionStatus('Ready');
+        setConnectionStatus(t.ready);
         break;
       case 'session_update':
         if (payload.runId) {
@@ -595,7 +1094,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
         setActiveRun(null);
         assistantItemIdRef.current = null;
         assistantTextRef.current = '';
-        setConnectionStatus('Ready');
+        setConnectionStatus(t.ready);
         if (activeSessionIdRef.current) touchSession(activeSessionIdRef.current);
         break;
       case 'error':
@@ -606,24 +1105,25 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
           setActiveRun(null);
           return;
         }
-        appendSystem(payload.message || payload.code || 'Unknown error');
+        appendSystem(payload.message || payload.code || t.error);
         setActiveRun(null);
-        setConnectionStatus(payload.code || 'Error');
+        setConnectionStatus(payload.code || t.error);
         break;
       default:
         break;
     }
-  }, [appendSystem, closeWS, thread, touchSession]);
+  }, [appendSystem, closeWS, t.connected, t.error, t.ready, thread, touchSession]);
 
   const connectWS = useCallback((sessionId: string) => {
     closeWS();
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${scheme}://${location.host}/ws/chat?sid=${encodeURIComponent(sessionId)}`);
     wsRef.current = ws;
-    setConnectionStatus('Connecting');
+    setConnectionStatus(t.connecting);
+    let stopHeartbeat: (() => void) | null = null;
     ws.onopen = () => {
-      setConnectionStatus('Connected');
-      ws.send(JSON.stringify({ type: 'heartbeat', sid: sessionId, payload: { ts: Date.now() } }));
+      setConnectionStatus(t.connected);
+      stopHeartbeat = startWSHeartbeat(ws, sessionId);
     };
     ws.onmessage = (event) => {
       try {
@@ -632,12 +1132,13 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
         // Ignore malformed frames.
       }
     };
-    ws.onerror = () => setConnectionStatus('Connection error');
+    ws.onerror = () => setConnectionStatus(t.connectionError);
     ws.onclose = () => {
-      if (activeSessionIdRef.current === sessionId) setConnectionStatus('Disconnected');
+      stopHeartbeat?.();
+      if (activeSessionIdRef.current === sessionId) setConnectionStatus(t.disconnected);
     };
     return ws;
-  }, [closeWS, handleEnvelope]);
+  }, [closeWS, handleEnvelope, startWSHeartbeat, t.connected, t.connecting, t.connectionError, t.disconnected]);
 
   const selectSession = useCallback(async (sessionId: string) => {
     stickToBottomRef.current = true;
@@ -682,10 +1183,10 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
     return () => window.cancelAnimationFrame(frame);
   }, [activeSessionId, items, scrollMessagesToBottom]);
 
-  const createSession = async (title = 'New Session') => {
+  const createSession = async (title = t.newSession) => {
     const agent = agents.find((item) => item.online) || agents[0];
     if (!agent) {
-      appendSystem('No bridge connected');
+      appendSystem(t.noBridgeConnected);
       return;
     }
     const data = await api<{ session: Session }>('/api/sessions', {
@@ -698,7 +1199,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
 
   const renameSession = (session: Session) => {
     setRenameTarget(session);
-    setRenameDraft(displaySessionTitle(session));
+    setRenameDraft(displaySessionTitle(session, t));
     setRenameError('');
   };
 
@@ -713,10 +1214,10 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
     if (!renameTarget) return;
     const title = renameDraft.trim();
     if (!title) {
-      setRenameError('Session name is required');
+      setRenameError(t.sessionNameRequired);
       return;
     }
-    if (title === displaySessionTitle(renameTarget)) {
+    if (title === displaySessionTitle(renameTarget, t)) {
       closeRenameModal();
       return;
     }
@@ -724,21 +1225,21 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
     setRenameError('');
     try {
       const data = await api<{ session: Session }>(`/api/sessions/${encodeURIComponent(renameTarget.id)}`, {
-      method: 'PATCH',
+        method: 'PATCH',
         body: JSON.stringify({ title }),
       });
       setSessions((current) => current.map((item) => item.id === data.session.id ? data.session : item));
       setRenameTarget(null);
       setRenameDraft('');
     } catch (err) {
-      setRenameError(err instanceof Error ? err.message : 'Failed to rename session');
+      setRenameError(err instanceof Error ? err.message : t.failedRenameSession);
     } finally {
       setRenaming(false);
     }
   };
 
   const deleteSession = async (session: Session) => {
-    if (!window.confirm('Delete this session? This cannot be undone.')) return;
+    if (!window.confirm(t.deleteSessionConfirm)) return;
     await api(`/api/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
     const remaining = sessions.filter((item) => item.id !== session.id);
     setSessions(remaining);
@@ -770,10 +1271,10 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
     const text = inputVal.trim();
     if ((!text && !attachments.length) || isGenerating) return;
     let sessionId = activeSessionId;
-    const promptText = text || 'Please analyze the uploaded image.';
-    const wasUntitled = !activeSession || activeSession.title === 'New chat' || activeSession.title === 'New Session';
+    const promptText = text || t.analyzeUploadedImage;
+    const wasUntitled = !activeSession || activeSession.title === 'New chat' || activeSession.title === 'New Session' || activeSession.title === t.newSession;
     if (!sessionId) {
-      await createSession(titleFromPrompt(promptText));
+      await createSession(titleFromPrompt(promptText, t));
       sessionId = activeSessionIdRef.current;
     }
     if (!sessionId) return;
@@ -793,7 +1294,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
     if (wasUntitled && promptText) {
       api<{ session: Session }>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
         method: 'PATCH',
-        body: JSON.stringify({ title: titleFromPrompt(promptText) }),
+        body: JSON.stringify({ title: titleFromPrompt(promptText, t) }),
       })
         .then((data) => setSessions((current) => current.map((item) => item.id === data.session.id ? data.session : item)))
         .catch(() => undefined);
@@ -824,9 +1325,9 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
   const groupedSessions = useMemo(() => {
     const query = search.trim().toLowerCase();
     return sessions
-      .filter((session) => !query || displaySessionTitle(session).toLowerCase().includes(query))
+      .filter((session) => !query || displaySessionTitle(session, t).toLowerCase().includes(query))
       .reduce((acc, session) => {
-        const label = sessionDateLabel(session.updatedAt || session.createdAt);
+        const label = sessionDateLabel(session.updatedAt || session.createdAt, t);
         if (!acc[label]) acc[label] = [];
         acc[label].push(session);
         return acc;
@@ -852,6 +1353,8 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
           setSearch={setSearch}
           openSettings={() => setSettingsOpen(true)}
           agentOnline={Boolean(onlineAgent)}
+          openOrchestration={() => navigate('/orchestrate')}
+          t={t}
         />
       </aside>
 
@@ -873,6 +1376,11 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
               setSearch={setSearch}
               openSettings={() => setSettingsOpen(true)}
               agentOnline={Boolean(onlineAgent)}
+              openOrchestration={() => {
+                setMobileMenuOpen(false);
+                navigate('/orchestrate');
+              }}
+              t={t}
             />
           </div>
         </div>
@@ -892,7 +1400,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
 
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-sm font-medium truncate">
-                {displaySessionTitle(activeSession)}
+                {displaySessionTitle(activeSession, t)}
               </span>
             </div>
           </div>
@@ -900,11 +1408,15 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
           <div className="flex items-center gap-3 shrink-0">
             <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-secondary/50 border border-border/50 text-xs text-muted-foreground">
               <div className={cn("h-2 w-2 rounded-full", onlineAgent ? "bg-emerald-500" : "bg-muted-foreground")} />
-              {onlineAgent ? 'Agent Online' : 'Agent Offline'}
+              {onlineAgent ? t.agentOnline : t.agentOffline}
             </div>
 
             <Button variant="ghost" size="icon" className="text-muted-foreground rounded-full h-8 w-8" onClick={() => refreshAll().catch((err) => appendSystem(err.message))}>
               <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button variant="secondary" size="sm" className="hidden sm:inline-flex h-8 gap-1.5 rounded-lg" onClick={() => navigate('/orchestrate')}>
+              <GitBranch className="h-3.5 w-3.5" />
+              {t.orchestrate}
             </Button>
           </div>
         </header>
@@ -912,15 +1424,15 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
         <div className="bg-muted/30 border-b border-border px-4 py-2 flex items-center gap-4 text-xs text-muted-foreground overflow-x-auto whitespace-nowrap elegant-scrollbar">
           <div className="flex items-center gap-1.5">
             <Server className="h-3.5 w-3.5" />
-            <span>Runner: {runner}</span>
+            <span>{t.runner}: {runner}</span>
           </div>
           <div className="flex items-center gap-1.5">
             <Activity className="h-3.5 w-3.5" />
-            <span>Thread: {thread}</span>
+            <span>{t.thread}: {thread}</span>
           </div>
           <div className="flex items-center gap-1.5">
             <Command className="h-3.5 w-3.5" />
-            <span>Status: {connectionStatus}</span>
+            <span>{t.status}: {connectionStatus}</span>
           </div>
         </div>
 
@@ -935,25 +1447,25 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
                 <div className="h-12 w-12 rounded-2xl bg-primary/5 border border-border flex items-center justify-center mb-2">
                   <Terminal className="h-6 w-6 text-primary" />
                 </div>
-                <h2 className="text-lg font-medium">How can I help you today?</h2>
+                <h2 className="text-lg font-medium">{t.howCanIHelp}</h2>
                 <p className="text-sm text-muted-foreground mb-4">
-                  I can execute code, read files, run terminal commands, and help you build your project.
+                  {t.codexCapability}
                 </p>
                 <div className="grid grid-cols-2 gap-2 w-full">
-                  <Button variant="secondary" className="h-auto py-3 px-4 justify-start text-left flex-col items-start gap-1" onClick={() => setInputVal('Read project files')}>
-                    <span className="text-sm font-medium">Read project files</span>
-                    <span className="text-xs text-muted-foreground font-normal">Explore current directory</span>
+                  <Button variant="secondary" className="h-auto py-3 px-4 justify-start text-left flex-col items-start gap-1" onClick={() => setInputVal(t.readProjectFiles)}>
+                    <span className="text-sm font-medium">{t.readProjectFiles}</span>
+                    <span className="text-xs text-muted-foreground font-normal">{t.exploreCurrentDirectory}</span>
                   </Button>
-                  <Button variant="secondary" className="h-auto py-3 px-4 justify-start text-left flex-col items-start gap-1" onClick={() => setInputVal('Run test suite')}>
-                    <span className="text-sm font-medium">Run test suite</span>
-                    <span className="text-xs text-muted-foreground font-normal">Execute configured tests</span>
+                  <Button variant="secondary" className="h-auto py-3 px-4 justify-start text-left flex-col items-start gap-1" onClick={() => setInputVal(t.runTestSuite)}>
+                    <span className="text-sm font-medium">{t.runTestSuite}</span>
+                    <span className="text-xs text-muted-foreground font-normal">{t.executeConfiguredTests}</span>
                   </Button>
                 </div>
               </div>
             ) : (
               items.map((item) => item.type === 'message'
-                ? <MessageItem key={item.id} msg={item} />
-                : <ToolItem key={item.id} tool={item.tool} />
+                ? <MessageItem key={item.id} msg={item} t={t} />
+                : <ToolItem key={item.id} tool={item.tool} t={t} />
               )
             )}
             <div ref={messageEndRef} className="h-4" />
@@ -966,8 +1478,8 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
               type="button"
               className="absolute bottom-4 left-1/2 z-20 h-9 w-9 -translate-x-1/2 rounded-full border border-border bg-card/95 text-muted-foreground shadow-lg backdrop-blur hover:text-foreground"
               onClick={() => scrollMessagesToBottom()}
-              aria-label="Jump to latest message"
-              title="Jump to bottom"
+              aria-label={t.jumpToLatestMessage}
+              title={t.jumpToBottom}
             >
               <ArrowDownToLine className="h-4 w-4" />
             </Button>
@@ -984,7 +1496,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
           >
             <textarea
               className="w-full bg-transparent border-0 resize-none p-3 text-sm focus:outline-none focus:ring-0 min-h-[60px] max-h-[300px] elegant-scrollbar"
-              placeholder="Ask Codex to read files, run commands, or write code..."
+              placeholder={t.askCodex}
               value={inputVal}
               onChange={(e) => setInputVal(e.target.value)}
               onKeyDown={(e) => {
@@ -1004,7 +1516,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
                       type="button"
                       className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-background/90 text-foreground shadow-sm hover:bg-background"
                       onClick={() => removeAttachment(attachment.id)}
-                      aria-label={`Remove ${attachment.name}`}
+                      aria-label={`${t.removeFile} ${attachment.name}`}
                     >
                       <X className="h-3 w-3" />
                     </button>
@@ -1030,7 +1542,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
                   className="h-8 w-8 text-muted-foreground rounded-lg"
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isGenerating}
-                  aria-label="Upload images"
+                  aria-label={t.uploadImages}
                 >
                   <ImagePlus className="h-4 w-4" />
                 </Button>
@@ -1040,11 +1552,11 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
                 {isGenerating ? (
                   <Button variant="secondary" size="sm" type="button" className="h-8 px-3 rounded-lg gap-1.5 text-xs" onClick={stopRun}>
                     <Square className="h-3.5 w-3.5 fill-current" />
-                    {activeRun?.status === 'canceling' ? 'Stopping' : 'Stop'}
+                    {activeRun?.status === 'canceling' ? t.stopping : t.stop}
                   </Button>
                 ) : (
                   <Button size="sm" type="submit" className="h-8 px-3 rounded-lg gap-1.5 text-xs font-medium" disabled={!inputVal.trim() && !attachments.length}>
-                    Send
+                    {t.send}
                     <Send className="h-3.5 w-3.5" />
                   </Button>
                 )}
@@ -1052,7 +1564,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
             </div>
           </form>
           <div className="text-center mt-2">
-            <span className="text-[10px] text-muted-foreground/60 font-medium">Codex Bridge may produce inaccurate results. Verify important changes.</span>
+            <span className="text-[10px] text-muted-foreground/60 font-medium">{t.verifyNotice}</span>
           </div>
         </div>
       </main>
@@ -1064,6 +1576,9 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
           onLogout={logout}
           isDarkMode={isDarkMode}
           setIsDarkMode={setIsDarkMode}
+          language={language}
+          setLanguage={setLanguage}
+          t={t}
           close={() => setSettingsOpen(false)}
         />
       )}
@@ -1079,6 +1594,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
           }}
           onClose={closeRenameModal}
           onSave={saveRenameSession}
+          t={t}
         />
       )}
     </div>
@@ -1093,6 +1609,633 @@ function upsertAssistant(items: ChatItem[], id: string, content: string): ChatIt
   return items.map((item) => item.id === id && item.type === 'message' ? { ...item, content } : item);
 }
 
+function OrchestrationWorkspace({
+  user,
+  onLogout,
+  isDarkMode,
+  setIsDarkMode,
+  language,
+  setLanguage,
+  t,
+  canOpenMain,
+  navigate,
+}: {
+  user: UserAccount;
+  onLogout: () => void;
+  isDarkMode: boolean;
+  setIsDarkMode: (value: boolean) => void;
+  language: Language;
+  setLanguage: (value: Language) => void;
+  t: UIText;
+  canOpenMain: boolean;
+  navigate: (path: string) => void;
+}) {
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [runs, setRuns] = useState<OrchestrationRun[]>([]);
+  const [activeRunId, setActiveRunId] = useState('');
+  const [events, setEvents] = useState<OrchestrationEvent[]>([]);
+  const [mode, setMode] = useState<'collaboration' | 'debate'>('collaboration');
+  const [prompt, setPrompt] = useState('');
+  const [cwd, setCwd] = useState('');
+  const [maxTurns, setMaxTurns] = useState(4);
+  const [files, setFiles] = useState<UploadAttachment[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [error, setError] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState(t.disconnected);
+  const wsRef = useRef<WebSocket | null>(null);
+  const activeRunIdRef = useRef('');
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const taskInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const endRef = useRef<HTMLDivElement | null>(null);
+
+  const activeRun = runs.find((run) => run.id === activeRunId) || null;
+  const visibleEvents = useMemo(() => mergeOrchestrationToolEvents(events.filter((event) => event.runId === activeRunId)), [events, activeRunId]);
+  const onlineAgent = agents.find((agent) => agent.online);
+  const selectedAgent = onlineAgent || agents[0];
+  const isRunning = activeOrchestrationStatus(activeRun?.status);
+  const continuingRun = Boolean(activeRun && !isRunning);
+  const canCancelRun = canCancelOrchestrationStatus(activeRun?.status);
+  const workingDirs = useMemo(() => {
+    return Array.from(new Set((selectedAgent?.workingDirs || []).map((dir) => dir.trim()).filter(Boolean)));
+  }, [selectedAgent]);
+
+  const loadAgents = useCallback(async () => {
+    const data = await api<{ agents: Agent[] }>('/api/agents');
+    setAgents(data.agents || []);
+  }, []);
+
+  const loadRuns = useCallback(async () => {
+    const data = await api<{ runs: OrchestrationRun[] }>('/api/orchestrations');
+    setRuns(data.runs || []);
+    return data.runs || [];
+  }, []);
+
+  const loadRun = useCallback(async (runId: string) => {
+    const data = await api<{ run: OrchestrationRun }>(`/api/orchestrations/${encodeURIComponent(runId)}`);
+    setRuns((current) => upsertOrchestrationRun(current, data.run));
+    return data.run;
+  }, []);
+
+  const loadRunEvents = useCallback(async (runId: string, replace = false) => {
+    const data = await api<{ events: OrchestrationEvent[] }>(`/api/orchestrations/${encodeURIComponent(runId)}/events`);
+    const incoming = data.events || [];
+    setEvents((current) => {
+      if (activeRunIdRef.current !== runId) return current;
+      return replace ? incoming.slice().sort(compareOrchestrationEvents) : mergeOrchestrationEvents(current, incoming);
+    });
+    return incoming;
+  }, []);
+
+  const closeWS = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+  }, []);
+
+  const applyEvent = useCallback((event: OrchestrationEvent) => {
+    setEvents((current) => {
+      if (activeRunIdRef.current !== event.runId) return current;
+      return mergeOrchestrationEvents(current, [event]);
+    });
+    setRuns((current) => {
+      if (!current.some((run) => run.id === event.runId)) return current;
+      return current
+        .map((run) => run.id === event.runId ? applyOrchestrationEventToRun(run, event) : run)
+        .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+    });
+  }, []);
+
+  const connectRun = useCallback((runId: string) => {
+    closeWS();
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${scheme}://${location.host}/ws/orchestrations?runId=${encodeURIComponent(runId)}`);
+    wsRef.current = ws;
+    setConnectionStatus(t.connecting);
+    let stopHeartbeat: (() => void) | null = null;
+    ws.onopen = () => {
+      if (wsRef.current !== ws) return;
+      setConnectionStatus(t.connected);
+      stopHeartbeat = startWSHeartbeat(ws);
+    };
+    ws.onmessage = (message) => {
+      if (wsRef.current !== ws) return;
+      try {
+        const env = JSON.parse(message.data) as Envelope;
+        if (env.type === 'orchestration_event') {
+          const event = env.payload as OrchestrationEvent;
+          if (event.runId === runId) applyEvent(event);
+        } else if (env.type === 'status') {
+          setConnectionStatus(env.payload?.status || t.connected);
+        }
+      } catch {
+        // Ignore malformed frames.
+      }
+    };
+    ws.onerror = () => {
+      if (wsRef.current === ws) setConnectionStatus(t.connectionError);
+    };
+    ws.onclose = () => {
+      stopHeartbeat?.();
+      if (wsRef.current === ws) setConnectionStatus(t.disconnected);
+    };
+  }, [applyEvent, closeWS, startWSHeartbeat, t.connected, t.connecting, t.connectionError, t.disconnected]);
+
+  const selectRun = useCallback(async (runId: string) => {
+    activeRunIdRef.current = runId;
+    setActiveRunId(runId);
+    setEvents((current) => current.filter((event) => event.runId === runId));
+    await Promise.all([loadRun(runId), loadRunEvents(runId, true)]);
+    connectRun(runId);
+  }, [connectRun, loadRun, loadRunEvents]);
+
+  useEffect(() => {
+    Promise.all([loadAgents(), loadRuns()])
+      .then(([, loadedRuns]) => {
+        if (loadedRuns[0]) return selectRun(loadedRuns[0].id);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
+    return () => closeWS();
+  }, []);
+
+  useEffect(() => {
+    if (!activeRunId || !activeOrchestrationStatus(activeRun?.status)) return;
+    let stopped = false;
+    const syncActiveRun = async () => {
+      try {
+        await Promise.all([loadRun(activeRunId), loadRunEvents(activeRunId)]);
+      } catch {
+        // The websocket remains the primary live path; polling is a quiet fallback.
+      }
+    };
+    const interval = window.setInterval(() => {
+      if (!stopped) void syncActiveRun();
+    }, 3000);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && !stopped) void syncActiveRun();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [activeRunId, activeRun?.status, loadRun, loadRunEvents]);
+
+  useEffect(() => {
+    const id = window.requestAnimationFrame(() => {
+      endRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' });
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [events]);
+
+  useEffect(() => {
+    if (!workingDirs.length) {
+      if (cwd) setCwd('');
+      return;
+    }
+    if (!cwd || !workingDirs.includes(cwd)) {
+      setCwd(workingDirs[0]);
+    }
+  }, [cwd, workingDirs]);
+
+  const addFiles = async (inputFiles: FileList | null) => {
+    if (!inputFiles?.length) return;
+    const next = await Promise.all(Array.from(inputFiles).map(readUploadAttachment));
+    setFiles((current) => [...current, ...next].slice(0, 12));
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const removeFile = (id: string) => {
+    setFiles((current) => current.filter((file) => file.id !== id));
+  };
+
+  const startRun = async () => {
+    const task = prompt.trim();
+    if (!task || creating || isRunning) return;
+    setCreating(true);
+    setError('');
+    try {
+      const endpoint = activeRun ? `/api/orchestrations/${encodeURIComponent(activeRun.id)}/prompts` : '/api/orchestrations';
+      const data = await api<{ run: OrchestrationRun }>(endpoint, {
+        method: 'POST',
+        body: JSON.stringify({
+          mode,
+          prompt: task,
+          title: titleFromPrompt(task, t),
+          cwd: cwd.trim(),
+          maxTurns,
+          agentId: selectedAgent?.id || '',
+          files: files.map(({ name, mimeType, size, data }) => ({ name, mimeType, size, data })),
+        }),
+      });
+      setRuns((current) => [data.run, ...current.filter((run) => run.id !== data.run.id)]);
+      setPrompt('');
+      setFiles([]);
+      await selectRun(data.run.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.failedStartOrchestration);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const cancelRun = async () => {
+    if (!activeRun || !canCancelOrchestrationStatus(activeRun.status)) return;
+    setRuns((current) => current.map((run) => run.id === activeRun.id ? { ...run, status: 'canceling' } : run));
+    const data = await api<{ status?: string }>(`/api/orchestrations/${encodeURIComponent(activeRun.id)}/cancel`, { method: 'POST', body: '{}' });
+    if (data.status && data.status !== 'canceling') {
+      setRuns((current) => current.map((run) => run.id === activeRun.id ? { ...run, status: data.status || run.status } : run));
+    }
+  };
+
+  const logout = async () => {
+    closeWS();
+    await api('/api/logout', { method: 'POST', body: '{}' });
+    onLogout();
+  };
+
+  const startDraftRun = () => {
+    closeWS();
+    activeRunIdRef.current = '';
+    setActiveRunId('');
+    setEvents([]);
+    setPrompt(t.reviewCurrentRepository);
+    setFiles([]);
+    setError('');
+    window.setTimeout(() => taskInputRef.current?.focus(), 0);
+  };
+
+  return (
+    <div className="h-screen w-full flex bg-background text-foreground overflow-hidden font-sans">
+      <aside className="hidden md:flex w-[280px] flex-col border-r border-sidebar-border bg-sidebar">
+        <div className="h-14 flex items-center px-4 border-b border-sidebar-border shrink-0">
+          <div className="flex items-center gap-2 font-medium">
+            <div className="h-6 w-6 rounded-md bg-primary text-primary-foreground flex items-center justify-center">
+              <GitBranch className="h-3.5 w-3.5" />
+            </div>
+            <span className="text-sm">{t.orchestration}</span>
+          </div>
+        </div>
+        <div className="p-3 space-y-2">
+          {canOpenMain && (
+            <Button variant="ghost" className="w-full justify-start gap-2 h-9 rounded-lg" onClick={() => navigate('/')}>
+              <ArrowLeft className="h-4 w-4" />
+              {t.codexBridge}
+            </Button>
+          )}
+          <Button variant="secondary" className="w-full justify-start gap-2 h-9 rounded-lg border border-sidebar-border shadow-sm" onClick={startDraftRun}>
+            <Plus className="h-4 w-4" />
+            {t.newRun}
+          </Button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1 elegant-scrollbar">
+          {runs.length === 0 ? (
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">{t.noOrchestrationRuns}</div>
+          ) : runs.map((run) => (
+            <button
+              key={run.id}
+              onClick={() => selectRun(run.id).catch((err) => setError(err.message))}
+              className={cn(
+                "w-full text-left px-2 py-2 rounded-md text-sm transition-colors",
+                activeRunId === run.id ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                {run.mode === 'debate' ? <Swords className="h-3.5 w-3.5 opacity-70 shrink-0" /> : <UsersRound className="h-3.5 w-3.5 opacity-70 shrink-0" />}
+                <span className="truncate font-medium">{run.title}</span>
+              </div>
+              <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
+                <span>{run.mode}</span>
+                <span>{run.status}</span>
+              </div>
+            </button>
+          ))}
+        </div>
+        <div className="p-3 border-t border-sidebar-border shrink-0">
+          <button onClick={() => setSettingsOpen(true)} className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm hover:bg-sidebar-accent transition-colors">
+            <Settings className="h-3.5 w-3.5" />
+            <span className="flex-1 text-left">{t.settings}</span>
+            <div className={cn("h-1.5 w-1.5 rounded-full", onlineAgent ? "bg-emerald-500" : "bg-muted-foreground")} />
+          </button>
+        </div>
+      </aside>
+
+      <main className="flex-1 flex flex-col min-w-0 h-full">
+        <header className="h-14 shrink-0 border-b border-border flex items-center justify-between px-3 md:px-4 bg-background z-10">
+          <div className="flex items-center gap-2 min-w-0">
+            {canOpenMain && (
+              <Button variant="ghost" size="icon" className="md:hidden text-muted-foreground" onClick={() => navigate('/')}>
+                <ArrowLeft className="h-5 w-5" />
+              </Button>
+            )}
+            <GitBranch className="h-4 w-4 text-muted-foreground" />
+            <span className="text-sm font-medium truncate">{activeRun?.title || t.cliOrchestration}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-secondary/50 border border-border/50 text-xs text-muted-foreground">
+              <div className={cn("h-2 w-2 rounded-full", onlineAgent ? "bg-emerald-500" : "bg-muted-foreground")} />
+              {onlineAgent ? t.agentOnline : t.agentOffline}
+            </div>
+            <Button variant="ghost" size="icon" className="text-muted-foreground rounded-full h-8 w-8" onClick={() => Promise.all([loadAgents(), loadRuns()]).catch((err) => setError(err.message))}>
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+          </div>
+        </header>
+
+        <div className="bg-muted/30 border-b border-border px-4 py-2 flex items-center gap-4 text-xs text-muted-foreground overflow-x-auto whitespace-nowrap elegant-scrollbar">
+          <div className="flex items-center gap-1.5">
+            <Server className="h-3.5 w-3.5" />
+            <span>{t.workers}: Claude Code + Codex CLI</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Activity className="h-3.5 w-3.5" />
+            <span>{t.status}: {activeRun?.status || t.idle}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Command className="h-3.5 w-3.5" />
+            <span>{t.stream}: {connectionStatus}</span>
+          </div>
+        </div>
+
+        <div className="grid flex-1 min-h-0 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px]">
+          <div ref={scrollRef} className="min-h-0 overflow-y-auto p-4 md:p-6 space-y-3 elegant-scrollbar">
+            {!visibleEvents.length ? (
+              <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4">
+                <div className="h-12 w-12 rounded-2xl bg-primary/5 border border-border flex items-center justify-center">
+                  <GitBranch className="h-6 w-6 text-primary" />
+                </div>
+                <h2 className="text-lg font-medium">{t.coordinateClaudeCodex}</h2>
+                <p className="text-sm text-muted-foreground">{t.startCollaborationHint}</p>
+              </div>
+            ) : visibleEvents.map((event, index) => <OrchestrationEventItem key={orchestrationEventKey(event, index)} event={event} t={t} />)}
+            <div ref={endRef} className="h-4" />
+          </div>
+
+          <aside className="border-t lg:border-t-0 lg:border-l border-border bg-background/95 p-4 overflow-y-auto elegant-scrollbar">
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.mode}</label>
+                <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1">
+                  <button className={cn("h-8 rounded-md text-xs font-medium", mode === 'collaboration' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setMode('collaboration')}>
+                    {t.collaborate}
+                  </button>
+                  <button className={cn("h-8 rounded-md text-xs font-medium", mode === 'debate' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setMode('debate')}>
+                    {t.debate}
+                  </button>
+                </div>
+              </div>
+
+              <label className="space-y-2 block">
+                <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.task}</span>
+                <textarea
+                  ref={taskInputRef}
+                  className="w-full min-h-[150px] rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring elegant-scrollbar"
+                  placeholder={t.taskPlaceholder}
+                  value={prompt}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  disabled={creating || isRunning}
+                />
+              </label>
+
+              <label className="space-y-2 block">
+                <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.workingDirectory}</span>
+                <div className="relative">
+                  <FolderInput className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <select
+                    value={cwd}
+                    onChange={(event) => setCwd(event.target.value)}
+                    className={cn(
+                      "flex h-9 w-full rounded-md border border-input bg-transparent py-1 pl-9 pr-8 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+                      !cwd && "text-muted-foreground"
+                    )}
+                    disabled={creating || isRunning || !workingDirs.length}
+                    aria-label={t.workingDirectory}
+                  >
+                    {workingDirs.length ? workingDirs.map((dir) => (
+                      <option key={dir} value={dir}>{dir}</option>
+                    )) : (
+                      <option value="">{t.noWorkingDirs}</option>
+                    )}
+                  </select>
+                </div>
+              </label>
+
+              <label className="space-y-2 block">
+                <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.turns}</span>
+                <Input type="number" min={2} max={12} value={maxTurns} onChange={(event) => setMaxTurns(Number(event.target.value) || 4)} disabled={creating || isRunning} />
+              </label>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.files}</span>
+                  <Button variant="ghost" size="sm" className="h-7 gap-1.5" onClick={() => fileInputRef.current?.click()} disabled={creating || isRunning}>
+                    <FileUp className="h-3.5 w-3.5" />
+                    {t.add}
+                  </Button>
+                </div>
+                <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(event) => addFiles(event.target.files).catch((err) => setError(err.message))} />
+                <div className="space-y-1.5">
+                  {files.length === 0 ? (
+                    <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">{t.uploadProofFiles}</div>
+                  ) : files.map((file) => (
+                    <div key={file.id} className="flex items-center gap-2 rounded-md border border-border bg-muted/20 px-2 py-1.5">
+                      <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                      <span className="min-w-0 flex-1 truncate text-xs">{file.name}</span>
+                      <span className="text-[10px] text-muted-foreground">{formatBytes(file.size)}</span>
+                      <button className="text-muted-foreground hover:text-foreground" onClick={() => removeFile(file.id)} aria-label={`${t.removeFile} ${file.name}`}>
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {error && (
+                <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 pt-1">
+                {isRunning ? (
+                  <Button variant="secondary" className="w-full gap-2" onClick={() => cancelRun().catch((err) => setError(err.message))} disabled={!canCancelRun}>
+                    {canCancelRun ? <Square className="h-3.5 w-3.5 fill-current" /> : <RefreshCw className="h-4 w-4 animate-spin" />}
+                    {canCancelRun ? t.stopRun : t.stopping}
+                  </Button>
+                ) : (
+                  <Button className="w-full gap-2" onClick={() => startRun()} disabled={!prompt.trim() || creating || !agents.length}>
+                    {creating ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                    {continuingRun ? t.continueRun : t.start}
+                  </Button>
+                )}
+              </div>
+            </div>
+          </aside>
+        </div>
+      </main>
+
+      {settingsOpen && (
+        <SettingsModal
+          user={user}
+          agents={agents}
+          onLogout={logout}
+          isDarkMode={isDarkMode}
+          setIsDarkMode={setIsDarkMode}
+          language={language}
+          setLanguage={setLanguage}
+          t={t}
+          close={() => setSettingsOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function OrchestrationEventItem({ event, t }: { event: OrchestrationEvent, t: UIText }) {
+  const isUser = event.kind === 'user.message';
+  const isCommand = event.kind.startsWith('command.');
+  const isRun = event.kind.startsWith('run.');
+  const avatar = orchestrationAvatar(event, t);
+  const title = isUser ? t.user : isRun ? t.run : `${event.role || t.agent}${event.cli ? ` · ${avatar.label}` : ''}`;
+  const content = event.error || event.content || '';
+
+  return (
+    <div className="flex gap-4 w-full max-w-4xl mx-auto py-2 group">
+      <div className="shrink-0 mt-1">
+        <div className={cn(
+          "h-6 w-6 rounded-md flex items-center justify-center shadow-sm border",
+          avatar.className
+        )}>
+          {avatar.icon}
+        </div>
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 mb-1 min-h-6">
+          <span className="text-xs font-semibold capitalize">{title}</span>
+          <span className="text-[10px] text-muted-foreground">{event.kind}</span>
+          {event.status && <span className="ml-auto rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">{event.status}</span>}
+        </div>
+        {isCommand ? (
+          <CommandEvent event={event} t={t} />
+        ) : (
+          <MessageContent content={content || ''} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function orchestrationAvatar(event: OrchestrationEvent, t: UIText) {
+  const cli = (event.cli || '').toLowerCase();
+  if (event.kind === 'user.message') {
+    return {
+      label: t.user,
+      className: 'bg-secondary border-border text-secondary-foreground',
+      icon: <User className="h-3.5 w-3.5" />,
+    };
+  }
+  if (event.kind.startsWith('run.')) {
+    return {
+      label: t.run,
+      className: 'bg-secondary border-border text-muted-foreground',
+      icon: <Activity className="h-3.5 w-3.5" />,
+    };
+  }
+  if (event.kind.startsWith('command.')) {
+    return {
+      label: cli === 'claude' ? 'Claude' : cli === 'codex' ? 'GPT' : 'Command',
+      className: cli === 'claude'
+        ? 'bg-[#d97757]/10 border-[#d97757]/25 text-[#d97757]'
+        : cli === 'codex'
+          ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-700 dark:text-emerald-300'
+          : 'bg-muted border-border text-muted-foreground',
+      icon: cli === 'claude' ? <ClaudeMark /> : cli === 'codex' ? <OpenAIMark /> : <Command className="h-3.5 w-3.5" />,
+    };
+  }
+  if (cli === 'claude') {
+    return {
+      label: 'Claude',
+      className: 'bg-[#d97757]/10 border-[#d97757]/25 text-[#d97757]',
+      icon: <ClaudeMark />,
+    };
+  }
+  if (cli === 'codex' || cli === 'gpt' || cli.startsWith('gpt-')) {
+    return {
+      label: 'GPT',
+      className: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-700 dark:text-emerald-300',
+      icon: <OpenAIMark />,
+    };
+  }
+  return {
+    label: event.cli || t.agent,
+    className: 'bg-primary border-primary text-primary-foreground',
+    icon: <Terminal className="h-3.5 w-3.5" />,
+  };
+}
+
+function ClaudeMark() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true" focusable="false">
+      <path
+        fill="currentColor"
+        d="M11.2 2.5 9.1 9.1 2.5 11.2a.85.85 0 0 0 0 1.6l6.6 2.1 2.1 6.6a.85.85 0 0 0 1.6 0l2.1-6.6 6.6-2.1a.85.85 0 0 0 0-1.6l-6.6-2.1-2.1-6.6a.85.85 0 0 0-1.6 0Z"
+      />
+      <path
+        fill="currentColor"
+        opacity=".55"
+        d="M5.4 3.6 8 8.1 3.6 5.4a.62.62 0 0 1 .7-1.02l1.1-.78Zm13.2 0 1.1.78a.62.62 0 0 1 .7 1.02L16 8.1l2.6-4.5ZM3.6 18.6 8.1 16l-2.7 4.4a.62.62 0 0 1-1.02-.7l-.78-1.1Zm16.8 0-.78 1.1a.62.62 0 0 1-1.02.7L16 16l4.4 2.6Z"
+      />
+    </svg>
+  );
+}
+
+function OpenAIMark() {
+  const petals = Array.from({ length: 6 }, (_, index) => index * 60);
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+        {petals.map((angle) => (
+          <path
+            key={angle}
+            d="M12 4.1c2 0 3.6 1.6 3.6 3.6 0 1.4-.8 2.6-2 3.2l-3.6 2.1"
+            transform={`rotate(${angle} 12 12)`}
+          />
+        ))}
+      </g>
+      <circle cx="12" cy="12" r="1.35" fill="currentColor" />
+    </svg>
+  );
+}
+
+function CommandEvent({ event, t }: { event: OrchestrationEvent, t: UIText }) {
+  const data = event.data || {};
+  const command = typeof data.command === 'string' ? data.command : '';
+  const output = typeof data.output === 'string' ? data.output : '';
+  const status = typeof data.status === 'string' ? data.status : event.status || '';
+  const exitCode = typeof data.exitCode === 'number' ? data.exitCode : undefined;
+  const isActive = event.kind === 'command.start' || status === 'running' || status === 'in_progress';
+
+  return (
+    <div className="rounded-md border border-border bg-muted/20 overflow-hidden">
+      <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-2 text-[11px]">
+        {isActive ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" /> : <Terminal className="h-3.5 w-3.5 text-muted-foreground" />}
+        <code className="min-w-0 flex-1 truncate text-foreground">{command || t.commandEvent}</code>
+        {status && <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
+        {typeof exitCode === 'number' && <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">exit {exitCode}</span>}
+      </div>
+      {output && (
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-relaxed text-muted-foreground elegant-scrollbar">
+          {output}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 function SidebarContent({
   groupedSessions,
   activeSession,
@@ -1104,6 +2247,8 @@ function SidebarContent({
   setSearch,
   openSettings,
   agentOnline,
+  openOrchestration,
+  t,
 }: {
   groupedSessions: Record<string, Session[]>;
   activeSession: string;
@@ -1115,6 +2260,8 @@ function SidebarContent({
   setSearch: (value: string) => void;
   openSettings: () => void;
   agentOnline: boolean;
+  openOrchestration: () => void;
+  t: UIText;
 }) {
   return (
     <>
@@ -1123,14 +2270,18 @@ function SidebarContent({
           <div className="h-6 w-6 rounded-md bg-primary text-primary-foreground flex items-center justify-center">
             <Terminal className="h-3.5 w-3.5" />
           </div>
-          <span className="text-sm">Codex Bridge</span>
+          <span className="text-sm">{t.codexBridge}</span>
         </div>
       </div>
 
       <div className="p-3">
         <Button variant="secondary" className="w-full justify-start gap-2 h-9 rounded-lg border border-sidebar-border shadow-sm" onClick={createSession}>
           <Plus className="h-4 w-4" />
-          New Session
+          {t.newSession}
+        </Button>
+        <Button variant="ghost" className="mt-2 w-full justify-start gap-2 h-9 rounded-lg text-muted-foreground" onClick={openOrchestration}>
+          <GitBranch className="h-4 w-4" />
+          {t.orchestration}
         </Button>
       </div>
 
@@ -1139,7 +2290,7 @@ function SidebarContent({
           <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" />
           <input
             type="text"
-            placeholder="Search sessions..."
+            placeholder={t.searchSessions}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             className="w-full h-8 pl-8 pr-3 text-xs bg-sidebar-accent/50 border border-sidebar-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring transition-all"
@@ -1149,7 +2300,7 @@ function SidebarContent({
 
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-4 elegant-scrollbar">
         {Object.keys(groupedSessions).length === 0 ? (
-          <div className="px-2 py-1.5 text-xs text-muted-foreground">No sessions</div>
+          <div className="px-2 py-1.5 text-xs text-muted-foreground">{t.noSessions}</div>
         ) : Object.entries(groupedSessions).map(([date, sessions]) => (
           <div key={date}>
             <h4 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1.5 px-2">
@@ -1168,7 +2319,7 @@ function SidebarContent({
                   )}
                 >
                   <MessageSquare className="h-3.5 w-3.5 opacity-70 shrink-0" />
-                  <span className="truncate">{displaySessionTitle(session)}</span>
+                  <span className="truncate">{displaySessionTitle(session, t)}</span>
 
                   {activeSession === session.id && (
                     <div className="ml-auto flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
@@ -1209,15 +2360,15 @@ function SidebarContent({
           <div className="h-6 w-6 rounded-full bg-sidebar-primary/10 flex items-center justify-center">
             <Settings className="h-3.5 w-3.5" />
           </div>
-          <span className="flex-1 text-left">Settings</span>
-          <div className={cn("h-1.5 w-1.5 rounded-full", agentOnline ? "bg-emerald-500" : "bg-muted-foreground")} title={agentOnline ? 'Connected' : 'Disconnected'} />
+          <span className="flex-1 text-left">{t.settings}</span>
+          <div className={cn("h-1.5 w-1.5 rounded-full", agentOnline ? "bg-emerald-500" : "bg-muted-foreground")} title={agentOnline ? t.agentOnline : t.agentOffline} />
         </button>
       </div>
     </>
   );
 }
 
-function MessageItem({ msg }: { msg: Extract<ChatItem, { type: 'message' }> }) {
+function MessageItem({ msg, t }: { msg: Extract<ChatItem, { type: 'message' }>, t: UIText }) {
   const isUser = msg.role === 'user';
   const [copied, setCopied] = useState(false);
 
@@ -1247,7 +2398,7 @@ function MessageItem({ msg }: { msg: Extract<ChatItem, { type: 'message' }> }) {
 
       <div className="flex flex-col gap-2 min-w-0 flex-1">
         <div className="flex items-center gap-2 mb-0.5 min-h-6">
-          <span className="text-xs font-semibold shrink-0">{isUser ? 'You' : msg.role === 'system' ? 'System' : 'Codex'}</span>
+          <span className="text-xs font-semibold shrink-0">{isUser ? t.user : msg.role === 'system' ? t.system : 'Codex'}</span>
           <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">{formatTime(msg.createdAt)}</span>
           <Button
             variant="ghost"
@@ -1258,8 +2409,8 @@ function MessageItem({ msg }: { msg: Extract<ChatItem, { type: 'message' }> }) {
               copied ? "opacity-100 text-emerald-600 dark:text-emerald-400" : "opacity-100 md:opacity-0 md:group-hover:opacity-100"
             )}
             onClick={copyMessage}
-            aria-label="Copy message"
-            title={copied ? 'Copied' : 'Copy'}
+            aria-label={t.copyMessage}
+            title={copied ? t.copied : t.copy}
           >
             {copied ? <Check className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
           </Button>
@@ -1271,7 +2422,7 @@ function MessageItem({ msg }: { msg: Extract<ChatItem, { type: 'message' }> }) {
   );
 }
 
-function ToolItem({ tool }: { tool: ToolEvent }) {
+function ToolItem({ tool, t }: { tool: ToolEvent, t: UIText }) {
   const [copied, setCopied] = useState(false);
   const content = [tool.command, tool.output, typeof tool.exitCode === 'number' ? `exit: ${tool.exitCode}` : ''].filter(Boolean).join('\n\n');
 
@@ -1289,8 +2440,8 @@ function ToolItem({ tool }: { tool: ToolEvent }) {
     <div className="w-full max-w-4xl mx-auto mt-2 bg-muted/30 border border-border rounded-lg overflow-hidden text-[13px] group/tool">
       <div className="flex items-center gap-2 px-3 py-1.5 bg-muted/50 border-b border-border">
         <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
-        <span className="font-medium text-xs">Run: {tool.name || 'Bash'}</span>
-        <span className="ml-auto text-xs text-muted-foreground font-mono truncate max-w-[260px]">{tool.command || tool.input || tool.status || 'running'}</span>
+        <span className="font-medium text-xs">{t.run}: {tool.name || t.bash}</span>
+        <span className="ml-auto text-xs text-muted-foreground font-mono truncate max-w-[260px]">{tool.command || tool.input || tool.status || t.running}</span>
         <Button
           variant="ghost"
           size="icon"
@@ -1301,8 +2452,8 @@ function ToolItem({ tool }: { tool: ToolEvent }) {
           )}
           onClick={copyToolOutput}
           disabled={!content}
-          aria-label="Copy output"
-          title={copied ? 'Copied' : 'Copy'}
+          aria-label={t.copyOutput}
+          title={copied ? t.copied : t.copy}
         >
           {copied ? <Check className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
         </Button>
@@ -1321,6 +2472,9 @@ function SettingsModal({
   onLogout,
   isDarkMode,
   setIsDarkMode,
+  language,
+  setLanguage,
+  t,
   close,
 }: {
   user: UserAccount;
@@ -1328,13 +2482,16 @@ function SettingsModal({
   onLogout: () => void;
   isDarkMode: boolean;
   setIsDarkMode: (value: boolean) => void;
+  language: Language;
+  setLanguage: (value: Language) => void;
+  t: UIText;
   close: () => void;
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in">
       <div className="bg-card w-full max-w-md rounded-xl border border-border shadow-lg flex flex-col overflow-hidden animate-in zoom-in-95">
         <div className="px-4 py-3 border-b border-border flex items-center justify-between bg-muted/30">
-          <h2 className="font-medium">Settings</h2>
+          <h2 className="font-medium">{t.settings}</h2>
           <Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" onClick={close}>
             <X className="h-4 w-4" />
           </Button>
@@ -1342,7 +2499,7 @@ function SettingsModal({
 
         <div className="p-4 space-y-6 overflow-y-auto max-h-[70vh] elegant-scrollbar">
           <div className="space-y-3">
-            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Account</h3>
+            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.account}</h3>
             <div className="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/20">
               <div className="flex items-center gap-3">
                 <div className="h-9 w-9 rounded-full bg-primary/10 flex items-center justify-center text-primary font-medium">
@@ -1350,33 +2507,50 @@ function SettingsModal({
                 </div>
                 <div>
                   <div className="text-sm font-medium">{user.username}</div>
-                  <div className="text-xs text-muted-foreground">Local Administrator</div>
+                  <div className="text-xs text-muted-foreground">{t.localAdministrator}</div>
                 </div>
               </div>
               <Button variant="ghost" size="sm" className="h-8 text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={onLogout}>
                 <LogOut className="h-4 w-4 mr-1.5" />
-                Logout
+                {t.logout}
               </Button>
             </div>
           </div>
 
           <div className="space-y-3">
-            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Appearance</h3>
+            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.appearance}</h3>
             <div className="space-y-2">
               <div className="flex items-center justify-between py-2">
-                <span className="text-sm">Theme</span>
+                <span className="text-sm">{t.theme}</span>
                 <div className="flex items-center gap-1 bg-muted p-1 rounded-lg border border-border/50">
                   <button
                     className={cn("px-2.5 py-1 text-xs rounded-md font-medium transition-colors", !isDarkMode ? "bg-background shadow-sm border border-border/50" : "text-muted-foreground hover:text-foreground")}
                     onClick={() => setIsDarkMode(false)}
                   >
-                    Light
+                    {t.light}
                   </button>
                   <button
                     className={cn("px-2.5 py-1 text-xs rounded-md font-medium transition-colors", isDarkMode ? "bg-background shadow-sm border border-border/50" : "text-muted-foreground hover:text-foreground")}
                     onClick={() => setIsDarkMode(true)}
                   >
-                    Dark
+                    {t.dark}
+                  </button>
+                </div>
+              </div>
+              <div className="flex items-center justify-between py-2">
+                <span className="text-sm">{t.language}</span>
+                <div className="flex items-center gap-1 bg-muted p-1 rounded-lg border border-border/50">
+                  <button
+                    className={cn("px-2.5 py-1 text-xs rounded-md font-medium transition-colors", language === 'en' ? "bg-background shadow-sm border border-border/50" : "text-muted-foreground hover:text-foreground")}
+                    onClick={() => setLanguage('en')}
+                  >
+                    {t.english}
+                  </button>
+                  <button
+                    className={cn("px-2.5 py-1 text-xs rounded-md font-medium transition-colors", language === 'zh' ? "bg-background shadow-sm border border-border/50" : "text-muted-foreground hover:text-foreground")}
+                    onClick={() => setLanguage('zh')}
+                  >
+                    {t.chinese}
                   </button>
                 </div>
               </div>
@@ -1384,7 +2558,7 @@ function SettingsModal({
           </div>
 
           <div className="space-y-3">
-            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Agents & Runtime</h3>
+            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.agentsRuntime}</h3>
             <div className="space-y-2">
               {agents.length ? agents.map((agent) => (
                 <div key={agent.id} className="flex items-center justify-between p-2.5 rounded-lg border border-border bg-muted/20">
@@ -1398,19 +2572,19 @@ function SettingsModal({
                       ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20 dark:text-emerald-400"
                       : "bg-muted text-muted-foreground border-border"
                   )}>
-                    {agent.online ? 'online' : 'offline'}
+                    {agent.online ? t.online : t.offline}
                   </div>
                 </div>
               )) : (
-                <div className="text-sm text-muted-foreground p-2.5 rounded-lg border border-border bg-muted/20">No agents enrolled</div>
+                <div className="text-sm text-muted-foreground p-2.5 rounded-lg border border-border bg-muted/20">{t.noAgentsEnrolled}</div>
               )}
             </div>
           </div>
         </div>
 
         <div className="p-4 border-t border-border flex justify-end gap-2 bg-muted/30">
-          <Button variant="ghost" size="sm" onClick={close}>Cancel</Button>
-          <Button size="sm" onClick={close}>Save Preferences</Button>
+          <Button variant="ghost" size="sm" onClick={close}>{t.cancel}</Button>
+          <Button size="sm" onClick={close}>{t.savePreferences}</Button>
         </div>
       </div>
     </div>
@@ -1424,6 +2598,7 @@ function RenameSessionModal({
   onChange,
   onClose,
   onSave,
+  t,
 }: {
   title: string;
   error: string;
@@ -1431,6 +2606,7 @@ function RenameSessionModal({
   onChange: (value: string) => void;
   onClose: () => void;
   onSave: () => void;
+  t: UIText;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -1464,7 +2640,7 @@ function RenameSessionModal({
             <div className="h-7 w-7 rounded-md bg-primary/10 text-primary flex items-center justify-center">
               <Edit2 className="h-3.5 w-3.5" />
             </div>
-            <h2 className="font-medium">Rename Session</h2>
+            <h2 className="font-medium">{t.renameSession}</h2>
           </div>
           <Button variant="ghost" size="icon" type="button" className="h-7 w-7 rounded-md" onClick={onClose} disabled={saving}>
             <X className="h-4 w-4" />
@@ -1473,7 +2649,7 @@ function RenameSessionModal({
 
         <div className="p-4 space-y-3">
           <label className="space-y-1.5 block">
-            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Session name</span>
+            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.sessionName}</span>
             <Input
               ref={inputRef}
               value={title}
@@ -1493,9 +2669,9 @@ function RenameSessionModal({
         </div>
 
         <div className="p-4 border-t border-border flex justify-end gap-2 bg-muted/30">
-          <Button variant="ghost" size="sm" type="button" onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button variant="ghost" size="sm" type="button" onClick={onClose} disabled={saving}>{t.cancel}</Button>
           <Button size="sm" type="submit" disabled={saving || !title.trim()}>
-            {saving ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : 'Save'}
+            {saving ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : t.save}
           </Button>
         </div>
       </form>

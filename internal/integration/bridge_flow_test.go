@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -367,6 +369,374 @@ func TestDuplicatePromptRejectedWhileRunActive(t *testing.T) {
 	}
 }
 
+func TestOrchestrationEndToEndWithFakeCLIs(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	codexPath := filepath.Join(binDir, "codex")
+	claudePath := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	port := freePort(t)
+	cfg := config.Default()
+	cfg.Gateway.Host = "127.0.0.1"
+	cfg.Gateway.Port = port
+	cfg.Gateway.ReadTimeout.Duration = 5 * time.Second
+	cfg.Gateway.WriteTimeout.Duration = 0
+	cfg.Hub.DBPath = tmp + "/bridge.db"
+	cfg.Hub.HeartbeatInterval.Duration = 200 * time.Millisecond
+	cfg.Auth.JWTSecret = "integration-test-secret-32-byte-minimum"
+	cfg.Auth.AccessTokenTTL.Duration = time.Hour
+	cfg.Bridge.HubURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	cfg.Bridge.Token = store.NewToken("enr")
+	cfg.Bridge.Name = "orchestration-bridge"
+	cfg.Bridge.MachineIDFile = tmp + "/machine_id"
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Runner = "echo"
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.ReconnectMin.Duration = 50 * time.Millisecond
+	cfg.Bridge.ReconnectMax.Duration = 100 * time.Millisecond
+	cfg.Bridge.HeartbeatInterval.Duration = 200 * time.Millisecond
+
+	st, err := store.Open(cfg.Hub.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
+	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
+	go func() { _ = srv.Run(ctx) }()
+	waitHTTP(t, cfg.Bridge.HubURL+"/health")
+	go func() { _ = bridge.NewClient(&cfg, "test").Run(ctx) }()
+
+	client := httpClient(t)
+	postJSON(t, client, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
+	waitAgents(t, client, cfg.Bridge.HubURL)
+
+	body := postJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations", map[string]any{
+		"mode":     "collaboration",
+		"title":    "fake orchestration",
+		"prompt":   "coordinate fake CLIs",
+		"maxTurns": 2,
+		"files": []map[string]any{
+			{"name": "Goal.v", "mimeType": "text/plain", "size": 12, "data": "VGhlb3JlbS4K"},
+		},
+	}, http.StatusCreated)
+	run := body["run"].(map[string]any)
+	runID := run["id"].(string)
+
+	waitOrchestrationStatus(t, client, cfg.Bridge.HubURL, runID, "completed")
+	eventsBody := getJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations/"+url.PathEscape(runID)+"/events", http.StatusOK)
+	events := eventsBody["events"].([]any)
+	var sawClaude, sawCodex bool
+	for _, raw := range events {
+		event := raw.(map[string]any)
+		if event["cli"] == "claude" && strings.Contains(fmt.Sprint(event["content"]), "fake claude") {
+			sawClaude = true
+		}
+		if event["cli"] == "codex" && strings.Contains(fmt.Sprint(event["content"]), "fake codex") {
+			sawCodex = true
+		}
+	}
+	if !sawClaude || !sawCodex {
+		t.Fatalf("missing fake CLI events: sawClaude=%v sawCodex=%v events=%#v", sawClaude, sawCodex, events)
+	}
+}
+
+func TestOrchestrationIsabellePromptStreamsUsefulCommandEvents(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	codexPath := filepath.Join(binDir, "codex")
+	claudePath := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(codexPath, []byte(fakeIsabelleCodexScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claudePath, []byte(fakeIsabelleClaudeScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	port := freePort(t)
+	cfg := config.Default()
+	cfg.Gateway.Host = "127.0.0.1"
+	cfg.Gateway.Port = port
+	cfg.Gateway.ReadTimeout.Duration = 5 * time.Second
+	cfg.Gateway.WriteTimeout.Duration = 0
+	cfg.Hub.DBPath = tmp + "/bridge.db"
+	cfg.Hub.HeartbeatInterval.Duration = 200 * time.Millisecond
+	cfg.Auth.JWTSecret = "integration-test-secret-32-byte-minimum"
+	cfg.Auth.AccessTokenTTL.Duration = time.Hour
+	cfg.Bridge.HubURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	cfg.Bridge.Token = store.NewToken("enr")
+	cfg.Bridge.Name = "isabelle-orchestration-bridge"
+	cfg.Bridge.MachineIDFile = tmp + "/machine_id"
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Runner = "echo"
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	cfg.Bridge.ReconnectMin.Duration = 50 * time.Millisecond
+	cfg.Bridge.ReconnectMax.Duration = 100 * time.Millisecond
+	cfg.Bridge.HeartbeatInterval.Duration = 200 * time.Millisecond
+
+	st, err := store.Open(cfg.Hub.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
+	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
+	go func() { _ = srv.Run(ctx) }()
+	waitHTTP(t, cfg.Bridge.HubURL+"/health")
+	go func() { _ = bridge.NewClient(&cfg, "test").Run(ctx) }()
+
+	client := httpClient(t)
+	postJSON(t, client, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
+	waitAgents(t, client, cfg.Bridge.HubURL)
+
+	body := postJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations", map[string]any{
+		"mode":     "collaboration",
+		"title":    "Isabelle BridgeDemo",
+		"prompt":   isabelleBridgeDemoPrompt(),
+		"cwd":      tmp,
+		"maxTurns": 2,
+	}, http.StatusCreated)
+	run := body["run"].(map[string]any)
+	runID := run["id"].(string)
+
+	ws := dialOrchestrationWS(t, client, cfg.Bridge.HubURL, runID)
+	defer ws.Close()
+	streamed := waitOrchestrationCommandEvents(t, ws, runID, []string{
+		"mkdir -p isabelle_bridge_demo",
+		"isabelle build -D isabelle_bridge_demo",
+	})
+
+	waitOrchestrationStatus(t, client, cfg.Bridge.HubURL, runID, "completed")
+	eventsBody := getJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations/"+url.PathEscape(runID)+"/events", http.StatusOK)
+	events := eventsBody["events"].([]any)
+	if !eventsContainCommand(events, "mkdir -p isabelle_bridge_demo") || !eventsContainCommand(events, "isabelle build -D isabelle_bridge_demo") {
+		t.Fatalf("persisted events missing useful commands: %#v", events)
+	}
+	if !streamed["mkdir -p isabelle_bridge_demo"] || !streamed["isabelle build -D isabelle_bridge_demo"] {
+		t.Fatalf("streamed commands = %#v", streamed)
+	}
+}
+
+func TestNonAdminCanOnlyUseOrchestrationAPIs(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tmp := t.TempDir()
+	port := freePort(t)
+	cfg := config.Default()
+	cfg.Gateway.Host = "127.0.0.1"
+	cfg.Gateway.Port = port
+	cfg.Gateway.ReadTimeout.Duration = 5 * time.Second
+	cfg.Hub.DBPath = tmp + "/bridge.db"
+	cfg.Auth.JWTSecret = "integration-test-secret-32-byte-minimum"
+	cfg.Auth.AccessTokenTTL.Duration = time.Hour
+	cfg.Bridge.HubURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	cfg.Bridge.Token = store.NewToken("enr")
+
+	st, err := store.Open(cfg.Hub.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertUser(ctx, "worker", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
+	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
+	go func() { _ = srv.Run(ctx) }()
+	waitHTTP(t, cfg.Bridge.HubURL+"/health")
+	fakeBridge := dialFakeBridge(t, cfg.Bridge.HubURL, cfg.Bridge.Token)
+	defer fakeBridge.Close()
+
+	adminClient := httpClient(t)
+	adminLogin := postJSON(t, adminClient, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
+	if user := adminLogin["user"].(map[string]any); user["isAdmin"] != true {
+		t.Fatalf("admin login user = %#v", user)
+	}
+	waitAgents(t, adminClient, cfg.Bridge.HubURL)
+	postJSON(t, adminClient, cfg.Bridge.HubURL+"/api/sessions", map[string]string{"title": "admin-ok"}, http.StatusCreated)
+
+	workerClient := httpClient(t)
+	workerLogin := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "worker", "password": "secret"}, http.StatusOK)
+	if user := workerLogin["user"].(map[string]any); user["isAdmin"] == true {
+		t.Fatalf("worker login user = %#v", user)
+	}
+	getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/sessions", http.StatusForbidden)
+	getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/orchestrations", http.StatusOK)
+	orcBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/orchestrations", map[string]any{
+		"mode":     "collaboration",
+		"title":    "worker orchestration",
+		"prompt":   "worker can use orchestration",
+		"maxTurns": 2,
+	}, http.StatusCreated)
+	run := orcBody["run"].(map[string]any)
+	env := waitBridgeEnvelope(t, fakeBridge, protocol.TypeOrchestrationStart, "")
+	start, err := protocol.Decode[protocol.OrchestrationStartPayload](env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start.RunID != run["id"] || start.Prompt != "worker can use orchestration" {
+		t.Fatalf("orchestration start = %#v, run = %#v", start, run)
+	}
+}
+
+func TestOrchestrationContinueReusesRunAndSendsContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tmp := t.TempDir()
+	port := freePort(t)
+	cfg := config.Default()
+	cfg.Gateway.Host = "127.0.0.1"
+	cfg.Gateway.Port = port
+	cfg.Gateway.ReadTimeout.Duration = 5 * time.Second
+	cfg.Hub.DBPath = tmp + "/bridge.db"
+	cfg.Auth.JWTSecret = "integration-test-secret-32-byte-minimum"
+	cfg.Auth.AccessTokenTTL.Duration = time.Hour
+	cfg.Bridge.HubURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	cfg.Bridge.Token = store.NewToken("enr")
+
+	st, err := store.Open(cfg.Hub.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
+	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
+	go func() { _ = srv.Run(ctx) }()
+	waitHTTP(t, cfg.Bridge.HubURL+"/health")
+	fakeBridge := dialFakeBridge(t, cfg.Bridge.HubURL, cfg.Bridge.Token)
+	defer fakeBridge.Close()
+
+	client := httpClient(t)
+	postJSON(t, client, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
+	waitAgents(t, client, cfg.Bridge.HubURL)
+
+	body := postJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations", map[string]any{
+		"mode":     "collaboration",
+		"title":    "continuity",
+		"prompt":   "first task",
+		"maxTurns": 2,
+	}, http.StatusCreated)
+	run := body["run"].(map[string]any)
+	runID := run["id"].(string)
+	firstStart := waitBridgeEnvelope(t, fakeBridge, protocol.TypeOrchestrationStart, "")
+	firstPayload, err := protocol.Decode[protocol.OrchestrationStartPayload](firstStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstPayload.RunID != runID || firstPayload.Resume {
+		t.Fatalf("first payload = %#v", firstPayload)
+	}
+	if err := fakeBridge.WriteJSON(protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+		RunID:   runID,
+		Kind:    "turn.delta",
+		Role:    "implementer",
+		CLI:     "claude",
+		Content: "first task changed app.go",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := fakeBridge.WriteJSON(protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+		RunID:  runID,
+		Kind:   "run.end",
+		Status: store.OrchestrationCompleted,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	waitOrchestrationStatus(t, client, cfg.Bridge.HubURL, runID, store.OrchestrationCompleted)
+
+	body = postJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations/"+url.PathEscape(runID)+"/prompts", map[string]any{
+		"prompt":   "second task",
+		"maxTurns": 2,
+	}, http.StatusOK)
+	continuedRun := body["run"].(map[string]any)
+	if continuedRun["id"] != runID || continuedRun["status"] != store.OrchestrationRunning {
+		t.Fatalf("continued run = %#v", continuedRun)
+	}
+	secondStart := waitBridgeEnvelope(t, fakeBridge, protocol.TypeOrchestrationStart, "")
+	secondPayload, err := protocol.Decode[protocol.OrchestrationStartPayload](secondStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondPayload.RunID != runID || !secondPayload.Resume || secondPayload.Prompt != "second task" {
+		t.Fatalf("second payload = %#v", secondPayload)
+	}
+	if !strings.Contains(secondPayload.Context, "first task") || !strings.Contains(secondPayload.Context, "first task changed app.go") {
+		t.Fatalf("second context = %q", secondPayload.Context)
+	}
+}
+
 func freePort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -428,6 +798,28 @@ func dialBrowserWS(t *testing.T, client *http.Client, baseURL, sid string) *webs
 		scheme = "wss"
 	}
 	wsURL := fmt.Sprintf("%s://%s/ws/chat?sid=%s", scheme, parsed.Host, url.QueryEscape(sid))
+	header := http.Header{}
+	for _, cookie := range client.Jar.Cookies(parsed) {
+		header.Add("Cookie", cookie.String())
+	}
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ws
+}
+
+func dialOrchestrationWS(t *testing.T, client *http.Client, baseURL, runID string) *websocket.Conn {
+	t.Helper()
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheme := "ws"
+	if parsed.Scheme == "https" {
+		scheme = "wss"
+	}
+	wsURL := fmt.Sprintf("%s://%s/ws/orchestrations?runId=%s", scheme, parsed.Host, url.QueryEscape(runID))
 	header := http.Header{}
 	for _, cookie := range client.Jar.Cookies(parsed) {
 		header.Add("Cookie", cookie.String())
@@ -600,6 +992,147 @@ func waitRunStatus(t *testing.T, client *http.Client, baseURL, sid, runID, want 
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for run %s status %s", runID, want)
+}
+
+func waitOrchestrationStatus(t *testing.T, client *http.Client, baseURL, runID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		body := getJSON(t, client, baseURL+"/api/orchestrations/"+url.PathEscape(runID), http.StatusOK)
+		run := body["run"].(map[string]any)
+		if run["status"] == want {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for orchestration run %s status %s", runID, want)
+}
+
+func waitOrchestrationCommandEvents(t *testing.T, ws *websocket.Conn, runID string, commands []string) map[string]bool {
+	t.Helper()
+	want := make(map[string]bool, len(commands))
+	for _, command := range commands {
+		want[command] = false
+	}
+	_ = ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer ws.SetReadDeadline(time.Time{})
+	for {
+		var env protocol.Envelope
+		if err := ws.ReadJSON(&env); err != nil {
+			t.Fatal(err)
+		}
+		if env.Type == protocol.TypeHeartbeat || env.Type == protocol.TypeStatus {
+			continue
+		}
+		if env.Type != protocol.TypeOrchestrationEvent {
+			continue
+		}
+		event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.RunID != runID || !strings.HasPrefix(event.Kind, "command.") {
+			continue
+		}
+		command, _ := event.Data["command"].(string)
+		if _, ok := want[command]; ok {
+			want[command] = true
+		}
+		all := true
+		for _, saw := range want {
+			all = all && saw
+		}
+		if all {
+			return want
+		}
+	}
+}
+
+func eventsContainCommand(events []any, want string) bool {
+	for _, raw := range events {
+		event, _ := raw.(map[string]any)
+		data, _ := event["data"].(map[string]any)
+		if data == nil {
+			continue
+		}
+		if command, _ := data["command"].(string); command == want {
+			return true
+		}
+	}
+	return false
+}
+
+func fakeCodexScript() string {
+	return `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"fake-thread"}'
+printf '%s\n' '{"type":"item.agent_message.delta","delta":"fake codex reviewed the previous turn."}'
+printf '%s\n' '{"type":"turn.completed","usage":{"output_tokens":6}}'
+`
+}
+
+func fakeClaudeScript() string {
+	return `#!/bin/sh
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"fake claude implemented the first turn."}]}}'
+printf '%s\n' '{"type":"result","result":"fake claude implemented the first turn."}'
+`
+}
+
+func fakeIsabelleCodexScript() string {
+	return `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"item.started","item":{"id":"cmd_1","type":"command_execution","command":"mkdir -p isabelle_bridge_demo","status":"running"}}'
+mkdir -p isabelle_bridge_demo
+printf '%s\n' '{"type":"item.completed","item":{"id":"cmd_1","type":"command_execution","command":"mkdir -p isabelle_bridge_demo","status":"completed","exit_code":0,"aggregated_output":""}}'
+printf '%s\n' '{"type":"item.started","item":{"id":"cmd_2","type":"command_execution","command":"isabelle build -D isabelle_bridge_demo","status":"running"}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"cmd_2","type":"command_execution","command":"isabelle build -D isabelle_bridge_demo","status":"completed","exit_code":0,"aggregated_output":"Finished BridgeDemo\n0:00:01 elapsed time\n"}}'
+printf '%s\n' '{"type":"item.agent_message.delta","delta":"Created isabelle_bridge_demo/BridgeDemo.thy and verified with isabelle build."}'
+printf '%s\n' '{"type":"turn.completed","usage":{"output_tokens":12}}'
+`
+}
+
+func fakeIsabelleClaudeScript() string {
+	return `#!/bin/sh
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_1","name":"Bash","input":{"command":"mkdir -p isabelle_bridge_demo"}}]}}'
+printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_1","content":"created\n"}]}}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"I will create the Isabelle theory in isabelle_bridge_demo and leave verification to the reviewer."}]}}'
+printf '%s\n' '{"type":"result","result":"I will create the Isabelle theory in isabelle_bridge_demo and leave verification to the reviewer."}'
+`
+}
+
+func isabelleBridgeDemoPrompt() string {
+	return `请创建一个 Isabelle/HOL 文件 BridgeDemo.thy，放在/root/tencent路径下新建一个合适的文件夹进行放置
+完成下面这些定理证明，并尽量运行 isabelle build 或 isabelle process 做验证。如果当前机器没有 Isabelle，请说明无法本地验证，但仍
+给出可检查的最终 proof。
+
+目标文件内容：
+
+theory BridgeDemo
+imports Main
+begin
+
+lemma append_nil_right:
+"xs @ [] = (xs :: 'a list)"
+sorry
+
+lemma rev_snoc:
+"rev (xs @ [x]) = x # rev xs"
+sorry
+
+lemma map_append_demo:
+"map f (xs @ ys) = map f xs @ map f ys"
+sorry
+
+lemma filter_append_demo:
+"filter P (xs @ ys) = filter P xs @ filter P ys"
+sorry
+
+end
+
+要求：
+1. 把所有 sorry 替换成正式 proof。
+2. 优先使用简洁 Isabelle proof，例如 by simp、by auto 或 induction。
+3. 最后总结每个 lemma 用了什么证明策略。`
 }
 
 func expectPrompt(t *testing.T, ws *websocket.Conn, sid, prompt, want string) {

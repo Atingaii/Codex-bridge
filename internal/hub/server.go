@@ -453,9 +453,9 @@ func (s *Server) handleCreateBridgeToken(w http.ResponseWriter, r *http.Request,
 	}
 	hubURL := s.publicBaseURL(r)
 	installCommand := fmt.Sprintf("curl -fsSL %s/install.sh | sh", hubURL)
-	connectCommand := fmt.Sprintf("~/.local/bin/codex-bridge connect %s", shellQuote(value))
+	connectCommand := fmt.Sprintf("CB_CWD=\"${PWD:-.}\"; CB_DIR=\"$(basename \"$CB_CWD\")\"; CB_HASH=\"$(printf '%%s' \"$CB_CWD\" | cksum | awk '{print $1}')\"; ~/.local/bin/codex-bridge connect --cwd \"$CB_CWD\" --name \"${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}\" --machine-id-file \"$HOME/.codex-bridge/machines/${CB_HASH}\" %s", shellQuote(value))
 	if hubURL != strings.TrimRight(s.cfg.Bridge.HubURL, "/") {
-		connectCommand = fmt.Sprintf("~/.local/bin/codex-bridge connect --hub %s %s", shellQuote(hubURL), shellQuote(value))
+		connectCommand = fmt.Sprintf("CB_CWD=\"${PWD:-.}\"; CB_DIR=\"$(basename \"$CB_CWD\")\"; CB_HASH=\"$(printf '%%s' \"$CB_CWD\" | cksum | awk '{print $1}')\"; ~/.local/bin/codex-bridge connect --hub %s --cwd \"$CB_CWD\" --name \"${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}\" --machine-id-file \"$HOME/.codex-bridge/machines/${CB_HASH}\" %s", shellQuote(hubURL), shellQuote(value))
 	}
 	serverutil.WriteJSON(w, http.StatusCreated, map[string]any{
 		"token":          value,

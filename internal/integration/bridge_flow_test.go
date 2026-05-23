@@ -691,6 +691,12 @@ func TestRegistrationBridgeTokenBindsAgentToUser(t *testing.T) {
 	if len(commands) != 2 || !strings.Contains(commands[0].(string), "/install.sh") || !strings.Contains(commands[1].(string), "codex-bridge connect") {
 		t.Fatalf("commands = %#v", commands)
 	}
+	connectCommand := commands[1].(string)
+	for _, want := range []string{`--cwd "$CB_CWD"`, `--name "${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}"`, `--machine-id-file "$HOME/.codex-bridge/machines/${CB_HASH}"`} {
+		if !strings.Contains(connectCommand, want) {
+			t.Fatalf("connect command missing %q: %s", want, connectCommand)
+		}
+	}
 
 	fakeBridge := dialFakeBridge(t, cfg.Bridge.HubURL, token)
 	defer fakeBridge.Close()

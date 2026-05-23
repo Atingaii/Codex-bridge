@@ -17,6 +17,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/tencent/codex-bridge/internal/auth"
 	"github.com/tencent/codex-bridge/internal/config"
@@ -27,6 +29,14 @@ import (
 )
 
 const accessCookieName = "cb_access"
+
+const (
+	loginRateLimitMax       = 8
+	registerRateLimitMax    = 5
+	authRateLimitWindow     = 10 * time.Minute
+	minRegisterPasswordRune = 10
+	maxRegisterPasswordByte = 256
+)
 
 type BuildInfo struct {
 	Version   string `json:"version"`
@@ -42,6 +52,14 @@ type Server struct {
 
 	buffersMu sync.Mutex
 	buffers   map[string]string
+
+	rateMu sync.Mutex
+	rates  map[string]rateBucket
+}
+
+type rateBucket struct {
+	count int
+	reset time.Time
 }
 
 func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
@@ -51,6 +69,7 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 		signer:  auth.NewSigner(cfg.Auth.JWTSecret, cfg.Auth.AccessTokenTTL.Duration),
 		pool:    NewPool(),
 		buffers: make(map[string]string),
+		rates:   make(map[string]rateBucket),
 	}
 
 	mux := http.NewServeMux()
@@ -174,7 +193,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid login payload")
 		return
 	}
-	user, err := s.store.AuthenticateUser(r.Context(), req.Username, req.Password)
+	username := normalizeUsername(req.Username)
+	if !s.allowAuthAttempt(r, "login", username, loginRateLimitMax, authRateLimitWindow) {
+		serverutil.WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many attempts, please try again later")
+		return
+	}
+	if username == "" || req.Password == "" || len(req.Password) > maxRegisterPasswordByte {
+		serverutil.WriteError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid username or password")
+		return
+	}
+	user, err := s.store.AuthenticateUser(r.Context(), username, req.Password)
 	if err != nil {
 		serverutil.WriteError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid username or password")
 		return
@@ -210,18 +238,18 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid registration payload")
 		return
 	}
-	username := strings.TrimSpace(req.Username)
+	username := normalizeUsername(req.Username)
 	password := req.Password
-	if username == "" || password == "" {
-		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "username and password are required")
+	if !s.allowAuthAttempt(r, "register", username, registerRateLimitMax, authRateLimitWindow) {
+		serverutil.WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many attempts, please try again later")
 		return
 	}
-	if len([]rune(username)) > 64 || strings.ContainsAny(username, "\r\n\t") {
-		serverutil.WriteError(w, http.StatusBadRequest, "BAD_USERNAME", "username is invalid")
+	if err := validateUsername(username); err != nil {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_USERNAME", err.Error())
 		return
 	}
-	if len(password) < 8 {
-		serverutil.WriteError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+	if err := validateRegisterPassword(password); err != nil {
+		serverutil.WriteError(w, http.StatusBadRequest, "WEAK_PASSWORD", err.Error())
 		return
 	}
 	user, err := s.store.CreateUser(r.Context(), username, password)
@@ -249,6 +277,100 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Secure:   s.secureCookie(r),
 	})
 	serverutil.WriteJSON(w, http.StatusCreated, map[string]any{"user": user, "expiresAt": expires.Unix()})
+}
+
+func normalizeUsername(username string) string {
+	return strings.TrimSpace(username)
+}
+
+func validateUsername(username string) error {
+	if username == "" {
+		return errors.New("username is required")
+	}
+	if !utf8.ValidString(username) {
+		return errors.New("username is invalid")
+	}
+	runes := []rune(username)
+	if len(runes) < 3 || len(runes) > 64 {
+		return errors.New("username must be 3 to 64 characters")
+	}
+	for _, r := range runes {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return errors.New("username may only contain letters, numbers, dots, underscores, and dashes")
+	}
+	return nil
+}
+
+func validateRegisterPassword(password string) error {
+	if password == "" {
+		return errors.New("password is required")
+	}
+	if len(password) > maxRegisterPasswordByte {
+		return errors.New("password is too long")
+	}
+	if !utf8.ValidString(password) {
+		return errors.New("password is invalid")
+	}
+	if len([]rune(password)) < minRegisterPasswordRune {
+		return errors.New("password must be at least 10 characters")
+	}
+	var hasLetter, hasDigit bool
+	for _, r := range password {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+		}
+		if unicode.IsDigit(r) {
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		return errors.New("password must include letters and numbers")
+	}
+	return nil
+}
+
+func (s *Server) allowAuthAttempt(r *http.Request, scope, username string, maxAttempts int, window time.Duration) bool {
+	now := time.Now()
+	key := scope + "|" + authClientIP(r) + "|" + strings.ToLower(username)
+
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	for k, bucket := range s.rates {
+		if now.After(bucket.reset) {
+			delete(s.rates, k)
+		}
+	}
+	bucket := s.rates[key]
+	if bucket.reset.IsZero() || now.After(bucket.reset) {
+		bucket = rateBucket{reset: now.Add(window)}
+	}
+	bucket.count++
+	s.rates[key] = bucket
+	return bucket.count <= maxAttempts
+}
+
+func authClientIP(r *http.Request) string {
+	for _, header := range []string{"CF-Connecting-IP", "X-Real-IP"} {
+		value := strings.TrimSpace(r.Header.Get(header))
+		if value != "" {
+			return value
+		}
+	}
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		if i := strings.Index(forwarded, ","); i >= 0 {
+			forwarded = forwarded[:i]
+		}
+		if forwarded = strings.TrimSpace(forwarded); forwarded != "" {
+			return forwarded
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil && host != "" {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

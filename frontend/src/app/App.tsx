@@ -110,6 +110,35 @@ type ChatItem =
   | { id: string; type: 'message'; role: 'user' | 'assistant' | 'system'; content: string; createdAt?: number }
   | { id: string; type: 'tool'; tool: ToolEvent };
 
+type OrchestrationVisibleEvent =
+  | {
+      type: 'message';
+      key: string;
+      runId: string;
+      kind: string;
+      role?: string;
+      cli?: string;
+      turnId?: string;
+      content: string;
+      status?: string;
+      error?: string;
+      createdAt?: number;
+      commands: OrchestrationEvent[];
+    }
+  | {
+      type: 'status';
+      key: string;
+      runId: string;
+      kind: string;
+      role?: string;
+      cli?: string;
+      turnId?: string;
+      content: string;
+      status?: string;
+      error?: string;
+      createdAt?: number;
+    };
+
 type Envelope = {
   type: string;
   sid?: string;
@@ -157,7 +186,7 @@ const uiText = {
     needAccount: 'Need an account?',
     switchToRegister: 'Create a new account',
     switchToLogin: 'Back to sign in',
-    passwordHint: 'At least 8 characters',
+    passwordHint: '10+ characters with letters and numbers',
     connectToWorkspace: 'Connect to Workspace',
     connectionFailed: 'Connection failed.',
     disconnected: 'Disconnected',
@@ -173,6 +202,9 @@ const uiText = {
     jumpToBottom: 'Jump to bottom',
     uploadImages: 'Upload images',
     commandEvent: 'command event',
+    commandDetails: 'Command details',
+    commands: 'Commands',
+    noVisibleAnswer: 'No user-visible answer was returned for this turn.',
     agent: 'agent',
     reviewCurrentRepository: 'Review the current repository, implement the requested change, and verify with tests.',
     english: 'English',
@@ -279,7 +311,7 @@ const uiText = {
     needAccount: '需要账户？',
     switchToRegister: '注册新账户',
     switchToLogin: '返回登录',
-    passwordHint: '至少 8 个字符',
+    passwordHint: '至少 10 位，包含字母和数字',
     connectToWorkspace: '连接工作区',
     connectionFailed: '连接失败。',
     disconnected: '已断开',
@@ -295,6 +327,9 @@ const uiText = {
     jumpToBottom: '跳到底部',
     uploadImages: '上传图片',
     commandEvent: '命令事件',
+    commandDetails: '命令详情',
+    commands: '命令',
+    noVisibleAnswer: '这一轮没有返回面向用户的可读回答。',
     agent: 'agent',
     reviewCurrentRepository: '审查当前仓库，完成请求的改动，并用测试验证。',
     english: 'English',
@@ -516,7 +551,7 @@ function orchestrationToolID(event: OrchestrationEvent) {
   return typeof event.data?.id === 'string' ? event.data.id : '';
 }
 
-function mergeOrchestrationToolEvents(events: OrchestrationEvent[]) {
+function mergeOrchestrationToolEvents(events: OrchestrationEvent[]): OrchestrationEvent[] {
   const merged: OrchestrationEvent[] = [];
   const toolIndexes = new Map<string, number>();
   events.forEach((event) => {
@@ -547,6 +582,155 @@ function mergeOrchestrationToolEvents(events: OrchestrationEvent[]) {
     };
   });
   return merged;
+}
+
+function orchestrationTurnKey(event: OrchestrationEvent) {
+  return `${event.runId}:${event.turnId || ''}:${event.role || ''}:${event.cli || ''}`;
+}
+
+function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string): OrchestrationVisibleEvent[] {
+  const ordered = mergeOrchestrationToolEvents(events.filter((event) => event.runId === runId).slice().sort(compareOrchestrationEvents));
+  const visible: OrchestrationVisibleEvent[] = [];
+  const messageIndexes = new Map<string, number>();
+
+  ordered.forEach((event, index) => {
+    if (event.kind === 'user.message') {
+      const content = stringsTrim(event.content);
+      if (!content) return;
+      visible.push({
+        type: 'message',
+        key: orchestrationEventKey(event, index),
+        runId: event.runId,
+        kind: event.kind,
+        role: event.role,
+        cli: event.cli,
+        turnId: event.turnId,
+        content,
+        status: event.status,
+        error: event.error,
+        createdAt: event.createdAt,
+        commands: [],
+      });
+      return;
+    }
+
+    if (event.kind === 'turn.delta') {
+      const content = String(event.content || '');
+      if (!content) return;
+      const key = orchestrationTurnKey(event);
+      const existingIndex = messageIndexes.get(key);
+      if (typeof existingIndex === 'number') {
+        const item = visible[existingIndex];
+        if (item.type === 'message') {
+          item.content = appendDelta(item.content, content);
+          item.status = event.status || item.status;
+          item.error = event.error || item.error;
+          item.createdAt = item.createdAt || event.createdAt;
+        }
+        return;
+      }
+      messageIndexes.set(key, visible.length);
+      visible.push({
+        type: 'message',
+        key,
+        runId: event.runId,
+        kind: event.kind,
+        role: event.role,
+        cli: event.cli,
+        turnId: event.turnId,
+        content,
+        status: event.status,
+        error: event.error,
+        createdAt: event.createdAt,
+        commands: [],
+      });
+      return;
+    }
+
+    if (event.kind.startsWith('command.')) {
+      const key = orchestrationTurnKey(event);
+      const existingIndex = messageIndexes.get(key);
+      if (typeof existingIndex === 'number') {
+        const item = visible[existingIndex];
+        if (item.type === 'message') item.commands.push(event);
+        return;
+      }
+      messageIndexes.set(key, visible.length);
+      visible.push({
+        type: 'message',
+        key,
+        runId: event.runId,
+        kind: 'turn.delta',
+        role: event.role,
+        cli: event.cli,
+        turnId: event.turnId,
+        content: '',
+        status: event.status,
+        error: event.error,
+        createdAt: event.createdAt,
+        commands: [event],
+      });
+      if (event.status === 'error' || event.error) {
+        visible.push(statusVisibleEvent(event, index));
+      }
+      return;
+    }
+
+    if (event.kind === 'turn.end') {
+      const key = orchestrationTurnKey(event);
+      const existingIndex = messageIndexes.get(key);
+      if (typeof existingIndex === 'number') {
+        const item = visible[existingIndex];
+        if (item.type === 'message') {
+          item.status = event.status || item.status;
+          item.error = event.error || item.error;
+        }
+      } else if (event.error) {
+        visible.push(statusVisibleEvent(event, index));
+      }
+      return;
+    }
+
+    if (shouldShowOrchestrationStatus(event)) {
+      visible.push(statusVisibleEvent(event, index));
+    }
+  });
+
+  return visible;
+}
+
+function stringsTrim(value?: string) {
+  return String(value || '').trim();
+}
+
+function appendDelta(current: string, delta: string) {
+  if (!current) return delta;
+  return current + delta;
+}
+
+function shouldShowOrchestrationStatus(event: OrchestrationEvent) {
+  if (event.kind === 'run.start' || event.kind === 'turn.start') return false;
+  if (event.kind === 'run.end') {
+    const content = stringsTrim(event.content);
+    return Boolean(event.error || (content && content !== 'Orchestration completed.'));
+  }
+  return event.kind === 'run.error' || event.kind === 'run.cancelled' || event.kind === 'run.canceling' || Boolean(event.error);
+}
+
+function statusVisibleEvent(event: OrchestrationEvent, index: number): OrchestrationVisibleEvent {
+  return {
+    type: 'status',
+    key: orchestrationEventKey(event, index),
+    runId: event.runId,
+    kind: event.kind,
+    role: event.role,
+    cli: event.cli,
+    turnId: event.turnId,
+    content: stringsTrim(event.error || event.content || event.status || event.kind),
+    status: event.status,
+    error: event.error,
+    createdAt: event.createdAt,
+  };
 }
 
 function applyOrchestrationEventToRun(run: OrchestrationRun, event: OrchestrationEvent): OrchestrationRun {
@@ -959,7 +1143,7 @@ function LoginScreen({
         <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1">
           <button
             type="button"
-            className={cn("h-8 rounded-md text-xs font-medium", !registering ? "bg-background shadow-sm" : "text-muted-foreground")}
+            className={cn("h-9 rounded-md text-sm font-medium", !registering ? "bg-background shadow-sm" : "text-muted-foreground")}
             onClick={() => {
               setRegistering(false);
               setError('');
@@ -969,7 +1153,7 @@ function LoginScreen({
           </button>
           <button
             type="button"
-            className={cn("h-8 rounded-md text-xs font-medium", registering ? "bg-background shadow-sm" : "text-muted-foreground")}
+            className={cn("h-9 rounded-md text-sm font-medium", registering ? "bg-background shadow-sm" : "text-muted-foreground")}
             onClick={() => {
               setRegistering(true);
               setError('');
@@ -996,7 +1180,7 @@ function LoginScreen({
               </label>
               <div className="relative">
                 <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                <Input id="password" name="password" type="password" placeholder={registering ? t.passwordHint : '••••••••'} className="pl-9" autoComplete={registering ? 'new-password' : 'current-password'} minLength={registering ? 8 : undefined} required />
+                <Input id="password" name="password" type="password" placeholder={registering ? t.passwordHint : '••••••••'} className="pl-9" autoComplete={registering ? 'new-password' : 'current-password'} minLength={registering ? 10 : undefined} required />
               </div>
             </div>
           </div>
@@ -1011,6 +1195,19 @@ function LoginScreen({
           <Button type="submit" className="w-full" disabled={loading}>
             {loading ? <RefreshCw className="h-4 w-4 animate-spin" /> : registering ? t.createAccount : t.connectToWorkspace}
           </Button>
+          {!registering && (
+            <Button
+              variant="secondary"
+              type="button"
+              className="w-full border border-border"
+              onClick={() => {
+                setRegistering(true);
+                setError('');
+              }}
+            >
+              {t.createAccount}
+            </Button>
+          )}
         </form>
 
         <div className="flex items-center justify-center gap-2 text-sm">
@@ -1819,7 +2016,7 @@ function OrchestrationWorkspace({
   const endRef = useRef<HTMLDivElement | null>(null);
 
   const activeRun = runs.find((run) => run.id === activeRunId) || null;
-  const visibleEvents = useMemo(() => mergeOrchestrationToolEvents(events.filter((event) => event.runId === activeRunId)), [events, activeRunId]);
+  const visibleEvents = useMemo(() => visibleOrchestrationEvents(events, activeRunId), [events, activeRunId]);
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || agents.find((agent) => agent.online) || agents[0];
   const onlineAgent = selectedAgent?.online ? selectedAgent : agents.find((agent) => agent.online);
   const isRunning = activeOrchestrationStatus(activeRun?.status);
@@ -2165,7 +2362,7 @@ function OrchestrationWorkspace({
                 <h2 className="text-lg font-medium">{t.coordinateClaudeCodex}</h2>
                 <p className="text-sm text-muted-foreground">{t.startCollaborationHint}</p>
               </div>
-            ) : visibleEvents.map((event, index) => <OrchestrationEventItem key={orchestrationEventKey(event, index)} event={event} t={t} />)}
+            ) : visibleEvents.map((event) => <OrchestrationEventItem key={event.key} item={event} t={t} />)}
             <div ref={endRef} className="h-4" />
           </div>
 
@@ -2306,13 +2503,12 @@ function OrchestrationWorkspace({
   );
 }
 
-function OrchestrationEventItem({ event, t }: { event: OrchestrationEvent, t: UIText }) {
-  const isUser = event.kind === 'user.message';
-  const isCommand = event.kind.startsWith('command.');
-  const isRun = event.kind.startsWith('run.');
-  const avatar = orchestrationAvatar(event, t);
-  const title = isUser ? t.user : isRun ? t.run : `${event.role || t.agent}${event.cli ? ` · ${avatar.label}` : ''}`;
-  const content = event.error || event.content || '';
+function OrchestrationEventItem({ item, t }: { item: OrchestrationVisibleEvent, t: UIText }) {
+  const isUser = item.kind === 'user.message';
+  const isRun = item.kind.startsWith('run.') || item.type === 'status';
+  const avatar = orchestrationAvatar(item, t);
+  const title = isUser ? t.user : isRun ? t.run : `${item.role || t.agent}${item.cli ? ` · ${avatar.label}` : ''}`;
+  const content = item.error || item.content || '';
 
   return (
     <div className="flex gap-4 w-full max-w-4xl mx-auto py-2 group">
@@ -2327,20 +2523,34 @@ function OrchestrationEventItem({ event, t }: { event: OrchestrationEvent, t: UI
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 mb-1 min-h-6">
           <span className="text-xs font-semibold capitalize">{title}</span>
-          <span className="text-[10px] text-muted-foreground">{event.kind}</span>
-          {event.status && <span className="ml-auto rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">{event.status}</span>}
+          <span className="text-[10px] text-muted-foreground">{item.kind}</span>
+          {item.status && <span className="ml-auto rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">{item.status}</span>}
         </div>
-        {isCommand ? (
-          <CommandEvent event={event} t={t} />
-        ) : (
-          <MessageContent content={content || ''} />
+        {content ? (
+          <MessageContent content={content} />
+        ) : item.type === 'message' && item.commands.length > 0 ? (
+          <p className="text-sm text-muted-foreground">{t.noVisibleAnswer}</p>
+        ) : null}
+        {item.type === 'message' && item.commands.length > 0 && (
+          <details className="mt-2 rounded-md border border-border bg-muted/10">
+            <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-[11px] text-muted-foreground hover:text-foreground">
+              <Command className="h-3.5 w-3.5" />
+              <span>{t.commandDetails}</span>
+              <span className="rounded border border-border px-1.5 py-0.5 text-[10px]">{item.commands.length}</span>
+            </summary>
+            <div className="space-y-2 border-t border-border p-2">
+              {item.commands.map((command, index) => (
+                <CommandEvent key={orchestrationEventKey(command, index)} event={command} t={t} />
+              ))}
+            </div>
+          </details>
         )}
       </div>
     </div>
   );
 }
 
-function orchestrationAvatar(event: OrchestrationEvent, t: UIText) {
+function orchestrationAvatar(event: Pick<OrchestrationEvent, 'kind' | 'cli'>, t: UIText) {
   const cli = (event.cli || '').toLowerCase();
   if (event.kind === 'user.message') {
     return {

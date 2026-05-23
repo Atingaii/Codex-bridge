@@ -106,6 +106,15 @@ func TestComposeOrchestrationPromptIncludesResumeContext(t *testing.T) {
 	}
 }
 
+func TestComposeOrchestrationPromptFinalTurnRequiresUserVisibleAnswer(t *testing.T) {
+	prompt := composeOrchestrationPrompt("collaboration", "finish it", "", false, "reviewer", "codex", 4, 4, nil)
+	for _, want := range []string{"final scheduled turn", "user-visible final answer", "what was verified"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("final prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func assertArgPair(t *testing.T, args []string, key, value string) {
 	t.Helper()
 	for i := 0; i < len(args)-1; i++ {

@@ -680,7 +680,7 @@ func TestRegistrationBridgeTokenBindsAgentToUser(t *testing.T) {
 	workerClient := httpClient(t)
 	registerBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/register", map[string]string{
 		"username": "bridge-user",
-		"password": "long-secret",
+		"password": "long-secret-123",
 	}, http.StatusCreated)
 	worker := registerBody["user"].(map[string]any)
 	tokenBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/bridge-tokens", map[string]string{

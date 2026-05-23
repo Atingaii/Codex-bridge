@@ -585,6 +585,7 @@ func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume 
 	}
 	if turn == maxTurns {
 		b.WriteString("This is the final scheduled turn. Summarize the final state, verification results, and remaining risks.\n")
+		b.WriteString("Return a concise user-visible final answer. Do not rely on command logs alone; state what was accomplished, what was verified, and any remaining issue.\n")
 	}
 	return b.String()
 }

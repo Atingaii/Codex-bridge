@@ -126,6 +126,20 @@ type OrchestrationVisibleEvent =
       commands: OrchestrationEvent[];
     }
   | {
+      type: 'command';
+      key: string;
+      runId: string;
+      kind: string;
+      role?: string;
+      cli?: string;
+      turnId?: string;
+      content: string;
+      status?: string;
+      error?: string;
+      createdAt?: number;
+      command: OrchestrationEvent;
+    }
+  | {
       type: 'status';
       key: string;
       runId: string;
@@ -574,10 +588,7 @@ function mergeOrchestrationToolEvents(events: OrchestrationEvent[]): Orchestrati
     merged[index] = {
       ...previous,
       ...event,
-      data: {
-        ...(previous.data || {}),
-        ...(event.data || {}),
-      },
+      data: mergeOrchestrationToolData(previous.data, event.data),
       content: event.content || previous.content,
       error: event.error || previous.error,
       createdAt: event.createdAt || previous.createdAt,
@@ -587,6 +598,19 @@ function mergeOrchestrationToolEvents(events: OrchestrationEvent[]): Orchestrati
   return merged;
 }
 
+function mergeOrchestrationToolData(previous?: Record<string, any>, next?: Record<string, any>) {
+  const data = {
+    ...(previous || {}),
+    ...(next || {}),
+  };
+  for (const field of ['command', 'input', 'name']) {
+    if (typeof data[field] === 'string' && !data[field].trim() && typeof previous?.[field] === 'string' && previous[field].trim()) {
+      data[field] = previous[field];
+    }
+  }
+  return data;
+}
+
 function orchestrationTurnKey(event: OrchestrationEvent) {
   return `${event.runId}:${event.turnId || ''}:${event.role || ''}:${event.cli || ''}`;
 }
@@ -594,7 +618,6 @@ function orchestrationTurnKey(event: OrchestrationEvent) {
 function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string): OrchestrationVisibleEvent[] {
   const ordered = mergeOrchestrationToolEvents(events.filter((event) => event.runId === runId).slice().sort(compareOrchestrationEvents));
   const visible: OrchestrationVisibleEvent[] = [];
-  const messageIndexes = new Map<string, number>();
 
   ordered.forEach((event, index) => {
     if (event.kind === 'user.message') {
@@ -618,24 +641,11 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string)
     }
 
     if (event.kind === 'turn.delta') {
-      const content = String(event.content || '');
+      const content = stringsTrim(event.content);
       if (!content) return;
-      const key = orchestrationTurnKey(event);
-      const existingIndex = messageIndexes.get(key);
-      if (typeof existingIndex === 'number') {
-        const item = visible[existingIndex];
-        if (item.type === 'message') {
-          item.content = appendDelta(item.content, content);
-          item.status = event.status || item.status;
-          item.error = event.error || item.error;
-          item.createdAt = item.createdAt || event.createdAt;
-        }
-        return;
-      }
-      messageIndexes.set(key, visible.length);
       visible.push({
         type: 'message',
-        key,
+        key: orchestrationEventKey(event, index),
         runId: event.runId,
         kind: event.kind,
         role: event.role,
@@ -651,27 +661,20 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string)
     }
 
     if (event.kind.startsWith('command.')) {
-      const key = orchestrationTurnKey(event);
-      const existingIndex = messageIndexes.get(key);
-      if (typeof existingIndex === 'number') {
-        const item = visible[existingIndex];
-        if (item.type === 'message') item.commands.push(event);
-        return;
-      }
-      messageIndexes.set(key, visible.length);
+      const content = orchestrationCommandSummary(event);
       visible.push({
-        type: 'message',
-        key,
+        type: 'command',
+        key: orchestrationEventKey(event, index),
         runId: event.runId,
-        kind: 'turn.delta',
+        kind: event.kind,
         role: event.role,
         cli: event.cli,
         turnId: event.turnId,
-        content: '',
+        content,
         status: event.status,
         error: event.error,
         createdAt: event.createdAt,
-        commands: [event],
+        command: event,
       });
       if (event.status === 'error' || event.error) {
         visible.push(statusVisibleEvent(event, index));
@@ -680,15 +683,7 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string)
     }
 
     if (event.kind === 'turn.end') {
-      const key = orchestrationTurnKey(event);
-      const existingIndex = messageIndexes.get(key);
-      if (typeof existingIndex === 'number') {
-        const item = visible[existingIndex];
-        if (item.type === 'message') {
-          item.status = event.status || item.status;
-          item.error = event.error || item.error;
-        }
-      } else if (event.error) {
+      if (event.error) {
         visible.push(statusVisibleEvent(event, index));
       }
       return;
@@ -706,9 +701,13 @@ function stringsTrim(value?: string) {
   return String(value || '').trim();
 }
 
-function appendDelta(current: string, delta: string) {
-  if (!current) return delta;
-  return current + delta;
+function orchestrationCommandSummary(event: OrchestrationEvent) {
+  const data = event.data || {};
+  const command = typeof data.command === 'string' ? data.command.trim() : '';
+  const output = typeof data.output === 'string' ? data.output.trim() : '';
+  const fallback = stringsTrim(event.error || event.content || event.status || event.kind);
+  if (command && output) return `${command}\n\n${output}`;
+  return command || output || fallback;
 }
 
 function shouldShowOrchestrationStatus(event: OrchestrationEvent) {
@@ -2551,7 +2550,7 @@ function OrchestrationEventItem({ item, t }: { item: OrchestrationVisibleEvent, 
   const isUser = item.kind === 'user.message';
   const isRun = item.kind.startsWith('run.');
   const avatar = orchestrationAvatar(item, t);
-  const title = isUser ? t.user : isRun ? t.run : `${item.role || t.agent}${item.cli ? ` · ${avatar.label}` : ''}`;
+  const title = isUser ? t.user : isRun ? t.run : item.type === 'command' ? t.commands : `${item.role || t.agent}${item.cli ? ` · ${avatar.label}` : ''}`;
   const content = item.error || item.content || '';
   const status = isUser ? '' : item.status;
 
@@ -2572,7 +2571,9 @@ function OrchestrationEventItem({ item, t }: { item: OrchestrationVisibleEvent, 
           {item.createdAt && <span className="text-[10px] text-muted-foreground">{formatTime(item.createdAt)}</span>}
           {status && <span className="ml-auto rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
         </div>
-        {content ? (
+        {item.type === 'command' ? (
+          <CommandEvent event={item.command} t={t} open />
+        ) : content ? (
           <MessageContent content={content} />
         ) : item.type === 'message' && item.commands.length > 0 ? (
           <p className="text-sm text-muted-foreground">{t.noVisibleAnswer}</p>
@@ -2678,7 +2679,7 @@ function OpenAIMark() {
   );
 }
 
-function CommandEvent({ event, t }: { event: OrchestrationEvent, t: UIText }) {
+function CommandEvent({ event, t, open = false }: { event: OrchestrationEvent, t: UIText, open?: boolean }) {
   const data = event.data || {};
   const command = typeof data.command === 'string' ? data.command : '';
   const output = typeof data.output === 'string' ? data.output : '';
@@ -2687,20 +2688,21 @@ function CommandEvent({ event, t }: { event: OrchestrationEvent, t: UIText }) {
   const isActive = event.kind === 'command.start' || status === 'running' || status === 'in_progress';
 
   return (
-    <div className="rounded-md border border-border bg-background/70 overflow-hidden">
-      <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-3 py-2 text-[11px]">
+    <details className="rounded-md border border-border bg-background/70 overflow-hidden" open={open || Boolean(output || event.error)}>
+      <summary className="flex cursor-pointer items-center gap-2 border-b border-border bg-muted/30 px-3 py-2 text-[11px] marker:content-none">
         {isActive ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" /> : <Terminal className="h-3.5 w-3.5 text-muted-foreground" />}
         <code className="min-w-0 flex-1 truncate text-foreground">{command || t.commandEvent}</code>
         {event.createdAt && <span className="shrink-0 text-[10px] text-muted-foreground">{formatTime(event.createdAt)}</span>}
         {status && <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
         {typeof exitCode === 'number' && <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">exit {exitCode}</span>}
-      </div>
+        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+      </summary>
       {output && (
         <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words bg-muted/40 p-3 font-mono text-[11px] leading-relaxed text-foreground/80 dark:bg-[#0f172a] dark:text-slate-200 elegant-scrollbar">
           {output}
         </pre>
       )}
-    </div>
+    </details>
   );
 }
 

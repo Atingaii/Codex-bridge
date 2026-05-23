@@ -34,6 +34,9 @@ context in the same `runID`.
 - The final turn must leave a user-readable conclusion. If the CLI only emits a
   process note and command events, the Bridge appends a concise fallback summary
   from prior conclusions and successful verification commands.
+- The frontend must render persisted `turn.delta` and `command.*` events as
+  visible timeline entries. Detailed content that reaches `/events` must not be
+  hidden behind only `turn.start` status cards.
 
 ## Design
 
@@ -57,6 +60,10 @@ Event cards display their precise clock time down to seconds. The orchestration
 sidebar shows the run calendar date beside status so history can be scanned
 without repeating full timestamps inside the run list.
 
+Assistant deltas are rendered as separate timeline entries in event sequence
+order. Command events are also rendered in the timeline with expandable command
+details so users can confirm which command/output payload arrived from Hub.
+
 ## Implementation Steps
 
 1. Keep Hub continue semantics in `handleContinueOrchestration`.
@@ -70,6 +77,8 @@ without repeating full timestamps inside the run list.
 7. Add a Bridge-side final-summary fallback when the final turn does not provide
    a clear conclusion.
 8. Render event times in the main timeline and run dates in the sidebar.
+9. Render detailed `turn.delta` and `command.*` events directly in the timeline
+   instead of relying on `turn.start` cards or nested command-only sections.
 
 ## Exit Gates
 
@@ -86,6 +95,8 @@ without repeating full timestamps inside the run list.
   conclusion in the timeline.
 - Timeline events include specific times, and sidebar runs include calendar
   dates.
+- Persisted assistant deltas and command outputs returned from `/events` are
+  visible in the timeline.
 
 ## Reviewer Q&A
 

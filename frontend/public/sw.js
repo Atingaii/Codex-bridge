@@ -1,4 +1,4 @@
-const CACHE_NAME = "codex-bridge-shell-v20260523-time-labels";
+const CACHE_NAME = "codex-bridge-shell-v20260523-visible-events";
 const STATIC_CACHE_PATHS = [
   "/",
   "/icon.svg",

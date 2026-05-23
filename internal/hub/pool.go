@@ -1,0 +1,171 @@
+package hub
+
+import (
+	"errors"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/tencent/codex-bridge/internal/protocol"
+)
+
+var ErrAgentOffline = errors.New("agent offline")
+
+type Pool struct {
+	mu       sync.RWMutex
+	agents   map[string]*BridgeConn
+	browsers map[string]map[*BrowserConn]struct{}
+}
+
+func NewPool() *Pool {
+	return &Pool{
+		agents:   make(map[string]*BridgeConn),
+		browsers: make(map[string]map[*BrowserConn]struct{}),
+	}
+}
+
+func (p *Pool) RegisterAgent(conn *BridgeConn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if old := p.agents[conn.agentID]; old != nil && old != conn {
+		old.Close()
+	}
+	p.agents[conn.agentID] = conn
+}
+
+func (p *Pool) UnregisterAgent(agentID string, conn *BridgeConn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.agents[agentID] == conn {
+		delete(p.agents, agentID)
+	}
+}
+
+func (p *Pool) AgentOnline(agentID string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.agents[agentID] != nil
+}
+
+func (p *Pool) SendToAgent(agentID string, env protocol.Envelope) error {
+	p.mu.RLock()
+	conn := p.agents[agentID]
+	p.mu.RUnlock()
+	if conn == nil {
+		return ErrAgentOffline
+	}
+	return conn.Send(env)
+}
+
+func (p *Pool) AddBrowser(sid string, conn *BrowserConn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	set := p.browsers[sid]
+	if set == nil {
+		set = make(map[*BrowserConn]struct{})
+		p.browsers[sid] = set
+	}
+	set[conn] = struct{}{}
+}
+
+func (p *Pool) RemoveBrowser(sid string, conn *BrowserConn) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	set := p.browsers[sid]
+	if set == nil {
+		return false
+	}
+	delete(set, conn)
+	if len(set) == 0 {
+		delete(p.browsers, sid)
+		return true
+	}
+	return false
+}
+
+func (p *Pool) HasBrowser(sid string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.browsers[sid]) > 0
+}
+
+func (p *Pool) BroadcastToBrowsers(sid string, env protocol.Envelope) {
+	p.mu.RLock()
+	var conns []*BrowserConn
+	for conn := range p.browsers[sid] {
+		conns = append(conns, conn)
+	}
+	p.mu.RUnlock()
+	for _, conn := range conns {
+		_ = conn.Send(env)
+	}
+}
+
+type wsSender struct {
+	ws   *websocket.Conn
+	send chan protocol.Envelope
+	done chan struct{}
+	once sync.Once
+}
+
+func newWSSender(ws *websocket.Conn, queue int) wsSender {
+	if queue <= 0 {
+		queue = 64
+	}
+	return wsSender{
+		ws:   ws,
+		send: make(chan protocol.Envelope, queue),
+		done: make(chan struct{}),
+	}
+}
+
+func (s *wsSender) Send(env protocol.Envelope) error {
+	select {
+	case <-s.done:
+		return websocket.ErrCloseSent
+	case s.send <- env:
+		return nil
+	default:
+		return errors.New("websocket send queue full")
+	}
+}
+
+func (s *wsSender) WriteLoop() {
+	for {
+		select {
+		case <-s.done:
+			return
+		case env := <-s.send:
+			_ = s.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := s.ws.WriteJSON(env); err != nil {
+				s.Close()
+				return
+			}
+		}
+	}
+}
+
+func (s *wsSender) Close() {
+	s.once.Do(func() {
+		close(s.done)
+		_ = s.ws.Close()
+	})
+}
+
+type BridgeConn struct {
+	agentID string
+	wsSender
+}
+
+func NewBridgeConn(agentID string, ws *websocket.Conn, queue int) *BridgeConn {
+	return &BridgeConn{agentID: agentID, wsSender: newWSSender(ws, queue)}
+}
+
+type BrowserConn struct {
+	sid string
+	wsSender
+}
+
+func NewBrowserConn(sid string, ws *websocket.Conn, queue int) *BrowserConn {
+	return &BrowserConn{sid: sid, wsSender: newWSSender(ws, queue)}
+}

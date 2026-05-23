@@ -1,0 +1,246 @@
+<!doctype html>
+<html class="dark" lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Codex Bridge" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>Codex Bridge</title>
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/style.css?v=20260523-saas1" />
+  </head>
+  <body>
+    <main id="app" class="app-shell">
+      <section id="loginView" class="login-screen">
+        <div class="login-shell">
+          <div class="login-brand">
+            <div class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" role="img">
+                <path d="M5 7.5 10 12l-5 4.5M12 17h7" />
+              </svg>
+            </div>
+            <h1>Codex Bridge</h1>
+            <p id="loginSubtitle">Secure connection to your workspace</p>
+          </div>
+          <form id="loginForm" class="login-panel">
+            <p id="loginError" class="error-text" aria-live="polite"></p>
+            <label class="field">
+              <span id="usernameLabel">Username</span>
+              <span class="input-wrap">
+                <svg class="field-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M20 21a8 8 0 0 0-16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" />
+                </svg>
+                <input id="username" name="username" autocomplete="username" placeholder="admin" required />
+              </span>
+            </label>
+            <label class="field">
+              <span id="passwordLabel">Password</span>
+              <span class="input-wrap">
+                <svg class="field-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 11V8a5 5 0 0 1 10 0v3M6 11h12v10H6z" />
+                </svg>
+                <input id="password" name="password" type="password" autocomplete="current-password" placeholder="••••••••" required />
+              </span>
+            </label>
+            <button id="loginSubmitBtn" class="primary-button" type="submit">Connect to Workspace</button>
+          </form>
+          <button id="loginLangBtn" class="ghost-button lang-button" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM3.6 9h16.8M3.6 15h16.8M11.5 3a14 14 0 0 0 0 18M12.5 3a14 14 0 0 1 0 18" /></svg>
+            <span>中文</span>
+          </button>
+        </div>
+      </section>
+
+      <section id="chatView" class="workspace hidden">
+        <aside id="sidebar" class="sidebar">
+          <div class="sidebar-top">
+            <div class="sidebar-brand">
+              <div class="brand-mini" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M5 7.5 10 12l-5 4.5M12 17h7" /></svg>
+              </div>
+              <div>
+                <strong>Codex Bridge</strong>
+                <span id="mobileUser">Workspace</span>
+              </div>
+            </div>
+            <button id="closeNavBtn" class="icon-button mobile-only" type="button" title="Close navigation" aria-label="Close navigation">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+            </button>
+          </div>
+
+          <div class="sidebar-create">
+            <button id="newChatBtn" class="new-chat-button" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+              <strong id="newChatText">New Session</strong>
+            </button>
+          </div>
+
+          <div class="sidebar-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" /></svg>
+            <input id="sessionSearch" autocomplete="off" placeholder="Search sessions..." />
+          </div>
+
+          <div id="conversationLabel" class="list-label">Conversations</div>
+          <nav id="sessionList" class="session-list" aria-label="Conversations"></nav>
+
+          <div class="sidebar-footer">
+            <div class="status-block">
+              <div class="panel-head">
+                <div>
+                  <strong id="agentTitle">Agent</strong>
+                  <span id="agentSubtitle">Reverse tunnel</span>
+                </div>
+                <button id="settingsBtn" class="icon-button" type="button" title="Settings" aria-label="Settings">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5ZM19.4 15a1.7 1.7 0 0 0 .34 1.87l.04.04a2 2 0 1 1-2.83 2.83l-.04-.04A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6l-.1.1a2 2 0 1 1-3.8 0l-.1-.1a1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.87.34l-.04.04a2 2 0 1 1-2.83-2.83l.04-.04A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1l-.1-.1a2 2 0 1 1 0-3.8l.1-.1a1.7 1.7 0 0 0 .6-1 1.7 1.7 0 0 0-.34-1.87l-.04-.04a2 2 0 1 1 2.83-2.83l.04.04A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6l.1-.1a2 2 0 1 1 3.8 0l.1.1a1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.87-.34l.04-.04a2 2 0 1 1 2.83 2.83l-.04.04A1.7 1.7 0 0 0 19.4 9c0 .38.22.74.6 1l.1.1a2 2 0 1 1 0 3.8l-.1.1c-.38.26-.6.62-.6 1Z" /></svg>
+                </button>
+              </div>
+              <div id="agentList" class="agent-list"></div>
+            </div>
+          </div>
+        </aside>
+
+        <section class="chat">
+          <header class="chat-head">
+            <div class="head-left">
+              <button id="openNavBtn" class="icon-button mobile-only" type="button" title="Open navigation" aria-label="Open navigation">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+              </button>
+              <button id="collapseSidebarBtn" class="icon-button desktop-only" type="button" title="Collapse sidebar" aria-label="Collapse sidebar">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18 9 12l6-6M4 4v16" /></svg>
+              </button>
+              <span class="head-divider desktop-only" aria-hidden="true"></span>
+              <div class="title-block">
+                <h1 id="chatTitle">Codex Bridge</h1>
+                <p id="connStatus">Disconnected</p>
+              </div>
+            </div>
+
+            <div class="head-actions">
+              <span id="agentPill" class="agent-pill">
+                <i id="headerAgentDot" class="dot"></i>
+                <span id="headerAgentStatus">Agent Offline</span>
+              </span>
+              <button id="refreshBtn" class="icon-button" type="button" title="Refresh" aria-label="Refresh">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.3 6.4M3 12A9 9 0 0 1 18.3 5.6M18 2v4h-4M6 22v-4h4" /></svg>
+              </button>
+              <button id="settingsTopBtn" class="icon-button desktop-only" type="button" title="Settings" aria-label="Settings">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5ZM19.4 15a1.7 1.7 0 0 0 .34 1.87l.04.04a2 2 0 1 1-2.83 2.83l-.04-.04A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6l-.1.1a2 2 0 1 1-3.8 0l-.1-.1a1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.87.34l-.04.04a2 2 0 1 1-2.83-2.83l.04-.04A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1l-.1-.1a2 2 0 1 1 0-3.8l.1-.1a1.7 1.7 0 0 0 .6-1 1.7 1.7 0 0 0-.34-1.87l-.04-.04a2 2 0 1 1 2.83-2.83l.04.04A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6l.1-.1a2 2 0 1 1 3.8 0l.1.1a1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.87-.34l.04-.04a2 2 0 1 1 2.83 2.83l-.04.04A1.7 1.7 0 0 0 19.4 9c0 .38.22.74.6 1l.1.1a2 2 0 1 1 0 3.8l-.1.1c-.38.26-.6.62-.6 1Z" /></svg>
+              </button>
+              <button id="langBtn" class="ghost-button lang-toggle" type="button">中文</button>
+              <button id="logoutBtn" class="icon-button desktop-only danger-action" type="button" title="Logout" aria-label="Logout">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" /></svg>
+              </button>
+            </div>
+          </header>
+
+          <section class="runtime-banner" aria-label="Runtime status">
+            <div class="runtime-item">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3H4V6ZM4 15h16v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-3ZM7 7h.01M7 17h.01" /></svg>
+              <span id="runtimeSessionLabel">Session</span>
+              <strong id="runtimeSession">-</strong>
+            </div>
+            <div class="runtime-item">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12h-4l-3 8-6-16-3 8H2" /></svg>
+              <span id="runtimeRunnerLabel">Runner</span>
+              <strong id="runtimeRunner">-</strong>
+            </div>
+            <div class="runtime-item">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m18 16 4-4-4-4M6 8l-4 4 4 4M14.5 4l-5 16" /></svg>
+              <span id="runtimeThreadLabel">Thread</span>
+              <strong id="runtimeThread">-</strong>
+            </div>
+          </section>
+
+          <section class="status-strip" aria-label="Runtime metrics">
+            <div class="status-pill">
+              <span id="metricAgentLabel">Agent</span>
+              <strong id="metricAgentValue">0</strong>
+              <small id="metricAgentHint">Bridge status</small>
+            </div>
+            <div class="status-pill">
+              <span id="metricSessionLabel">Sessions</span>
+              <strong id="metricSessionValue">0</strong>
+              <small id="metricSessionHint">Conversation tabs</small>
+            </div>
+            <div class="status-pill">
+              <span id="metricRunnerLabel">Runner</span>
+              <strong id="metricRunnerValue">-</strong>
+              <small id="metricRunnerHint">Current runtime</small>
+            </div>
+          </section>
+
+          <div class="console-main">
+            <div id="messages" class="messages"></div>
+          </div>
+
+          <form id="promptForm" class="composer">
+            <textarea id="prompt" rows="2" placeholder="Ask Codex to inspect, change, or explain your workspace"></textarea>
+            <div class="composer-tools">
+              <div class="composer-left">
+                <button id="attachBtn" class="icon-button subtle-action" type="button" title="Attach" aria-label="Attach">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.82-2.83l8.48-8.48" /></svg>
+                </button>
+                <button id="autoExecuteBtn" class="ghost-button auto-button" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8V4H8M4 12a8 8 0 0 1 13.66-5.66L20 8M12 16v4h4M20 12A8 8 0 0 1 6.34 17.66L4 16" /></svg>
+                  <span id="autoExecuteText">Auto-execute</span>
+                </button>
+              </div>
+              <div class="composer-right">
+                <button id="stopBtn" class="ghost-button stop-button hidden" type="button">Stop</button>
+                <button id="sendBtn" class="send-button" type="submit" title="Send" aria-label="Send">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+                </button>
+              </div>
+            </div>
+          </form>
+        </section>
+
+        <div id="settingsOverlay" class="modal-overlay hidden" role="presentation">
+          <section class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+            <header class="modal-head">
+              <h2 id="settingsTitle">Settings</h2>
+              <button id="closeSettingsBtn" class="icon-button" type="button" title="Close" aria-label="Close">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+              </button>
+            </header>
+            <div class="modal-body">
+              <section class="settings-section">
+                <h3 id="accountLabel">Account</h3>
+                <div class="account-row">
+                  <div class="avatar" id="settingsAvatar">CB</div>
+                  <div>
+                    <strong id="settingsUsername">admin</strong>
+                    <span id="settingsRole">Local Administrator</span>
+                  </div>
+                  <button id="settingsLogoutBtn" class="ghost-button danger-action" type="button">Logout</button>
+                </div>
+              </section>
+              <section class="settings-section">
+                <h3 id="appearanceLabel">Appearance</h3>
+                <div class="setting-row">
+                  <span id="themeLabel">Theme</span>
+                  <div class="segmented-control" role="group" aria-label="Theme">
+                    <button id="themeLightBtn" type="button">Light</button>
+                    <button id="themeDarkBtn" type="button">Dark</button>
+                  </div>
+                </div>
+              </section>
+              <section class="settings-section">
+                <h3 id="agentsRuntimeLabel">Agents & Runtime</h3>
+                <div id="settingsAgentList" class="settings-agent-list"></div>
+              </section>
+            </div>
+            <footer class="modal-actions">
+              <button id="cancelSettingsBtn" class="ghost-button" type="button">Cancel</button>
+              <button id="saveSettingsBtn" class="primary-button compact" type="button">Save Preferences</button>
+            </footer>
+          </section>
+        </div>
+      </section>
+    </main>
+    <script src="/app.js?v=20260523-saas1"></script>
+  </body>
+</html>

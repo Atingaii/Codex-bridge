@@ -1,0 +1,18 @@
+[Unit]
+Description=Codex Bridge Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/codex-bridge
+Environment=APP_ENV=prod
+Environment=BRIDGE_HUB_URL=https://sparkapi.tech
+Environment=OPENAI_API_KEY=
+ExecStart=/usr/local/bin/codex-bridge bridge
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

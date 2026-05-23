@@ -1,0 +1,5 @@
+bin/
+data/
+configs/*.yaml
+!configs/*.yaml.example
+*.zip

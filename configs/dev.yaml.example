@@ -1,0 +1,51 @@
+app:
+  name: codex-bridge
+  env: dev
+  debug: true
+
+gateway:
+  host: 127.0.0.1
+  port: 8088
+  read_timeout: 10s
+  write_timeout: 0s
+
+hub:
+  db_path: data/codex-bridge.db
+  cookie_secure: false
+  heartbeat_interval: 15s
+  bridge_read_timeout: 45s
+  browser_close_session: false
+  browser_close_grace: 1500ms
+  allowed_origins:
+    - https://sparkapi.tech
+  max_bridge_send_queue: 128
+  max_browser_send_queue: 128
+  max_prompt_bytes: 262144
+  max_assistant_message_bytes: 4194304
+
+bridge:
+  hub_url: http://127.0.0.1:8088
+  token: ""
+  token_file: ""
+  name: local-codex
+  machine_id_file: ~/.codex-bridge/machine_id
+  cwd: .
+  runner: echo
+  codex_path: codex
+  model: ""
+  sandbox: workspace-write
+  approval_policy: never
+  reconnect_min: 5s
+  reconnect_max: 30s
+  heartbeat_interval: 15s
+  max_sessions: 8
+
+auth:
+  jwt_secret: dev-only-change-me-32-byte-minimum-secret
+  access_token_ttl: 24h
+  bootstrap_username: admin
+  bootstrap_password: ""
+
+observability:
+  log_level: info
+  log_format: console

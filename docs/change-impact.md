@@ -15,6 +15,7 @@ keeps only the top frequent subset.
 | Add or change auth/cookie behavior | `internal/auth/`, `internal/hub/server.go`, frontend login/logout handling, security docs |
 | Add or change runner behavior | `internal/bridge/runner.go` or `internal/bridge/orchestration.go`, protocol payload if needed, tests, runner notes in docs |
 | Add or change deployment unit | `deploy/`, README deployment section, `docs/dev-workflow.md` |
+| Add or change install/download flow | `internal/hub/server.go`, `configs/*.yaml.example`, README/README.zh-CN, integration tests |
 | Add or change Android wrapper behavior | `android/`, `frontend/capacitor.config.ts`, README Android section, GitHub workflow if release output changes |
 | Add or change embedded static assets | `frontend/` source, run `npm run build`, verify generated `internal/web/static/` |
 

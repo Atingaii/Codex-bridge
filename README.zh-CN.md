@@ -94,7 +94,9 @@ APP_ENV=prod CODEX_BRIDGE_CONFIG_DIR=/opt/codex-bridge/configs codex-bridge hub
 
 ## 给其他用户的接入配置
 
-自建 Hub 管理员需要配置 release 二进制下载地址：
+自建 Hub 默认会让 `/install.sh` 从当前 Hub 的
+`/downloads/codex-bridge-linux-amd64` 下载正在运行的二进制。也可以配置
+release 二进制下载地址：
 
 ```yaml
 hub:

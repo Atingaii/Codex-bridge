@@ -39,6 +39,24 @@ func TestAuthRateLimit(t *testing.T) {
 	login(t, s, map[string]string{"username": "admin", "password": "wrong"}, http.StatusTooManyRequests)
 }
 
+func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
+	t.Parallel()
+
+	s, _ := newAuthTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/install.sh", nil)
+	req.Host = "sparkapi.test"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rr := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("install HTTP status = %d, want %d, body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "https://sparkapi.test/downloads/codex-bridge-linux-amd64") {
+		t.Fatalf("install script did not use hub binary download: %s", body)
+	}
+}
+
 func newAuthTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
 

@@ -92,7 +92,7 @@ func Default() Config {
 			BridgeReadTimeout:        Duration{Duration: 45_000_000_000},
 			BrowserCloseSession:      false,
 			BrowserCloseGrace:        Duration{Duration: 1500_000_000},
-			BridgeDownloadURL:        "https://github.com/Atingaii/Codex-bridge/releases/latest/download/codex-bridge-linux-amd64",
+			BridgeDownloadURL:        "",
 			MaxBridgeSendQueue:       128,
 			MaxBrowserSendQueue:      128,
 			MaxPromptBytes:           256 * 1024,

@@ -89,6 +89,7 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("GET /api/agents", s.withAuth(s.handleAgents))
 	mux.HandleFunc("POST /api/bridge-tokens", s.withAuth(s.handleCreateBridgeToken))
 	mux.HandleFunc("GET /install.sh", s.handleInstallScript)
+	mux.HandleFunc("GET /downloads/codex-bridge-linux-amd64", s.handleBridgeBinaryDownload)
 	mux.HandleFunc("GET /api/sessions", s.withAdmin(s.handleListSessions))
 	mux.HandleFunc("POST /api/sessions", s.withAdmin(s.handleCreateSession))
 	mux.HandleFunc("PATCH /api/sessions/{sid}", s.withAdmin(s.handleUpdateSession))
@@ -469,7 +470,7 @@ func (s *Server) handleCreateBridgeToken(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
-	downloadURL := strings.TrimSpace(s.cfg.Hub.BridgeDownloadURL)
+	downloadURL := s.bridgeDownloadURL(r)
 	if downloadURL == "" {
 		serverutil.WriteError(w, http.StatusInternalServerError, "DOWNLOAD_NOT_CONFIGURED", "bridge download url is not configured")
 		return
@@ -495,6 +496,25 @@ fi
 chmod +x "$BIN"
 echo "installed $BIN"
 `, shellQuote(downloadURL))
+}
+
+func (s *Server) handleBridgeBinaryDownload(w http.ResponseWriter, r *http.Request) {
+	exe, err := os.Executable()
+	if err != nil || strings.TrimSpace(exe) == "" {
+		serverutil.WriteError(w, http.StatusInternalServerError, "BINARY_NOT_FOUND", "failed to locate bridge binary")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="codex-bridge-linux-amd64"`)
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, exe)
+}
+
+func (s *Server) bridgeDownloadURL(r *http.Request) string {
+	if downloadURL := strings.TrimSpace(s.cfg.Hub.BridgeDownloadURL); downloadURL != "" {
+		return downloadURL
+	}
+	return s.publicBaseURL(r) + "/downloads/codex-bridge-linux-amd64"
 }
 
 func (s *Server) publicBaseURL(r *http.Request) string {

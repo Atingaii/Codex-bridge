@@ -20,6 +20,7 @@ should list names and point here for detail.
 | `APP_PORT` | Hub listen port | config `gateway.port` |
 | `HUB_DB_PATH` | SQLite database path | config `hub.db_path` |
 | `HUB_COOKIE_SECURE` | Force secure auth cookie | config `hub.cookie_secure` |
+| `HUB_BRIDGE_DOWNLOAD_URL` | Optional external CLI binary URL for `/install.sh`; empty uses the current Hub binary | config `hub.bridge_download_url` |
 | `JWT_SECRET` | JWT signing secret, 32+ bytes | config `auth.jwt_secret` |
 | `HUB_USERNAME` | Bootstrap/default username | config `auth.bootstrap_username` |
 | `HUB_PASSWORD` | Bootstrap/default password | config `auth.bootstrap_password` |

@@ -18,7 +18,10 @@ hub:
   browser_close_grace: 1500ms
   allowed_origins:
     - https://sparkapi.tech
-  bridge_download_url: https://github.com/Atingaii/Codex-bridge/releases/latest/download/codex-bridge-linux-amd64
+  # Empty means /install.sh downloads the currently running Hub binary from
+  # /downloads/codex-bridge-linux-amd64. Set this to a release asset URL only
+  # when you publish external binaries.
+  bridge_download_url: ""
   max_bridge_send_queue: 128
   max_browser_send_queue: 128
   max_prompt_bytes: 262144

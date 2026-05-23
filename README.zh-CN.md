@@ -1,96 +1,56 @@
 # Codex Bridge 中文接入指南
 
-Codex Bridge 让浏览器远程访问一台私有机器上的 Codex CLI。Hub 是公网入口和 Web UI，Bridge 从私有机器反向连接 Hub，所以 Hub 不需要保存 `OPENAI_API_KEY`，也不需要直连你的工作目录。
+Codex Bridge 让浏览器远程访问私有机器上的 Codex CLI。Hub 是公网入口和 Web UI，Bridge 从私有机器反向连接 Hub，所以 Hub 不需要保存 `OPENAI_API_KEY`，也不需要直连你的工作目录。
 
-## 最少命令
+## 普通用户接入 SparkAPI Hub
 
-Hub 机器执行：
+目标 Hub：`https://sparkapi.tech`
 
-```bash
-git clone <REPO_URL> codex-bridge && cd codex-bridge
-cp configs/dev.yaml.example configs/dev.yaml
-/usr/local/go/bin/go run . user --username admin --password 'change-me'
-TOKEN=$(/usr/local/go/bin/go run . enroll | tail -n1)
-sed -i "s|token:.*|token: ${TOKEN}|" configs/dev.yaml
-/usr/local/go/bin/go run . hub
-```
+1. 打开 `https://sparkapi.tech`，登录或注册账号。
+2. 进入设置，点击“添加 CLI 端”，复制页面生成的两行命令。
+3. 在要接入的终端里执行这两行命令。
 
-Bridge 私有机器执行：
+WSL2/Linux 终端一般就是：
 
 ```bash
-git clone <REPO_URL> codex-bridge && cd codex-bridge
-BRIDGE_HUB_URL='http://HUB_HOST:8088' BRIDGE_TOKEN='<TOKEN>' BRIDGE_RUNNER=codex BRIDGE_CWD='/path/to/workspace' /usr/local/go/bin/go run . bridge
+curl -fsSL https://sparkapi.tech/install.sh | sh
+~/.local/bin/codex-bridge connect '<TOKEN>'
 ```
 
-浏览器打开 `http://HUB_HOST:8088`，用 `admin / change-me` 登录。生产环境请把 `change-me`、`JWT_SECRET` 和 `<TOKEN>` 换成自己的强随机值，并用 HTTPS。
-
-如果 Hub 和 Bridge 是同一台机器，本地试用可以更短：
+`connect` 默认连接 `https://sparkapi.tech`，默认使用当前目录作为工作目录，默认 runner 是 `codex`。如果要显式指定：
 
 ```bash
-cp configs/dev.yaml.example configs/dev.yaml
-/usr/local/go/bin/go run . user --username admin --password 'change-me'
-TOKEN=$(/usr/local/go/bin/go run . enroll | tail -n1)
-BRIDGE_TOKEN="$TOKEN" /usr/local/go/bin/go run . bridge
+~/.local/bin/codex-bridge connect '<TOKEN>' --cwd "$PWD" --name wsl2-main --runner codex
 ```
 
-再开一个终端运行：
+token 由网页生成，默认 24 小时内有效。一个 token 绑定一个 CLI 端；不同用户、不同终端会在页面里显示为不同的 CLI 端，并可在顶部选择切换。
+
+## 普通用户前置条件
+
+在 WSL2/Linux CLI 端需要先准备好 Codex CLI，并在该终端完成 OpenAI/Codex 的本地认证。Hub 不会接触你的 `OPENAI_API_KEY`。
+
+最短接入路径不需要 clone 仓库，也不需要本地编译：
 
 ```bash
-/usr/local/go/bin/go run . hub
+curl -fsSL https://sparkapi.tech/install.sh | sh
+~/.local/bin/codex-bridge connect '<TOKEN>'
 ```
 
-## 角色说明
-
-- Hub：公网 HTTP/WebSocket 服务，内置 Web UI，SQLite 保存会话和输出。
-- Bridge：私有机器上的反向 WebSocket 客户端，持有 Codex/Claude 凭据和工作目录访问权。
-- Browser：只连接 Hub，不接触 `OPENAI_API_KEY`。
-
-## 配置文件
-
-默认读取 `configs/${APP_ENV:-dev}.yaml`。也可以用环境变量覆盖，适合给其他用户做一行启动命令。
-
-Hub 关键配置：
-
-```yaml
-gateway:
-  host: 127.0.0.1
-  port: 8088
-hub:
-  db_path: data/codex-bridge.db
-  cookie_secure: false
-auth:
-  jwt_secret: "replace-with-32-byte-random-secret"
-```
-
-Bridge 关键配置：
-
-```yaml
-bridge:
-  hub_url: http://HUB_HOST:8088
-  token: paste-enroll-token-here
-  runner: codex
-  cwd: /path/to/workspace
-  sandbox: workspace-write
-  approval_policy: never
-```
-
-常用环境变量：
+如果只是验证连接链路，可以用 echo runner：
 
 ```bash
-APP_HOST=127.0.0.1
-APP_PORT=8088
-HUB_DB_PATH=/opt/codex-bridge/data/codex-bridge.db
-JWT_SECRET='32-byte-random-secret'
-BRIDGE_HUB_URL='https://your-domain.example'
-BRIDGE_TOKEN='enroll-token'
-BRIDGE_RUNNER=codex
-BRIDGE_CWD='/path/to/workspace'
-BRIDGE_MODEL='gpt-5.1-codex-max'
-BRIDGE_SANDBOX=workspace-write
-BRIDGE_APPROVAL_POLICY=never
+~/.local/bin/codex-bridge connect '<TOKEN>' --runner echo
 ```
 
-## 生产部署
+## 界面使用
+
+- 登录后在设置里可以看到自己已接入的 CLI 端。
+- 在线/离线状态会显示在 CLI 端列表里。
+- 主对话和编排页顶部都有 CLI 端选择器，可以在多个 WSL2/服务器终端之间切换。
+- 非管理员只能看到自己接入的 CLI 端；管理员可以看到所有 CLI 端。
+- Orchestrate 页面只有点击“新运行”才会开启新的编排会话；在当前任务框继续输入会沿用当前 run，并把历史事件压缩成上下文继续运行。
+
+## 自建 Hub
 
 构建单个 Go 二进制：
 
@@ -99,67 +59,123 @@ BRIDGE_APPROVAL_POLICY=never
 /usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .
 ```
 
-Hub 服务器：
+初始化生产配置：
 
 ```bash
 sudo mkdir -p /opt/codex-bridge/configs /opt/codex-bridge/data
 sudo cp bin/codex-bridge /usr/local/bin/codex-bridge
 sudo cp configs/dev.yaml.example /opt/codex-bridge/configs/prod.yaml
-sudo sed -i 's/cookie_secure: false/cookie_secure: true/' /opt/codex-bridge/configs/prod.yaml
+```
+
+关键配置：
+
+```yaml
+gateway:
+  host: 127.0.0.1
+  port: 8088
+hub:
+  db_path: /opt/codex-bridge/data/codex-bridge.db
+  cookie_secure: true
+  bridge_download_url: https://github.com/Atingaii/Codex-bridge/releases/latest/download/codex-bridge-linux-amd64
+auth:
+  jwt_secret: replace-with-32-byte-random-secret
+  bootstrap_username: admin
+  allow_registration: true
+```
+
+启动 Hub 前创建管理员：
+
+```bash
 APP_ENV=prod CODEX_BRIDGE_CONFIG_DIR=/opt/codex-bridge/configs codex-bridge user --username admin --password 'change-me'
-APP_ENV=prod CODEX_BRIDGE_CONFIG_DIR=/opt/codex-bridge/configs codex-bridge enroll --ttl 24h
+APP_ENV=prod CODEX_BRIDGE_CONFIG_DIR=/opt/codex-bridge/configs codex-bridge hub
 ```
 
-把生成的 enroll token 填到 Bridge 机器的 `BRIDGE_TOKEN`。Hub 推荐放在 Caddy/Nginx 后面做 HTTPS，反代到 `127.0.0.1:8088`。
+建议把 Hub 放在 Caddy/Nginx 后面做 HTTPS，反代到 `127.0.0.1:8088`。生产环境必须替换 `change-me` 和 `auth.jwt_secret`。
 
-Bridge 机器：
+## 给其他用户的接入配置
+
+自建 Hub 管理员需要配置 release 二进制下载地址：
+
+```yaml
+hub:
+  bridge_download_url: https://github.com/Atingaii/Codex-bridge/releases/latest/download/codex-bridge-linux-amd64
+```
+
+也可以用环境变量覆盖：
 
 ```bash
-BRIDGE_HUB_URL='https://your-domain.example' \
-BRIDGE_TOKEN='<TOKEN>' \
-BRIDGE_RUNNER=codex \
-BRIDGE_CWD='/path/to/workspace' \
-codex-bridge bridge
+HUB_BRIDGE_DOWNLOAD_URL='https://your-release-url/codex-bridge-linux-amd64'
+AUTH_ALLOW_REGISTRATION=true
 ```
 
-## 让其他用户接入
-
-给用户只需要三样东西：
-
-1. Hub 地址：`https://your-domain.example`
-2. 登录账号密码：由 Hub 管理员创建
-3. Bridge 接入命令：包含一次性 enroll token 和工作目录
-
-推荐发给用户的最短版本：
+用户在网页里自己注册、自己生成 CLI token，然后执行：
 
 ```bash
-BRIDGE_HUB_URL='https://your-domain.example' BRIDGE_TOKEN='<TOKEN>' BRIDGE_RUNNER=codex BRIDGE_CWD="$PWD" codex-bridge bridge
+curl -fsSL https://your-domain.example/install.sh | sh
+~/.local/bin/codex-bridge connect --hub https://your-domain.example '<TOKEN>'
 ```
 
-如果用户机器还没有二进制，可以给这一版：
+## 旧式手动接入
+
+管理员仍可手动生成未绑定 token，用于本地开发或临时测试：
 
 ```bash
-curl -L -o codex-bridge '<DOWNLOAD_URL>' && chmod +x codex-bridge
-BRIDGE_HUB_URL='https://your-domain.example' BRIDGE_TOKEN='<TOKEN>' BRIDGE_RUNNER=codex BRIDGE_CWD="$PWD" ./codex-bridge bridge
+TOKEN=$(codex-bridge enroll --ttl 24h | tail -n1)
+BRIDGE_HUB_URL='https://your-domain.example' BRIDGE_TOKEN="$TOKEN" BRIDGE_RUNNER=codex BRIDGE_CWD="$PWD" codex-bridge bridge
 ```
 
-如果用户只想先试通链路，把 `BRIDGE_RUNNER=echo`，不需要 Codex 凭据。
+下载的 release 二进制也可以使用旧命令：
 
-## 编排会话行为
+```bash
+BRIDGE_HUB_URL='https://your-domain.example' BRIDGE_TOKEN="$TOKEN" codex-bridge bridge
+```
 
-Orchestrate 页面中，只有点击“新运行”才会开启新的编排会话。若用户在当前编排框继续输入并点击开始，系统会沿用当前 run，把历史事件压缩成上下文后交给 Bridge，让 Codex/Claude 带着前文继续工作。压缩内容保留用户目标、已完成动作、命令结果、错误和未解决事项。
+## 本地开发
+
+```bash
+cp configs/dev.yaml.example configs/dev.yaml
+/usr/local/go/bin/go run . user --username admin --password 'change-me'
+TOKEN=$(/usr/local/go/bin/go run . enroll | tail -n1)
+BRIDGE_TOKEN="$TOKEN" /usr/local/go/bin/go run . bridge
+```
+
+另开一个终端：
+
+```bash
+/usr/local/go/bin/go run . hub
+```
+
+浏览器打开 `http://127.0.0.1:8088`。
+
+## 常用环境变量
+
+```bash
+APP_HOST=127.0.0.1
+APP_PORT=8088
+HUB_DB_PATH=/opt/codex-bridge/data/codex-bridge.db
+HUB_BRIDGE_DOWNLOAD_URL='https://your-release-url/codex-bridge-linux-amd64'
+JWT_SECRET='32-byte-random-secret'
+AUTH_ALLOW_REGISTRATION=true
+BRIDGE_HUB_URL='https://sparkapi.tech'
+BRIDGE_TOKEN='enroll-token'
+BRIDGE_RUNNER=codex
+BRIDGE_CWD='/path/to/workspace'
+BRIDGE_MODEL='gpt-5.1-codex-max'
+BRIDGE_SANDBOX=workspace-write
+BRIDGE_APPROVAL_POLICY=never
+```
 
 ## 排查
 
 ```bash
-curl http://127.0.0.1:8088/health
-BRIDGE_RUNNER=echo BRIDGE_HUB_URL='http://HUB_HOST:8088' BRIDGE_TOKEN='<TOKEN>' codex-bridge bridge
+curl https://sparkapi.tech/health
+~/.local/bin/codex-bridge connect '<TOKEN>' --runner echo
 /usr/local/go/bin/go test ./...
 ```
 
 常见问题：
 
-- 登录失败：确认 `user` 命令创建的用户名密码和当前 `APP_ENV`/配置目录一致。
-- Bridge 不在线：确认 `BRIDGE_HUB_URL` 能从 Bridge 机器访问，token 没过期且未被消费。
-- Cookie 在 HTTPS 下异常：生产环境设置 `hub.cookie_secure: true`，本地 HTTP 设置为 `false`。
-- Codex 无法访问仓库：确认 `BRIDGE_CWD` 指向正确目录，sandbox 策略允许需要的文件访问。
+- Bridge 不在线：确认 token 没过期、没有被其他机器消费，并且终端能访问 Hub。
+- Codex 无法执行：确认 WSL2/服务器里已经安装并登录 Codex CLI。
+- 工作目录不对：用 `--cwd /path/to/workspace` 指定。
+- HTTPS Cookie 异常：生产环境设置 `hub.cookie_secure: true`，本地 HTTP 设置为 `false`。

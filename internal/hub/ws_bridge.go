@@ -43,13 +43,18 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 		_ = ws.WriteJSON(protocol.MustEnvelope(protocol.TypeError, "", protocol.ErrorPayload{Message: "invalid register payload"}))
 		return
 	}
-	if err := s.store.ConsumeEnrollToken(r.Context(), token, reg.MachineID); err != nil {
+	enroll, err := s.store.ConsumeEnrollTokenInfo(r.Context(), token, reg.MachineID)
+	if err != nil {
 		slog.Warn("[hub] bridge enroll rejected", "machine_id", reg.MachineID, "error", err)
 		_ = ws.WriteJSON(protocol.MustEnvelope(protocol.TypeError, "", protocol.ErrorPayload{Message: "invalid enroll token"}))
 		return
 	}
 	prevAgent, prevErr := s.store.AgentByMachineID(r.Context(), reg.MachineID)
-	agent, err := s.store.UpsertAgent(r.Context(), reg.Name, reg.MachineID, reg.Hostname, reg.Instance, reg.WorkingDirs)
+	name := reg.Name
+	if strings.TrimSpace(name) == "" && strings.TrimSpace(enroll.Label) != "" {
+		name = enroll.Label
+	}
+	agent, err := s.store.UpsertAgentForUser(r.Context(), enroll.UserID, name, reg.MachineID, reg.Hostname, reg.Instance, reg.WorkingDirs)
 	if err != nil {
 		slog.Error("[hub] bridge agent upsert failed", "error", err)
 		_ = ws.WriteJSON(protocol.MustEnvelope(protocol.TypeError, "", protocol.ErrorPayload{Message: "failed to register agent"}))

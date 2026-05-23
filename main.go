@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/tencent/codex-bridge/internal/bridge"
@@ -48,6 +50,8 @@ func run(args []string) error {
 		return runHub(cfg)
 	case "bridge":
 		return bridge.NewClient(cfg, Version).Run(context.Background())
+	case "connect":
+		return runConnect(cfg, args)
 	case "user":
 		return runUser(cfg, args)
 	case "enroll":
@@ -59,6 +63,103 @@ func run(args []string) error {
 		printUsage()
 		return fmt.Errorf("unknown command %q", cmd)
 	}
+}
+
+func runConnect(cfg *config.Config, args []string) error {
+	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	hubURL := fs.String("hub", cfg.Bridge.HubURL, "hub URL")
+	name := fs.String("name", "", "CLI endpoint name")
+	cwd := fs.String("cwd", "", "workspace directory")
+	runner := fs.String("runner", "codex", "runner: codex, claude, echo")
+	machineIDFile := fs.String("machine-id-file", cfg.Bridge.MachineIDFile, "machine id file")
+	sandbox := fs.String("sandbox", cfg.Bridge.Sandbox, "runner sandbox")
+	approvalPolicy := fs.String("approval-policy", cfg.Bridge.ApprovalPolicy, "runner approval policy")
+	token, flagArgs, err := normalizeConnectArgs(args)
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		if token != "" || fs.NArg() > 1 {
+			return errors.New("connect requires exactly one enroll token")
+		}
+		token = fs.Arg(0)
+	}
+	if token == "" {
+		return errors.New("connect requires exactly one enroll token")
+	}
+	if *hubURL == "" {
+		*hubURL = "https://sparkapi.tech"
+	}
+	if *cwd == "" {
+		if wd, err := os.Getwd(); err == nil {
+			*cwd = wd
+		} else {
+			*cwd = "."
+		}
+	}
+	if *name == "" {
+		host, _ := os.Hostname()
+		base := filepath.Base(*cwd)
+		if host != "" && base != "" && base != "." && base != string(filepath.Separator) {
+			*name = host + "-" + base
+		} else if host != "" {
+			*name = host
+		} else {
+			*name = "codex-cli"
+		}
+	}
+	cfg.Bridge.HubURL = *hubURL
+	cfg.Bridge.Token = token
+	cfg.Bridge.TokenFile = ""
+	cfg.Bridge.Name = *name
+	cfg.Bridge.CWD = *cwd
+	cfg.Bridge.Runner = *runner
+	cfg.Bridge.MachineIDFile = *machineIDFile
+	cfg.Bridge.Sandbox = *sandbox
+	cfg.Bridge.ApprovalPolicy = *approvalPolicy
+	return bridge.NewClient(cfg, Version).Run(context.Background())
+}
+
+func normalizeConnectArgs(args []string) (string, []string, error) {
+	token := ""
+	flagArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "" {
+			continue
+		}
+		if arg == "--" {
+			if len(args)-i != 2 || token != "" {
+				return "", nil, errors.New("connect requires exactly one enroll token")
+			}
+			token = args[i+1]
+			break
+		}
+		if strings.HasPrefix(arg, "-") {
+			flagArgs = append(flagArgs, arg)
+			if strings.Contains(arg, "=") || isBoolConnectFlag(arg) {
+				continue
+			}
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("flag needs an argument: %s", arg)
+			}
+			i++
+			flagArgs = append(flagArgs, args[i])
+			continue
+		}
+		if token != "" {
+			return "", nil, errors.New("connect requires exactly one enroll token")
+		}
+		token = arg
+	}
+	return token, flagArgs, nil
+}
+
+func isBoolConnectFlag(arg string) bool {
+	return arg == "-h" || arg == "--help"
 }
 
 func runHub(cfg *config.Config) error {
@@ -139,6 +240,7 @@ func printUsage() {
 Usage:
   codex-bridge hub                 Run the public Hub server
   codex-bridge bridge              Run the reverse-connecting Bridge
+  codex-bridge connect <token>     Connect this CLI endpoint to https://sparkapi.tech
   codex-bridge user --username u --password p
   codex-bridge enroll [--ttl 24h]
 

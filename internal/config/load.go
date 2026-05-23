@@ -63,6 +63,9 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("HUB_COOKIE_SECURE"); v != "" {
 		cfg.Hub.CookieSecure = parseBool(v, cfg.Hub.CookieSecure)
 	}
+	if v := os.Getenv("HUB_BRIDGE_DOWNLOAD_URL"); v != "" {
+		cfg.Hub.BridgeDownloadURL = v
+	}
 	if v := os.Getenv("JWT_SECRET"); v != "" {
 		cfg.Auth.JWTSecret = v
 	}
@@ -71,6 +74,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("HUB_PASSWORD"); v != "" {
 		cfg.Auth.BootstrapPassword = v
+	}
+	if v := os.Getenv("AUTH_ALLOW_REGISTRATION"); v != "" {
+		cfg.Auth.AllowRegistration = parseBool(v, cfg.Auth.AllowRegistration)
 	}
 	if v := os.Getenv("BRIDGE_HUB_URL"); v != "" {
 		cfg.Bridge.HubURL = v

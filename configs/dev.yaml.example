@@ -18,6 +18,7 @@ hub:
   browser_close_grace: 1500ms
   allowed_origins:
     - https://sparkapi.tech
+  bridge_download_url: https://github.com/Atingaii/Codex-bridge/releases/latest/download/codex-bridge-linux-amd64
   max_bridge_send_queue: 128
   max_browser_send_queue: 128
   max_prompt_bytes: 262144
@@ -49,6 +50,7 @@ auth:
   access_token_ttl: 24h
   bootstrap_username: admin
   bootstrap_password: ""
+  allow_registration: true
 
 observability:
   log_level: info

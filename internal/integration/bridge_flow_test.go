@@ -592,11 +592,12 @@ func TestNonAdminCanOnlyUseOrchestrationAPIs(t *testing.T) {
 	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.UpsertUser(ctx, "worker", "secret"); err != nil {
+	worker, err := st.UpsertUser(ctx, "worker", "secret")
+	if err != nil {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
+	if err := st.CreateEnrollTokenForUser(ctx, cfg.Bridge.Token, worker.ID, "worker-cli", &expires); err != nil {
 		t.Fatal(err)
 	}
 
@@ -620,6 +621,10 @@ func TestNonAdminCanOnlyUseOrchestrationAPIs(t *testing.T) {
 		t.Fatalf("worker login user = %#v", user)
 	}
 	getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/sessions", http.StatusForbidden)
+	workerAgents := getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/agents", http.StatusOK)["agents"].([]any)
+	if len(workerAgents) != 1 || workerAgents[0].(map[string]any)["userId"] != worker.ID {
+		t.Fatalf("worker agents = %#v", workerAgents)
+	}
 	getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/orchestrations", http.StatusOK)
 	orcBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/orchestrations", map[string]any{
 		"mode":     "collaboration",
@@ -635,6 +640,76 @@ func TestNonAdminCanOnlyUseOrchestrationAPIs(t *testing.T) {
 	}
 	if start.RunID != run["id"] || start.Prompt != "worker can use orchestration" {
 		t.Fatalf("orchestration start = %#v, run = %#v", start, run)
+	}
+}
+
+func TestRegistrationBridgeTokenBindsAgentToUser(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tmp := t.TempDir()
+	port := freePort(t)
+	cfg := config.Default()
+	cfg.Gateway.Host = "127.0.0.1"
+	cfg.Gateway.Port = port
+	cfg.Gateway.ReadTimeout.Duration = 5 * time.Second
+	cfg.Hub.DBPath = tmp + "/bridge.db"
+	cfg.Hub.BridgeDownloadURL = "https://example.com/codex-bridge-linux-amd64"
+	cfg.Auth.JWTSecret = "integration-test-secret-32-byte-minimum"
+	cfg.Auth.AccessTokenTTL.Duration = time.Hour
+	cfg.Bridge.HubURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	st, err := store.Open(cfg.Hub.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
+	go func() { _ = srv.Run(ctx) }()
+	waitHTTP(t, cfg.Bridge.HubURL+"/health")
+
+	workerClient := httpClient(t)
+	registerBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/register", map[string]string{
+		"username": "bridge-user",
+		"password": "long-secret",
+	}, http.StatusCreated)
+	worker := registerBody["user"].(map[string]any)
+	tokenBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/bridge-tokens", map[string]string{
+		"label": "wsl2-cli",
+	}, http.StatusCreated)
+	token := tokenBody["token"].(string)
+	commands := tokenBody["commands"].([]any)
+	if len(commands) != 2 || !strings.Contains(commands[0].(string), "/install.sh") || !strings.Contains(commands[1].(string), "codex-bridge connect") {
+		t.Fatalf("commands = %#v", commands)
+	}
+
+	fakeBridge := dialFakeBridge(t, cfg.Bridge.HubURL, token)
+	defer fakeBridge.Close()
+	waitAgents(t, workerClient, cfg.Bridge.HubURL)
+	agentsBody := getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/agents", http.StatusOK)
+	agents := agentsBody["agents"].([]any)
+	if len(agents) != 1 {
+		t.Fatalf("worker agents = %#v", agents)
+	}
+	agent := agents[0].(map[string]any)
+	if agent["userId"] != worker["id"] || agent["online"] != true {
+		t.Fatalf("bound agent = %#v, user = %#v", agent, worker)
+	}
+
+	adminClient := httpClient(t)
+	postJSON(t, adminClient, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
+	adminAgents := getJSON(t, adminClient, cfg.Bridge.HubURL+"/api/agents", http.StatusOK)["agents"].([]any)
+	if len(adminAgents) != 1 {
+		t.Fatalf("admin agents = %#v", adminAgents)
 	}
 }
 

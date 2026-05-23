@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -63,9 +64,12 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 		})
 	})
 	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.HandleFunc("POST /api/register", s.handleRegister)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/me", s.withAuth(s.handleMe))
 	mux.HandleFunc("GET /api/agents", s.withAuth(s.handleAgents))
+	mux.HandleFunc("POST /api/bridge-tokens", s.withAuth(s.handleCreateBridgeToken))
+	mux.HandleFunc("GET /install.sh", s.handleInstallScript)
 	mux.HandleFunc("GET /api/sessions", s.withAdmin(s.handleListSessions))
 	mux.HandleFunc("POST /api/sessions", s.withAdmin(s.handleCreateSession))
 	mux.HandleFunc("PATCH /api/sessions/{sid}", s.withAdmin(s.handleUpdateSession))
@@ -193,6 +197,60 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"user": user, "expiresAt": expires.Unix()})
 }
 
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Auth.AllowRegistration {
+		serverutil.WriteError(w, http.StatusForbidden, "REGISTRATION_DISABLED", "registration is disabled")
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid registration payload")
+		return
+	}
+	username := strings.TrimSpace(req.Username)
+	password := req.Password
+	if username == "" || password == "" {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "username and password are required")
+		return
+	}
+	if len([]rune(username)) > 64 || strings.ContainsAny(username, "\r\n\t") {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_USERNAME", "username is invalid")
+		return
+	}
+	if len(password) < 8 {
+		serverutil.WriteError(w, http.StatusBadRequest, "WEAK_PASSWORD", "password must be at least 8 characters")
+		return
+	}
+	user, err := s.store.CreateUser(r.Context(), username, password)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			serverutil.WriteError(w, http.StatusConflict, "USERNAME_EXISTS", "username already exists")
+			return
+		}
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to register user")
+		return
+	}
+	token, expires, err := s.signer.Sign(user.ID)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "TOKEN_ERROR", "failed to issue token")
+		return
+	}
+	user.IsAdmin = s.isAdminUser(user)
+	http.SetCookie(w, &http.Cookie{
+		Name:     accessCookieName,
+		Value:    token,
+		Path:     "/",
+		Expires:  expires,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.secureCookie(r),
+	})
+	serverutil.WriteJSON(w, http.StatusCreated, map[string]any{"user": user, "expiresAt": expires.Unix()})
+}
+
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     accessCookieName,
@@ -224,8 +282,12 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, uid string) {
 }
 
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request, uid string) {
-	agents, err := s.store.ListAgents(r.Context())
+	agents, err := s.visibleAgents(r.Context(), uid)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			serverutil.WriteError(w, http.StatusUnauthorized, "INVALID_TOKEN", "invalid token")
+			return
+		}
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to list agents")
 		return
 	}
@@ -233,6 +295,116 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request, uid string
 		agents[i].Online = s.pool.AgentOnline(agents[i].ID)
 	}
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"agents": agents})
+}
+
+func (s *Server) handleCreateBridgeToken(w http.ResponseWriter, r *http.Request, uid string) {
+	var req struct {
+		Label string `json:"label"`
+		TTL   string `json:"ttl"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid bridge token payload")
+		return
+	}
+	ttl := 24 * time.Hour
+	if strings.TrimSpace(req.TTL) != "" {
+		parsed, err := time.ParseDuration(strings.TrimSpace(req.TTL))
+		if err != nil || parsed <= 0 || parsed > 7*24*time.Hour {
+			serverutil.WriteError(w, http.StatusBadRequest, "BAD_TTL", "ttl must be between 1s and 168h")
+			return
+		}
+		ttl = parsed
+	}
+	label := strings.TrimSpace(req.Label)
+	if label == "" {
+		label = "CLI endpoint"
+	}
+	if runes := []rune(label); len(runes) > 80 {
+		label = string(runes[:80])
+	}
+	value := store.NewToken("enr")
+	expiresAt := time.Now().Add(ttl)
+	if err := s.store.CreateEnrollTokenForUser(r.Context(), value, uid, label, &expiresAt); err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to create bridge token")
+		return
+	}
+	hubURL := s.publicBaseURL(r)
+	installCommand := fmt.Sprintf("curl -fsSL %s/install.sh | sh", hubURL)
+	connectCommand := fmt.Sprintf("~/.local/bin/codex-bridge connect %s", shellQuote(value))
+	if hubURL != strings.TrimRight(s.cfg.Bridge.HubURL, "/") {
+		connectCommand = fmt.Sprintf("~/.local/bin/codex-bridge connect --hub %s %s", shellQuote(hubURL), shellQuote(value))
+	}
+	serverutil.WriteJSON(w, http.StatusCreated, map[string]any{
+		"token":          value,
+		"expiresAt":      expiresAt.Unix(),
+		"label":          label,
+		"hubUrl":         hubURL,
+		"downloadUrl":    strings.TrimSpace(s.cfg.Hub.BridgeDownloadURL),
+		"installCommand": installCommand,
+		"connectCommand": connectCommand,
+		"commands":       []string{installCommand, connectCommand},
+	})
+}
+
+func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
+	downloadURL := strings.TrimSpace(s.cfg.Hub.BridgeDownloadURL)
+	if downloadURL == "" {
+		serverutil.WriteError(w, http.StatusInternalServerError, "DOWNLOAD_NOT_CONFIGURED", "bridge download url is not configured")
+		return
+	}
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = fmt.Fprintf(w, `#!/bin/sh
+set -eu
+
+BIN_DIR="${HOME}/.local/bin"
+BIN="${BIN_DIR}/codex-bridge"
+DOWNLOAD_URL=%s
+
+mkdir -p "$BIN_DIR"
+if command -v curl >/dev/null 2>&1; then
+  curl -fL --retry 3 -o "$BIN" "$DOWNLOAD_URL"
+elif command -v wget >/dev/null 2>&1; then
+  wget -O "$BIN" "$DOWNLOAD_URL"
+else
+  echo "curl or wget is required" >&2
+  exit 1
+fi
+chmod +x "$BIN"
+echo "installed $BIN"
+`, shellQuote(downloadURL))
+}
+
+func (s *Server) publicBaseURL(r *http.Request) string {
+	proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if proto == "" {
+		proto = strings.TrimSpace(r.URL.Scheme)
+	}
+	if proto == "" {
+		if r.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	if i := strings.Index(proto, ","); i >= 0 {
+		proto = strings.TrimSpace(proto[:i])
+	}
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = r.Host
+	}
+	if i := strings.Index(host, ","); i >= 0 {
+		host = strings.TrimSpace(host[:i])
+	}
+	return strings.TrimRight(proto+"://"+host, "/")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request, uid string) {
@@ -254,7 +426,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request, uid
 		return
 	}
 	if req.AgentID == "" {
-		agents, err := s.store.ListAgents(r.Context())
+		agents, err := s.visibleAgents(r.Context(), uid)
 		if err != nil || len(agents) == 0 {
 			serverutil.WriteError(w, http.StatusConflict, "NO_AGENT", "no bridge agent has enrolled yet")
 			return
@@ -269,7 +441,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request, uid
 			req.AgentID = agents[0].ID
 		}
 	}
-	if _, err := s.store.AgentByID(r.Context(), req.AgentID); err != nil {
+	if _, err := s.visibleAgentByID(r.Context(), uid, req.AgentID); err != nil {
 		serverutil.WriteError(w, http.StatusBadRequest, "BAD_AGENT", "agent not found")
 		return
 	}
@@ -393,6 +565,34 @@ func (s *Server) isAdminUser(user store.User) bool {
 		admin = "admin"
 	}
 	return strings.EqualFold(user.Username, admin)
+}
+
+func (s *Server) visibleAgents(ctx context.Context, uid string) ([]store.Agent, error) {
+	user, err := s.store.UserByID(ctx, uid)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	if s.isAdminUser(user) {
+		return s.store.ListAgents(ctx)
+	}
+	return s.store.ListAgentsForUser(ctx, uid, false)
+}
+
+func (s *Server) visibleAgentByID(ctx context.Context, uid, agentID string) (store.Agent, error) {
+	user, err := s.store.UserByID(ctx, uid)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return store.Agent{}, store.ErrNotFound
+		}
+		return store.Agent{}, err
+	}
+	if s.isAdminUser(user) {
+		return s.store.AgentByID(ctx, agentID)
+	}
+	return s.store.AgentByIDForUser(ctx, agentID, uid, false)
 }
 
 func (s *Server) userIDFromRequest(r *http.Request) (string, error) {

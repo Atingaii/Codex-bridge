@@ -25,6 +25,7 @@ type UserAccount = {
 
 type Agent = {
   id: string;
+  userId?: string;
   name: string;
   machineId: string;
   hostname: string;
@@ -115,6 +116,17 @@ type Envelope = {
   payload?: any;
 };
 
+type BridgeTokenResponse = {
+  token: string;
+  expiresAt: number;
+  label: string;
+  hubUrl: string;
+  downloadUrl: string;
+  installCommand: string;
+  connectCommand: string;
+  commands: string[];
+};
+
 type ImageAttachment = {
   id: string;
   name: string;
@@ -139,6 +151,11 @@ const uiText = {
     secureConnection: 'Secure connection to your workspace',
     username: 'Username',
     password: 'Password',
+    createAccount: 'Create account',
+    signIn: 'Sign in',
+    haveAccount: 'Already have an account?',
+    needAccount: 'Need an account?',
+    passwordHint: 'At least 8 characters',
     connectToWorkspace: 'Connect to Workspace',
     connectionFailed: 'Connection failed.',
     disconnected: 'Disconnected',
@@ -210,6 +227,15 @@ const uiText = {
     dark: 'Dark',
     agentsRuntime: 'Agents & Runtime',
     noAgentsEnrolled: 'No agents enrolled',
+    cliEndpoint: 'CLI Endpoint',
+    selectEndpoint: 'Select endpoint',
+    addCliEndpoint: 'Add CLI Endpoint',
+    endpointLabel: 'Endpoint label',
+    generating: 'Generating',
+    installCommand: 'Install',
+    connectCommand: 'Connect',
+    expiresIn24h: 'Expires in 24h',
+    failedCreateBridgeToken: 'Failed to create CLI token',
     online: 'online',
     offline: 'offline',
     cancel: 'Cancel',
@@ -244,6 +270,11 @@ const uiText = {
     secureConnection: '安全连接到你的工作区',
     username: '用户名',
     password: '密码',
+    createAccount: '创建账户',
+    signIn: '登录',
+    haveAccount: '已有账户？',
+    needAccount: '需要账户？',
+    passwordHint: '至少 8 个字符',
     connectToWorkspace: '连接工作区',
     connectionFailed: '连接失败。',
     disconnected: '已断开',
@@ -315,6 +346,15 @@ const uiText = {
     dark: '深色',
     agentsRuntime: 'Agent 与运行时',
     noAgentsEnrolled: '暂无已注册 Agent',
+    cliEndpoint: 'CLI 端',
+    selectEndpoint: '选择 CLI 端',
+    addCliEndpoint: '添加 CLI 端',
+    endpointLabel: '端名称',
+    generating: '生成中',
+    installCommand: '安装',
+    connectCommand: '连接',
+    expiresIn24h: '24 小时内有效',
+    failedCreateBridgeToken: '创建 CLI token 失败',
     online: '在线',
     offline: '离线',
     cancel: '取消',
@@ -579,6 +619,45 @@ function waitForOpen(ws: WebSocket, timeout = 3000) {
   });
 }
 
+function AgentSelector({
+  agents,
+  selectedAgentId,
+  onSelect,
+  t,
+  className,
+  disabled,
+}: {
+  agents: Agent[];
+  selectedAgentId: string;
+  onSelect: (agentId: string) => void;
+  t: UIText;
+  className?: string;
+  disabled?: boolean;
+}) {
+  const selected = agents.find((agent) => agent.id === selectedAgentId) || agents.find((agent) => agent.online) || agents[0];
+  return (
+    <label className={cn("relative inline-flex min-w-[180px] items-center", className)}>
+      <Server className="absolute left-2.5 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+      <select
+        value={selected?.id || ''}
+        onChange={(event) => onSelect(event.target.value)}
+        disabled={disabled || agents.length === 0}
+        className="h-8 w-full rounded-lg border border-border bg-secondary/50 py-1 pl-8 pr-7 text-xs text-foreground shadow-sm outline-none focus:ring-1 focus:ring-ring disabled:opacity-60"
+        aria-label={t.selectEndpoint}
+        title={selected?.name || t.noBridgeConnected}
+      >
+        {agents.length ? agents.map((agent) => (
+          <option key={agent.id} value={agent.id}>
+            {agent.online ? '● ' : '○ '}{agent.name || agent.hostname || agent.machineId}
+          </option>
+        )) : (
+          <option value="">{t.noBridgeConnected}</option>
+        )}
+      </select>
+    </label>
+  );
+}
+
 function startWSHeartbeat(ws: WebSocket, sid?: string) {
   const send = () => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -588,6 +667,14 @@ function startWSHeartbeat(ws: WebSocket, sid?: string) {
   send();
   const id = window.setInterval(send, 15000);
   return () => window.clearInterval(id);
+}
+
+function defaultAgentID(agents: Agent[]) {
+  return (agents.find((agent) => agent.online) || agents[0])?.id || '';
+}
+
+function agentStatusClass(agent?: Agent) {
+  return cn("h-2 w-2 rounded-full", agent?.online ? "bg-emerald-500" : "bg-muted-foreground");
 }
 
 function escapeBasic(value: string) {
@@ -829,6 +916,7 @@ function LoginScreen({
 }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [registering, setRegistering] = useState(false);
 
   const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -836,7 +924,7 @@ function LoginScreen({
     setError('');
     const form = new FormData(e.currentTarget);
     try {
-      const data = await api<{ user: UserAccount }>('/api/login', {
+      const data = await api<{ user: UserAccount }>(registering ? '/api/register' : '/api/login', {
         method: 'POST',
         body: JSON.stringify({
           username: String(form.get('username') || ''),
@@ -862,6 +950,29 @@ function LoginScreen({
           <p className="text-sm text-muted-foreground">{t.secureConnection}</p>
         </div>
 
+        <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1">
+          <button
+            type="button"
+            className={cn("h-8 rounded-md text-xs font-medium", !registering ? "bg-background shadow-sm" : "text-muted-foreground")}
+            onClick={() => {
+              setRegistering(false);
+              setError('');
+            }}
+          >
+            {t.signIn}
+          </button>
+          <button
+            type="button"
+            className={cn("h-8 rounded-md text-xs font-medium", registering ? "bg-background shadow-sm" : "text-muted-foreground")}
+            onClick={() => {
+              setRegistering(true);
+              setError('');
+            }}
+          >
+            {t.createAccount}
+          </button>
+        </div>
+
         <form onSubmit={handleLogin} className="flex flex-col gap-4">
           <div className="space-y-4">
             <div className="space-y-2">
@@ -879,7 +990,7 @@ function LoginScreen({
               </label>
               <div className="relative">
                 <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                <Input id="password" name="password" type="password" placeholder="••••••••" className="pl-9" autoComplete="current-password" required />
+                <Input id="password" name="password" type="password" placeholder={registering ? t.passwordHint : '••••••••'} className="pl-9" autoComplete={registering ? 'new-password' : 'current-password'} minLength={registering ? 8 : undefined} required />
               </div>
             </div>
           </div>
@@ -892,7 +1003,7 @@ function LoginScreen({
           )}
 
           <Button type="submit" className="w-full" disabled={loading}>
-            {loading ? <RefreshCw className="h-4 w-4 animate-spin" /> : t.connectToWorkspace}
+            {loading ? <RefreshCw className="h-4 w-4 animate-spin" /> : registering ? t.createAccount : t.connectToWorkspace}
           </Button>
         </form>
 
@@ -934,6 +1045,7 @@ function Workspace({
   const [inputVal, setInputVal] = useState('');
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState(() => localStorage.getItem('codexBridge.selectedAgentId') || '');
   const [sessions, setSessions] = useState<Session[]>([]);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [runner, setRunner] = useState('-');
@@ -956,12 +1068,19 @@ function Workspace({
   const assistantTextRef = useRef('');
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) || null;
-  const onlineAgent = agents.find((agent) => agent.online);
+  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || agents.find((agent) => agent.online) || agents[0];
+  const onlineAgent = selectedAgent?.online ? selectedAgent : agents.find((agent) => agent.online);
   const isGenerating = Boolean(activeRun && activeStatus(activeRun.status));
 
   const loadAgents = useCallback(async () => {
     const data = await api<{ agents: Agent[] }>('/api/agents');
-    setAgents(data.agents || []);
+    const nextAgents = data.agents || [];
+    setAgents(nextAgents);
+    setSelectedAgentId((current) => {
+      const next = nextAgents.some((agent) => agent.id === current) ? current : defaultAgentID(nextAgents);
+      if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
+      return next;
+    });
   }, []);
 
   const loadSessions = useCallback(async () => {
@@ -1184,7 +1303,7 @@ function Workspace({
   }, [activeSessionId, items, scrollMessagesToBottom]);
 
   const createSession = async (title = t.newSession) => {
-    const agent = agents.find((item) => item.online) || agents[0];
+    const agent = selectedAgent || agents.find((item) => item.online) || agents[0];
     if (!agent) {
       appendSystem(t.noBridgeConnected);
       return;
@@ -1322,6 +1441,11 @@ function Workspace({
     onLogout();
   };
 
+  const selectAgent = (agentId: string) => {
+    setSelectedAgentId(agentId);
+    if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
+  };
+
   const groupedSessions = useMemo(() => {
     const query = search.trim().toLowerCase();
     return sessions
@@ -1406,10 +1530,13 @@ function Workspace({
           </div>
 
           <div className="flex items-center gap-3 shrink-0">
-            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-secondary/50 border border-border/50 text-xs text-muted-foreground">
-              <div className={cn("h-2 w-2 rounded-full", onlineAgent ? "bg-emerald-500" : "bg-muted-foreground")} />
-              {onlineAgent ? t.agentOnline : t.agentOffline}
-            </div>
+            <AgentSelector
+              agents={agents}
+              selectedAgentId={selectedAgent?.id || selectedAgentId}
+              onSelect={selectAgent}
+              t={t}
+              className="hidden sm:inline-flex"
+            />
 
             <Button variant="ghost" size="icon" className="text-muted-foreground rounded-full h-8 w-8" onClick={() => refreshAll().catch((err) => appendSystem(err.message))}>
               <RefreshCw className="h-4 w-4" />
@@ -1433,6 +1560,9 @@ function Workspace({
           <div className="flex items-center gap-1.5">
             <Command className="h-3.5 w-3.5" />
             <span>{t.status}: {connectionStatus}</span>
+          </div>
+          <div className="flex sm:hidden items-center gap-1.5">
+            <span>{t.cliEndpoint}: {selectedAgent?.name || t.noBridgeConnected}</span>
           </div>
         </div>
 
@@ -1573,6 +1703,9 @@ function Workspace({
         <SettingsModal
           user={user}
           agents={agents}
+          selectedAgentId={selectedAgent?.id || selectedAgentId}
+          onSelectAgent={selectAgent}
+          onAgentsChanged={loadAgents}
           onLogout={logout}
           isDarkMode={isDarkMode}
           setIsDarkMode={setIsDarkMode}
@@ -1631,6 +1764,7 @@ function OrchestrationWorkspace({
   navigate: (path: string) => void;
 }) {
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState(() => localStorage.getItem('codexBridge.selectedAgentId') || '');
   const [runs, setRuns] = useState<OrchestrationRun[]>([]);
   const [activeRunId, setActiveRunId] = useState('');
   const [events, setEvents] = useState<OrchestrationEvent[]>([]);
@@ -1652,8 +1786,8 @@ function OrchestrationWorkspace({
 
   const activeRun = runs.find((run) => run.id === activeRunId) || null;
   const visibleEvents = useMemo(() => mergeOrchestrationToolEvents(events.filter((event) => event.runId === activeRunId)), [events, activeRunId]);
-  const onlineAgent = agents.find((agent) => agent.online);
-  const selectedAgent = onlineAgent || agents[0];
+  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || agents.find((agent) => agent.online) || agents[0];
+  const onlineAgent = selectedAgent?.online ? selectedAgent : agents.find((agent) => agent.online);
   const isRunning = activeOrchestrationStatus(activeRun?.status);
   const continuingRun = Boolean(activeRun && !isRunning);
   const canCancelRun = canCancelOrchestrationStatus(activeRun?.status);
@@ -1663,7 +1797,13 @@ function OrchestrationWorkspace({
 
   const loadAgents = useCallback(async () => {
     const data = await api<{ agents: Agent[] }>('/api/agents');
-    setAgents(data.agents || []);
+    const nextAgents = data.agents || [];
+    setAgents(nextAgents);
+    setSelectedAgentId((current) => {
+      const next = nextAgents.some((agent) => agent.id === current) ? current : defaultAgentID(nextAgents);
+      if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
+      return next;
+    });
   }, []);
 
   const loadRuns = useCallback(async () => {
@@ -1857,6 +1997,11 @@ function OrchestrationWorkspace({
     onLogout();
   };
 
+  const selectAgent = (agentId: string) => {
+    setSelectedAgentId(agentId);
+    if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
+  };
+
   const startDraftRun = () => {
     closeWS();
     activeRunIdRef.current = '';
@@ -1935,10 +2080,14 @@ function OrchestrationWorkspace({
             <span className="text-sm font-medium truncate">{activeRun?.title || t.cliOrchestration}</span>
           </div>
           <div className="flex items-center gap-2">
-            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-secondary/50 border border-border/50 text-xs text-muted-foreground">
-              <div className={cn("h-2 w-2 rounded-full", onlineAgent ? "bg-emerald-500" : "bg-muted-foreground")} />
-              {onlineAgent ? t.agentOnline : t.agentOffline}
-            </div>
+            <AgentSelector
+              agents={agents}
+              selectedAgentId={selectedAgent?.id || selectedAgentId}
+              onSelect={selectAgent}
+              t={t}
+              className="hidden sm:inline-flex"
+              disabled={creating || isRunning}
+            />
             <Button variant="ghost" size="icon" className="text-muted-foreground rounded-full h-8 w-8" onClick={() => Promise.all([loadAgents(), loadRuns()]).catch((err) => setError(err.message))}>
               <RefreshCw className="h-4 w-4" />
             </Button>
@@ -1957,6 +2106,9 @@ function OrchestrationWorkspace({
           <div className="flex items-center gap-1.5">
             <Command className="h-3.5 w-3.5" />
             <span>{t.stream}: {connectionStatus}</span>
+          </div>
+          <div className="flex sm:hidden items-center gap-1.5">
+            <span>{t.cliEndpoint}: {selectedAgent?.name || t.noBridgeConnected}</span>
           </div>
         </div>
 
@@ -1996,6 +2148,18 @@ function OrchestrationWorkspace({
                   placeholder={t.taskPlaceholder}
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
+                  disabled={creating || isRunning}
+                />
+              </label>
+
+              <label className="space-y-2 block">
+                <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.cliEndpoint}</span>
+                <AgentSelector
+                  agents={agents}
+                  selectedAgentId={selectedAgent?.id || selectedAgentId}
+                  onSelect={selectAgent}
+                  t={t}
+                  className="w-full sm:hidden"
                   disabled={creating || isRunning}
                 />
               </label>
@@ -2082,6 +2246,9 @@ function OrchestrationWorkspace({
         <SettingsModal
           user={user}
           agents={agents}
+          selectedAgentId={selectedAgent?.id || selectedAgentId}
+          onSelectAgent={selectAgent}
+          onAgentsChanged={loadAgents}
           onLogout={logout}
           isDarkMode={isDarkMode}
           setIsDarkMode={setIsDarkMode}
@@ -2469,6 +2636,9 @@ function ToolItem({ tool, t }: { tool: ToolEvent, t: UIText }) {
 function SettingsModal({
   user,
   agents,
+  selectedAgentId,
+  onSelectAgent,
+  onAgentsChanged,
   onLogout,
   isDarkMode,
   setIsDarkMode,
@@ -2479,6 +2649,9 @@ function SettingsModal({
 }: {
   user: UserAccount;
   agents: Agent[];
+  selectedAgentId: string;
+  onSelectAgent: (agentId: string) => void;
+  onAgentsChanged: () => Promise<void>;
   onLogout: () => void;
   isDarkMode: boolean;
   setIsDarkMode: (value: boolean) => void;
@@ -2487,6 +2660,33 @@ function SettingsModal({
   t: UIText;
   close: () => void;
 }) {
+  const [label, setLabel] = useState('');
+  const [tokenInfo, setTokenInfo] = useState<BridgeTokenResponse | null>(null);
+  const [tokenError, setTokenError] = useState('');
+  const [generatingToken, setGeneratingToken] = useState(false);
+  const [copiedCommand, setCopiedCommand] = useState('');
+  const generateToken = async () => {
+    setGeneratingToken(true);
+    setTokenError('');
+    try {
+      const data = await api<BridgeTokenResponse>('/api/bridge-tokens', {
+        method: 'POST',
+        body: JSON.stringify({ label: label.trim() || 'wsl2-cli' }),
+      });
+      setTokenInfo(data);
+      await onAgentsChanged();
+    } catch (err) {
+      setTokenError(err instanceof Error ? err.message : t.failedCreateBridgeToken);
+    } finally {
+      setGeneratingToken(false);
+    }
+  };
+  const copyCommand = async (value: string, key: string) => {
+    await copyText(value);
+    setCopiedCommand(key);
+    window.setTimeout(() => setCopiedCommand(''), 1200);
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in">
       <div className="bg-card w-full max-w-md rounded-xl border border-border shadow-lg flex flex-col overflow-hidden animate-in zoom-in-95">
@@ -2561,22 +2761,73 @@ function SettingsModal({
             <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.agentsRuntime}</h3>
             <div className="space-y-2">
               {agents.length ? agents.map((agent) => (
-                <div key={agent.id} className="flex items-center justify-between p-2.5 rounded-lg border border-border bg-muted/20">
+                <button
+                  key={agent.id}
+                  type="button"
+                  onClick={() => onSelectAgent(agent.id)}
+                  className={cn(
+                    "w-full flex items-center justify-between gap-2 p-2.5 rounded-lg border bg-muted/20 text-left transition-colors",
+                    selectedAgentId === agent.id ? "border-primary/40 bg-primary/5" : "border-border hover:bg-muted/40"
+                  )}
+                >
                   <div className="flex flex-col min-w-0">
                     <span className="text-sm font-medium truncate">{agent.name}</span>
                     <span className="text-xs text-muted-foreground font-mono mt-0.5 truncate">{agent.hostname || agent.machineId}</span>
                   </div>
-                  <div className={cn(
-                    "px-2 py-0.5 rounded-full text-[10px] font-medium border uppercase tracking-wide",
-                    agent.online
-                      ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20 dark:text-emerald-400"
-                      : "bg-muted text-muted-foreground border-border"
-                  )}>
-                    {agent.online ? t.online : t.offline}
+                  <div className="flex items-center gap-2 shrink-0">
+                    {selectedAgentId === agent.id && <Check className="h-3.5 w-3.5 text-primary" />}
+                    <div className={cn(
+                      "px-2 py-0.5 rounded-full text-[10px] font-medium border uppercase tracking-wide",
+                      agent.online
+                        ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20 dark:text-emerald-400"
+                        : "bg-muted text-muted-foreground border-border"
+                    )}>
+                      {agent.online ? t.online : t.offline}
+                    </div>
                   </div>
-                </div>
+                </button>
               )) : (
                 <div className="text-sm text-muted-foreground p-2.5 rounded-lg border border-border bg-muted/20">{t.noAgentsEnrolled}</div>
+              )}
+            </div>
+            <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium">{t.addCliEndpoint}</div>
+                  <div className="text-xs text-muted-foreground">{t.expiresIn24h}</div>
+                </div>
+                <Button size="sm" className="h-8 gap-1.5 shrink-0" onClick={() => generateToken()} disabled={generatingToken}>
+                  {generatingToken ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                  {generatingToken ? t.generating : t.add}
+                </Button>
+              </div>
+              <label className="space-y-1.5 block">
+                <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.endpointLabel}</span>
+                <Input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="wsl2-cli" className="h-8 bg-background/60" />
+              </label>
+              {tokenError && (
+                <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{tokenError}</span>
+                </div>
+              )}
+              {tokenInfo && (
+                <div className="space-y-2">
+                  <CommandBlock
+                    label={t.installCommand}
+                    value={tokenInfo.installCommand}
+                    copied={copiedCommand === 'install'}
+                    onCopy={() => copyCommand(tokenInfo.installCommand, 'install').catch(() => undefined)}
+                    t={t}
+                  />
+                  <CommandBlock
+                    label={t.connectCommand}
+                    value={tokenInfo.connectCommand}
+                    copied={copiedCommand === 'connect'}
+                    onCopy={() => copyCommand(tokenInfo.connectCommand, 'connect').catch(() => undefined)}
+                    t={t}
+                  />
+                </div>
               )}
             </div>
           </div>
@@ -2587,6 +2838,33 @@ function SettingsModal({
           <Button size="sm" onClick={close}>{t.savePreferences}</Button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function CommandBlock({
+  label,
+  value,
+  copied,
+  onCopy,
+  t,
+}: {
+  label: string;
+  value: string;
+  copied: boolean;
+  onCopy: () => void;
+  t: UIText;
+}) {
+  return (
+    <div className="overflow-hidden rounded-md border border-border bg-background/70">
+      <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-2 py-1.5">
+        <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="text-xs font-medium">{label}</span>
+        <Button variant="ghost" size="icon" type="button" className="ml-auto h-6 w-6 rounded-md text-muted-foreground" onClick={onCopy} aria-label={t.copy} title={copied ? t.copied : t.copy}>
+          {copied ? <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> : <Clipboard className="h-3.5 w-3.5" />}
+        </Button>
+      </div>
+      <pre className="max-h-28 overflow-x-auto whitespace-pre-wrap p-2 font-mono text-[11px] leading-relaxed text-muted-foreground elegant-scrollbar">{value}</pre>
     </div>
   );
 }

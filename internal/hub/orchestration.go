@@ -65,7 +65,7 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	agentID, err := s.resolveAgentID(r.Context(), normalized.AgentID)
+	agentID, err := s.resolveAgentID(r.Context(), uid, normalized.AgentID)
 	if err != nil {
 		status := http.StatusConflict
 		if errors.Is(err, store.ErrNotFound) {
@@ -143,7 +143,7 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	agentID, err := s.resolveAgentID(r.Context(), normalized.AgentID)
+	agentID, err := s.resolveAgentID(r.Context(), uid, normalized.AgentID)
 	if err != nil {
 		status := http.StatusConflict
 		if errors.Is(err, store.ErrNotFound) {
@@ -587,14 +587,14 @@ func orchestrationFileMeta(files []protocol.AttachmentPayload) []store.Orchestra
 	return metas
 }
 
-func (s *Server) resolveAgentID(ctx context.Context, requested string) (string, error) {
+func (s *Server) resolveAgentID(ctx context.Context, uid, requested string) (string, error) {
 	if requested != "" {
-		if _, err := s.store.AgentByID(ctx, requested); err != nil {
+		if _, err := s.visibleAgentByID(ctx, uid, requested); err != nil {
 			return "", store.ErrNotFound
 		}
 		return requested, nil
 	}
-	agents, err := s.store.ListAgents(ctx)
+	agents, err := s.visibleAgents(ctx, uid)
 	if err != nil {
 		return "", err
 	}

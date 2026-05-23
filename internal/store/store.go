@@ -64,15 +64,19 @@ func (s *Store) Migrate(ctx context.Context) error {
 		);`,
 		`CREATE TABLE IF NOT EXISTS agents (
 			id TEXT PRIMARY KEY,
+			user_id TEXT,
 			name TEXT NOT NULL,
 			machine_id TEXT UNIQUE NOT NULL,
 			hostname TEXT,
 			instance TEXT,
 			working_dirs_json TEXT,
-			last_seen_at INTEGER NOT NULL
+			last_seen_at INTEGER NOT NULL,
+			FOREIGN KEY (user_id) REFERENCES users(id)
 		);`,
+		`ALTER TABLE agents ADD COLUMN user_id TEXT;`,
 		`ALTER TABLE agents ADD COLUMN instance TEXT;`,
 		`ALTER TABLE agents ADD COLUMN working_dirs_json TEXT;`,
+		`CREATE INDEX IF NOT EXISTS idx_agents_user_seen ON agents(user_id, last_seen_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
 			agent_id TEXT NOT NULL,
@@ -113,9 +117,16 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_runs_session_status ON runs(session_id, status);`,
 		`CREATE TABLE IF NOT EXISTS enroll_tokens (
 			token TEXT PRIMARY KEY,
+			user_id TEXT,
+			label TEXT,
 			used_by_machine TEXT,
-			expires_at INTEGER
+			expires_at INTEGER,
+			created_at INTEGER,
+			FOREIGN KEY (user_id) REFERENCES users(id)
 		);`,
+		`ALTER TABLE enroll_tokens ADD COLUMN user_id TEXT;`,
+		`ALTER TABLE enroll_tokens ADD COLUMN label TEXT;`,
+		`ALTER TABLE enroll_tokens ADD COLUMN created_at INTEGER;`,
 		`CREATE TABLE IF NOT EXISTS orchestration_runs (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
@@ -234,6 +245,30 @@ func (s *Store) UpsertUser(ctx context.Context, username, password string) (User
 	return s.UserByUsername(ctx, username)
 }
 
+func (s *Store) CreateUser(ctx context.Context, username, password string) (User, error) {
+	username = strings.TrimSpace(username)
+	if username == "" || password == "" {
+		return User{}, errors.New("username and password are required")
+	}
+	now := time.Now().Unix()
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), passwordHashCost)
+	if err != nil {
+		return User{}, err
+	}
+	user := User{ID: NewID("usr"), Username: username, CreatedAt: now}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO users (id, username, password_hash, created_at)
+		VALUES (?, ?, ?, ?)
+	`, user.ID, username, string(hash), now)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return User{}, ErrConflict
+		}
+		return User{}, err
+	}
+	return user, nil
+}
+
 func (s *Store) UserByUsername(ctx context.Context, username string) (User, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, username, created_at FROM users WHERE username = ?`, username)
 	var u User
@@ -276,6 +311,7 @@ func (s *Store) AuthenticateUser(ctx context.Context, username, password string)
 
 type Agent struct {
 	ID          string   `json:"id"`
+	UserID      string   `json:"userId,omitempty"`
 	Name        string   `json:"name"`
 	MachineID   string   `json:"machineId"`
 	Hostname    string   `json:"hostname"`
@@ -286,6 +322,10 @@ type Agent struct {
 }
 
 func (s *Store) UpsertAgent(ctx context.Context, name, machineID, hostname, instance string, workingDirs []string) (Agent, error) {
+	return s.UpsertAgentForUser(ctx, "", name, machineID, hostname, instance, workingDirs)
+}
+
+func (s *Store) UpsertAgentForUser(ctx context.Context, userID, name, machineID, hostname, instance string, workingDirs []string) (Agent, error) {
 	if machineID == "" {
 		return Agent{}, errors.New("machine id is required")
 	}
@@ -299,15 +339,16 @@ func (s *Store) UpsertAgent(ctx context.Context, name, machineID, hostname, inst
 	now := time.Now().Unix()
 	id := NewID("agt")
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO agents (id, name, machine_id, hostname, instance, working_dirs_json, last_seen_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO agents (id, user_id, name, machine_id, hostname, instance, working_dirs_json, last_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(machine_id) DO UPDATE SET
+			user_id = COALESCE(excluded.user_id, agents.user_id),
 			name = excluded.name,
 			hostname = excluded.hostname,
 			instance = excluded.instance,
 			working_dirs_json = excluded.working_dirs_json,
 			last_seen_at = excluded.last_seen_at
-	`, id, name, machineID, hostname, instance, string(workingDirsJSON), now)
+	`, id, nullString(userID), name, machineID, hostname, instance, string(workingDirsJSON), now)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -315,19 +356,39 @@ func (s *Store) UpsertAgent(ctx context.Context, name, machineID, hostname, inst
 }
 
 func (s *Store) AgentByMachineID(ctx context.Context, machineID string) (Agent, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, machine_id, COALESCE(hostname,''), COALESCE(instance,''), COALESCE(working_dirs_json,'[]'), last_seen_at FROM agents WHERE machine_id = ?`, machineID)
+	row := s.db.QueryRowContext(ctx, agentSelectSQL()+` WHERE machine_id = ?`, machineID)
 	return scanAgent(row)
 }
 
 func (s *Store) AgentByID(ctx context.Context, id string) (Agent, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, machine_id, COALESCE(hostname,''), COALESCE(instance,''), COALESCE(working_dirs_json,'[]'), last_seen_at FROM agents WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, agentSelectSQL()+` WHERE id = ?`, id)
 	return scanAgent(row)
+}
+
+func (s *Store) AgentByIDForUser(ctx context.Context, id, userID string, includeUnowned bool) (Agent, error) {
+	if id == "" {
+		return Agent{}, ErrNotFound
+	}
+	if userID == "" {
+		return s.AgentByID(ctx, id)
+	}
+	where := ` WHERE id = ? AND user_id = ?`
+	args := []any{id, userID}
+	if includeUnowned {
+		where = ` WHERE id = ? AND (user_id = ? OR user_id IS NULL OR user_id = '')`
+	}
+	row := s.db.QueryRowContext(ctx, agentSelectSQL()+where, args...)
+	return scanAgent(row)
+}
+
+func agentSelectSQL() string {
+	return `SELECT id, COALESCE(user_id,''), name, machine_id, COALESCE(hostname,''), COALESCE(instance,''), COALESCE(working_dirs_json,'[]'), last_seen_at FROM agents`
 }
 
 func scanAgent(row interface{ Scan(dest ...any) error }) (Agent, error) {
 	var a Agent
 	var workingDirsJSON string
-	if err := row.Scan(&a.ID, &a.Name, &a.MachineID, &a.Hostname, &a.Instance, &workingDirsJSON, &a.LastSeenAt); err != nil {
+	if err := row.Scan(&a.ID, &a.UserID, &a.Name, &a.MachineID, &a.Hostname, &a.Instance, &workingDirsJSON, &a.LastSeenAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Agent{}, ErrNotFound
 		}
@@ -346,10 +407,29 @@ func (s *Store) TouchAgent(ctx context.Context, id string) error {
 }
 
 func (s *Store) ListAgents(ctx context.Context) ([]Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, machine_id, COALESCE(hostname,''), COALESCE(instance,''), COALESCE(working_dirs_json,'[]'), last_seen_at FROM agents ORDER BY last_seen_at DESC`)
+	rows, err := s.db.QueryContext(ctx, agentSelectSQL()+` ORDER BY last_seen_at DESC`)
 	if err != nil {
 		return nil, err
 	}
+	return scanAgents(rows)
+}
+
+func (s *Store) ListAgentsForUser(ctx context.Context, userID string, includeUnowned bool) ([]Agent, error) {
+	if userID == "" {
+		return s.ListAgents(ctx)
+	}
+	where := ` WHERE user_id = ?`
+	if includeUnowned {
+		where = ` WHERE user_id = ? OR user_id IS NULL OR user_id = ''`
+	}
+	rows, err := s.db.QueryContext(ctx, agentSelectSQL()+where+` ORDER BY last_seen_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	return scanAgents(rows)
+}
+
+func scanAgents(rows *sql.Rows) ([]Agent, error) {
 	defer rows.Close()
 	var out []Agent
 	for rows.Next() {
@@ -1003,46 +1083,79 @@ func isDuplicateColumn(err error) bool {
 	return strings.Contains(msg, "duplicate column")
 }
 
+type EnrollToken struct {
+	Token         string `json:"token"`
+	UserID        string `json:"userId,omitempty"`
+	Label         string `json:"label,omitempty"`
+	UsedByMachine string `json:"usedByMachine,omitempty"`
+	ExpiresAt     int64  `json:"expiresAt,omitempty"`
+	CreatedAt     int64  `json:"createdAt,omitempty"`
+}
+
 func (s *Store) CreateEnrollToken(ctx context.Context, token string, expiresAt *time.Time) error {
+	return s.CreateEnrollTokenForUser(ctx, token, "", "", expiresAt)
+}
+
+func (s *Store) CreateEnrollTokenForUser(ctx context.Context, token, userID, label string, expiresAt *time.Time) error {
+	token = CleanToken(token)
+	if token == "" {
+		return errors.New("token is required")
+	}
 	var expires sql.NullInt64
 	if expiresAt != nil {
 		expires = sql.NullInt64{Int64: expiresAt.Unix(), Valid: true}
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO enroll_tokens (token, expires_at) VALUES (?, ?)`, token, expires)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO enroll_tokens (token, user_id, label, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, token, nullString(userID), nullString(strings.TrimSpace(label)), expires, time.Now().Unix())
 	return err
 }
 
 func (s *Store) ConsumeEnrollToken(ctx context.Context, token, machineID string) error {
+	_, err := s.ConsumeEnrollTokenInfo(ctx, token, machineID)
+	return err
+}
+
+func (s *Store) ConsumeEnrollTokenInfo(ctx context.Context, token, machineID string) (EnrollToken, error) {
 	token = CleanToken(token)
 	if token == "" {
-		return ErrUnauthorized
+		return EnrollToken{}, ErrUnauthorized
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return EnrollToken{}, err
 	}
 	defer tx.Rollback()
 
-	row := tx.QueryRowContext(ctx, `SELECT used_by_machine, expires_at FROM enroll_tokens WHERE token = ?`, token)
+	row := tx.QueryRowContext(ctx, `SELECT COALESCE(user_id,''), COALESCE(label,''), used_by_machine, expires_at, COALESCE(created_at,0) FROM enroll_tokens WHERE token = ?`, token)
+	info := EnrollToken{Token: token}
 	var used sql.NullString
 	var expires sql.NullInt64
-	if err := row.Scan(&used, &expires); err != nil {
+	if err := row.Scan(&info.UserID, &info.Label, &used, &expires, &info.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrUnauthorized
+			return EnrollToken{}, ErrUnauthorized
 		}
-		return err
+		return EnrollToken{}, err
 	}
 	if expires.Valid && expires.Int64 < time.Now().Unix() {
-		return ErrTokenExpired
+		return EnrollToken{}, ErrTokenExpired
+	}
+	if expires.Valid {
+		info.ExpiresAt = expires.Int64
+	}
+	if used.Valid {
+		info.UsedByMachine = used.String
 	}
 	if used.Valid && used.String != "" && used.String != machineID {
-		return ErrTokenConsumed
+		return EnrollToken{}, ErrTokenConsumed
 	}
 	if !used.Valid || used.String == "" {
 		if _, err := tx.ExecContext(ctx, `UPDATE enroll_tokens SET used_by_machine = ? WHERE token = ?`, machineID, token); err != nil {
-			return err
+			return EnrollToken{}, err
 		}
+		info.UsedByMachine = machineID
 	}
-	return tx.Commit()
+	return info, tx.Commit()
 }

@@ -30,6 +30,7 @@ type HubConfig struct {
 	BrowserCloseSession      bool     `yaml:"browser_close_session"`
 	BrowserCloseGrace        Duration `yaml:"browser_close_grace"`
 	AllowedOrigins           []string `yaml:"allowed_origins"`
+	BridgeDownloadURL        string   `yaml:"bridge_download_url"`
 	MaxBridgeSendQueue       int      `yaml:"max_bridge_send_queue"`
 	MaxBrowserSendQueue      int      `yaml:"max_browser_send_queue"`
 	MaxPromptBytes           int64    `yaml:"max_prompt_bytes"`
@@ -63,6 +64,7 @@ type AuthConfig struct {
 	AccessTokenTTL    Duration `yaml:"access_token_ttl"`
 	BootstrapUsername string   `yaml:"bootstrap_username"`
 	BootstrapPassword string   `yaml:"bootstrap_password"`
+	AllowRegistration bool     `yaml:"allow_registration"`
 }
 
 type ObservabilityConfig struct {
@@ -90,6 +92,7 @@ func Default() Config {
 			BridgeReadTimeout:        Duration{Duration: 45_000_000_000},
 			BrowserCloseSession:      false,
 			BrowserCloseGrace:        Duration{Duration: 1500_000_000},
+			BridgeDownloadURL:        "https://github.com/Atingaii/Codex-bridge/releases/latest/download/codex-bridge-linux-amd64",
 			MaxBridgeSendQueue:       128,
 			MaxBrowserSendQueue:      128,
 			MaxPromptBytes:           256 * 1024,
@@ -97,7 +100,7 @@ func Default() Config {
 			MaxAssistantMessageBytes: 4 * 1024 * 1024,
 		},
 		Bridge: BridgeConfig{
-			HubURL:            "http://127.0.0.1:8088",
+			HubURL:            "https://sparkapi.tech",
 			Name:              "local-codex",
 			MachineIDFile:     "~/.codex-bridge/machine_id",
 			CWD:               ".",
@@ -117,6 +120,7 @@ func Default() Config {
 			JWTSecret:         "dev-only-change-me-32-byte-minimum-secret",
 			AccessTokenTTL:    Duration{Duration: 24 * 60 * 60 * 1_000_000_000},
 			BootstrapUsername: "admin",
+			AllowRegistration: true,
 		},
 		Observability: ObservabilityConfig{
 			LogLevel:  "info",

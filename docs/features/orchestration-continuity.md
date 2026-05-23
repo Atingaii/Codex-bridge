@@ -53,9 +53,9 @@ is not shown as an authoritative processing state because the persisted
 `queued` marker only records submission, not whether later turns are already
 running.
 
-Event cards display their precise event time. The orchestration sidebar shows
-the run date beside status so history can be scanned without repeating full
-timestamps inside the run list.
+Event cards display their precise clock time down to seconds. The orchestration
+sidebar shows the run calendar date beside status so history can be scanned
+without repeating full timestamps inside the run list.
 
 ## Implementation Steps
 
@@ -84,7 +84,8 @@ timestamps inside the run list.
   prose.
 - A final turn that only emits process text still produces a clear final
   conclusion in the timeline.
-- Timeline events include specific times, and sidebar runs include dates.
+- Timeline events include specific times, and sidebar runs include calendar
+  dates.
 
 ## Reviewer Q&A
 

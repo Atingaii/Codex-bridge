@@ -463,8 +463,9 @@ function titleFromPrompt(prompt: string, t: UIText = uiText.en) {
 }
 
 function formatTime(timestamp?: number) {
-  const date = timestamp ? new Date(timestamp * 1000) : new Date();
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (!timestamp) return '';
+  const date = new Date(timestamp * 1000);
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function sessionDateLabel(timestamp: number, t: UIText = uiText.en) {
@@ -473,10 +474,10 @@ function sessionDateLabel(timestamp: number, t: UIText = uiText.en) {
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const target = new Date(date.getFullYear(), date.getMonth(), date.getDate());
   const diffDays = Math.round((today.getTime() - target.getTime()) / 86400000);
-  if (diffDays <= 0) return t.today;
-  if (diffDays === 1) return t.yesterday;
-  if (diffDays <= 7) return t.previous7Days;
-  return t.older;
+  const calendarDate = date.toLocaleDateString([], { year: 'numeric', month: '2-digit', day: '2-digit' });
+  if (diffDays <= 0) return `${t.today} · ${calendarDate}`;
+  if (diffDays === 1) return `${t.yesterday} · ${calendarDate}`;
+  return calendarDate;
 }
 
 function initials(username: string) {

@@ -25,6 +25,12 @@ context in the same `runID`.
   same `runID` to the Bridge with `Resume=true`.
 - The frontend must preserve the selected run and call
   `/api/orchestrations/{runID}/prompts` for follow-ups.
+- While a follow-up is active, the frontend must surface `turn.start`,
+  `command.start`, and run status events instead of leaving the user message as
+  the only visible item.
+- The orchestration WebSocket is the live path. If it disconnects while the
+  selected run is active, the frontend reconnects and reloads persisted events
+  so progress that arrived during the gap is rendered.
 
 ## Design
 
@@ -39,6 +45,11 @@ The selected orchestration run id is stored in browser local storage so a page
 refresh or returning to `/orchestrate` restores the same run when it still
 exists. The New Run button clears that selection intentionally.
 
+`turn.start` is rendered as a lightweight status item. User message event status
+is not shown as an authoritative processing state because the persisted
+`queued` marker only records submission, not whether later turns are already
+running.
+
 ## Implementation Steps
 
 1. Keep Hub continue semantics in `handleContinueOrchestration`.
@@ -47,6 +58,8 @@ exists. The New Run button clears that selection intentionally.
 3. Make the frontend restore the last selected run from local storage.
 4. Make the frontend update mode/cwd/max-turn controls from the selected run.
 5. Preserve the explicit New Run action as the only way to clear run selection.
+6. Show turn/run progress events and reconnect orchestration WebSockets while a
+   selected run remains active.
 
 ## Exit Gates
 
@@ -55,6 +68,10 @@ exists. The New Run button clears that selection intentionally.
 - The compacted context contains prior user messages and recent agent output.
 - Refreshing `/orchestrate` reselects the last selected run when it exists.
 - Explicit New Run still creates a new run.
+- If a live WebSocket drops during an active run, the page reconnects and
+  reloads events.
+- A newly started follow-up shows the active turn before the CLI returns final
+  prose.
 
 ## Reviewer Q&A
 

@@ -711,7 +711,7 @@ function appendDelta(current: string, delta: string) {
 }
 
 function shouldShowOrchestrationStatus(event: OrchestrationEvent) {
-  if (event.kind === 'run.start' || event.kind === 'turn.start') return false;
+  if (event.kind === 'run.start' || event.kind === 'turn.start') return true;
   if (event.kind === 'run.end') {
     const content = stringsTrim(event.content);
     return Boolean(event.error || (content && content !== 'Orchestration completed.'));
@@ -954,7 +954,7 @@ function MessageContent({ content }: { content: string }) {
     const chunks = String(content || '').split(/```([\s\S]*?)```/g);
     return chunks.map((chunk, index) => {
       if (index % 2 === 1) {
-        return `<pre class="my-3 overflow-x-auto rounded-lg border border-border bg-[#0f172a] p-3 text-xs leading-relaxed text-slate-200"><code>${escapeBasic(chunk.replace(/^\w+\n/, ''))}</code></pre>`;
+        return `<pre class="my-3 overflow-x-auto rounded-lg border border-border bg-muted/70 p-3 text-xs leading-relaxed text-foreground dark:bg-[#0f172a] dark:text-slate-200"><code>${escapeBasic(chunk.replace(/^\w+\n/, ''))}</code></pre>`;
       }
       return renderInlineMarkdown(chunk).replace(/\n/g, '<br />');
     }).join('');
@@ -2011,6 +2011,8 @@ function OrchestrationWorkspace({
   const [creating, setCreating] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState(t.disconnected);
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptsRef = useRef(0);
   const activeRunIdRef = useRef('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const taskInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -2061,12 +2063,20 @@ function OrchestrationWorkspace({
     return incoming;
   }, []);
 
+  const clearReconnect = useCallback(() => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, []);
+
   const closeWS = useCallback(() => {
+    clearReconnect();
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
     }
-  }, []);
+  }, [clearReconnect]);
 
   const applyEvent = useCallback((event: OrchestrationEvent) => {
     setEvents((current) => {
@@ -2090,8 +2100,10 @@ function OrchestrationWorkspace({
     let stopHeartbeat: (() => void) | null = null;
     ws.onopen = () => {
       if (wsRef.current !== ws) return;
+      reconnectAttemptsRef.current = 0;
       setConnectionStatus(t.connected);
       stopHeartbeat = startWSHeartbeat(ws);
+      void loadRunEvents(runId).catch(() => undefined);
     };
     ws.onmessage = (message) => {
       if (wsRef.current !== ws) return;
@@ -2112,9 +2124,25 @@ function OrchestrationWorkspace({
     };
     ws.onclose = () => {
       stopHeartbeat?.();
-      if (wsRef.current === ws) setConnectionStatus(t.disconnected);
+      if (wsRef.current !== ws) return;
+      setConnectionStatus(t.disconnected);
+      if (activeRunIdRef.current !== runId) return;
+      const delay = Math.min(10000, 1000 * Math.max(1, reconnectAttemptsRef.current + 1));
+      reconnectAttemptsRef.current += 1;
+      clearReconnect();
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        if (activeRunIdRef.current !== runId) return;
+        void Promise.all([loadRun(runId), loadRunEvents(runId)])
+          .then(([run]) => {
+            if (activeRunIdRef.current === runId && activeOrchestrationStatus(run.status)) connectRun(runId);
+          })
+          .catch(() => {
+            if (activeRunIdRef.current === runId) connectRun(runId);
+          });
+      }, delay);
     };
-  }, [applyEvent, closeWS, startWSHeartbeat, t.connected, t.connecting, t.connectionError, t.disconnected]);
+  }, [applyEvent, clearReconnect, closeWS, loadRun, loadRunEvents, startWSHeartbeat, t.connected, t.connecting, t.connectionError, t.disconnected]);
 
   const selectRun = useCallback(async (runId: string) => {
     activeRunIdRef.current = runId;
@@ -2520,13 +2548,14 @@ function OrchestrationWorkspace({
 
 function OrchestrationEventItem({ item, t }: { item: OrchestrationVisibleEvent, t: UIText }) {
   const isUser = item.kind === 'user.message';
-  const isRun = item.kind.startsWith('run.') || item.type === 'status';
+  const isRun = item.kind.startsWith('run.');
   const avatar = orchestrationAvatar(item, t);
   const title = isUser ? t.user : isRun ? t.run : `${item.role || t.agent}${item.cli ? ` · ${avatar.label}` : ''}`;
   const content = item.error || item.content || '';
+  const status = isUser ? '' : item.status;
 
   return (
-    <div className="flex gap-4 w-full max-w-4xl mx-auto py-2 group">
+    <div className="flex gap-4 w-full max-w-4xl mx-auto rounded-lg border border-border/70 bg-card/50 px-3 py-3 group">
       <div className="shrink-0 mt-1">
         <div className={cn(
           "h-6 w-6 rounded-md flex items-center justify-center shadow-sm border",
@@ -2539,7 +2568,7 @@ function OrchestrationEventItem({ item, t }: { item: OrchestrationVisibleEvent, 
         <div className="flex items-center gap-2 mb-1 min-h-6">
           <span className="text-xs font-semibold capitalize">{title}</span>
           <span className="text-[10px] text-muted-foreground">{item.kind}</span>
-          {item.status && <span className="ml-auto rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">{item.status}</span>}
+          {status && <span className="ml-auto rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
         </div>
         {content ? (
           <MessageContent content={content} />
@@ -2656,15 +2685,15 @@ function CommandEvent({ event, t }: { event: OrchestrationEvent, t: UIText }) {
   const isActive = event.kind === 'command.start' || status === 'running' || status === 'in_progress';
 
   return (
-    <div className="rounded-md border border-border bg-muted/20 overflow-hidden">
-      <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-2 text-[11px]">
+    <div className="rounded-md border border-border bg-background/70 overflow-hidden">
+      <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-3 py-2 text-[11px]">
         {isActive ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" /> : <Terminal className="h-3.5 w-3.5 text-muted-foreground" />}
         <code className="min-w-0 flex-1 truncate text-foreground">{command || t.commandEvent}</code>
         {status && <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
         {typeof exitCode === 'number' && <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">exit {exitCode}</span>}
       </div>
       {output && (
-        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-relaxed text-muted-foreground elegant-scrollbar">
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words bg-muted/40 p-3 font-mono text-[11px] leading-relaxed text-foreground/80 dark:bg-[#0f172a] dark:text-slate-200 elegant-scrollbar">
           {output}
         </pre>
       )}
@@ -2819,7 +2848,7 @@ function MessageItem({ msg, t }: { msg: Extract<ChatItem, { type: 'message' }>, 
   };
 
   return (
-    <div className="flex gap-4 w-full max-w-4xl mx-auto py-2 group">
+    <div className="flex gap-4 w-full max-w-4xl mx-auto rounded-lg border border-border/70 bg-card/50 px-3 py-3 group">
       <div className="shrink-0 mt-1">
         {isUser ? (
           <div className="h-6 w-6 rounded-md bg-secondary flex items-center justify-center border border-border shadow-sm">

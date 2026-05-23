@@ -113,3 +113,12 @@ Then install the systemd units from `deploy/` and reload Caddy. With Cloudflare 
 ## Notes
 
 `codex exec --json` is the first practical Codex runner because it is already available in the installed CLI and keeps the bridge simple. The runner boundary is intentionally small so a later `codex app-server` JSON-RPC adapter can replace it without changing Hub, storage, or the browser protocol.
+
+## Project Workflow
+
+Engineering rules are documented in `AGENTS.md`. The short version:
+
+- Non-trivial behavior changes need an ADR or `docs/features/` design first.
+- Check `docs/change-impact.md` for coupled docs/tests before submitting.
+- Commit messages use a final `Doc-Impact: ...` footer.
+- Run `make doc-lint` when documentation, env vars, anchors, or rules change.

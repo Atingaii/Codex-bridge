@@ -1,4 +1,4 @@
-const CACHE_NAME = "codex-bridge-shell-v20260523-auth-orchestration";
+const CACHE_NAME = "codex-bridge-shell-v20260523-rules-continuity";
 const STATIC_CACHE_PATHS = [
   "/",
   "/icon.svg",

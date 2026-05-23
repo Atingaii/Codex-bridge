@@ -496,6 +496,8 @@ function activeOrchestrationStatus(status?: string) {
   return status === 'queued' || status === 'running' || status === 'canceling';
 }
 
+const activeOrchestrationRunStorageKey = 'codexBridge.activeOrchestrationRunId';
+
 function canCancelOrchestrationStatus(status?: string) {
   return status === 'queued' || status === 'running';
 }
@@ -2117,14 +2119,25 @@ function OrchestrationWorkspace({
   const selectRun = useCallback(async (runId: string) => {
     activeRunIdRef.current = runId;
     setActiveRunId(runId);
+    localStorage.setItem(activeOrchestrationRunStorageKey, runId);
     setEvents((current) => current.filter((event) => event.runId === runId));
-    await Promise.all([loadRun(runId), loadRunEvents(runId, true)]);
+    const [run] = await Promise.all([loadRun(runId), loadRunEvents(runId, true)]);
+    setMode(run.mode === 'debate' ? 'debate' : 'collaboration');
+    setCwd(run.cwd || '');
+    setMaxTurns(run.maxTurns || 4);
+    if (run.agentId) {
+      setSelectedAgentId(run.agentId);
+      localStorage.setItem('codexBridge.selectedAgentId', run.agentId);
+    }
     connectRun(runId);
   }, [connectRun, loadRun, loadRunEvents]);
 
   useEffect(() => {
     Promise.all([loadAgents(), loadRuns()])
       .then(([, loadedRuns]) => {
+        const savedRunId = localStorage.getItem(activeOrchestrationRunStorageKey) || '';
+        const savedRun = loadedRuns.find((run) => run.id === savedRunId);
+        if (savedRun) return selectRun(savedRun.id);
         if (loadedRuns[0]) return selectRun(loadedRuns[0].id);
       })
       .catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
@@ -2205,6 +2218,7 @@ function OrchestrationWorkspace({
       setRuns((current) => [data.run, ...current.filter((run) => run.id !== data.run.id)]);
       setPrompt('');
       setFiles([]);
+      localStorage.setItem(activeOrchestrationRunStorageKey, data.run.id);
       await selectRun(data.run.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : t.failedStartOrchestration);
@@ -2242,6 +2256,7 @@ function OrchestrationWorkspace({
     closeWS();
     activeRunIdRef.current = '';
     setActiveRunId('');
+    localStorage.removeItem(activeOrchestrationRunStorageKey);
     setEvents([]);
     setPrompt(t.reviewCurrentRepository);
     setFiles([]);

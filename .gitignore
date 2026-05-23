@@ -2,6 +2,7 @@ bin/
 data/
 configs/*.yaml
 !configs/*.yaml.example
+docs/private/
 *.zip
 frontend/node_modules/
 frontend/dist/

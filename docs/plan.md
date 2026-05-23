@@ -22,9 +22,17 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P3 | SQLite users, agents, sessions, messages | implemented |
 | P4 | Cookie JWT login and Caddy/systemd deployment files | implemented |
 | P5 | Heartbeat, reconnect, cancel, close-session cleanup | partial |
-| P6 | Browser permission prompts over app-server | deferred |
+| P6 | Orchestration create/continue event stream | implemented |
+| P7 | Browser permission prompts over app-server | deferred |
+
+## Engineering Workflow
+
+- Non-trivial changes need ADR or feature design before code.
+- Use [docs/change-impact.md](change-impact.md) before editing and before
+  submitting.
+- Commit messages must include `Doc-Impact: ...`.
+- `make doc-lint` checks the lightweight documentation contract.
 
 ## Follow-up
 
 The current runner uses short-lived `codex exec` processes and resumes with the returned Codex thread id. A deeper integration should add a second runner backed by `codex app-server`, using `initialize`, `thread/start`, `turn/start`, streamed `item/agentMessage/delta`, and `turn/interrupt`.
-

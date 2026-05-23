@@ -36,6 +36,7 @@ type orchestrationTurn struct {
 	CLI     string
 	Content string
 	Err     string
+	Tools   []RunnerToolEvent
 }
 
 var safeOrchestrationFileName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -161,8 +162,8 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			CLI:     cli,
 			Content: promptHeader(role, cli, turn),
 		})
-		content, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
-		record := orchestrationTurn{TurnID: turnID, Role: role, CLI: cli, Content: content}
+		content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
+		record := orchestrationTurn{TurnID: turnID, Role: role, CLI: cli, Content: content, Tools: tools}
 		if err != nil {
 			record.Err = err.Error()
 			history = append(history, record)
@@ -184,6 +185,22 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			}
 			continue
 		}
+		if summary := finalTurnFallbackSummary(payload.Prompt, turn, maxTurns, history, record); summary != "" {
+			delta := summary
+			if strings.TrimSpace(content) != "" {
+				delta = "\n\n" + summary
+				record.Content = strings.TrimSpace(content + "\n\n" + summary)
+			} else {
+				record.Content = summary
+			}
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:    "turn.delta",
+				TurnID:  turnID,
+				Role:    role,
+				CLI:     cli,
+				Content: delta,
+			})
+		}
 		history = append(history, record)
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:   "turn.end",
@@ -204,7 +221,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	})
 }
 
-func (m *OrchestrationManager) runCLI(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, prompt string) (string, error) {
+func (m *OrchestrationManager) runCLI(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, prompt string) (string, []RunnerToolEvent, error) {
 	switch cli {
 	case "claude":
 		return m.runClaude(ctx, payload, turnID, role, prompt)
@@ -213,7 +230,7 @@ func (m *OrchestrationManager) runCLI(ctx context.Context, payload protocol.Orch
 	}
 }
 
-func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, error) {
+func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, []RunnerToolEvent, error) {
 	args := []string{"exec", "--json", "--color", "never", "--skip-git-repo-check"}
 	if m.cfg.Bridge.Model != "" {
 		args = append(args, "--model", m.cfg.Bridge.Model)
@@ -238,39 +255,39 @@ func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.Or
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	_, _ = io.WriteString(stdin, prompt)
 	_ = stdin.Close()
 
-	content, scanErr := m.scanCodexJSONL(stdout, payload.RunID, turnID, role)
+	content, tools, scanErr := m.scanCodexJSONL(stdout, payload.RunID, turnID, role)
 	waitErr := cmd.Wait()
 	if scanErr != nil {
-		return content, scanErr
+		return content, tools, scanErr
 	}
 	if waitErr != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = waitErr.Error()
 		}
-		return content, errors.New(msg)
+		return content, tools, errors.New(msg)
 	}
 	if content == "" {
 		content = strings.TrimSpace(stderr.String())
 	}
-	return content, nil
+	return content, tools, nil
 }
 
-func (m *OrchestrationManager) runClaude(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, error) {
+func (m *OrchestrationManager) runClaude(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, []RunnerToolEvent, error) {
 	args := m.claudeArgs(payload, prompt)
 	cmd := exec.CommandContext(ctx, m.claudePath(), args...)
 	if cwd := m.cwd(payload); cwd != "" {
@@ -278,27 +295,27 @@ func (m *OrchestrationManager) runClaude(ctx context.Context, payload protocol.O
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	cmd.Stdin = nil
 	if err := cmd.Start(); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	content, scanErr := m.scanClaudeJSONL(stdout, payload.RunID, turnID, role)
+	content, tools, scanErr := m.scanClaudeJSONL(stdout, payload.RunID, turnID, role)
 	waitErr := cmd.Wait()
 	if scanErr != nil {
-		return content, scanErr
+		return content, tools, scanErr
 	}
 	if waitErr != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = waitErr.Error()
 		}
-		return content, errors.New(msg)
+		return content, tools, errors.New(msg)
 	}
-	return content, nil
+	return content, tools, nil
 }
 
 func (m *OrchestrationManager) claudeArgs(payload protocol.OrchestrationStartPayload, prompt string) []string {
@@ -339,17 +356,18 @@ func runningAsRoot() bool {
 	return err == nil && current.Uid == "0"
 }
 
-func (m *OrchestrationManager) scanCodexJSONL(stdout io.Reader, runID, turnID, role string) (string, error) {
+func (m *OrchestrationManager) scanCodexJSONL(stdout io.Reader, runID, turnID, role string) (string, []RunnerToolEvent, error) {
 	reader := bufio.NewReaderSize(stdout, 64*1024)
 	var content strings.Builder
 	var eventErr string
+	var tools []RunnerToolEvent
 	for {
 		line, err := readJSONLLine(reader, 32*1024*1024)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return content.String(), err
+			return content.String(), tools, err
 		}
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
@@ -375,13 +393,15 @@ func (m *OrchestrationManager) scanCodexJSONL(stdout io.Reader, runID, turnID, r
 			item, _ := msg["item"].(map[string]any)
 			itemType, _ := item["type"].(string)
 			if itemType == "agent_message" || itemType == "agentMessage" {
-				if text := agentMessageText(item); text != "" && content.Len() == 0 {
-					content.WriteString(text)
-					m.emit(runID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: text})
+				if text := agentMessageText(item); text != "" {
+					if delta := appendAgentMessageContent(&content, text); delta != "" {
+						m.emit(runID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: delta})
+					}
 				}
 			}
 			if itemType == "command_execution" || itemType == "commandExecution" {
 				if tool := commandExecutionEvent(item); tool != nil {
+					tools = append(tools, *tool)
 					m.emitTool(runID, turnID, role, "codex", tool)
 				}
 			}
@@ -390,27 +410,29 @@ func (m *OrchestrationManager) scanCodexJSONL(stdout io.Reader, runID, turnID, r
 			itemType, _ := item["type"].(string)
 			if itemType == "command_execution" || itemType == "commandExecution" {
 				if tool := commandExecutionEvent(item); tool != nil {
+					tools = append(tools, *tool)
 					m.emitTool(runID, turnID, role, "codex", tool)
 				}
 			}
 		}
 	}
 	if eventErr != "" {
-		return content.String(), errors.New(eventErr)
+		return content.String(), tools, errors.New(eventErr)
 	}
-	return strings.TrimSpace(content.String()), nil
+	return strings.TrimSpace(content.String()), tools, nil
 }
 
-func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, role string) (string, error) {
+func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, role string) (string, []RunnerToolEvent, error) {
 	reader := bufio.NewReaderSize(stdout, 64*1024)
 	var content strings.Builder
+	var tools []RunnerToolEvent
 	for {
 		line, err := readJSONLLine(reader, 32*1024*1024)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return content.String(), err
+			return content.String(), tools, err
 		}
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
@@ -424,9 +446,10 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 		switch typ {
 		case "assistant":
 			if message := firstString(msg, "error"); message != "" {
-				return content.String(), errors.New(message)
+				return content.String(), tools, errors.New(message)
 			}
 			for _, tool := range claudeToolEvents(msg) {
+				tools = append(tools, *tool)
 				m.emitTool(runID, turnID, role, "claude", tool)
 			}
 			if delta := claudeAssistantText(msg); delta != "" {
@@ -435,14 +458,15 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 			}
 		case "user":
 			for _, tool := range claudeToolEvents(msg) {
+				tools = append(tools, *tool)
 				m.emitTool(runID, turnID, role, "claude", tool)
 			}
 		case "result":
 			if isErr, _ := msg["is_error"].(bool); isErr {
 				if text := firstString(msg, "result", "error"); text != "" {
-					return content.String(), errors.New(text)
+					return content.String(), tools, errors.New(text)
 				}
-				return content.String(), errors.New("claude returned an error")
+				return content.String(), tools, errors.New("claude returned an error")
 			}
 			if text := firstString(msg, "result"); text != "" && content.Len() == 0 {
 				content.WriteString(text)
@@ -450,11 +474,11 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 			}
 		case "error":
 			if message := eventErrorMessage(msg); message != "" {
-				return content.String(), errors.New(message)
+				return content.String(), tools, errors.New(message)
 			}
 		}
 	}
-	return strings.TrimSpace(content.String()), nil
+	return strings.TrimSpace(content.String()), tools, nil
 }
 
 func (m *OrchestrationManager) emitTool(runID, turnID, role, cli string, tool *RunnerToolEvent) {
@@ -536,6 +560,218 @@ func roleForTurn(mode string, turn int) (string, string) {
 
 func promptHeader(role, cli string, turn int) string {
 	return fmt.Sprintf("%s via %s, turn %d", role, cli, turn)
+}
+
+func finalTurnFallbackSummary(userPrompt string, turn, maxTurns int, history []orchestrationTurn, current orchestrationTurn) string {
+	if turn != maxTurns || !finalResponseNeedsFallback(current.Content) {
+		return ""
+	}
+	zh := containsCJK(userPrompt + current.Content)
+	prior := latestMeaningfulConclusion(history)
+	commands := completedCommandSummaries([]orchestrationTurn{current}, 3)
+	if len(commands) == 0 {
+		commands = completedCommandSummaries(history, 3)
+	}
+	failed := failedCommandCount(append(history, current))
+
+	var b strings.Builder
+	if zh {
+		b.WriteString("最终结论：本次编排已完成。最后一轮没有给出清晰总结，因此这里根据前序结论和成功验证命令生成摘要。")
+		if prior != "" {
+			b.WriteString("\n\n依据：")
+			b.WriteString(prior)
+		}
+		if len(commands) > 0 {
+			b.WriteString("\n\n已验证：")
+			for _, command := range commands {
+				b.WriteString("\n- ")
+				b.WriteString(command)
+			}
+		}
+		if failed > 0 {
+			b.WriteString("\n\n剩余风险：命令详情里有失败命令，需要结合具体输出判断；以上结论以成功的最终验证命令和前序结论为准。")
+		} else {
+			b.WriteString("\n\n剩余风险：未发现新的阻塞问题；如需审计细节，可展开命令详情查看原始命令输出。")
+		}
+		return b.String()
+	}
+
+	b.WriteString("Final conclusion: this orchestration completed. The final turn did not provide a clear summary, so this fallback summarizes prior conclusions and successful verification commands.")
+	if prior != "" {
+		b.WriteString("\n\nBasis: ")
+		b.WriteString(prior)
+	}
+	if len(commands) > 0 {
+		b.WriteString("\n\nVerified:")
+		for _, command := range commands {
+			b.WriteString("\n- ")
+			b.WriteString(command)
+		}
+	}
+	if failed > 0 {
+		b.WriteString("\n\nRemaining risk: some command events failed; check command details for raw output. The conclusion above is based on the successful final verification command and prior findings.")
+	} else {
+		b.WriteString("\n\nRemaining risk: no new blocking issue was reported. Expand command details for the raw command output.")
+	}
+	return b.String()
+}
+
+func finalResponseNeedsFallback(content string) bool {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return true
+	}
+	lower := strings.ToLower(content)
+	progressStarts := []string{
+		"我会", "我将", "接下来", "正在", "i will", "i'll", "i am going to", "next i",
+	}
+	for _, prefix := range progressStarts {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	signals := []string{
+		"final", "conclusion", "summary", "verified", "verification", "passed", "completed", "remaining", "risk",
+		"最终", "结论", "总结", "确认", "验证", "通过", "完成", "剩余", "风险", "正确",
+	}
+	count := 0
+	for _, signal := range signals {
+		if strings.Contains(lower, signal) {
+			count++
+		}
+	}
+	if count >= 2 {
+		return false
+	}
+	return count < 2 && len([]rune(content)) < 320
+}
+
+func latestMeaningfulConclusion(history []orchestrationTurn) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		content := strings.TrimSpace(history[i].Content)
+		if content == "" {
+			continue
+		}
+		lower := strings.ToLower(content)
+		if strings.Contains(lower, "结论") || strings.Contains(lower, "确认") ||
+			strings.Contains(lower, "通过") || strings.Contains(lower, "正确") ||
+			strings.Contains(lower, "conclusion") || strings.Contains(lower, "verified") ||
+			strings.Contains(lower, "passed") || strings.Contains(lower, "correct") {
+			return trimForPrompt(oneLine(content), 700)
+		}
+	}
+	return ""
+}
+
+func completedCommandSummaries(turns []orchestrationTurn, max int) []string {
+	commands := commandStates(turns)
+	var out []string
+	for i := len(commands) - 1; i >= 0 && len(out) < max; i-- {
+		command := commands[i]
+		if !strings.EqualFold(command.Status, "completed") {
+			continue
+		}
+		out = append(out, formatCommandSummary(command))
+	}
+	return reverseStrings(out)
+}
+
+func failedCommandCount(turns []orchestrationTurn) int {
+	count := 0
+	for _, command := range commandStates(turns) {
+		if strings.EqualFold(command.Status, "failed") || strings.EqualFold(command.Status, "error") {
+			count++
+		}
+	}
+	return count
+}
+
+type orchestrationCommandState struct {
+	ID       string
+	Status   string
+	Command  string
+	Output   string
+	ExitCode *int
+}
+
+func commandStates(turns []orchestrationTurn) []orchestrationCommandState {
+	var states []orchestrationCommandState
+	indexes := map[string]int{}
+	for _, turn := range turns {
+		for _, tool := range turn.Tools {
+			toolKey := tool.ID
+			if toolKey == "" {
+				toolKey = tool.Command
+			}
+			if toolKey == "" {
+				toolKey = fmt.Sprintf("tool-%d", len(states))
+			}
+			key := turn.TurnID + ":" + toolKey
+			index, ok := indexes[key]
+			if !ok {
+				index = len(states)
+				indexes[key] = index
+				states = append(states, orchestrationCommandState{ID: tool.ID})
+			}
+			state := states[index]
+			if tool.ID != "" {
+				state.ID = tool.ID
+			}
+			if tool.Status != "" {
+				state.Status = tool.Status
+			}
+			if tool.Command != "" {
+				state.Command = tool.Command
+			}
+			if tool.Output != "" {
+				state.Output = tool.Output
+			}
+			if tool.ExitCode != nil {
+				state.ExitCode = tool.ExitCode
+			}
+			states[index] = state
+		}
+	}
+	return states
+}
+
+func formatCommandSummary(command orchestrationCommandState) string {
+	label := strings.TrimSpace(command.Command)
+	if label == "" {
+		label = "command"
+	}
+	status := command.Status
+	if status == "" {
+		status = "completed"
+	}
+	parts := []string{fmt.Sprintf("`%s` %s", label, status)}
+	if command.ExitCode != nil {
+		parts = append(parts, fmt.Sprintf("exit %d", *command.ExitCode))
+	}
+	if output := trimForPrompt(oneLine(command.Output), 160); output != "" {
+		parts = append(parts, "output: "+output)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func reverseStrings(values []string) []string {
+	for i, j := 0, len(values)-1; i < j; i, j = i+1, j-1 {
+		values[i], values[j] = values[j], values[i]
+	}
+	return values
+}
+
+func oneLine(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func containsCJK(value string) bool {
+	for _, r := range value {
+		if r >= '\u4e00' && r <= '\u9fff' {
+			return true
+		}
+	}
+	return false
 }
 
 func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {

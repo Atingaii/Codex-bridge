@@ -59,7 +59,7 @@ func TestOrchestrationScanClaudeJSONLEmitsToolEvents(t *testing.T) {
 	out := make(chan protocol.Envelope, 16)
 	manager.AttachOut(out)
 
-	got, err := manager.scanClaudeJSONL(input, "orc_test", "turn_1", "implementer")
+	got, _, err := manager.scanClaudeJSONL(input, "orc_test", "turn_1", "implementer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +112,47 @@ func TestComposeOrchestrationPromptFinalTurnRequiresUserVisibleAnswer(t *testing
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("final prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestFinalTurnFallbackSummaryForProcessOnlyFinalOutput(t *testing.T) {
+	exitCode := 0
+	summary := finalTurnFallbackSummary(
+		"检查一下现在这个项目怎么样证明正确吗",
+		4,
+		4,
+		[]orchestrationTurn{{
+			Role:    "implementer",
+			CLI:     "claude",
+			Content: "我复核后确认：当前项目确实能用 Isabelle 证明并验证正确性。isabelle build -D /root/tencent/BridgeDemo 构建通过。",
+		}},
+		orchestrationTurn{
+			Role:    "reviewer",
+			CLI:     "codex",
+			Content: "我会做最后一轮独立复核：确认 session 入口、最终定理是否存在，并重新跑一次 Isabelle 构建。",
+			Tools: []RunnerToolEvent{
+				{ID: "cmd_1", Status: "in_progress", Command: "isabelle build -D ."},
+				{ID: "cmd_1", Status: "completed", Command: "isabelle build -D .", Output: "0:00:05 elapsed time\n", ExitCode: &exitCode},
+			},
+		},
+	)
+	for _, want := range []string{"最终结论", "已验证", "isabelle build -D .", "0:00:05 elapsed time"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
+func TestFinalTurnFallbackSummarySkipsClearFinalOutput(t *testing.T) {
+	summary := finalTurnFallbackSummary(
+		"check proof",
+		4,
+		4,
+		nil,
+		orchestrationTurn{Content: "Final conclusion: verification passed and no remaining risks were found."},
+	)
+	if summary != "" {
+		t.Fatalf("summary = %q, want empty", summary)
 	}
 }
 

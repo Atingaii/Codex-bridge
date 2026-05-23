@@ -377,6 +377,37 @@ func agentMessageText(item map[string]any) string {
 	return b.String()
 }
 
+func appendAgentMessageContentString(current *string, text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	base := strings.TrimSpace(*current)
+	switch {
+	case base == "":
+		*current = text
+		return text
+	case strings.HasSuffix(base, text):
+		*current = base
+		return ""
+	case strings.HasPrefix(text, base):
+		delta := strings.TrimPrefix(text, base)
+		*current = text
+		return delta
+	default:
+		*current = base + "\n\n" + text
+		return "\n\n" + text
+	}
+}
+
+func appendAgentMessageContent(current *strings.Builder, text string) string {
+	content := current.String()
+	delta := appendAgentMessageContentString(&content, text)
+	current.Reset()
+	current.WriteString(content)
+	return delta
+}
+
 func firstString(m map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if value, _ := m[key].(string); value != "" {

@@ -2332,7 +2332,7 @@ function OrchestrationWorkspace({
                 <span className="truncate font-medium">{run.title}</span>
               </div>
               <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
-                <span>{run.mode}</span>
+                <span>{sessionDateLabel(run.updatedAt || run.createdAt, t)}</span>
                 <span>{run.status}</span>
               </div>
             </button>
@@ -2568,6 +2568,7 @@ function OrchestrationEventItem({ item, t }: { item: OrchestrationVisibleEvent, 
         <div className="flex items-center gap-2 mb-1 min-h-6">
           <span className="text-xs font-semibold capitalize">{title}</span>
           <span className="text-[10px] text-muted-foreground">{item.kind}</span>
+          {item.createdAt && <span className="text-[10px] text-muted-foreground">{formatTime(item.createdAt)}</span>}
           {status && <span className="ml-auto rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
         </div>
         {content ? (
@@ -2689,6 +2690,7 @@ function CommandEvent({ event, t }: { event: OrchestrationEvent, t: UIText }) {
       <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-3 py-2 text-[11px]">
         {isActive ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" /> : <Terminal className="h-3.5 w-3.5 text-muted-foreground" />}
         <code className="min-w-0 flex-1 truncate text-foreground">{command || t.commandEvent}</code>
+        {event.createdAt && <span className="shrink-0 text-[10px] text-muted-foreground">{formatTime(event.createdAt)}</span>}
         {status && <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
         {typeof exitCode === 'number' && <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">exit {exitCode}</span>}
       </div>

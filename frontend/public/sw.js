@@ -1,4 +1,4 @@
-const CACHE_NAME = "codex-bridge-shell-v20260523-progress-ui";
+const CACHE_NAME = "codex-bridge-shell-v20260523-final-summary";
 const STATIC_CACHE_PATHS = [
   "/",
   "/icon.svg",

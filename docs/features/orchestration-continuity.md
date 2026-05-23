@@ -31,6 +31,9 @@ context in the same `runID`.
 - The orchestration WebSocket is the live path. If it disconnects while the
   selected run is active, the frontend reconnects and reloads persisted events
   so progress that arrived during the gap is rendered.
+- The final turn must leave a user-readable conclusion. If the CLI only emits a
+  process note and command events, the Bridge appends a concise fallback summary
+  from prior conclusions and successful verification commands.
 
 ## Design
 
@@ -50,6 +53,10 @@ is not shown as an authoritative processing state because the persisted
 `queued` marker only records submission, not whether later turns are already
 running.
 
+Event cards display their precise event time. The orchestration sidebar shows
+the run date beside status so history can be scanned without repeating full
+timestamps inside the run list.
+
 ## Implementation Steps
 
 1. Keep Hub continue semantics in `handleContinueOrchestration`.
@@ -60,6 +67,9 @@ running.
 5. Preserve the explicit New Run action as the only way to clear run selection.
 6. Show turn/run progress events and reconnect orchestration WebSockets while a
    selected run remains active.
+7. Add a Bridge-side final-summary fallback when the final turn does not provide
+   a clear conclusion.
+8. Render event times in the main timeline and run dates in the sidebar.
 
 ## Exit Gates
 
@@ -72,6 +82,9 @@ running.
   reloads events.
 - A newly started follow-up shows the active turn before the CLI returns final
   prose.
+- A final turn that only emits process text still produces a clear final
+  conclusion in the timeline.
+- Timeline events include specific times, and sidebar runs include dates.
 
 ## Reviewer Q&A
 

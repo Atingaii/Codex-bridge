@@ -1064,6 +1064,7 @@ function Workspace({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsFocus, setSettingsFocus] = useState<'cli' | ''>('');
   const [inputVal, setInputVal] = useState('');
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -1468,6 +1469,11 @@ function Workspace({
     if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
   };
 
+  const openSettings = (focus: 'cli' | '' = '') => {
+    setSettingsFocus(focus);
+    setSettingsOpen(true);
+  };
+
   const groupedSessions = useMemo(() => {
     const query = search.trim().toLowerCase();
     return sessions
@@ -1497,7 +1503,7 @@ function Workspace({
           deleteSession={(session) => deleteSession(session).catch((err) => appendSystem(err.message))}
           search={search}
           setSearch={setSearch}
-          openSettings={() => setSettingsOpen(true)}
+          openSettings={() => openSettings()}
           agentOnline={Boolean(onlineAgent)}
           openOrchestration={() => navigate('/orchestrate')}
           t={t}
@@ -1520,7 +1526,7 @@ function Workspace({
               deleteSession={(session) => deleteSession(session).catch((err) => appendSystem(err.message))}
               search={search}
               setSearch={setSearch}
-              openSettings={() => setSettingsOpen(true)}
+              openSettings={() => openSettings()}
               agentOnline={Boolean(onlineAgent)}
               openOrchestration={() => {
                 setMobileMenuOpen(false);
@@ -1562,6 +1568,10 @@ function Workspace({
 
             <Button variant="ghost" size="icon" className="text-muted-foreground rounded-full h-8 w-8" onClick={() => refreshAll().catch((err) => appendSystem(err.message))}>
               <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button variant="secondary" size="sm" className="hidden sm:inline-flex h-8 gap-1.5 rounded-lg" onClick={() => openSettings('cli')}>
+              <Plus className="h-3.5 w-3.5" />
+              {t.addCliEndpoint}
             </Button>
             <Button variant="secondary" size="sm" className="hidden sm:inline-flex h-8 gap-1.5 rounded-lg" onClick={() => navigate('/orchestrate')}>
               <GitBranch className="h-3.5 w-3.5" />
@@ -1734,6 +1744,7 @@ function Workspace({
           language={language}
           setLanguage={setLanguage}
           t={t}
+          initialFocus={settingsFocus}
           close={() => setSettingsOpen(false)}
         />
       )}
@@ -1796,6 +1807,7 @@ function OrchestrationWorkspace({
   const [maxTurns, setMaxTurns] = useState(4);
   const [files, setFiles] = useState<UploadAttachment[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsFocus, setSettingsFocus] = useState<'cli' | ''>('');
   const [error, setError] = useState('');
   const [creating, setCreating] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState(t.disconnected);
@@ -2024,6 +2036,11 @@ function OrchestrationWorkspace({
     if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
   };
 
+  const openSettings = (focus: 'cli' | '' = '') => {
+    setSettingsFocus(focus);
+    setSettingsOpen(true);
+  };
+
   const startDraftRun = () => {
     closeWS();
     activeRunIdRef.current = '';
@@ -2082,7 +2099,7 @@ function OrchestrationWorkspace({
           ))}
         </div>
         <div className="p-3 border-t border-sidebar-border shrink-0">
-          <button onClick={() => setSettingsOpen(true)} className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm hover:bg-sidebar-accent transition-colors">
+          <button onClick={() => openSettings()} className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm hover:bg-sidebar-accent transition-colors">
             <Settings className="h-3.5 w-3.5" />
             <span className="flex-1 text-left">{t.settings}</span>
             <div className={cn("h-1.5 w-1.5 rounded-full", onlineAgent ? "bg-emerald-500" : "bg-muted-foreground")} />
@@ -2110,6 +2127,10 @@ function OrchestrationWorkspace({
               className="hidden sm:inline-flex"
               disabled={creating || isRunning}
             />
+            <Button variant="secondary" size="sm" className="hidden sm:inline-flex h-8 gap-1.5 rounded-lg" onClick={() => openSettings('cli')}>
+              <Plus className="h-3.5 w-3.5" />
+              {t.addCliEndpoint}
+            </Button>
             <Button variant="ghost" size="icon" className="text-muted-foreground rounded-full h-8 w-8" onClick={() => Promise.all([loadAgents(), loadRuns()]).catch((err) => setError(err.message))}>
               <RefreshCw className="h-4 w-4" />
             </Button>
@@ -2277,6 +2298,7 @@ function OrchestrationWorkspace({
           language={language}
           setLanguage={setLanguage}
           t={t}
+          initialFocus={settingsFocus}
           close={() => setSettingsOpen(false)}
         />
       )}
@@ -2667,6 +2689,7 @@ function SettingsModal({
   language,
   setLanguage,
   t,
+  initialFocus,
   close,
 }: {
   user: UserAccount;
@@ -2680,6 +2703,7 @@ function SettingsModal({
   language: Language;
   setLanguage: (value: Language) => void;
   t: UIText;
+  initialFocus: 'cli' | '';
   close: () => void;
 }) {
   const [label, setLabel] = useState('');
@@ -2687,6 +2711,7 @@ function SettingsModal({
   const [tokenError, setTokenError] = useState('');
   const [generatingToken, setGeneratingToken] = useState(false);
   const [copiedCommand, setCopiedCommand] = useState('');
+  const cliSectionRef = useRef<HTMLDivElement | null>(null);
   const generateToken = async () => {
     setGeneratingToken(true);
     setTokenError('');
@@ -2708,6 +2733,12 @@ function SettingsModal({
     setCopiedCommand(key);
     window.setTimeout(() => setCopiedCommand(''), 1200);
   };
+
+  useEffect(() => {
+    if (initialFocus !== 'cli') return;
+    const id = window.setTimeout(() => cliSectionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0);
+    return () => window.clearTimeout(id);
+  }, [initialFocus]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in">
@@ -2812,7 +2843,7 @@ function SettingsModal({
                 <div className="text-sm text-muted-foreground p-2.5 rounded-lg border border-border bg-muted/20">{t.noAgentsEnrolled}</div>
               )}
             </div>
-            <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-3">
+            <div ref={cliSectionRef} className="rounded-lg border border-border bg-muted/20 p-3 space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">
                   <div className="text-sm font-medium">{t.addCliEndpoint}</div>

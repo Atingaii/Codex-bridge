@@ -4,7 +4,7 @@ import {
   PanelLeftClose, PanelLeft, Plus, MessageSquare,
   Settings, LogOut, Search,
   ImagePlus, Send, Square, AlertCircle,
-  RefreshCw, FileCode, CheckCircle,
+  RefreshCw, Check, Clipboard,
   Menu, X, Server, Activity, Command,
   Trash2, Edit2
 } from 'lucide-react';
@@ -144,6 +144,27 @@ function initials(username: string) {
 
 function activeStatus(status?: string) {
   return status === 'queued' || status === 'running' || status === 'canceling';
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // Fall back for WebViews or browsers that expose clipboard but deny it.
+    }
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!copied) throw new Error('Copy failed');
 }
 
 function waitForOpen(ws: WebSocket, timeout = 3000) {
@@ -417,6 +438,10 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
   const [connectionStatus, setConnectionStatus] = useState('Disconnected');
   const [activeRun, setActiveRun] = useState<Run | null>(null);
   const [search, setSearch] = useState('');
+  const [renameTarget, setRenameTarget] = useState<Session | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [renameError, setRenameError] = useState('');
+  const [renaming, setRenaming] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionIdRef = useRef('');
@@ -624,14 +649,45 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
     await selectSession(data.session.id);
   };
 
-  const renameSession = async (session: Session) => {
-    const title = window.prompt('Rename session', displaySessionTitle(session));
-    if (!title?.trim()) return;
-    const data = await api<{ session: Session }>(`/api/sessions/${encodeURIComponent(session.id)}`, {
+  const renameSession = (session: Session) => {
+    setRenameTarget(session);
+    setRenameDraft(displaySessionTitle(session));
+    setRenameError('');
+  };
+
+  const closeRenameModal = () => {
+    if (renaming) return;
+    setRenameTarget(null);
+    setRenameDraft('');
+    setRenameError('');
+  };
+
+  const saveRenameSession = async () => {
+    if (!renameTarget) return;
+    const title = renameDraft.trim();
+    if (!title) {
+      setRenameError('Session name is required');
+      return;
+    }
+    if (title === displaySessionTitle(renameTarget)) {
+      closeRenameModal();
+      return;
+    }
+    setRenaming(true);
+    setRenameError('');
+    try {
+      const data = await api<{ session: Session }>(`/api/sessions/${encodeURIComponent(renameTarget.id)}`, {
       method: 'PATCH',
-      body: JSON.stringify({ title: title.trim() }),
-    });
-    setSessions((current) => current.map((item) => item.id === data.session.id ? data.session : item));
+        body: JSON.stringify({ title }),
+      });
+      setSessions((current) => current.map((item) => item.id === data.session.id ? data.session : item));
+      setRenameTarget(null);
+      setRenameDraft('');
+    } catch (err) {
+      setRenameError(err instanceof Error ? err.message : 'Failed to rename session');
+    } finally {
+      setRenaming(false);
+    }
   };
 
   const deleteSession = async (session: Session) => {
@@ -742,7 +798,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
           activeSession={activeSessionId}
           setActiveSession={(id) => selectSession(id).catch((err) => appendSystem(err.message))}
           createSession={() => createSession().catch((err) => appendSystem(err.message))}
-          renameSession={(session) => renameSession(session).catch((err) => appendSystem(err.message))}
+          renameSession={renameSession}
           deleteSession={(session) => deleteSession(session).catch((err) => appendSystem(err.message))}
           search={search}
           setSearch={setSearch}
@@ -763,7 +819,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
               activeSession={activeSessionId}
               setActiveSession={(id) => selectSession(id).catch((err) => appendSystem(err.message))}
               createSession={() => createSession().catch((err) => appendSystem(err.message))}
-              renameSession={(session) => renameSession(session).catch((err) => appendSystem(err.message))}
+              renameSession={renameSession}
               deleteSession={(session) => deleteSession(session).catch((err) => appendSystem(err.message))}
               search={search}
               setSearch={setSearch}
@@ -943,6 +999,20 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
           close={() => setSettingsOpen(false)}
         />
       )}
+
+      {renameTarget && (
+        <RenameSessionModal
+          title={renameDraft}
+          error={renameError}
+          saving={renaming}
+          onChange={(value) => {
+            setRenameDraft(value);
+            if (renameError) setRenameError('');
+          }}
+          onClose={closeRenameModal}
+          onSave={saveRenameSession}
+        />
+      )}
     </div>
   );
 }
@@ -1081,6 +1151,17 @@ function SidebarContent({
 
 function MessageItem({ msg }: { msg: Extract<ChatItem, { type: 'message' }> }) {
   const isUser = msg.role === 'user';
+  const [copied, setCopied] = useState(false);
+
+  const copyMessage = async () => {
+    try {
+      await copyText(msg.content || '');
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  };
 
   return (
     <div className="flex gap-4 w-full max-w-4xl mx-auto py-2 group">
@@ -1097,9 +1178,23 @@ function MessageItem({ msg }: { msg: Extract<ChatItem, { type: 'message' }> }) {
       </div>
 
       <div className="flex flex-col gap-2 min-w-0 flex-1">
-        <div className="flex items-center gap-2 mb-0.5">
-          <span className="text-xs font-semibold">{isUser ? 'You' : msg.role === 'system' ? 'System' : 'Codex'}</span>
+        <div className="flex items-center gap-2 mb-0.5 min-h-6">
+          <span className="text-xs font-semibold shrink-0">{isUser ? 'You' : msg.role === 'system' ? 'System' : 'Codex'}</span>
           <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">{formatTime(msg.createdAt)}</span>
+          <Button
+            variant="ghost"
+            size="icon"
+            type="button"
+            className={cn(
+              "ml-auto h-6 w-6 rounded-md text-muted-foreground transition-opacity hover:text-foreground",
+              copied ? "opacity-100 text-emerald-600 dark:text-emerald-400" : "opacity-100 md:opacity-0 md:group-hover:opacity-100"
+            )}
+            onClick={copyMessage}
+            aria-label="Copy message"
+            title={copied ? 'Copied' : 'Copy'}
+          >
+            {copied ? <Check className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
+          </Button>
         </div>
 
         <MessageContent content={msg.content} />
@@ -1109,16 +1204,44 @@ function MessageItem({ msg }: { msg: Extract<ChatItem, { type: 'message' }> }) {
 }
 
 function ToolItem({ tool }: { tool: ToolEvent }) {
+  const [copied, setCopied] = useState(false);
+  const content = [tool.command, tool.output, typeof tool.exitCode === 'number' ? `exit: ${tool.exitCode}` : ''].filter(Boolean).join('\n\n');
+
+  const copyToolOutput = async () => {
+    try {
+      await copyText(content);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  };
+
   return (
     <div className="w-full max-w-4xl mx-auto mt-2 bg-muted/30 border border-border rounded-lg overflow-hidden text-[13px] group/tool">
       <div className="flex items-center gap-2 px-3 py-1.5 bg-muted/50 border-b border-border">
         <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
         <span className="font-medium text-xs">Run: {tool.name || 'Bash'}</span>
         <span className="ml-auto text-xs text-muted-foreground font-mono truncate max-w-[260px]">{tool.command || tool.input || tool.status || 'running'}</span>
+        <Button
+          variant="ghost"
+          size="icon"
+          type="button"
+          className={cn(
+            "h-6 w-6 rounded-md text-muted-foreground transition-opacity hover:text-foreground",
+            copied ? "opacity-100 text-emerald-600 dark:text-emerald-400" : "opacity-100 md:opacity-0 md:group-hover/tool:opacity-100"
+          )}
+          onClick={copyToolOutput}
+          disabled={!content}
+          aria-label="Copy output"
+          title={copied ? 'Copied' : 'Copy'}
+        >
+          {copied ? <Check className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
+        </Button>
         <ChevronDown className="h-3.5 w-3.5 text-muted-foreground opacity-50" />
       </div>
       <div className="p-3 font-mono text-[11px] whitespace-pre-wrap text-muted-foreground overflow-x-auto max-h-40 bg-background/50 elegant-scrollbar">
-        {[tool.command, tool.output, typeof tool.exitCode === 'number' ? `exit: ${tool.exitCode}` : ''].filter(Boolean).join('\n\n')}
+        {content}
       </div>
     </div>
   );
@@ -1222,6 +1345,92 @@ function SettingsModal({
           <Button size="sm" onClick={close}>Save Preferences</Button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function RenameSessionModal({
+  title,
+  error,
+  saving,
+  onChange,
+  onClose,
+  onSave,
+}: {
+  title: string;
+  error: string;
+  saving: boolean;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, []);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') onClose();
+      }}
+    >
+      <form
+        className="bg-card w-full max-w-sm rounded-xl border border-border shadow-lg flex flex-col overflow-hidden animate-in zoom-in-95"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave();
+        }}
+      >
+        <div className="px-4 py-3 border-b border-border flex items-center justify-between bg-muted/30">
+          <div className="flex items-center gap-2">
+            <div className="h-7 w-7 rounded-md bg-primary/10 text-primary flex items-center justify-center">
+              <Edit2 className="h-3.5 w-3.5" />
+            </div>
+            <h2 className="font-medium">Rename Session</h2>
+          </div>
+          <Button variant="ghost" size="icon" type="button" className="h-7 w-7 rounded-md" onClick={onClose} disabled={saving}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+
+        <div className="p-4 space-y-3">
+          <label className="space-y-1.5 block">
+            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Session name</span>
+            <Input
+              ref={inputRef}
+              value={title}
+              onChange={(event) => onChange(event.target.value)}
+              maxLength={80}
+              disabled={saving}
+              className="h-10 bg-background border-border"
+            />
+          </label>
+
+          {error && (
+            <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="p-4 border-t border-border flex justify-end gap-2 bg-muted/30">
+          <Button variant="ghost" size="sm" type="button" onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button size="sm" type="submit" disabled={saving || !title.trim()}>
+            {saving ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : 'Save'}
+          </Button>
+        </div>
+      </form>
     </div>
   );
 }

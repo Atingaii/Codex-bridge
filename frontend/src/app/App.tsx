@@ -698,7 +698,18 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string)
 }
 
 function stringsTrim(value?: string) {
-  return String(value || '').trim();
+  return decodeEscapedLineBreaks(String(value || '')).trim();
+}
+
+function decodeEscapedLineBreaks(value: string) {
+  if (/[\r\n]/.test(value)) return value;
+  const escapedBreaks = value.match(/\\r\\n|\\n|\\r/g);
+  if (!escapedBreaks || escapedBreaks.length < 2) return value;
+  return value
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\n')
+    .replace(/\\t/g, '\t');
 }
 
 function orchestrationCommandSummary(event: OrchestrationEvent) {

@@ -205,7 +205,7 @@ func (c *Client) handleEnvelope(ctx context.Context, env protocol.Envelope, out 
 			send(out, protocol.MustEnvelope(protocol.TypeError, env.Sid, protocol.ErrorPayload{Code: "BAD_PROMPT", Message: err.Error()}))
 			return
 		}
-		go c.sessions.Prompt(ctx, env.Sid, payload.Content, payload.RunID, payload.PromptID, out)
+		go c.sessions.Prompt(ctx, env.Sid, payload, out)
 	case protocol.TypeCancel:
 		payload, _ := protocol.Decode[protocol.PromptPayload](env)
 		c.sessions.Cancel(env.Sid, payload.RunID, payload.PromptID)

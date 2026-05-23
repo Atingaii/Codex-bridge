@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Codex Bridge</string>
+    <string name="title_activity_main">Codex Bridge</string>
+    <string name="package_name">tech.sparkapi.codexbridge</string>
+    <string name="custom_url_scheme">tech.sparkapi.codexbridge</string>
+</resources>

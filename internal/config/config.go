@@ -33,6 +33,7 @@ type HubConfig struct {
 	MaxBridgeSendQueue       int      `yaml:"max_bridge_send_queue"`
 	MaxBrowserSendQueue      int      `yaml:"max_browser_send_queue"`
 	MaxPromptBytes           int64    `yaml:"max_prompt_bytes"`
+	MaxAttachmentBytes       int64    `yaml:"max_attachment_bytes"`
 	MaxAssistantMessageBytes int64    `yaml:"max_assistant_message_bytes"`
 }
 
@@ -89,6 +90,7 @@ func Default() Config {
 			MaxBridgeSendQueue:       128,
 			MaxBrowserSendQueue:      128,
 			MaxPromptBytes:           256 * 1024,
+			MaxAttachmentBytes:       8 * 1024 * 1024,
 			MaxAssistantMessageBytes: 4 * 1024 * 1024,
 		},
 		Bridge: BridgeConfig{

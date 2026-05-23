@@ -48,6 +48,23 @@ codex-bridge user --username admin --password '...'
 codex-bridge enroll --ttl 24h
 ```
 
+## Android APK
+
+The Android wrapper uses Capacitor and points at `https://sparkapi.tech`.
+
+```bash
+cd frontend
+npm run android:build
+
+cd ../android
+ANDROID_HOME=/usr/lib/android-sdk \
+ANDROID_SDK_ROOT=/usr/lib/android-sdk \
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+./gradlew assembleDebug
+```
+
+The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
+
 ## Configuration
 
 Config loads from `configs/${APP_ENV:-dev}.yaml`, then selected environment variables override it. Set `CODEX_BRIDGE_CONFIG_DIR` to read config files from another directory.

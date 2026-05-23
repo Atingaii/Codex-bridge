@@ -21,6 +21,7 @@ hub:
   max_bridge_send_queue: 128
   max_browser_send_queue: 128
   max_prompt_bytes: 262144
+  max_attachment_bytes: 8388608
   max_assistant_message_bytes: 4194304
 
 bridge:

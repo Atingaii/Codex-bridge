@@ -114,6 +114,37 @@
     @apply border-border outline-ring/50;
   }
 
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--muted-foreground) 26%, transparent) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--muted-foreground) 22%, transparent);
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--muted-foreground) 46%, transparent);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
   body {
     @apply bg-background text-foreground;
     font-family: var(--font-sans);
@@ -125,11 +156,41 @@
 }
 
 @layer utilities {
-  .scrollbar-hide {
-    -ms-overflow-style: none;
-    scrollbar-width: none;
+  .elegant-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--muted-foreground) 24%, transparent) transparent;
   }
-  .scrollbar-hide::-webkit-scrollbar {
-    display: none;
+  .elegant-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .elegant-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .elegant-scrollbar::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--muted-foreground) 22%, transparent);
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+  }
+  .elegant-scrollbar:hover::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--muted-foreground) 46%, transparent);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .dark .elegant-scrollbar,
+  .dark * {
+    scrollbar-color: color-mix(in oklab, var(--muted-foreground) 32%, transparent) transparent;
+  }
+
+  .dark .elegant-scrollbar::-webkit-scrollbar-thumb,
+  .dark *::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--muted-foreground) 30%, transparent);
+  }
+
+  .dark .elegant-scrollbar:hover::-webkit-scrollbar-thumb,
+  .dark *::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--muted-foreground) 54%, transparent);
   }
 }

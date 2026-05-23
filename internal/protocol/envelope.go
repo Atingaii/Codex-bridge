@@ -81,9 +81,17 @@ type SessionOpenedPayload struct {
 }
 
 type PromptPayload struct {
-	Content  string `json:"content"`
-	PromptID string `json:"promptId,omitempty"`
-	RunID    string `json:"runId,omitempty"`
+	Content     string              `json:"content"`
+	PromptID    string              `json:"promptId,omitempty"`
+	RunID       string              `json:"runId,omitempty"`
+	Attachments []AttachmentPayload `json:"attachments,omitempty"`
+}
+
+type AttachmentPayload struct {
+	Name     string `json:"name"`
+	MimeType string `json:"mimeType"`
+	Size     int64  `json:"size"`
+	Data     string `json:"data"`
 }
 
 type SessionUpdatePayload struct {

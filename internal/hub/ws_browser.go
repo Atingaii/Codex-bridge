@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -34,7 +35,7 @@ func (s *Server) handleBrowserWS(w http.ResponseWriter, r *http.Request, uid str
 		return
 	}
 	defer ws.Close()
-	ws.SetReadLimit(s.cfg.Hub.MaxPromptBytes + 4096)
+	ws.SetReadLimit(s.browserReadLimit())
 	_ = ws.SetReadDeadline(time.Now().Add(s.browserReadTimeout()))
 	ws.SetPongHandler(func(string) error {
 		return ws.SetReadDeadline(time.Now().Add(s.browserReadTimeout()))
@@ -87,6 +88,15 @@ func (s *Server) handleBrowserWS(w http.ResponseWriter, r *http.Request, uid str
 	}
 }
 
+func (s *Server) browserReadLimit() int64 {
+	maxAttachmentBytes := s.cfg.Hub.MaxAttachmentBytes
+	if maxAttachmentBytes <= 0 {
+		maxAttachmentBytes = 8 * 1024 * 1024
+	}
+	// Base64 expands payloads by roughly 4/3. Allow up to 4 images plus JSON overhead.
+	return s.cfg.Hub.MaxPromptBytes + (maxAttachmentBytes * 4 * 2) + 64*1024
+}
+
 func (s *Server) browserReadTimeout() time.Duration {
 	timeout := 3 * s.cfg.Hub.HeartbeatInterval.Duration
 	if timeout <= 0 {
@@ -107,6 +117,10 @@ func (s *Server) handleBrowserEnvelope(r *http.Request, uid string, session stor
 		}
 		if int64(len(payload.Content)) > s.cfg.Hub.MaxPromptBytes {
 			_ = conn.Send(protocol.MustEnvelope(protocol.TypeError, session.ID, protocol.ErrorPayload{Code: "PROMPT_TOO_LARGE", Message: "prompt is too large"}))
+			return
+		}
+		if err := s.validatePromptAttachments(payload.Attachments); err != nil {
+			_ = conn.Send(protocol.MustEnvelope(protocol.TypeError, session.ID, protocol.ErrorPayload{Code: "BAD_ATTACHMENT", Message: err.Error()}))
 			return
 		}
 		if active, err := s.store.ActiveRunBySession(r.Context(), session.ID); err == nil && active.ID != "" {
@@ -180,4 +194,26 @@ func (s *Server) handleBrowserEnvelope(r *http.Request, uid string, session stor
 	default:
 		_ = conn.Send(protocol.MustEnvelope(protocol.TypeError, session.ID, protocol.ErrorPayload{Code: "BAD_TYPE", Message: "unsupported browser frame type"}))
 	}
+}
+
+func (s *Server) validatePromptAttachments(attachments []protocol.AttachmentPayload) error {
+	if len(attachments) > 4 {
+		return errors.New("at most 4 images can be uploaded at once")
+	}
+	maxBytes := s.cfg.Hub.MaxAttachmentBytes
+	if maxBytes <= 0 {
+		maxBytes = 8 * 1024 * 1024
+	}
+	for _, attachment := range attachments {
+		if !strings.HasPrefix(attachment.MimeType, "image/") {
+			return errors.New("only image uploads are supported")
+		}
+		if attachment.Size <= 0 || attachment.Size > maxBytes {
+			return errors.New("image is too large")
+		}
+		if strings.TrimSpace(attachment.Data) == "" {
+			return errors.New("image data is missing")
+		}
+	}
+	return nil
 }

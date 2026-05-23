@@ -4,6 +4,8 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
+    "android:build": "vite build && cap sync android",
+    "android:open": "cap open android",
     "build": "vite build",
     "dev": "vite"
   },
@@ -67,9 +69,13 @@
     "vaul": "1.1.2"
   },
   "devDependencies": {
+    "@capacitor/android": "8.3.4",
+    "@capacitor/cli": "8.3.4",
+    "@capacitor/core": "8.3.4",
     "@tailwindcss/vite": "4.1.12",
     "@vitejs/plugin-react": "4.7.0",
     "tailwindcss": "4.1.12",
+    "typescript": "5.9.3",
     "vite": "6.4.2"
   },
   "peerDependencies": {

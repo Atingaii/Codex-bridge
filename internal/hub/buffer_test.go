@@ -3,9 +3,11 @@ package hub
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/tencent/codex-bridge/internal/config"
+	"github.com/tencent/codex-bridge/internal/protocol"
 )
 
 func TestAssistantBufferDeltaAndContentSemantics(t *testing.T) {
@@ -60,5 +62,39 @@ func TestSecurityHeaders(t *testing.T) {
 		if rr.Header().Get(key) == "" {
 			t.Fatalf("missing security header %s", key)
 		}
+	}
+	if csp := rr.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "blob:") {
+		t.Fatalf("CSP should allow blob image previews, got %q", csp)
+	}
+}
+
+func TestValidatePromptAttachments(t *testing.T) {
+	cfg := config.Default()
+	cfg.Hub.MaxAttachmentBytes = 10
+	s := &Server{cfg: &cfg}
+
+	if err := s.validatePromptAttachments([]protocol.AttachmentPayload{{
+		Name:     "image.png",
+		MimeType: "image/png",
+		Size:     10,
+		Data:     "abcd",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.validatePromptAttachments([]protocol.AttachmentPayload{{
+		Name:     "file.txt",
+		MimeType: "text/plain",
+		Size:     4,
+		Data:     "abcd",
+	}}); err == nil {
+		t.Fatal("text attachment should be rejected")
+	}
+	if err := s.validatePromptAttachments([]protocol.AttachmentPayload{{
+		Name:     "big.png",
+		MimeType: "image/png",
+		Size:     11,
+		Data:     "abcd",
+	}}); err == nil {
+		t.Fatal("oversized image should be rejected")
 	}
 }

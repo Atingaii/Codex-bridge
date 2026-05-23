@@ -82,7 +82,10 @@ func (m *SessionManager) Open(sid, remoteThreadID string, out chan<- protocol.En
 	return nil
 }
 
-func (m *SessionManager) Prompt(parent context.Context, sid, content, runID, promptID string, out chan<- protocol.Envelope) {
+func (m *SessionManager) Prompt(parent context.Context, sid string, payload protocol.PromptPayload, out chan<- protocol.Envelope) {
+	content := payload.Content
+	runID := payload.RunID
+	promptID := payload.PromptID
 	s, remoteThreadID, ctx, cancel, err := m.beginPrompt(sid, runID, promptID, out)
 	if err != nil {
 		code := "NO_SESSION"
@@ -92,10 +95,23 @@ func (m *SessionManager) Prompt(parent context.Context, sid, content, runID, pro
 		send(out, protocol.MustEnvelope(protocol.TypeError, sid, protocol.ErrorPayload{Code: code, Message: err.Error(), RunID: runID, PromptID: promptID}))
 		return
 	}
+	preparedContent, cleanup, err := m.preparePromptContent(sid, content, payload.Attachments)
+	if err != nil {
+		cancel()
+		m.mu.Lock()
+		s.cancel = nil
+		s.busy = false
+		s.runID = ""
+		s.promptID = ""
+		m.mu.Unlock()
+		send(out, protocol.MustEnvelope(protocol.TypeError, sid, protocol.ErrorPayload{Code: "ATTACHMENT_ERROR", Message: err.Error(), RunID: runID, PromptID: promptID}))
+		return
+	}
+	defer cleanup()
 
 	result, err := s.runner.Prompt(ctx, RunnerRequest{
 		SID:            sid,
-		Content:        content,
+		Content:        preparedContent,
 		RemoteThreadID: remoteThreadID,
 		RunID:          runID,
 		PromptID:       promptID,

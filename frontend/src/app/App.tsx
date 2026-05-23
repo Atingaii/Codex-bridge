@@ -3,7 +3,7 @@ import {
   Terminal, User, Lock, Globe, ChevronDown,
   PanelLeftClose, PanelLeft, Plus, MessageSquare,
   Settings, LogOut, Search,
-  Bot, Paperclip, Send, Square, AlertCircle,
+  ImagePlus, Send, Square, AlertCircle,
   RefreshCw, FileCode, CheckCircle,
   Menu, X, Server, Activity, Command,
   Trash2, Edit2
@@ -75,6 +75,15 @@ type Envelope = {
   payload?: any;
 };
 
+type ImageAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  data: string;
+  previewUrl: string;
+};
+
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(path, {
     credentials: 'include',
@@ -99,6 +108,12 @@ function newID(prefix: string) {
 function displaySessionTitle(session?: Session | null) {
   if (!session?.title || session.title === 'New chat') return 'New Session';
   return session.title;
+}
+
+function titleFromPrompt(prompt: string) {
+  const compact = prompt.replace(/\s+/g, ' ').trim();
+  if (!compact) return 'New Session';
+  return compact.length > 48 ? `${compact.slice(0, 48)}...` : compact;
 }
 
 function formatTime(timestamp?: number) {
@@ -177,8 +192,37 @@ function escapeBasic(value: string) {
 
 function renderInlineMarkdown(text: string) {
   return escapeBasic(text)
+    .replace(/!\[([^\]]*)\]\((blob:[^)]+|data:image\/[^)]+|https?:\/\/[^)]+)\)/g, '<img alt="$1" src="$2" class="mt-2 max-h-64 rounded-lg border border-border object-contain" />')
     .replace(/`([^`]+)`/g, '<code class="px-1 py-0.5 rounded bg-muted font-mono text-[0.92em]">$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+
+function readImageAttachment(file: File): Promise<ImageAttachment> {
+  return new Promise((resolve, reject) => {
+    if (!file.type.startsWith('image/')) {
+      reject(new Error('Only image files can be uploaded'));
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      reject(new Error('Image must be 8 MB or smaller'));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read image'));
+    reader.onload = () => {
+      const value = String(reader.result || '');
+      const comma = value.indexOf(',');
+      resolve({
+        id: newID('att'),
+        name: file.name,
+        mimeType: file.type,
+        size: file.size,
+        data: comma === -1 ? value : value.slice(comma + 1),
+        previewUrl: URL.createObjectURL(file),
+      });
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function MessageContent({ content }: { content: string }) {
@@ -364,6 +408,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
   const [activeSessionId, setActiveSessionId] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inputVal, setInputVal] = useState('');
+  const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [items, setItems] = useState<ChatItem[]>([]);
@@ -373,6 +418,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
   const [activeRun, setActiveRun] = useState<Run | null>(null);
   const [search, setSearch] = useState('');
   const wsRef = useRef<WebSocket | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionIdRef = useRef('');
   const assistantItemIdRef = useRef<string | null>(null);
   const assistantTextRef = useRef('');
@@ -564,7 +610,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
 
-  const createSession = async () => {
+  const createSession = async (title = 'New Session') => {
     const agent = agents.find((item) => item.online) || agents[0];
     if (!agent) {
       appendSystem('No bridge connected');
@@ -572,7 +618,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
     }
     const data = await api<{ session: Session }>('/api/sessions', {
       method: 'POST',
-      body: JSON.stringify({ agentId: agent.id, title: 'New Session' }),
+      body: JSON.stringify({ agentId: agent.id, title }),
     });
     setSessions((current) => [data.session, ...current.filter((session) => session.id !== data.session.id)]);
     await selectSession(data.session.id);
@@ -602,24 +648,61 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
     }
   };
 
+  const addImages = async (files: FileList | null) => {
+    if (!files?.length) return;
+    const next = await Promise.all(Array.from(files).map(readImageAttachment));
+    setAttachments((current) => [...current, ...next].slice(0, 4));
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const removeAttachment = (id: string) => {
+    setAttachments((current) => {
+      const target = current.find((item) => item.id === id);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return current.filter((item) => item.id !== id);
+    });
+  };
+
   const sendPrompt = async () => {
     const text = inputVal.trim();
-    if (!text || isGenerating) return;
+    if ((!text && !attachments.length) || isGenerating) return;
     let sessionId = activeSessionId;
+    const promptText = text || 'Please analyze the uploaded image.';
+    const wasUntitled = !activeSession || activeSession.title === 'New chat' || activeSession.title === 'New Session';
     if (!sessionId) {
-      await createSession();
+      await createSession(titleFromPrompt(promptText));
       sessionId = activeSessionIdRef.current;
     }
     if (!sessionId) return;
     const ws = wsRef.current?.readyState === WebSocket.OPEN ? wsRef.current : connectWS(sessionId);
     await waitForOpen(ws);
     setInputVal('');
+    setAttachments([]);
     const promptId = newID('prm');
-    setItems((current) => [...current, { id: promptId, type: 'message', role: 'user', content: text, createdAt: Math.floor(Date.now() / 1000) }]);
+    const userContent = attachments.length
+      ? `${promptText}\n\n${attachments.map((item) => `![${item.name}](${item.previewUrl})`).join('\n')}`
+      : promptText;
+    setItems((current) => [...current, { id: promptId, type: 'message', role: 'user', content: userContent, createdAt: Math.floor(Date.now() / 1000) }]);
     assistantItemIdRef.current = null;
     assistantTextRef.current = '';
     setActiveRun({ id: '', promptId, status: 'running' });
-    ws.send(JSON.stringify({ type: 'prompt', sid: sessionId, payload: { content: text, promptId } }));
+    if (wasUntitled && promptText) {
+      api<{ session: Session }>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ title: titleFromPrompt(promptText) }),
+      })
+        .then((data) => setSessions((current) => current.map((item) => item.id === data.session.id ? data.session : item)))
+        .catch(() => undefined);
+    }
+    ws.send(JSON.stringify({
+      type: 'prompt',
+      sid: sessionId,
+      payload: {
+        content: promptText,
+        promptId,
+        attachments: attachments.map(({ name, mimeType, size, data }) => ({ name, mimeType, size, data })),
+      },
+    }));
   };
 
   const stopRun = () => {
@@ -722,7 +805,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
           </div>
         </header>
 
-        <div className="bg-muted/30 border-b border-border px-4 py-2 flex items-center gap-4 text-xs text-muted-foreground overflow-x-auto whitespace-nowrap scrollbar-hide">
+        <div className="bg-muted/30 border-b border-border px-4 py-2 flex items-center gap-4 text-xs text-muted-foreground overflow-x-auto whitespace-nowrap elegant-scrollbar">
           <div className="flex items-center gap-1.5">
             <Server className="h-3.5 w-3.5" />
             <span>Runner: {runner}</span>
@@ -737,7 +820,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 scroll-smooth">
+        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 scroll-smooth elegant-scrollbar">
           {!items.length ? (
             <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4 animate-in fade-in zoom-in-95 duration-500">
               <div className="h-12 w-12 rounded-2xl bg-primary/5 border border-border flex items-center justify-center mb-2">
@@ -776,7 +859,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
             className="max-w-4xl mx-auto flex flex-col bg-card border border-border rounded-xl shadow-sm focus-within:ring-1 focus-within:ring-ring focus-within:border-border transition-all"
           >
             <textarea
-              className="w-full bg-transparent border-0 resize-none p-3 text-sm focus:outline-none focus:ring-0 min-h-[60px] max-h-[300px]"
+              className="w-full bg-transparent border-0 resize-none p-3 text-sm focus:outline-none focus:ring-0 min-h-[60px] max-h-[300px] elegant-scrollbar"
               placeholder="Ask Codex to read files, run commands, or write code..."
               value={inputVal}
               onChange={(e) => setInputVal(e.target.value)}
@@ -788,17 +871,44 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
               }}
               disabled={isGenerating}
             />
+            {attachments.length > 0 && (
+              <div className="flex gap-2 px-3 pb-2 overflow-x-auto elegant-scrollbar">
+                {attachments.map((attachment) => (
+                  <div key={attachment.id} className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-border bg-muted">
+                    <img src={attachment.previewUrl} alt={attachment.name} className="h-full w-full object-cover" />
+                    <button
+                      type="button"
+                      className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-background/90 text-foreground shadow-sm hover:bg-background"
+                      onClick={() => removeAttachment(attachment.id)}
+                      aria-label={`Remove ${attachment.name}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
 
             <div className="flex items-center justify-between p-2 pt-0">
               <div className="flex items-center gap-1">
-                <Button variant="ghost" size="icon" type="button" className="h-8 w-8 text-muted-foreground rounded-lg">
-                  <Paperclip className="h-4 w-4" />
-                </Button>
-                <div className="h-4 w-px bg-border mx-1" />
-                <Button variant="ghost" size="sm" type="button" className="h-8 text-xs text-muted-foreground gap-1 rounded-lg">
-                  <Bot className="h-3.5 w-3.5" />
-                  Auto-execute
-                  <ChevronDown className="h-3 w-3 opacity-50" />
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={(event) => addImages(event.target.files).catch((err) => appendSystem(err.message))}
+                />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  type="button"
+                  className="h-8 w-8 text-muted-foreground rounded-lg"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isGenerating}
+                  aria-label="Upload images"
+                >
+                  <ImagePlus className="h-4 w-4" />
                 </Button>
               </div>
 
@@ -809,7 +919,7 @@ function Workspace({ user, onLogout, isDarkMode, setIsDarkMode }: { user: UserAc
                     {activeRun?.status === 'canceling' ? 'Stopping' : 'Stop'}
                   </Button>
                 ) : (
-                  <Button size="sm" type="submit" className="h-8 px-3 rounded-lg gap-1.5 text-xs font-medium" disabled={!inputVal.trim()}>
+                  <Button size="sm" type="submit" className="h-8 px-3 rounded-lg gap-1.5 text-xs font-medium" disabled={!inputVal.trim() && !attachments.length}>
                     Send
                     <Send className="h-3.5 w-3.5" />
                   </Button>
@@ -899,7 +1009,7 @@ function SidebarContent({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-4 scrollbar-hide">
+      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-4 elegant-scrollbar">
         {Object.keys(groupedSessions).length === 0 ? (
           <div className="px-2 py-1.5 text-xs text-muted-foreground">No sessions</div>
         ) : Object.entries(groupedSessions).map(([date, sessions]) => (
@@ -923,7 +1033,7 @@ function SidebarContent({
                   <span className="truncate">{displaySessionTitle(session)}</span>
 
                   {activeSession === session.id && (
-                    <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="ml-auto flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                       <span
                         className="h-5 w-5 rounded flex items-center justify-center hover:bg-sidebar-border text-muted-foreground"
                         onClick={(event) => {
@@ -1007,7 +1117,7 @@ function ToolItem({ tool }: { tool: ToolEvent }) {
         <span className="ml-auto text-xs text-muted-foreground font-mono truncate max-w-[260px]">{tool.command || tool.input || tool.status || 'running'}</span>
         <ChevronDown className="h-3.5 w-3.5 text-muted-foreground opacity-50" />
       </div>
-      <div className="p-3 font-mono text-[11px] whitespace-pre-wrap text-muted-foreground overflow-x-auto max-h-40 bg-background/50">
+      <div className="p-3 font-mono text-[11px] whitespace-pre-wrap text-muted-foreground overflow-x-auto max-h-40 bg-background/50 elegant-scrollbar">
         {[tool.command, tool.output, typeof tool.exitCode === 'number' ? `exit: ${tool.exitCode}` : ''].filter(Boolean).join('\n\n')}
       </div>
     </div>
@@ -1039,7 +1149,7 @@ function SettingsModal({
           </Button>
         </div>
 
-        <div className="p-4 space-y-6 overflow-y-auto max-h-[70vh]">
+        <div className="p-4 space-y-6 overflow-y-auto max-h-[70vh] elegant-scrollbar">
           <div className="space-y-3">
             <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Account</h3>
             <div className="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/20">

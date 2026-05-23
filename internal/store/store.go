@@ -225,8 +225,12 @@ type User struct {
 }
 
 func (s *Store) UpsertUser(ctx context.Context, username, password string) (User, error) {
+	username = strings.TrimSpace(username)
 	if username == "" || password == "" {
 		return User{}, errors.New("username and password are required")
+	}
+	if isQuotedEmptyPassword(password) {
+		return User{}, errors.New("password is invalid")
 	}
 	now := time.Now().Unix()
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), passwordHashCost)
@@ -250,6 +254,9 @@ func (s *Store) CreateUser(ctx context.Context, username, password string) (User
 	if username == "" || password == "" {
 		return User{}, errors.New("username and password are required")
 	}
+	if isQuotedEmptyPassword(password) {
+		return User{}, errors.New("password is invalid")
+	}
 	now := time.Now().Unix()
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), passwordHashCost)
 	if err != nil {
@@ -267,6 +274,11 @@ func (s *Store) CreateUser(ctx context.Context, username, password string) (User
 		return User{}, err
 	}
 	return user, nil
+}
+
+func isQuotedEmptyPassword(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return trimmed == `""` || trimmed == `''`
 }
 
 func (s *Store) UserByUsername(ctx context.Context, username string) (User, error) {

@@ -164,6 +164,20 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsQuotedEmptyPasswords(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	for _, password := range []string{`""`, `''`, ` "" `} {
+		if _, err := st.UpsertUser(ctx, "admin", password); err == nil {
+			t.Fatalf("UpsertUser accepted quoted empty password %q", password)
+		}
+		if _, err := st.CreateUser(ctx, "member", password); err == nil {
+			t.Fatalf("CreateUser accepted quoted empty password %q", password)
+		}
+	}
+}
+
 func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)

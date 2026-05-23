@@ -308,6 +308,9 @@ func validateRegisterPassword(password string) error {
 	if password == "" {
 		return errors.New("password is required")
 	}
+	if isQuotedEmptyString(password) {
+		return errors.New("password is invalid")
+	}
 	if len(password) > maxRegisterPasswordByte {
 		return errors.New("password is too long")
 	}
@@ -330,6 +333,11 @@ func validateRegisterPassword(password string) error {
 		return errors.New("password must include letters and numbers")
 	}
 	return nil
+}
+
+func isQuotedEmptyString(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return trimmed == `""` || trimmed == `''`
 }
 
 func (s *Server) allowAuthAttempt(r *http.Request, scope, username string, maxAttempts int, window time.Duration) bool {

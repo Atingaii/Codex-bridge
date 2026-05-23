@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,6 +22,13 @@ func TestRegisterValidatesCredentialsAndLoginNormalizesUsername(t *testing.T) {
 	register(t, s, map[string]string{"username": "ab", "password": "abc1234567"}, http.StatusBadRequest)
 	register(t, s, map[string]string{"username": "new user", "password": "abc1234567"}, http.StatusBadRequest)
 	register(t, s, map[string]string{"username": "new-user", "password": "abcdefghij"}, http.StatusBadRequest)
+	register(t, s, map[string]string{"username": "quoted-empty-a", "password": `""`}, http.StatusBadRequest)
+	register(t, s, map[string]string{"username": "quoted-empty-b", "password": `''`}, http.StatusBadRequest)
+	for _, username := range []string{"quoted-empty-a", "quoted-empty-b"} {
+		if _, err := st.UserByUsername(context.Background(), username); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("quoted empty password created user %q: %v", username, err)
+		}
+	}
 	register(t, s, map[string]string{"username": " new-user ", "password": "abc1234567"}, http.StatusCreated)
 
 	if _, err := st.UserByUsername(context.Background(), "new-user"); err != nil {

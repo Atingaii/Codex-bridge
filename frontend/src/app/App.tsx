@@ -3100,8 +3100,8 @@ function OrchestrationWorkspace({
                 </label>
               </div>
 
-              <div className="min-h-0 flex-1 space-y-2">
-                <div className="flex items-center justify-between">
+              <div className="min-h-0 flex flex-1 flex-col gap-2">
+                <div className="flex shrink-0 items-center justify-between">
                   <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.files}</span>
                   <Button variant="ghost" size="sm" className="h-7 gap-1.5" onClick={() => fileInputRef.current?.click()} disabled={creating || isRunning}>
                     <FileUp className="h-3.5 w-3.5" />
@@ -3109,7 +3109,7 @@ function OrchestrationWorkspace({
                   </Button>
                 </div>
                 <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(event) => addFiles(event.target.files).catch((err) => setError(err.message))} />
-                <div className="max-h-full space-y-1.5 overflow-y-auto elegant-scrollbar">
+                <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-1 elegant-scrollbar">
                   {files.length === 0 ? (
                     activeRunFiles.length > 0 ? (
                       <OrchestrationFileList files={activeRunFiles} label={t.currentRunFiles} compact />

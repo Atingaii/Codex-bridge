@@ -904,6 +904,37 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 	reader := bufio.NewReaderSize(stdout, 64*1024)
 	var content strings.Builder
 	var tools []RunnerToolEvent
+	toolCommands := make(map[string]string)
+	deferredReadStarts := make(map[string]*RunnerToolEvent)
+	emitClaudeTool := func(tool *RunnerToolEvent) {
+		if tool == nil {
+			return
+		}
+		if tool.ID != "" && tool.Command != "" {
+			toolCommands[tool.ID] = tool.Command
+		}
+		if tool.ID != "" && tool.Command == "" {
+			tool.Command = toolCommands[tool.ID]
+		}
+		if tool.ID != "" && strings.EqualFold(tool.Status, "in_progress") && isClaudeReadCommand(tool.Command) {
+			copy := *tool
+			deferredReadStarts[tool.ID] = &copy
+			return
+		}
+		if isClaudeEmptyPagesReadFailure(tool) {
+			delete(deferredReadStarts, tool.ID)
+			return
+		}
+		if tool.ID != "" {
+			if start := deferredReadStarts[tool.ID]; start != nil {
+				tools = append(tools, *start)
+				m.emitTool(runID, turnID, role, "claude", start)
+				delete(deferredReadStarts, tool.ID)
+			}
+		}
+		tools = append(tools, *tool)
+		m.emitTool(runID, turnID, role, "claude", tool)
+	}
 	for {
 		line, err := readJSONLLine(reader, 32*1024*1024)
 		if err != nil {
@@ -927,8 +958,7 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 				return content.String(), tools, errors.New(message)
 			}
 			for _, tool := range claudeToolEvents(msg) {
-				tools = append(tools, *tool)
-				m.emitTool(runID, turnID, role, "claude", tool)
+				emitClaudeTool(tool)
 			}
 			if delta := claudeAssistantText(msg); delta != "" {
 				content.WriteString(delta)
@@ -936,8 +966,7 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 			}
 		case "user":
 			for _, tool := range claudeToolEvents(msg) {
-				tools = append(tools, *tool)
-				m.emitTool(runID, turnID, role, "claude", tool)
+				emitClaudeTool(tool)
 			}
 		case "result":
 			if isErr, _ := msg["is_error"].(bool); isErr {
@@ -957,6 +986,18 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 		}
 	}
 	return strings.TrimSpace(content.String()), tools, nil
+}
+
+func isClaudeReadCommand(command string) bool {
+	return strings.HasPrefix(strings.TrimSpace(command), "Read ")
+}
+
+func isClaudeEmptyPagesReadFailure(tool *RunnerToolEvent) bool {
+	if tool == nil || !strings.EqualFold(tool.Status, "failed") || !isClaudeReadCommand(tool.Command) {
+		return false
+	}
+	output := tool.Output
+	return strings.Contains(output, `Invalid pages parameter: ""`) && strings.Contains(output, "Pages are 1-indexed")
 }
 
 func (m *OrchestrationManager) emitTool(runID, turnID, role, cli string, tool *RunnerToolEvent) {
@@ -1785,7 +1826,8 @@ func PrepareOrchestrationPromptFiles(cfg *config.Config, runID, prompt string, f
 		b.WriteByte('\n')
 	}
 	b.WriteString("\nUse these local file paths directly when the task refers to uploaded files.")
-	b.WriteString("\nDo not call PDF-reading tools with empty pages values; inspect the local paths directly or omit optional page filters.")
+	b.WriteString("\nFor uploaded source/text files such as .thy, ROOT, .go, .md, and .txt, inspect them with shell commands like sed -n '1,220p' <path>, cat <path>, or wc -l <path>.")
+	b.WriteString("\nDo not send an empty pages field to any file-reading tool. Only include pages when a non-empty page range is required for a real PDF/document; otherwise omit the page filter.")
 	return b.String(), metas, nil
 }
 

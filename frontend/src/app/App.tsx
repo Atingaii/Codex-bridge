@@ -825,7 +825,10 @@ function orchestrationTurnLabel(info: OrchestrationTurnInfo, t: UIText) {
 }
 
 function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string): OrchestrationVisibleEvent[] {
-  const ordered = mergeOrchestrationDeltaEvents(mergeOrchestrationToolEvents(events.filter((event) => event.runId === runId).slice().sort(compareOrchestrationEvents)));
+  const ordered = mergeOrchestrationDeltaEvents(
+    mergeOrchestrationToolEvents(events.filter((event) => event.runId === runId).slice().sort(compareOrchestrationEvents))
+      .filter((event) => !isEmptyPagesReadFailureEvent(event))
+  );
   const visible: OrchestrationVisibleEvent[] = [];
 
   ordered.forEach((event, index) => {
@@ -982,6 +985,20 @@ function orchestrationCommandSummary(event: OrchestrationEvent) {
   const fallback = stringsTrim(event.error || event.content || event.status || event.kind);
   if (command && output) return `${command}\n\n${output}`;
   return command || output || fallback;
+}
+
+function isEmptyPagesReadFailureEvent(event: OrchestrationEvent) {
+  if (!event.kind.startsWith('command.')) return false;
+  const data = event.data || {};
+  const command = typeof data.command === 'string' ? data.command.trim() : '';
+  const output = typeof data.output === 'string' ? data.output : '';
+  const status = typeof data.status === 'string' ? data.status : event.status || '';
+  return (
+    status.toLowerCase() === 'failed' &&
+    command.startsWith('Read ') &&
+    output.includes('Invalid pages parameter: ""') &&
+    output.includes('Pages are 1-indexed')
+  );
 }
 
 function shouldShowOrchestrationStatus(event: OrchestrationEvent) {

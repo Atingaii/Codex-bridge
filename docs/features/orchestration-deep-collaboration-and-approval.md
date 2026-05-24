@@ -108,6 +108,10 @@ Claude Code:
 
 - Review-required Claude turns start with `--permission-mode default` and
   `--permission-prompt-tool mcp__codex_bridge__browser_approval`.
+- Uploaded source/text attachments are presented as local paths with guidance to
+  inspect them through shell commands. Bridge suppresses Claude Code `Read`
+  tool failures caused only by an empty `pages` parameter, so transient
+  tool-argument retries do not clutter the visible orchestration timeline.
 - The Bridge writes a short-lived MCP config for that turn and runs a local
   stdio MCP server command:
   `codex-bridge claude-approval-mcp --socket ...`.

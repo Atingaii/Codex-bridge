@@ -160,6 +160,60 @@ func TestOrchestrationScanClaudeJSONLEmitsToolEvents(t *testing.T) {
 	}
 }
 
+func TestOrchestrationScanClaudeJSONLSuppressesEmptyPagesReadFailure(t *testing.T) {
+	input := strings.NewReader(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_1","name":"Read","input":{"file_path":"/tmp/Model.thy","pages":""}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_1","is_error":true,"content":"<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"retrying"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_2","name":"Read","input":{"file_path":"/tmp/Model.thy"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_2","content":"theory Model\n"}]}}
+{"type":"result","result":"retrying"}
+`)
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 16)
+	manager.AttachOut(out)
+
+	got, tools, err := manager.scanClaudeJSONL(input, "orc_test", "turn_1", "implementer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "retrying" {
+		t.Fatalf("content = %q, want retrying", got)
+	}
+	for _, tool := range tools {
+		if tool.ID == "tool_1" {
+			t.Fatalf("empty pages failure was retained in tools: %#v", tools)
+		}
+	}
+
+	var events []protocol.OrchestrationEventPayload
+	for len(out) > 0 {
+		env := <-out
+		if env.Type != protocol.TypeOrchestrationEvent {
+			continue
+		}
+		payload, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+		if err == nil {
+			events = append(events, payload)
+		}
+	}
+
+	var sawRetryRead bool
+	for _, event := range events {
+		if event.Kind == "command.start" && event.Data["id"] == "tool_1" {
+			t.Fatalf("empty pages read start was emitted: %#v", events)
+		}
+		if event.Kind == "command.end" && event.Data["id"] == "tool_1" {
+			t.Fatalf("empty pages read failure was emitted: %#v", events)
+		}
+		if event.Kind == "command.end" && event.Data["id"] == "tool_2" && event.Data["output"] == "theory Model\n" {
+			sawRetryRead = true
+		}
+	}
+	if !sawRetryRead {
+		t.Fatalf("successful retry read was not emitted: %#v", events)
+	}
+}
+
 func TestOrchestrationEventsBufferWhileBridgeDisconnected(t *testing.T) {
 	manager := NewOrchestrationManager(&config.Config{})
 	firstOut := make(chan protocol.Envelope, 2)
@@ -268,8 +322,13 @@ func TestPrepareOrchestrationPromptFilesWarnsAgainstEmptyPDFPages(t *testing.T) 
 	if len(metas) != 1 || metas[0].Name != "paper.pdf" {
 		t.Fatalf("metas = %#v", metas)
 	}
-	if !strings.Contains(prompt, "Do not call PDF-reading tools with empty pages values") {
-		t.Fatalf("prompt missing PDF pages guard:\n%s", prompt)
+	for _, want := range []string{
+		"inspect them with shell commands",
+		"Do not send an empty pages field to any file-reading tool",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
 	}
 }
 

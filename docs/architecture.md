@@ -96,6 +96,7 @@ Implemented frame types:
 - `approval_request`, `approval_response`
 - `cancel`, `error`, `status`
 - `orchestration_start`, `orchestration_event`, `orchestration_cancel`
+- `agent_shutdown`
 
 ## Continuity
 

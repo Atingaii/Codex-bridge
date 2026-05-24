@@ -358,7 +358,10 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request, uid s
 	if err := s.store.RevokeEnrollTokensForMachine(r.Context(), agent.MachineID); err != nil {
 		slog.Warn("[hub] revoke agent enroll token failed", "agent_id", agent.ID, "error", err)
 	}
-	s.pool.DisconnectAgent(agent.ID)
+	if err := s.pool.ShutdownAgent(agent.ID, "deleted by user"); err != nil && !errors.Is(err, ErrAgentOffline) {
+		slog.Warn("[hub] request agent shutdown failed", "agent_id", agent.ID, "error", err)
+		s.pool.DisconnectAgent(agent.ID)
+	}
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"deleted": true, "agentId": agent.ID})
 }
 

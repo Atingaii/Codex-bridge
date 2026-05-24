@@ -166,6 +166,7 @@ type OrchestrationVisibleEvent =
       status?: string;
       error?: string;
       createdAt?: number;
+      files?: OrchestrationFile[];
       commands: OrchestrationEvent[];
     }
   | {
@@ -392,6 +393,8 @@ const uiText = {
     removeFile: 'Remove file',
     turns: 'Turns',
     files: 'Files',
+    attachedFiles: 'Attached files',
+    currentRunFiles: 'Run files',
     add: 'Add',
     uploadProofFiles: 'Upload Coq, Lean, Isabelle, source, logs, or screenshots.',
     stopRun: 'Stop Run',
@@ -545,6 +548,8 @@ const uiText = {
     removeFile: '移除文件',
     turns: '轮次',
     files: '文件',
+    attachedFiles: '已上传文件',
+    currentRunFiles: '本轮文件',
     add: '添加',
     uploadProofFiles: '上传 Coq、Lean、Isabelle、源码、日志或截图。',
     stopRun: '停止运行',
@@ -839,6 +844,7 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string)
         status: event.status,
         error: event.error,
         createdAt: event.createdAt,
+        files: orchestrationEventFiles(event),
         commands: [],
       });
       return;
@@ -941,6 +947,21 @@ function mergeDeltaContent(previous: string, next: string) {
 
 function stringsTrim(value?: string) {
   return decodeEscapedLineBreaks(String(value || '')).trim();
+}
+
+function orchestrationEventFiles(event: OrchestrationEvent): OrchestrationFile[] {
+  const raw = event.data?.files;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const record = item as Record<string, unknown>;
+    const name = typeof record.name === 'string' ? record.name.trim() : '';
+    if (!name) return [];
+    const mimeType = typeof record.mimeType === 'string' ? record.mimeType.trim() : '';
+    const parsedSize = Number(record.size);
+    const size = Number.isFinite(parsedSize) && parsedSize > 0 ? parsedSize : 0;
+    return [{ name, mimeType, size }];
+  });
 }
 
 function decodeEscapedLineBreaks(value: string) {
@@ -1248,6 +1269,28 @@ function formatBytes(size: number) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function OrchestrationFileList({ files, label, compact = false }: { files: OrchestrationFile[]; label?: string; compact?: boolean }) {
+  if (!files.length) return null;
+  return (
+    <div className={cn("space-y-1.5", label && "mt-2")}>
+      {label && <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</div>}
+      <div className={cn(compact ? "space-y-1.5" : "flex flex-wrap gap-1.5")}>
+        {files.map((file, index) => (
+          <div key={`${file.name}-${file.size}-${index}`} className={cn(
+            "min-w-0 rounded-md border border-border bg-muted/25 px-2 py-1.5 text-xs",
+            compact ? "flex items-center gap-2" : "inline-flex max-w-full items-center gap-2"
+          )}>
+            <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 truncate">{file.name}</span>
+            <span className="shrink-0 text-[10px] text-muted-foreground">{formatBytes(file.size)}</span>
+            {file.mimeType && <span className="hidden shrink-0 rounded border border-border px-1 py-0.5 text-[10px] text-muted-foreground sm:inline">{file.mimeType}</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function initialLanguage(): Language {
@@ -2412,11 +2455,13 @@ function OrchestrationWorkspace({
     return runs.filter((run) => run.agentId === selectedAgent.id);
   }, [runs, selectedAgent?.id]);
   const activeRun = runs.find((run) => run.id === activeRunId && (!selectedAgent?.id || run.agentId === selectedAgent.id)) || null;
+  const activeRunFiles = activeRun?.files || [];
   const visibleEvents = useMemo(() => activeRun ? visibleOrchestrationEvents(events, activeRunId) : [], [activeRun, events, activeRunId]);
   const currentTurnInfo = useMemo(() => activeRun ? orchestrationTurnInfoFromEvents(events, activeRun.id, activeRun.maxTurns) : {}, [activeRun, events]);
   const currentTurnLabel = useMemo(() => orchestrationTurnLabel(currentTurnInfo, t), [currentTurnInfo, t]);
   const visibleApprovals = useMemo(() => approvals.filter((item) => item.approval.runId === activeRunId), [approvals, activeRunId]);
   const isRunning = activeOrchestrationStatus(activeRun?.status);
+  const orchestrationStreamStatus = activeRun ? connectionStatus : t.idle;
   const continuingRun = Boolean(activeRun && !isRunning);
   const canCancelRun = canCancelOrchestrationStatus(activeRun?.status);
   const capabilityProblems = useMemo(() => orchestrationCapabilityProblems(selectedAgent, t), [selectedAgent, t]);
@@ -2510,9 +2555,9 @@ function OrchestrationWorkspace({
     localStorage.removeItem(activeOrchestrationRunStorageKey);
     setEvents([]);
     setApprovals([]);
-    setConnectionStatus(t.disconnected);
+    setConnectionStatus(t.idle);
     setShowScrollBottom(false);
-  }, [closeWS, runs, t.disconnected]);
+  }, [closeWS, runs, t.idle]);
 
   const applyEvent = useCallback((event: OrchestrationEvent) => {
     setEvents((current) => {
@@ -2931,7 +2976,7 @@ function OrchestrationWorkspace({
           )}
           <div className="flex items-center gap-1.5">
             <Command className="h-3.5 w-3.5" />
-            <span>{t.stream}: {connectionStatus}</span>
+            <span>{t.stream}: {orchestrationStreamStatus}</span>
           </div>
         </div>
 
@@ -3066,7 +3111,11 @@ function OrchestrationWorkspace({
                 <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(event) => addFiles(event.target.files).catch((err) => setError(err.message))} />
                 <div className="max-h-full space-y-1.5 overflow-y-auto elegant-scrollbar">
                   {files.length === 0 ? (
-                    <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">{t.uploadProofFiles}</div>
+                    activeRunFiles.length > 0 ? (
+                      <OrchestrationFileList files={activeRunFiles} label={t.currentRunFiles} compact />
+                    ) : (
+                      <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">{t.uploadProofFiles}</div>
+                    )
                   ) : files.map((file) => (
                     <div key={file.id} className="flex items-center gap-2 rounded-md border border-border bg-muted/20 px-2 py-1.5">
                       <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
@@ -3193,6 +3242,9 @@ function OrchestrationEventItem({ item, t }: { item: OrchestrationVisibleEvent, 
           <MessageContent content={content} />
         ) : item.type === 'message' && item.commands.length > 0 ? (
           <p className="text-sm text-muted-foreground">{t.noVisibleAnswer}</p>
+        ) : null}
+        {item.type === 'message' && item.files?.length ? (
+          <OrchestrationFileList files={item.files} label={t.attachedFiles} />
         ) : null}
         {item.type === 'message' && item.commands.length > 0 && (
           <details className="mt-2 rounded-md border border-border bg-muted/10">

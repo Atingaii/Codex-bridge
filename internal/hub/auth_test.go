@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tencent/codex-bridge/internal/config"
+	"github.com/tencent/codex-bridge/internal/protocol"
 	"github.com/tencent/codex-bridge/internal/store"
 )
 
@@ -103,6 +104,51 @@ func TestDeleteAgentHidesVisibleAgent(t *testing.T) {
 	agents := body["agents"].([]any)
 	if len(agents) != 0 {
 		t.Fatalf("deleted agent still visible: %#v", agents)
+	}
+}
+
+func TestDeleteAgentRequestsOnlineBridgeShutdown(t *testing.T) {
+	t.Parallel()
+
+	s, st := newAuthTestServer(t)
+	ctx := context.Background()
+	user, err := st.UpsertUser(ctx, "worker", "abc1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgentForUser(ctx, user.ID, "worker-cli", "machine-shutdown", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := &BridgeConn{
+		agentID: agent.ID,
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 2),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(conn)
+
+	cookie := loginCookie(t, s, map[string]string{"username": "worker", "password": "abc1234567"})
+	authRequestWithCookie(t, s, http.MethodDelete, "/api/agents/"+agent.ID, cookie, http.StatusOK)
+
+	select {
+	case env := <-conn.send:
+		if env.Type != protocol.TypeAgentShutdown {
+			t.Fatalf("shutdown envelope type = %q", env.Type)
+		}
+		payload, err := protocol.Decode[protocol.AgentShutdownPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(payload.Reason, "deleted") {
+			t.Fatalf("shutdown reason = %#v", payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for agent shutdown envelope")
+	}
+	if s.pool.AgentOnline(agent.ID) {
+		t.Fatal("deleted agent still marked online")
 	}
 }
 

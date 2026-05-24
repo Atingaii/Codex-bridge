@@ -21,6 +21,7 @@ const (
 	TypeOrchestrationStart  = "orchestration_start"
 	TypeOrchestrationEvent  = "orchestration_event"
 	TypeOrchestrationCancel = "orchestration_cancel"
+	TypeAgentShutdown       = "agent_shutdown"
 	TypeError               = "error"
 	TypeStatus              = "status"
 )
@@ -74,6 +75,10 @@ type RegisterPayload struct {
 
 type RegisteredPayload struct {
 	AgentID string `json:"agentId"`
+}
+
+type AgentShutdownPayload struct {
+	Reason string `json:"reason,omitempty"`
 }
 
 type BridgeCapabilities struct {

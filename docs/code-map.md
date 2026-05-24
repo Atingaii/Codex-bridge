@@ -36,13 +36,15 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 
 1. `internal/hub/server.go:handleAgents` lists visible endpoints.
 2. `internal/hub/server.go:handleDeleteAgent` soft-deletes an endpoint and
-   disconnects its active Bridge connection.
+   sends `agent_shutdown` before disconnecting its active Bridge connection.
 3. `internal/hub/server.go:handleCreateAgentRepairToken` generates repair
    commands for existing endpoints.
-4. `internal/store/store.go:DeleteAgent` owns agent soft deletion.
-5. `frontend/src/app/App.tsx:SettingsModal` renders add/delete/detail/repair
+4. `internal/bridge/client.go:requestShutdown` handles remote endpoint
+   shutdown and local user-service cleanup.
+5. `internal/store/store.go:DeleteAgent` owns agent soft deletion.
+6. `frontend/src/app/App.tsx:SettingsModal` renders add/delete/detail/repair
    controls.
-6. Update the relevant feature doc and tests.
+7. Update the relevant feature doc and tests.
 
 ### Add A WebSocket Frame
 
@@ -114,7 +116,10 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    using the prompt plus compacted context.
 4. `frontend/src/app/App.tsx:OrchestrationWorkspace` must keep selecting the
    current run and call the continue endpoint for follow-up tasks.
-5. Update [docs/features/orchestration-continuity.md](features/orchestration-continuity.md).
+5. `internal/hub/orchestration.go:startOrchestration` attaches uploaded file
+   metadata to `user.message` events, and
+   `frontend/src/app/App.tsx:OrchestrationEventItem` renders those files.
+6. Update [docs/features/orchestration-continuity.md](features/orchestration-continuity.md).
 
 ### Change Orchestration Strategy
 

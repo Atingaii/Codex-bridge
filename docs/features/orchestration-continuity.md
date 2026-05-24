@@ -42,6 +42,10 @@ context in the same `runID`.
 - Turn-to-turn strategy now uses compact handoffs documented in
   [orchestration-strategy-optimization.md](orchestration-strategy-optimization.md);
   this preserves continuity without replaying full prior turn transcripts.
+- Uploaded orchestration file contents are sent to the Bridge with the current
+  prompt, while `user.message` events persist only file metadata in
+  `event.data.files` so the timeline can show what was attached without
+  storing duplicate file bodies.
 
 ## Design
 
@@ -74,6 +78,11 @@ When the user scrolls away from the latest orchestration event, the timeline
 shows a floating jump-to-bottom control; if the user is already at the bottom,
 new events continue to follow automatically.
 
+User message cards render attached file metadata from `event.data.files`.
+The right-side file panel also shows `OrchestrationRun.files` for the selected
+run when no draft files are pending, so historical uploads remain discoverable
+after the draft upload list is cleared.
+
 ## Implementation Steps
 
 1. Keep Hub continue semantics in `handleContinueOrchestration`.
@@ -92,6 +101,8 @@ new events continue to follow automatically.
    Merge same-turn `turn.delta` events before display and context compaction.
 10. Preserve a bottom-following timeline by default, and show a jump-to-bottom
     button when the user has scrolled up.
+11. Persist uploaded file metadata on `user.message` orchestration events and
+    render that metadata in the timeline and selected-run side panel.
 
 ## Exit Gates
 
@@ -112,6 +123,8 @@ new events continue to follow automatically.
   visible in the timeline, with token-sized deltas merged into one turn entry.
 - Scrolling up in the orchestration timeline exposes a jump-to-bottom button,
   and clicking it returns to the latest event.
+- Uploaded files appear beside the user message that submitted them, and prior
+  selected-run files remain visible in the side panel after send.
 
 ## Reviewer Q&A
 

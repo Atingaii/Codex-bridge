@@ -61,6 +61,33 @@ func (p *Pool) DisconnectAgent(agentID string) {
 	}
 }
 
+func (p *Pool) ShutdownAgent(agentID, reason string) error {
+	return p.ShutdownAgentWithGrace(agentID, reason, 500*time.Millisecond)
+}
+
+func (p *Pool) ShutdownAgentWithGrace(agentID, reason string, grace time.Duration) error {
+	p.mu.Lock()
+	conn := p.agents[agentID]
+	if conn != nil {
+		delete(p.agents, agentID)
+	}
+	p.mu.Unlock()
+	if conn == nil {
+		return ErrAgentOffline
+	}
+	if err := conn.Send(protocol.MustEnvelope(protocol.TypeAgentShutdown, "", protocol.AgentShutdownPayload{Reason: reason})); err != nil {
+		conn.Close()
+		return err
+	}
+	go func() {
+		if grace > 0 {
+			time.Sleep(grace)
+		}
+		conn.Close()
+	}()
+	return nil
+}
+
 func (p *Pool) SendToAgent(agentID string, env protocol.Envelope) error {
 	p.mu.RLock()
 	conn := p.agents[agentID]
@@ -198,7 +225,9 @@ func (s *wsSender) WriteLoop() {
 func (s *wsSender) Close() {
 	s.once.Do(func() {
 		close(s.done)
-		_ = s.ws.Close()
+		if s.ws != nil {
+			_ = s.ws.Close()
+		}
 	})
 }
 

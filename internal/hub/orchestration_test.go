@@ -306,6 +306,60 @@ func TestCreateOrchestrationAllowsAutoExecuteWithoutBrowserApprovalCapability(t 
 	}
 }
 
+func TestCreateOrchestrationPersistsUserMessageFileMetadata(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	conn := &BridgeConn{
+		agentID: agentID,
+		capabilities: &protocol.BridgeCapabilities{
+			Sandbox:        "danger-full-access",
+			ApprovalPolicy: "never",
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: true},
+				"codex":  {Available: true},
+			},
+		},
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 2),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	body := createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId":  agentID,
+		"prompt":   "prove termination",
+		"maxTurns": 2,
+		"files": []map[string]any{{
+			"name":     "Termination.thy",
+			"mimeType": "text/plain",
+			"size":     18,
+			"data":     "dGhlb3J5IFRlcm1pbmF0aW9u",
+		}},
+	}, http.StatusCreated)
+	run := body["run"].(map[string]any)
+	events, err := st.ListOrchestrationEvents(context.Background(), run["id"].(string), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) == 0 || events[0].Kind != "user.message" {
+		t.Fatalf("events = %#v", events)
+	}
+	rawFiles, ok := events[0].Data["files"].([]any)
+	if !ok || len(rawFiles) != 1 {
+		t.Fatalf("user message files = %#v", events[0].Data)
+	}
+	file := rawFiles[0].(map[string]any)
+	if file["name"] != "Termination.thy" || file["mimeType"] != "text/plain" || file["data"] != nil {
+		t.Fatalf("file metadata = %#v", file)
+	}
+	if file["size"] != float64(18) {
+		t.Fatalf("file size = %#v", file["size"])
+	}
+}
+
 func TestCreateOrchestrationRejectsUnavailableCLIInAutoExecute(t *testing.T) {
 	t.Parallel()
 

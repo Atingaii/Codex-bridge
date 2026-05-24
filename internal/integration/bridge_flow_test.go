@@ -1011,16 +1011,25 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	if !sawPinnedAuto {
 		t.Fatalf("repair profiles missing auto-execute fallback: %#v", repairProfiles)
 	}
+	deleteJSON(t, workerClient, cfg.Bridge.HubURL+"/api/agents/"+url.PathEscape(agent["id"].(string)), http.StatusOK)
+	env := waitBridgeEnvelope(t, fakeBridge, protocol.TypeAgentShutdown, "")
+	shutdown, err := protocol.Decode[protocol.AgentShutdownPayload](env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(shutdown.Reason, "deleted") {
+		t.Fatalf("shutdown payload = %#v", shutdown)
+	}
 
 	adminClient := httpClient(t)
 	postJSON(t, adminClient, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
 	adminAgents := getJSON(t, adminClient, cfg.Bridge.HubURL+"/api/agents", http.StatusOK)["agents"].([]any)
-	if len(adminAgents) != 1 {
+	if len(adminAgents) != 0 {
 		t.Fatalf("admin agents = %#v", adminAgents)
 	}
 	postJSON(t, adminClient, cfg.Bridge.HubURL+"/api/agents/"+url.PathEscape(agent["id"].(string))+"/repair-token", map[string]string{
 		"permissionProfile": "auto-execute",
-	}, http.StatusCreated)
+	}, http.StatusNotFound)
 	other, err := st.UpsertUser(ctx, "other-user", "long-secret-456")
 	if err != nil {
 		t.Fatal(err)
@@ -1645,6 +1654,15 @@ func postJSON(t *testing.T, client *http.Client, target string, payload any, wan
 func getJSON(t *testing.T, client *http.Client, target string, wantStatus int) map[string]any {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doJSON(t, client, req, wantStatus)
+}
+
+func deleteJSON(t *testing.T, client *http.Client, target string, wantStatus int) map[string]any {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

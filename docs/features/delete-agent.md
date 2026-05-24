@@ -4,13 +4,13 @@
 
 Users can remove a CLI endpoint from the settings modal after adding it. Deleted
 agents disappear from agent selectors, and an online Bridge connection for that
-agent is closed.
+agent is asked to shut down before its Hub connection is closed.
 
 ## Non-Goals
 
 - Delete historical chat sessions, messages, orchestration runs, or events.
-- Kill arbitrary local OS processes on the private Bridge machine.
-- Change enroll token creation or the reverse WebSocket frame shape.
+- Kill arbitrary local OS processes unrelated to the selected Bridge endpoint.
+- Remove all user shell artifacts under `~/.codex-bridge`.
 
 ## Data And Protocol Impact
 
@@ -20,8 +20,11 @@ agent is closed.
   history.
 - `DELETE /api/agents/{agentID}` deletes only agents visible to the current
   user. Admin users may delete any agent visible through the admin listing.
-- The endpoint closes the in-memory Bridge WebSocket through
-  `internal/hub/pool.go:DisconnectAgent`.
+- Hub sends a best-effort `protocol.TypeAgentShutdown` frame through
+  `internal/hub/pool.go:ShutdownAgent` before closing the in-memory connection.
+- `internal/bridge/client.go:requestShutdown` stops active work, tries to
+  disable the generated `systemd --user` service for the endpoint, and exits.
+  For `nohup` fallback endpoints, exiting the process is the cleanup action.
 - The endpoint revokes enroll tokens consumed by the deleted machine id so a
   background process cannot immediately reconnect with the same token.
 
@@ -31,8 +34,10 @@ agent is closed.
 2. Add store soft-delete and token-revocation helpers.
 3. Filter deleted agents from list and lookup methods.
 4. Add a delete icon button in `frontend/src/app/App.tsx:SettingsModal`.
-5. Rebuild embedded static assets.
-6. Add store and Hub tests.
+5. Add `protocol.TypeAgentShutdown` and handle it in
+   `internal/bridge/client.go:handleEnvelope`.
+6. Rebuild embedded static assets.
+7. Add store and Hub tests.
 
 ## Exit Gates
 
@@ -50,6 +55,8 @@ keeps historical records intact while removing the endpoint from active UI.
 
 **Q: Does this stop the user's local background process?**
 
-The Hub closes the active WebSocket and revokes the consumed token. It cannot
-kill arbitrary local OS processes, so users may still stop the background
-process locally if they do not want it retrying.
+If the endpoint is online and was started by the generated connect command, the
+Bridge receives `agent_shutdown`, disables its matching `systemd --user`
+service, and exits. If the endpoint was started by the `nohup` fallback, the
+Bridge exits and is not restarted by Codex Bridge. If the endpoint is offline,
+Hub still soft-deletes it and revokes consumed enroll tokens.

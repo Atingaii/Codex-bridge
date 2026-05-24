@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,10 +28,12 @@ type Client struct {
 	instance       string
 	sessions       *SessionManager
 	orchestrations *OrchestrationManager
+	shutdown       chan struct{}
+	shutdownOnce   chan struct{}
 }
 
 func NewClient(cfg *config.Config, version string) *Client {
-	return &Client{cfg: cfg, version: version}
+	return &Client{cfg: cfg, version: version, shutdown: make(chan struct{}), shutdownOnce: make(chan struct{}, 1)}
 }
 
 func (c *Client) Run(ctx context.Context) error {
@@ -60,9 +63,15 @@ func (c *Client) Run(ctx context.Context) error {
 	delay := minDelay
 
 	for {
+		if c.shutdownRequested() {
+			return nil
+		}
 		err := c.connectOnce(ctx, token)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if c.shutdownRequested() {
+			return nil
 		}
 		slog.Warn("[bridge] disconnected", "error", err, "retry_in", delay.String())
 		timer := time.NewTimer(delay + time.Duration(rand.Int63n(int64(delay/2+1))))
@@ -70,6 +79,9 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()
+		case <-c.shutdown:
+			timer.Stop()
+			return nil
 		case <-timer.C:
 		}
 		delay *= 2
@@ -166,6 +178,10 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 			c.sessions.CloseAll()
 			c.orchestrations.CloseAll()
 			return ctx.Err()
+		case <-c.shutdown:
+			c.sessions.CloseAll()
+			c.orchestrations.CloseAll()
+			return nil
 		case err := <-done:
 			return err
 		case <-ticker.C:
@@ -281,6 +297,9 @@ func (c *Client) handleEnvelope(ctx context.Context, env protocol.Envelope, out 
 	switch env.Type {
 	case protocol.TypeHeartbeat:
 		return
+	case protocol.TypeAgentShutdown:
+		payload, _ := protocol.Decode[protocol.AgentShutdownPayload](env)
+		c.requestShutdown(payload.Reason)
 	case protocol.TypeOpenSession:
 		payload, _ := protocol.Decode[protocol.OpenSessionPayload](env)
 		if err := c.sessions.Open(env.Sid, payload.RemoteThreadID, out); err != nil {
@@ -329,6 +348,45 @@ func (c *Client) handleEnvelope(ctx context.Context, env protocol.Envelope, out 
 	default:
 		send(out, protocol.MustEnvelope(protocol.TypeError, env.Sid, protocol.ErrorPayload{Code: "BAD_TYPE", Message: "unsupported bridge frame"}))
 	}
+}
+
+func (c *Client) requestShutdown(reason string) {
+	select {
+	case c.shutdownOnce <- struct{}{}:
+		slog.Info("[bridge] shutdown requested by hub", "reason", reason)
+		c.stopLocalUserService()
+		close(c.shutdown)
+	default:
+	}
+}
+
+func (c *Client) shutdownRequested() bool {
+	select {
+	case <-c.shutdown:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) stopLocalUserService() {
+	serviceName := bridgeUserServiceName(c.cfg.Bridge.MachineIDFile)
+	if serviceName == "" || !commandAvailable("systemctl") {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "systemctl", "--user", "disable", "--now", serviceName).Run()
+	_ = exec.CommandContext(ctx, "systemctl", "--user", "reset-failed", serviceName).Run()
+	_ = exec.CommandContext(ctx, "systemctl", "--user", "daemon-reload").Run()
+}
+
+func bridgeUserServiceName(machineIDFile string) string {
+	base := filepath.Base(expandHome(strings.TrimSpace(machineIDFile)))
+	if base == "" || base == "." || base == string(filepath.Separator) || base == "machine_id" {
+		return ""
+	}
+	return "codex-bridge-" + base + ".service"
 }
 
 func send(out chan<- protocol.Envelope, env protocol.Envelope) bool {

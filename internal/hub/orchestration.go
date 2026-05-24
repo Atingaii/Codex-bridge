@@ -225,6 +225,7 @@ func (s *Server) startOrchestration(ctx context.Context, run store.Orchestration
 		Role:    "user",
 		Content: req.Prompt,
 		Status:  store.OrchestrationQueued,
+		Data:    orchestrationUserMessageData(req.Files),
 	})
 	if err != nil {
 		return err
@@ -730,6 +731,14 @@ func orchestrationFileMeta(files []protocol.AttachmentPayload) []store.Orchestra
 		})
 	}
 	return metas
+}
+
+func orchestrationUserMessageData(files []protocol.AttachmentPayload) map[string]any {
+	metas := orchestrationFileMeta(files)
+	if len(metas) == 0 {
+		return nil
+	}
+	return map[string]any{"files": metas}
 }
 
 func (s *Server) resolveAgentID(ctx context.Context, uid, requested string) (string, error) {

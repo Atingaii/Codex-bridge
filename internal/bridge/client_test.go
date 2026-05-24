@@ -25,3 +25,13 @@ func TestBridgeCapabilitiesCheckCLIPaths(t *testing.T) {
 		t.Fatalf("orchestration claude should be unavailable: %#v", caps.Orchestration["claude"])
 	}
 }
+
+func TestBridgeUserServiceNameUsesMachineIDFileHash(t *testing.T) {
+	got := bridgeUserServiceName("~/.codex-bridge/machines/123456789")
+	if got != "codex-bridge-123456789.service" {
+		t.Fatalf("service name = %q", got)
+	}
+	if got := bridgeUserServiceName("~/.codex-bridge/machine_id"); got != "" {
+		t.Fatalf("global machine id should not map to generated service, got %q", got)
+	}
+}

@@ -70,7 +70,9 @@ connected endpoint's Codex/Claude approval capabilities before a run starts.
 Existing endpoints can be expanded under Settings -> Agents & Runtime to
 generate a repair command. That command downloads the current Bridge binary and
 reconnects the same endpoint with its existing machine id, name, and known
-working directory.
+working directory. Deleting an online endpoint asks its local Bridge to stop the
+matching generated user service and exit before the Hub hides the endpoint and
+revokes consumed enroll tokens.
 
 ## Android APK
 

@@ -65,9 +65,11 @@ Event cards display their precise clock time down to seconds. The orchestration
 sidebar shows the run calendar date beside status so history can be scanned
 without repeating full timestamps inside the run list.
 
-Assistant deltas are rendered as separate timeline entries in event sequence
-order. Command events are also rendered in the timeline with expandable command
-details so users can confirm which command/output payload arrived from Hub.
+Assistant deltas are merged by `runId`, `turnId`, role, and CLI before timeline
+rendering. This keeps token-level app-server deltas from becoming one card per
+word while still preserving the final streamed text. Command events are rendered
+in the timeline with expandable command details so users can confirm which
+command/output payload arrived from Hub.
 When the user scrolls away from the latest orchestration event, the timeline
 shows a floating jump-to-bottom control; if the user is already at the bottom,
 new events continue to follow automatically.
@@ -87,6 +89,7 @@ new events continue to follow automatically.
 8. Render event times in the main timeline and run dates in the sidebar.
 9. Render detailed `turn.delta` and `command.*` events directly in the timeline
    instead of relying on `turn.start` cards or nested command-only sections.
+   Merge same-turn `turn.delta` events before display and context compaction.
 10. Preserve a bottom-following timeline by default, and show a jump-to-bottom
     button when the user has scrolled up.
 
@@ -106,7 +109,7 @@ new events continue to follow automatically.
 - Timeline events include specific times, and sidebar runs include calendar
   dates.
 - Persisted assistant deltas and command outputs returned from `/events` are
-  visible in the timeline.
+  visible in the timeline, with token-sized deltas merged into one turn entry.
 - Scrolling up in the orchestration timeline exposes a jump-to-bottom button,
   and clicking it returns to the latest event.
 

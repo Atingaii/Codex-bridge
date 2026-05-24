@@ -132,25 +132,26 @@ func handleClaudeApprovalMCPToolCall(socketPath string, rawParams json.RawMessag
 		behavior = "allow"
 		text = "Allowed by browser approval."
 	}
-	result := map[string]any{
-		"content": []map[string]any{{
-			"type": "text",
-			"text": text,
-		}},
-		"structuredContent": map[string]any{
-			"behavior":     behavior,
-			"updatedInput": map[string]any{},
-			"message":      text,
-		},
+	decision := map[string]any{
 		"behavior": behavior,
 		"message":  text,
 	}
 	if allow {
-		result["updatedInput"] = map[string]any{}
+		decision["updatedInput"] = map[string]any{}
 	} else {
-		result["isError"] = true
+		decision["interrupt"] = true
 	}
-	return result, nil
+	decisionJSON, err := json.Marshal(decision)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"content": []map[string]any{{
+			"type": "text",
+			"text": string(decisionJSON),
+		}},
+		"structuredContent": decision,
+	}, nil
 }
 
 func callClaudeApprovalSocket(socketPath string, req claudeApprovalSocketRequest) (claudeApprovalSocketResponse, error) {

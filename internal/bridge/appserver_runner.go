@@ -338,7 +338,7 @@ func approvalResponseFor(method, decision string) any {
 	switch method {
 	case "item/commandExecution/requestApproval":
 		if allow {
-			return map[string]any{"decision": "accept"}
+			return map[string]any{"decision": "acceptForSession"}
 		}
 		return map[string]any{"decision": "decline"}
 	case "item/fileChange/requestApproval":
@@ -348,17 +348,17 @@ func approvalResponseFor(method, decision string) any {
 		return map[string]any{"decision": "decline"}
 	case "item/permissions/requestApproval":
 		if allow {
-			return map[string]any{"permissions": map[string]any{}, "scope": "turn"}
+			return map[string]any{"permissions": map[string]any{}, "scope": "session"}
 		}
 		return map[string]any{"permissions": map[string]any{}, "scope": "turn", "strictAutoReview": true}
 	case "execCommandApproval":
 		if allow {
-			return map[string]any{"decision": "approved"}
+			return map[string]any{"decision": "approved_for_session"}
 		}
 		return map[string]any{"decision": "denied"}
 	case "applyPatchApproval":
 		if allow {
-			return map[string]any{"decision": "approved"}
+			return map[string]any{"decision": "approved_for_session"}
 		}
 		return map[string]any{"decision": "denied"}
 	default:

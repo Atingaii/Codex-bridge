@@ -152,6 +152,23 @@ func TestCompactOrchestrationContextCarriesPriorState(t *testing.T) {
 	}
 }
 
+func TestCompactOrchestrationContextMergesTokenDeltas(t *testing.T) {
+	run := store.OrchestrationRun{ID: "orc_test", Mode: "collaboration", CWD: "/repo", Status: store.OrchestrationCompleted}
+	events := []store.OrchestrationEvent{
+		{RunID: run.ID, Kind: "turn.delta", Role: "reviewer", CLI: "codex", TurnID: "t1", Content: "H"},
+		{RunID: run.ID, Kind: "turn.delta", Role: "reviewer", CLI: "codex", TurnID: "t1", Content: "andoff"},
+		{RunID: run.ID, Kind: "turn.delta", Role: "reviewer", CLI: "codex", TurnID: "t1", Content: ": status=resolved"},
+	}
+
+	got := compactOrchestrationContext(run, events)
+	if !strings.Contains(got, "Handoff: status=resolved") {
+		t.Fatalf("context did not merge token deltas:\n%s", got)
+	}
+	if strings.Count(got, "reviewer via codex via t1") != 1 {
+		t.Fatalf("context should include one merged turn note:\n%s", got)
+	}
+}
+
 func TestContinueOrchestrationSendsCompactedContext(t *testing.T) {
 	t.Parallel()
 

@@ -226,6 +226,17 @@ It uses Claude Code's own permission prompt callback. Granularity is therefore
 bounded by the tool input Claude Code sends, but the user's browser decision now
 controls the turn instead of a hidden local prompt.
 
+Claude Code expects the MCP permission-prompt tool result to be a single text
+block containing a JSON decision such as `{"behavior":"allow","updatedInput":{}}`
+or `{"behavior":"deny","message":"..."}`. Returning prose in that text block is
+invalid and prevents the browser approval card from unblocking the turn.
+
+Codex app-server approval responses use the upstream session-scoped acceptance
+values (`acceptForSession`, `approved_for_session`, and `scope=session`) when a
+browser user approves. This still requires the explicit first browser click, but
+lets Codex reuse its same-session approval cache for matching later prompts
+instead of asking for the same directory or command repeatedly.
+
 **Q: Why block review-required orchestration when capabilities are missing?**
 
 Review-required is a user-visible safety promise. If Codex would fall back to

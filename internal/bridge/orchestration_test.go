@@ -222,6 +222,26 @@ func TestParseHandoffFieldsAndCompactPromptAvoidsRawTranscript(t *testing.T) {
 	}
 }
 
+func TestPrepareOrchestrationPromptFilesWarnsAgainstEmptyPDFPages(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.CWD = t.TempDir()
+	prompt, metas, err := PrepareOrchestrationPromptFiles(&cfg, "orc_pdf", "read this", []protocol.AttachmentPayload{{
+		Name:     "paper.pdf",
+		MimeType: "application/pdf",
+		Size:     int64(len("pdf")),
+		Data:     "cGRm",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 1 || metas[0].Name != "paper.pdf" {
+		t.Fatalf("metas = %#v", metas)
+	}
+	if !strings.Contains(prompt, "Do not call PDF-reading tools with empty pages values") {
+		t.Fatalf("prompt missing PDF pages guard:\n%s", prompt)
+	}
+}
+
 func TestFinalVerifierRunsOnlyWhenRiskSignalsExist(t *testing.T) {
 	manager := NewOrchestrationManager(&config.Config{})
 	clean := []orchestrationTurn{{
@@ -424,12 +444,54 @@ func TestClaudeApprovalMCPToolCallUsesSocketDecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := res.(map[string]any)
-	if result["behavior"] != "allow" {
+	content := result["content"].([]map[string]any)
+	var decision map[string]any
+	if err := json.Unmarshal([]byte(content[0]["text"].(string)), &decision); err != nil {
+		t.Fatalf("permission prompt result is not JSON: %v", err)
+	}
+	if decision["behavior"] != "allow" {
 		t.Fatalf("mcp result = %#v", result)
+	}
+	if _, ok := decision["updatedInput"].(map[string]any); !ok {
+		t.Fatalf("mcp result missing updatedInput: %#v", decision)
 	}
 	req := <-got
 	if req.Command != "rm -rf build" || req.CWD != "/repo" || req.Reason != "test" {
 		t.Fatalf("socket request = %#v", req)
+	}
+}
+
+func TestClaudeApprovalMCPToolCallReturnsDenyJSON(t *testing.T) {
+	socketPath := t.TempDir() + "/approval.sock"
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var req claudeApprovalSocketRequest
+		_ = json.NewDecoder(conn).Decode(&req)
+		_ = json.NewEncoder(conn).Encode(claudeApprovalSocketResponse{RequestID: req.RequestID, Decision: "decline"})
+	}()
+
+	raw := json.RawMessage(`{"name":"browser_approval","arguments":{"command":"rm -rf build","cwd":"/repo","reason":"test"}}`)
+	res, err := handleClaudeApprovalMCPToolCall(socketPath, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := res.(map[string]any)
+	content := result["content"].([]map[string]any)
+	var decision map[string]any
+	if err := json.Unmarshal([]byte(content[0]["text"].(string)), &decision); err != nil {
+		t.Fatalf("permission prompt result is not JSON: %v", err)
+	}
+	if decision["behavior"] != "deny" || decision["message"] == "" || decision["interrupt"] != true {
+		t.Fatalf("mcp deny result = %#v", decision)
 	}
 }
 

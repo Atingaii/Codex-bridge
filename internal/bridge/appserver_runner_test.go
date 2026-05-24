@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -46,6 +47,23 @@ func TestCodexAppServerRunnerApprovalRoundTrip(t *testing.T) {
 	}
 	if approvals.request.RequestID != "99" || approvals.request.Command != "echo ok" || approvals.request.RunID != "run_1" || approvals.request.PromptID != "prm_1" {
 		t.Fatalf("approval request = %#v", approvals.request)
+	}
+}
+
+func TestApprovalResponseForUsesSessionScopedAcceptance(t *testing.T) {
+	tests := []struct {
+		method string
+		want   any
+	}{
+		{"item/commandExecution/requestApproval", map[string]any{"decision": "acceptForSession"}},
+		{"item/permissions/requestApproval", map[string]any{"permissions": map[string]any{}, "scope": "session"}},
+		{"execCommandApproval", map[string]any{"decision": "approved_for_session"}},
+		{"applyPatchApproval", map[string]any{"decision": "approved_for_session"}},
+	}
+	for _, tc := range tests {
+		if got := approvalResponseFor(tc.method, "accept"); !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("approvalResponseFor(%q) = %#v, want %#v", tc.method, got, tc.want)
+		}
 	}
 }
 

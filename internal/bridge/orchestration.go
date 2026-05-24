@@ -1767,6 +1767,7 @@ func PrepareOrchestrationPromptFiles(cfg *config.Config, runID, prompt string, f
 		b.WriteByte('\n')
 	}
 	b.WriteString("\nUse these local file paths directly when the task refers to uploaded files.")
+	b.WriteString("\nDo not call PDF-reading tools with empty pages values; inspect the local paths directly or omit optional page filters.")
 	return b.String(), metas, nil
 }
 

@@ -409,6 +409,7 @@ func cleanContextParts(parts []string) []string {
 }
 
 func compactOrchestrationContext(run store.OrchestrationRun, events []store.OrchestrationEvent) string {
+	events = mergeOrchestrationDeltasForContext(events)
 	var userMessages []string
 	var turnNotes []string
 	var commands []string
@@ -458,6 +459,56 @@ func compactOrchestrationContext(run store.OrchestrationRun, events []store.Orch
 	writeContextSection(&b, "Run outcomes", lastN(outcomes, 8))
 	writeContextSection(&b, "Unresolved blockers or errors", lastN(blockers, 6))
 	return trimForContext(b.String(), 14000)
+}
+
+func mergeOrchestrationDeltasForContext(events []store.OrchestrationEvent) []store.OrchestrationEvent {
+	merged := make([]store.OrchestrationEvent, 0, len(events))
+	deltaIndexes := make(map[string]int)
+	for _, event := range events {
+		if event.Kind != "turn.delta" {
+			merged = append(merged, event)
+			continue
+		}
+		content := strings.TrimSpace(event.Content)
+		if content == "" {
+			continue
+		}
+		key := contextDeltaKey(event)
+		index, ok := deltaIndexes[key]
+		if !ok {
+			event.Content = content
+			deltaIndexes[key] = len(merged)
+			merged = append(merged, event)
+			continue
+		}
+		previous := merged[index]
+		previous.Content = mergeContextDeltaContent(previous.Content, content)
+		if previous.Status == "" {
+			previous.Status = event.Status
+		}
+		if previous.Error == "" {
+			previous.Error = event.Error
+		}
+		merged[index] = previous
+	}
+	return merged
+}
+
+func contextDeltaKey(event store.OrchestrationEvent) string {
+	return strings.Join([]string{event.RunID, event.TurnID, event.Role, event.CLI}, "\x1f")
+}
+
+func mergeContextDeltaContent(previous, next string) string {
+	if previous == "" {
+		return next
+	}
+	if next == "" || strings.HasSuffix(previous, next) {
+		return previous
+	}
+	if strings.HasPrefix(next, previous) {
+		return next
+	}
+	return previous + next
 }
 
 func writeContextSection(b *strings.Builder, title string, items []string) {

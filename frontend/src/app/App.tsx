@@ -690,15 +690,32 @@ function upsertOrchestrationRun(current: OrchestrationRun[], next: Orchestration
 }
 
 function upsertApprovalItem(current: ApprovalItemState[], approval: ApprovalRequest): ApprovalItemState[] {
-  const found = current.some((item) => item.approval.requestId === approval.requestId);
+  const semanticKey = approvalSemanticKey(approval);
   const next: ApprovalItemState = { id: approval.requestId, approval, status: 'pending' };
-  return found
-    ? current.map((item) => item.approval.requestId === approval.requestId ? { ...item, approval } : item)
-    : [...current, next];
+  let replaced = false;
+  const updated = current.map((item) => {
+    if (item.approval.requestId === approval.requestId) {
+      replaced = true;
+      return { ...item, approval };
+    }
+    if (approvalSemanticKey(item.approval) === semanticKey) {
+      replaced = true;
+      return next;
+    }
+    return item;
+  });
+  return replaced ? updated : [...current, next];
 }
 
 function updateApprovalItemStatus(current: ApprovalItemState[], requestId: string, status: ApprovalStatus): ApprovalItemState[] {
   return current.map((item) => item.approval.requestId === requestId ? { ...item, status } : item);
+}
+
+function approvalSemanticKey(approval: ApprovalRequest) {
+  const command = stringsTrim(approval.command).replace(/\s+/g, ' ');
+  const cwd = stringsTrim(approval.cwd);
+  const reason = stringsTrim(approval.reason).replace(/\s+/g, ' ');
+  return [approval.runId || '', approval.turnId || approval.promptId || '', approval.kind || '', command, cwd, reason].join('\u001f');
 }
 
 function approvalStatusFromDecision(decision: 'accept' | 'decline' | 'cancel'): ApprovalStatus {
@@ -757,7 +774,7 @@ function orchestrationTurnKey(event: OrchestrationEvent) {
 }
 
 function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string): OrchestrationVisibleEvent[] {
-  const ordered = mergeOrchestrationToolEvents(events.filter((event) => event.runId === runId).slice().sort(compareOrchestrationEvents));
+  const ordered = mergeOrchestrationDeltaEvents(mergeOrchestrationToolEvents(events.filter((event) => event.runId === runId).slice().sort(compareOrchestrationEvents)));
   const visible: OrchestrationVisibleEvent[] = [];
 
   ordered.forEach((event, index) => {
@@ -836,6 +853,44 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string)
   });
 
   return visible;
+}
+
+function mergeOrchestrationDeltaEvents(events: OrchestrationEvent[]): OrchestrationEvent[] {
+  const merged: OrchestrationEvent[] = [];
+  const deltaIndexes = new Map<string, number>();
+  events.forEach((event) => {
+    if (event.kind !== 'turn.delta') {
+      merged.push(event);
+      return;
+    }
+    const content = decodeEscapedLineBreaks(String(event.content || ''));
+    if (!stringsTrim(content)) return;
+    const key = orchestrationTurnKey(event);
+    const index = deltaIndexes.get(key);
+    if (typeof index !== 'number') {
+      deltaIndexes.set(key, merged.length);
+      merged.push({ ...event, content });
+      return;
+    }
+    const previous = merged[index];
+    merged[index] = {
+      ...previous,
+      content: mergeDeltaContent(previous.content || '', content),
+      status: event.status || previous.status,
+      error: event.error || previous.error,
+      createdAt: previous.createdAt || event.createdAt,
+      seq: previous.seq || event.seq,
+    };
+  });
+  return merged;
+}
+
+function mergeDeltaContent(previous: string, next: string) {
+  if (!previous) return next;
+  if (!next) return previous;
+  if (next.startsWith(previous)) return next;
+  if (previous.endsWith(next)) return previous;
+  return previous + next;
 }
 
 function stringsTrim(value?: string) {
@@ -2872,31 +2927,31 @@ function OrchestrationWorkspace({
 
           <aside className="min-h-0 border-t lg:border-t-0 lg:border-l border-border bg-background/95 p-4 overflow-y-auto lg:overflow-hidden elegant-scrollbar">
             <div className="flex min-h-full flex-col gap-3 lg:h-full lg:min-h-0">
-              <div className="shrink-0 space-y-2">
-                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.mode}</label>
-                <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1">
-                  <button className={cn("h-8 rounded-md text-xs font-medium", mode === 'collaboration' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setMode('collaboration')}>
-                    {t.collaborate}
-                  </button>
-                  <button className={cn("h-8 rounded-md text-xs font-medium", mode === 'debate' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setMode('debate')}>
-                    {t.debate}
-                  </button>
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.mode}</label>
+                  <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1">
+                    <button className={cn("h-8 rounded-md text-xs font-medium", mode === 'collaboration' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setMode('collaboration')}>
+                      {t.collaborate}
+                    </button>
+                    <button className={cn("h-8 rounded-md text-xs font-medium", mode === 'debate' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setMode('debate')}>
+                      {t.debate}
+                    </button>
+                  </div>
                 </div>
-              </div>
 
-              <label className="flex shrink-0 flex-col gap-2">
-                <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.task}</span>
-                <textarea
-                  ref={taskInputRef}
-                  className="h-28 w-full resize-none overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring lg:h-24 xl:h-28 elegant-scrollbar"
-                  placeholder={t.taskPlaceholder}
-                  value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
-                  disabled={creating || isRunning}
-                />
-              </label>
+                <label className="flex flex-col gap-2">
+                  <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.task}</span>
+                  <textarea
+                    ref={taskInputRef}
+                    className="h-24 w-full resize-none overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring elegant-scrollbar"
+                    placeholder={t.taskPlaceholder}
+                    value={prompt}
+                    onChange={(event) => setPrompt(event.target.value)}
+                    disabled={creating || isRunning}
+                  />
+                </label>
 
-              <div className="min-h-0 space-y-3 lg:overflow-y-auto lg:pr-1 elegant-scrollbar">
                 <label className="block shrink-0 space-y-2 sm:hidden">
                   <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.cliEndpoint}</span>
                   <AgentSelector
@@ -2946,7 +3001,7 @@ function OrchestrationWorkspace({
                 </label>
               </div>
 
-              <div className="min-h-0 shrink-0 space-y-2">
+              <div className="min-h-0 flex-1 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.files}</span>
                   <Button variant="ghost" size="sm" className="h-7 gap-1.5" onClick={() => fileInputRef.current?.click()} disabled={creating || isRunning}>
@@ -2955,7 +3010,7 @@ function OrchestrationWorkspace({
                   </Button>
                 </div>
                 <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(event) => addFiles(event.target.files).catch((err) => setError(err.message))} />
-                <div className="space-y-1.5 lg:max-h-28 lg:overflow-y-auto elegant-scrollbar">
+                <div className="max-h-full space-y-1.5 overflow-y-auto elegant-scrollbar">
                   {files.length === 0 ? (
                     <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">{t.uploadProofFiles}</div>
                   ) : files.map((file) => (

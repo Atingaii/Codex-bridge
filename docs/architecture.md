@@ -60,9 +60,10 @@ the owning Bridge.
 Bridge registration includes `protocol.RegisterPayload.Capabilities`. Hub keeps
 the latest online capabilities in `internal/hub/pool.go` and returns them from
 `GET /api/agents`, allowing the frontend to show whether Codex and Claude
-orchestration browser approval are available. Hub blocks review-required
-orchestration when the selected endpoint cannot provide the required approvals
-instead of falling back to `codex exec --json`.
+orchestration execution and browser approval are available. Hub blocks
+orchestration when the selected endpoint cannot execute both CLIs, and blocks
+review-required orchestration when the endpoint cannot provide the required
+approvals instead of falling back to `codex exec --json`.
 
 ## Decisions
 

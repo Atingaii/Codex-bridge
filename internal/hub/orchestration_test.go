@@ -289,6 +289,38 @@ func TestCreateOrchestrationAllowsAutoExecuteWithoutBrowserApprovalCapability(t 
 	}
 }
 
+func TestCreateOrchestrationRejectsUnavailableCLIInAutoExecute(t *testing.T) {
+	t.Parallel()
+
+	s, _, userID, agentID := newOrchestrationTestServer(t)
+	conn := &BridgeConn{
+		agentID: agentID,
+		capabilities: &protocol.BridgeCapabilities{
+			Sandbox:        "danger-full-access",
+			ApprovalPolicy: "never",
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: false},
+				"codex":  {Available: true},
+			},
+		},
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 2),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	body := createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId":  agentID,
+		"prompt":   "trusted run",
+		"maxTurns": 2,
+	}, http.StatusConflict)
+	if body["code"] != "ORCHESTRATION_CAPABILITY_UNAVAILABLE" || !strings.Contains(body["message"].(string), "Claude") {
+		t.Fatalf("capability error body = %#v", body)
+	}
+}
+
 func TestBridgeApprovalRequestRoutesToOrchestrationBrowsers(t *testing.T) {
 	t.Parallel()
 

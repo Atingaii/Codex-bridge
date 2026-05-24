@@ -54,9 +54,10 @@ Browser self-registration is disabled. Create or update approved users with
 After login, create a CLI token in Settings and copy the single install-and-connect
 command. The command writes logs under `~/.codex-bridge/logs/` and only prints
 `codex-bridge connected` after the Bridge logs `[bridge] connected`; otherwise
-it prints recent log lines for diagnosis. It preserves common proxy variables
-for the background service so WSL/Linux shells that need a proxy keep working
-after `systemd --user` starts the Bridge.
+it prints recent log lines for diagnosis. It preserves `PATH`, resolved
+Codex/Claude CLI paths, and common proxy variables for the background service
+so WSL/Linux shells that need a custom CLI or proxy path keep working after
+`systemd --user` starts the Bridge.
 
 The Settings flow offers two permission profiles. Review required uses the
 Codex app-server runner so Codex command/file approval requests appear in the

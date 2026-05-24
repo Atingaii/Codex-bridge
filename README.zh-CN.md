@@ -118,7 +118,7 @@ hub:
 HUB_BRIDGE_DOWNLOAD_URL='https://your-release-url/codex-bridge-linux-amd64'
 ```
 
-先用 `codex-bridge user --username <name> --password <password>` 创建用户。用户登录后在网页里自己生成 CLI token，然后复制执行页面生成的单行“安装并连接”命令。该命令会把日志写到 `~/.codex-bridge/logs/`，保留当前 shell 的常见代理变量，只有 Bridge 日志出现 `[bridge] connected` 后才会提示已连接；否则会打印最近日志方便定位。
+先用 `codex-bridge user --username <name> --password <password>` 创建用户。用户登录后在网页里自己生成 CLI token，然后复制执行页面生成的单行“安装并连接”命令。该命令会把日志写到 `~/.codex-bridge/logs/`，保留当前 shell 的 `PATH`、解析到的 Codex/Claude CLI 路径和常见代理变量，只有 Bridge 日志出现 `[bridge] connected` 后才会提示已连接；否则会打印最近日志方便定位。
 
 如果某个已添加 CLI 端没有上报能力矩阵，打开设置里的 `Agent 与运行时`，展开该端并点击 `生成修复命令`。修复命令会下载最新 Bridge，并用该端原有的 machine id、端名称和已知工作目录重启连接，避免误注册成新端点。
 

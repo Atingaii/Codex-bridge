@@ -30,6 +30,8 @@ should list names and point here for detail.
 | `BRIDGE_NAME` | Agent display name | config `bridge.name` |
 | `BRIDGE_CWD` | Default workspace path for runner | config `bridge.cwd` |
 | `BRIDGE_RUNNER` | `echo` or `codex` | config `bridge.runner` |
+| `BRIDGE_CODEX_PATH` | Codex CLI path used by Bridge | config `bridge.codex_path` |
+| `BRIDGE_CLAUDE_PATH` | Claude Code CLI path used by orchestration | config `bridge.claude_path` |
 | `BRIDGE_MODEL` | Model argument for Codex runner | config `bridge.model` |
 | `BRIDGE_SANDBOX` | Codex sandbox policy | config `bridge.sandbox` |
 | `BRIDGE_APPROVAL_POLICY` | Codex approval policy | config `bridge.approval_policy` |
@@ -67,9 +69,10 @@ falls back to `nohup` when user systemd is not available, writes logs under
 `~/.codex-bridge/machines/`. The setup command clears the per-directory log
 before starting and only prints `codex-bridge connected` after the Bridge logs
 `[bridge] connected`; otherwise it prints recent log lines for diagnosis. It
-also preserves common proxy environment variables in
+also preserves `PATH`, resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`,
+and common proxy environment variables in
 `~/.codex-bridge/services/<cwd-hash>.env` so background services keep the same
-Hub connectivity as the shell that ran the setup command.
+CLI and Hub connectivity as the shell that ran the setup command.
 
 The settings UI exposes two permission profiles:
 

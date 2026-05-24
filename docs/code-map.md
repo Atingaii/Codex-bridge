@@ -96,8 +96,9 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    requests to chat browsers by `sid` or orchestration browsers by
    `payload.runId`.
 8. `internal/hub/orchestration.go:validateOrchestrationCapabilities` blocks
-   review-required orchestration if the selected online Bridge does not report
-   browser approval support for both CLIs.
+   orchestration if the selected online Bridge cannot execute both CLIs, and
+   additionally blocks review-required orchestration if browser approval support
+   is missing.
 9. `internal/hub/ws_browser.go:handleBrowserEnvelope` and
    `internal/hub/orchestration.go:handleOrchestrationWS` forward browser
    approval decisions back to the Bridge.

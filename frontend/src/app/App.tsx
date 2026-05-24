@@ -3033,7 +3033,7 @@ function CapabilityMatrix({ agent, t }: { agent: Agent | null; t: UIText }) {
       </div>
       <div className="space-y-1.5">
         {rows.map((row) => {
-          const ok = auto || Boolean(row.cap?.available && row.cap.browserApproval);
+          const ok = Boolean(row.cap?.available && (auto || row.cap.browserApproval));
           return (
             <div key={row.cli} className="grid grid-cols-[64px_minmax(0,1fr)_auto] items-center gap-2 text-xs">
               <span className="font-medium">{row.label}</span>
@@ -3043,7 +3043,7 @@ function CapabilityMatrix({ agent, t }: { agent: Agent | null; t: UIText }) {
                 ok ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-destructive/20 bg-destructive/10 text-destructive"
               )}>
                 {ok ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
-                {auto ? t.autoExecute : row.cap?.browserApproval ? t.browserApproval : t.notAvailable}
+                {ok ? (auto ? t.autoExecute : t.browserApproval) : t.notAvailable}
               </span>
             </div>
           );

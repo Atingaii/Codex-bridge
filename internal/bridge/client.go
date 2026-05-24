@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -183,6 +184,8 @@ func BridgeCapabilities(cfg *config.Config) *protocol.BridgeCapabilities {
 		runner = "echo"
 	}
 	reviewRequired := !bridgeBypassApprovalsAndSandbox(cfg)
+	codexAvailable := commandAvailable(bridgeCodexPath(cfg))
+	claudeAvailable := commandAvailable(bridgeClaudePath(cfg))
 	caps := &protocol.BridgeCapabilities{
 		Runner:         runner,
 		Sandbox:        cfg.Bridge.Sandbox,
@@ -192,24 +195,46 @@ func BridgeCapabilities(cfg *config.Config) *protocol.BridgeCapabilities {
 		Metadata:       map[string]string{"approvalMode": approvalMode(cfg)},
 	}
 	caps.Chat["codex"] = protocol.BridgeCLICapability{
-		Available:       runner == "codex-app-server" || runner == "codex-appserver" || runner == "app-server",
+		Available:       codexAvailable && (runner == "codex-app-server" || runner == "codex-appserver" || runner == "app-server"),
 		Execution:       runner,
-		BrowserApproval: runner == "codex-app-server" || runner == "codex-appserver" || runner == "app-server",
+		BrowserApproval: codexAvailable && (runner == "codex-app-server" || runner == "codex-appserver" || runner == "app-server"),
 		ApprovalMode:    approvalMode(cfg),
 	}
 	caps.Orchestration["claude"] = protocol.BridgeCLICapability{
-		Available:       true,
+		Available:       claudeAvailable,
 		Execution:       "claude --print",
-		BrowserApproval: reviewRequired,
+		BrowserApproval: claudeAvailable && reviewRequired,
 		ApprovalMode:    approvalMode(cfg),
 	}
 	caps.Orchestration["codex"] = protocol.BridgeCLICapability{
-		Available:       true,
+		Available:       codexAvailable,
 		Execution:       codexOrchestrationExecution(cfg),
-		BrowserApproval: reviewRequired,
+		BrowserApproval: codexAvailable && reviewRequired,
 		ApprovalMode:    approvalMode(cfg),
 	}
 	return caps
+}
+
+func commandAvailable(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := exec.LookPath(path)
+	return err == nil
+}
+
+func bridgeCodexPath(cfg *config.Config) string {
+	if strings.TrimSpace(cfg.Bridge.CodexPath) == "" {
+		return "codex"
+	}
+	return cfg.Bridge.CodexPath
+}
+
+func bridgeClaudePath(cfg *config.Config) string {
+	if strings.TrimSpace(cfg.Bridge.ClaudePath) == "" {
+		return "claude"
+	}
+	return cfg.Bridge.ClaudePath
 }
 
 func codexOrchestrationExecution(cfg *config.Config) string {

@@ -37,11 +37,12 @@ for manual recovery.
   `~/.codex-bridge/services`.
 - Writes the helper script and user service with `printf '%s\n'` so the browser
   copies one executable shell line instead of a heredoc block.
-- Captures common proxy variables from the shell that runs the setup command
+- Captures `PATH`, resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, and
+  common proxy variables from the shell that runs the setup command
   (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and lowercase
   variants) into `~/.codex-bridge/services/<cwd-hash>.env`. The start script
   loads that file before dialing the Hub so user systemd does not lose the
-  WSL/Linux proxy environment.
+  WSL/Linux CLI or proxy environment.
 - If `systemctl --user` is available, writes
   `~/.config/systemd/user/codex-bridge-<cwd-hash>.service` and a matching
   start script, then runs `systemctl --user enable` and `restart`.

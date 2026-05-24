@@ -265,6 +265,10 @@ func (s *Server) validateOrchestrationCapabilities(agentID string) error {
 	if !ok {
 		return errors.New("selected CLI endpoint is offline or did not advertise orchestration approval capabilities")
 	}
+	missingCLI := missingOrchestrationCLIs(caps)
+	if len(missingCLI) > 0 {
+		return fmt.Errorf("selected CLI endpoint cannot execute %s; reconnect the endpoint after installing the missing CLI commands or fixing its service PATH", strings.Join(missingCLI, " and "))
+	}
 	if strings.EqualFold(caps.ApprovalPolicy, "never") && strings.EqualFold(caps.Sandbox, "danger-full-access") {
 		return nil
 	}
@@ -276,6 +280,20 @@ func (s *Server) validateOrchestrationCapabilities(agentID string) error {
 		return fmt.Errorf("review-required orchestration needs browser approval for %s; reconnect the endpoint with a review-required bridge that supports app-server orchestration", strings.Join(missing, " and "))
 	}
 	return nil
+}
+
+func missingOrchestrationCLIs(caps *protocol.BridgeCapabilities) []string {
+	if caps == nil {
+		return []string{"Claude", "Codex"}
+	}
+	var missing []string
+	for _, cli := range []string{"claude", "codex"} {
+		capability, ok := caps.Orchestration[cli]
+		if !ok || !capability.Available {
+			missing = append(missing, cliDisplayName(cli))
+		}
+	}
+	return missing
 }
 
 func missingOrchestrationBrowserApproval(caps *protocol.BridgeCapabilities) []string {

@@ -57,7 +57,8 @@ command. The command writes logs under `~/.codex-bridge/logs/` and only prints
 it prints recent log lines for diagnosis. It preserves `PATH`, resolved
 Codex/Claude CLI paths, and common proxy variables for the background service
 so WSL/Linux shells that need a custom CLI or proxy path keep working after
-`systemd --user` starts the Bridge.
+`systemd --user` starts the Bridge. If either CLI is missing from the shell
+running the command, setup exits before registering an unusable endpoint.
 
 The Settings flow offers two permission profiles. Review required uses the
 Codex app-server runner so Codex command/file approval requests appear in the

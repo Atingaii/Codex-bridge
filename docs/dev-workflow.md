@@ -67,10 +67,12 @@ parts. The connect command prefers a restartable `systemd --user` service,
 falls back to `nohup` when user systemd is not available, writes logs under
 `~/.codex-bridge/logs/`, and keeps a per-working-directory machine id under
 `~/.codex-bridge/machines/`. The setup command clears the per-directory log
-before starting and only prints `codex-bridge connected` after the Bridge logs
+before starting, stops any existing same-directory user service, refuses to
+continue unless `codex` and `claude` are resolvable in the shell that runs the
+command, and only prints `codex-bridge connected` after the Bridge logs
 `[bridge] connected`; otherwise it prints recent log lines for diagnosis. It
-also preserves `PATH`, resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`,
-and common proxy environment variables in
+preserves `PATH`, resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, and
+common proxy environment variables in
 `~/.codex-bridge/services/<cwd-hash>.env` so background services keep the same
 CLI and Hub connectivity as the shell that ran the setup command.
 

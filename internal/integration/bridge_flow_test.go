@@ -912,9 +912,14 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	}
 	for _, want := range []string{
 		`CB_SERVICE_NAME="codex-bridge-${CB_HASH}.service"`,
+		`systemctl --user stop "$CB_SERVICE_NAME"`,
 		`systemctl --user daemon-reload && systemctl --user enable "$CB_SERVICE_NAME" && systemctl --user restart "$CB_SERVICE_NAME"`,
 		`systemctl --user is-active --quiet "$CB_SERVICE_NAME"`,
 		`${CB_HASH}.env`,
+		`codex CLI not found in PATH`,
+		`Claude Code CLI not found in PATH`,
+		`CB_CODEX_PATH="$(command -v codex)"`,
+		`CB_CLAUDE_PATH="$(command -v claude)"`,
 		`printf 'PATH=%s\n'`,
 		`BRIDGE_CODEX_PATH`,
 		`BRIDGE_CLAUDE_PATH`,

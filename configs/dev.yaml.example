@@ -53,7 +53,6 @@ auth:
   access_token_ttl: 24h
   bootstrap_username: admin
   bootstrap_password: ""
-  allow_registration: true
 
 observability:
   log_level: info

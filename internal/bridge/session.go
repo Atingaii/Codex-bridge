@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
@@ -31,6 +32,7 @@ type Session struct {
 	runID          string
 	promptID       string
 	pending        []protocol.Envelope
+	approvals      map[string]chan protocol.ApprovalResponsePayload
 }
 
 func NewSessionManager(cfg *config.Config) *SessionManager {
@@ -72,7 +74,7 @@ func (m *SessionManager) Open(sid, remoteThreadID string, out chan<- protocol.En
 		m.mu.Unlock()
 		return err
 	}
-	s := &Session{sid: sid, remoteThreadID: remoteThreadID, runner: runner, out: out}
+	s := &Session{sid: sid, remoteThreadID: remoteThreadID, runner: runner, out: out, approvals: make(map[string]chan protocol.ApprovalResponsePayload)}
 	m.sessions[sid] = s
 	m.mu.Unlock()
 	send(out, protocol.MustEnvelope(protocol.TypeSessionOpened, sid, protocol.SessionOpenedPayload{
@@ -109,12 +111,14 @@ func (m *SessionManager) Prompt(parent context.Context, sid string, payload prot
 	}
 	defer cleanup()
 
+	approvals := sessionApprovalRequester{manager: m, sid: sid, runID: runID, promptID: promptID}
 	result, err := s.runner.Prompt(ctx, RunnerRequest{
 		SID:            sid,
 		Content:        preparedContent,
 		RemoteThreadID: remoteThreadID,
 		RunID:          runID,
 		PromptID:       promptID,
+		Approvals:      approvals,
 	}, func(update RunnerUpdate) {
 		if update.Delta == "" && update.Content == "" && update.Tool == nil {
 			return
@@ -192,6 +196,13 @@ func (m *SessionManager) beginPrompt(sid, runID, promptID string, out chan<- pro
 	return s, s.remoteThreadID, ctx, cancel, nil
 }
 
+type sessionApprovalRequester struct {
+	manager  *SessionManager
+	sid      string
+	runID    string
+	promptID string
+}
+
 func updateEvent(update RunnerUpdate) string {
 	if update.Tool != nil {
 		return "tool"
@@ -232,6 +243,60 @@ func (m *SessionManager) sendSessionEnvelope(sid string, env protocol.Envelope) 
 				send(retry, env)
 			}
 		}
+	}
+}
+
+func (r sessionApprovalRequester) RequestApproval(ctx context.Context, req protocol.ApprovalRequestPayload) (protocol.ApprovalResponsePayload, error) {
+	if req.RequestID == "" {
+		req.RequestID = fmt.Sprintf("apr_%d", time.Now().UnixNano())
+	}
+	req.RunID = r.runID
+	req.PromptID = r.promptID
+	ch := make(chan protocol.ApprovalResponsePayload, 1)
+	m := r.manager
+	m.mu.Lock()
+	s := m.sessions[r.sid]
+	if s == nil {
+		m.mu.Unlock()
+		return protocol.ApprovalResponsePayload{}, errSessionNotOpen
+	}
+	if s.approvals == nil {
+		s.approvals = make(map[string]chan protocol.ApprovalResponsePayload)
+	}
+	s.approvals[req.RequestID] = ch
+	m.mu.Unlock()
+
+	m.sendSessionEnvelope(r.sid, protocol.MustEnvelope(protocol.TypeApprovalRequest, r.sid, req))
+	select {
+	case res := <-ch:
+		return res, nil
+	case <-ctx.Done():
+		m.removeApproval(r.sid, req.RequestID)
+		return protocol.ApprovalResponsePayload{}, ctx.Err()
+	}
+}
+
+func (m *SessionManager) ApprovalResponse(sid string, res protocol.ApprovalResponsePayload) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.sessions[sid]
+	if s == nil || s.approvals == nil {
+		return false
+	}
+	ch := s.approvals[res.RequestID]
+	if ch == nil {
+		return false
+	}
+	delete(s.approvals, res.RequestID)
+	ch <- res
+	return true
+}
+
+func (m *SessionManager) removeApproval(sid, requestID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s := m.sessions[sid]; s != nil && s.approvals != nil {
+		delete(s.approvals, requestID)
 	}
 }
 
@@ -304,6 +369,9 @@ func (m *SessionManager) Close(sid string) {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	for _, ch := range s.approvals {
+		ch <- protocol.ApprovalResponsePayload{Decision: "cancel"}
+	}
 	s.runner.Close()
 }
 
@@ -318,6 +386,9 @@ func (m *SessionManager) CloseAll() {
 	for _, s := range sessions {
 		if s.cancel != nil {
 			s.cancel()
+		}
+		for _, ch := range s.approvals {
+			ch <- protocol.ApprovalResponsePayload{Decision: "cancel"}
 		}
 		s.runner.Close()
 	}

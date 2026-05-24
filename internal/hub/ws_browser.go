@@ -186,6 +186,22 @@ func (s *Server) handleBrowserEnvelope(r *http.Request, uid string, session stor
 			_ = conn.Send(s.bridgeErrorToBrowser(session.ID, err))
 			return
 		}
+	case protocol.TypeApprovalResponse:
+		payload, err := protocol.Decode[protocol.ApprovalResponsePayload](env)
+		if err != nil || payload.RequestID == "" {
+			_ = conn.Send(protocol.MustEnvelope(protocol.TypeError, session.ID, protocol.ErrorPayload{Code: "BAD_APPROVAL_RESPONSE", Message: "approval response is invalid"}))
+			return
+		}
+		decision := strings.ToLower(strings.TrimSpace(payload.Decision))
+		if decision != "accept" && decision != "decline" && decision != "cancel" {
+			_ = conn.Send(protocol.MustEnvelope(protocol.TypeError, session.ID, protocol.ErrorPayload{Code: "BAD_APPROVAL_DECISION", Message: "approval decision must be accept, decline, or cancel"}))
+			return
+		}
+		payload.Decision = decision
+		if err := s.pool.SendToAgent(session.AgentID, protocol.MustEnvelope(protocol.TypeApprovalResponse, session.ID, payload)); err != nil {
+			_ = conn.Send(s.bridgeErrorToBrowser(session.ID, err))
+			return
+		}
 	case protocol.TypeCloseSession:
 		if err := s.pool.SendToAgent(session.AgentID, env); err != nil {
 			_ = conn.Send(s.bridgeErrorToBrowser(session.ID, err))

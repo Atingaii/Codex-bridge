@@ -75,9 +75,6 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("HUB_PASSWORD"); v != "" {
 		cfg.Auth.BootstrapPassword = v
 	}
-	if v := os.Getenv("AUTH_ALLOW_REGISTRATION"); v != "" {
-		cfg.Auth.AllowRegistration = parseBool(v, cfg.Auth.AllowRegistration)
-	}
 	if v := os.Getenv("BRIDGE_HUB_URL"); v != "" {
 		cfg.Bridge.HubURL = v
 	}

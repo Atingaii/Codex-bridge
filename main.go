@@ -50,6 +50,8 @@ func run(args []string) error {
 		return runHub(cfg)
 	case "bridge":
 		return bridge.NewClient(cfg, Version).Run(context.Background())
+	case "claude-approval-mcp":
+		return runClaudeApprovalMCP(args)
 	case "connect":
 		return runConnect(cfg, args)
 	case "user":
@@ -63,6 +65,15 @@ func run(args []string) error {
 		printUsage()
 		return fmt.Errorf("unknown command %q", cmd)
 	}
+}
+
+func runClaudeApprovalMCP(args []string) error {
+	fs := flag.NewFlagSet("claude-approval-mcp", flag.ContinueOnError)
+	socketPath := fs.String("socket", "", "parent Bridge approval socket")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return bridge.RunClaudeApprovalMCPFromEnv(*socketPath)
 }
 
 func runConnect(cfg *config.Config, args []string) error {
@@ -251,6 +262,7 @@ Usage:
   codex-bridge hub                 Run the public Hub server
   codex-bridge bridge              Run the reverse-connecting Bridge
   codex-bridge connect <token>     Connect this CLI endpoint to https://sparkapi.tech
+  codex-bridge claude-approval-mcp Internal Claude permission prompt MCP server
   codex-bridge user --username u --password p
   codex-bridge enroll [--ttl 24h]
 

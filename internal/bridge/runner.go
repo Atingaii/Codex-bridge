@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/tencent/codex-bridge/internal/config"
+	"github.com/tencent/codex-bridge/internal/protocol"
 )
 
 type Runner interface {
@@ -26,6 +27,8 @@ type RunnerRequest struct {
 	RemoteThreadID string
 	RunID          string
 	PromptID       string
+	CWD            string
+	Approvals      ApprovalRequester
 }
 
 type RunnerResult struct {
@@ -48,12 +51,18 @@ type RunnerToolEvent struct {
 	ExitCode *int
 }
 
+type ApprovalRequester interface {
+	RequestApproval(ctx context.Context, req protocol.ApprovalRequestPayload) (protocol.ApprovalResponsePayload, error)
+}
+
 func NewRunner(cfg *config.Config) (Runner, error) {
 	switch strings.ToLower(cfg.Bridge.Runner) {
 	case "", "echo":
 		return EchoRunner{}, nil
 	case "codex", "codex-exec":
 		return NewCodexExecRunner(cfg), nil
+	case "codex-app-server", "codex-appserver", "app-server":
+		return NewCodexAppServerRunner(cfg), nil
 	default:
 		return nil, fmt.Errorf("unknown runner %q", cfg.Bridge.Runner)
 	}
@@ -165,8 +174,13 @@ func (r *CodexExecRunner) resumeArgs() []string {
 	}
 	if r.bypassApprovalsAndSandbox() {
 		common = append(common, "--dangerously-bypass-approvals-and-sandbox")
-	} else if r.cfg.Bridge.ApprovalPolicy != "" {
-		common = append(common, "-c", "approval_policy="+quoteTomlString(r.cfg.Bridge.ApprovalPolicy))
+	} else {
+		if r.cfg.Bridge.Sandbox != "" {
+			common = append(common, "-c", "sandbox_mode="+quoteTomlString(r.cfg.Bridge.Sandbox))
+		}
+		if r.cfg.Bridge.ApprovalPolicy != "" {
+			common = append(common, "-c", "approval_policy="+quoteTomlString(r.cfg.Bridge.ApprovalPolicy))
+		}
 	}
 	return common
 }

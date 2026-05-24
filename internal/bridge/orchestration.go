@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -17,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
@@ -24,27 +26,46 @@ import (
 )
 
 type OrchestrationManager struct {
-	cfg    *config.Config
-	mu     sync.Mutex
-	runs   map[string]context.CancelFunc
-	output chan<- protocol.Envelope
+	cfg       *config.Config
+	mu        sync.Mutex
+	runs      map[string]context.CancelFunc
+	output    chan<- protocol.Envelope
+	approvals map[string]orchestrationApproval
+}
+
+type orchestrationApproval struct {
+	runID string
+	ch    chan protocol.ApprovalResponsePayload
 }
 
 type orchestrationTurn struct {
-	TurnID  string
-	Role    string
-	CLI     string
-	Content string
-	Err     string
-	Tools   []RunnerToolEvent
+	TurnID        string
+	Role          string
+	CLI           string
+	Msg           string
+	Content       string
+	Handoff       string
+	HandoffFields orchestrationHandoffFields
+	Err           string
+	Tools         []RunnerToolEvent
+	Verifier      bool
+}
+
+type orchestrationHandoffFields struct {
+	Status   string
+	Changed  string
+	Verified string
+	Next     string
+	Risks    string
 }
 
 var safeOrchestrationFileName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
 	return &OrchestrationManager{
-		cfg:  cfg,
-		runs: make(map[string]context.CancelFunc),
+		cfg:       cfg,
+		runs:      make(map[string]context.CancelFunc),
+		approvals: make(map[string]orchestrationApproval),
 	}
 }
 
@@ -84,6 +105,7 @@ func (m *OrchestrationManager) Start(parent context.Context, payload protocol.Or
 			m.mu.Lock()
 			delete(m.runs, payload.RunID)
 			m.mu.Unlock()
+			m.cancelApprovals(payload.RunID)
 		}()
 		m.run(ctx, payload)
 	}()
@@ -96,18 +118,97 @@ func (m *OrchestrationManager) Cancel(runID string) {
 	if cancel != nil {
 		cancel()
 	}
+	m.cancelApprovals(runID)
 }
 
 func (m *OrchestrationManager) CloseAll() {
 	m.mu.Lock()
 	var cancels []context.CancelFunc
+	runIDs := make([]string, 0, len(m.runs))
 	for runID, cancel := range m.runs {
 		cancels = append(cancels, cancel)
+		runIDs = append(runIDs, runID)
 		delete(m.runs, runID)
 	}
 	m.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
+	}
+	for _, runID := range runIDs {
+		m.cancelApprovals(runID)
+	}
+}
+
+type orchestrationApprovalRequester struct {
+	manager *OrchestrationManager
+	runID   string
+	turnID  string
+	role    string
+	cli     string
+	cwd     string
+}
+
+func (r orchestrationApprovalRequester) RequestApproval(ctx context.Context, req protocol.ApprovalRequestPayload) (protocol.ApprovalResponsePayload, error) {
+	if req.RequestID == "" {
+		req.RequestID = fmt.Sprintf("apr_%d", time.Now().UnixNano())
+	}
+	req.RunID = r.runID
+	req.TurnID = r.turnID
+	if req.CWD == "" {
+		req.CWD = r.cwd
+	}
+	if req.Kind == "" {
+		req.Kind = "orchestration.approval"
+	}
+	ch := make(chan protocol.ApprovalResponsePayload, 1)
+	m := r.manager
+	m.mu.Lock()
+	if m.approvals == nil {
+		m.approvals = make(map[string]orchestrationApproval)
+	}
+	m.approvals[req.RequestID] = orchestrationApproval{runID: r.runID, ch: ch}
+	m.mu.Unlock()
+
+	m.send(protocol.MustEnvelope(protocol.TypeApprovalRequest, "", req))
+	select {
+	case res := <-ch:
+		return res, nil
+	case <-ctx.Done():
+		m.removeApproval(req.RequestID)
+		return protocol.ApprovalResponsePayload{}, ctx.Err()
+	}
+}
+
+func (m *OrchestrationManager) ApprovalResponse(res protocol.ApprovalResponsePayload) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pending := m.approvals[res.RequestID]
+	if pending.ch == nil {
+		return false
+	}
+	delete(m.approvals, res.RequestID)
+	pending.ch <- res
+	return true
+}
+
+func (m *OrchestrationManager) removeApproval(requestID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.approvals, requestID)
+}
+
+func (m *OrchestrationManager) cancelApprovals(runID string) {
+	m.mu.Lock()
+	var pending []orchestrationApproval
+	for requestID, approval := range m.approvals {
+		if approval.runID == runID {
+			pending = append(pending, approval)
+			delete(m.approvals, requestID)
+		}
+	}
+	m.mu.Unlock()
+	for _, approval := range pending {
+		approval.ch <- protocol.ApprovalResponsePayload{Decision: "cancel"}
 	}
 }
 
@@ -163,7 +264,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			Content: promptHeader(role, cli, turn),
 		})
 		content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
-		record := orchestrationTurn{TurnID: turnID, Role: role, CLI: cli, Content: content, Tools: tools}
+		record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
 		if err != nil {
 			record.Err = err.Error()
 			history = append(history, record)
@@ -193,6 +294,9 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			} else {
 				record.Content = summary
 			}
+			record.Msg = extractMsg(record.Content)
+			record.Handoff = extractHandoff(record.Content)
+			record.HandoffFields = parseHandoffFields(record.Handoff)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 				Kind:    "turn.delta",
 				TurnID:  turnID,
@@ -209,8 +313,63 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			CLI:    cli,
 			Status: "success",
 		})
-		if mode == "debate" && turn >= 2 && strings.Contains(strings.ToLower(content), "resolved") {
+		if turn >= 2 && resolvedHandoffReady(record.Content) {
 			break
+		}
+	}
+	if m.shouldRunFinalVerifier(history) {
+		if err := ctx.Err(); err != nil {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:   "run.cancelled",
+				Status: store.OrchestrationCanceled,
+				Error:  "canceled",
+			})
+			return
+		}
+		role, cli := verifierRoleCLI(mode, history)
+		turnID := fmt.Sprintf("%s-verifier", payload.RunID)
+		if payload.PromptSeq > 0 {
+			turnID = fmt.Sprintf("%s-p%03d-verifier", payload.RunID, payload.PromptSeq)
+		}
+		prompt := composeFinalVerifierPrompt(mode, payload.Prompt, payload.Context, payload.Resume, role, cli, history)
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.start",
+			TurnID:  turnID,
+			Role:    role,
+			CLI:     cli,
+			Content: "final verifier via " + cli,
+		})
+		content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
+		record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
+		record.Verifier = true
+		if err != nil {
+			record.Err = err.Error()
+			history = append(history, record)
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:   "turn.end",
+				TurnID: turnID,
+				Role:   role,
+				CLI:    cli,
+				Status: "error",
+				Error:  err.Error(),
+			})
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+					Kind:   "run.cancelled",
+					Status: store.OrchestrationCanceled,
+					Error:  "canceled",
+				})
+				return
+			}
+		} else {
+			history = append(history, record)
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:   "turn.end",
+				TurnID: turnID,
+				Role:   role,
+				CLI:    cli,
+				Status: "success",
+			})
 		}
 	}
 
@@ -231,6 +390,9 @@ func (m *OrchestrationManager) runCLI(ctx context.Context, payload protocol.Orch
 }
 
 func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, []RunnerToolEvent, error) {
+	if m.shouldRunCodexAppServer() {
+		return m.runCodexAppServer(ctx, payload, turnID, role, prompt)
+	}
 	args := []string{"exec", "--json", "--color", "never", "--skip-git-repo-check"}
 	if m.cfg.Bridge.Model != "" {
 		args = append(args, "--model", m.cfg.Bridge.Model)
@@ -287,8 +449,48 @@ func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.Or
 	return content, tools, nil
 }
 
+func (m *OrchestrationManager) runCodexAppServer(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, []RunnerToolEvent, error) {
+	runner := NewCodexAppServerRunner(m.cfg)
+	defer runner.Close()
+	var tools []RunnerToolEvent
+	result, err := runner.Prompt(ctx, RunnerRequest{
+		Content:  prompt,
+		RunID:    payload.RunID,
+		PromptID: turnID,
+		CWD:      m.cwd(payload),
+		Approvals: orchestrationApprovalRequester{
+			manager: m,
+			runID:   payload.RunID,
+			turnID:  turnID,
+			role:    role,
+			cli:     "codex",
+			cwd:     m.cwd(payload),
+		},
+	}, func(update RunnerUpdate) {
+		if update.Delta != "" {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: update.Delta})
+		}
+		if update.Content != "" {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: update.Content})
+		}
+		if update.Tool != nil {
+			tools = append(tools, *update.Tool)
+			m.emitTool(payload.RunID, turnID, role, "codex", update.Tool)
+		}
+	})
+	return strings.TrimSpace(result.Content), tools, err
+}
+
 func (m *OrchestrationManager) runClaude(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, []RunnerToolEvent, error) {
+	approvalServer, cleanup, err := m.prepareClaudeApprovalServer(ctx, payload, turnID, role)
+	if err != nil {
+		return "", nil, err
+	}
+	defer cleanup()
 	args := m.claudeArgs(payload, prompt)
+	if approvalServer != nil {
+		args = m.withClaudeApprovalArgs(args, approvalServer.configPath)
+	}
 	cmd := exec.CommandContext(ctx, m.claudePath(), args...)
 	if cwd := m.cwd(payload); cwd != "" {
 		cmd.Dir = cwd
@@ -318,6 +520,75 @@ func (m *OrchestrationManager) runClaude(ctx context.Context, payload protocol.O
 	return content, tools, nil
 }
 
+type claudeApprovalServer struct {
+	configPath string
+}
+
+func (m *OrchestrationManager) prepareClaudeApprovalServer(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role string) (*claudeApprovalServer, func(), error) {
+	if !m.shouldBridgeClaudeApproval() {
+		return nil, func() {}, nil
+	}
+	tmpDir, err := os.MkdirTemp("", "codex-bridge-claude-approval-*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("create claude approval temp dir: %w", err)
+	}
+	cleanup := func() {
+		_ = os.RemoveAll(tmpDir)
+	}
+	socketPath := filepath.Join(tmpDir, "approval.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("listen claude approval socket: %w", err)
+	}
+	serverCtx, cancel := context.WithCancel(ctx)
+	requester := orchestrationApprovalRequester{
+		manager: m,
+		runID:   payload.RunID,
+		turnID:  turnID,
+		role:    role,
+		cli:     "claude",
+		cwd:     m.cwd(payload),
+	}
+	go serveClaudeApprovalSocket(serverCtx, listener, requester)
+
+	exe, err := os.Executable()
+	if err != nil {
+		listener.Close()
+		cancel()
+		cleanup()
+		return nil, nil, fmt.Errorf("locate codex-bridge executable for claude approval mcp: %w", err)
+	}
+	configPath := filepath.Join(tmpDir, "mcp.json")
+	config := map[string]any{
+		"mcpServers": map[string]any{
+			"codex_bridge": map[string]any{
+				"type":    "stdio",
+				"command": exe,
+				"args":    []string{"claude-approval-mcp", "--socket", socketPath},
+			},
+		},
+	}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		listener.Close()
+		cancel()
+		cleanup()
+		return nil, nil, fmt.Errorf("marshal claude approval mcp config: %w", err)
+	}
+	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+		listener.Close()
+		cancel()
+		cleanup()
+		return nil, nil, fmt.Errorf("write claude approval mcp config: %w", err)
+	}
+	return &claudeApprovalServer{configPath: configPath}, func() {
+		cancel()
+		listener.Close()
+		cleanup()
+	}, nil
+}
+
 func (m *OrchestrationManager) claudeArgs(payload protocol.OrchestrationStartPayload, prompt string) []string {
 	args := []string{"--print", "--output-format=stream-json"}
 	if cwd := m.cwd(payload); cwd != "" {
@@ -343,9 +614,210 @@ func (m *OrchestrationManager) claudeArgs(payload protocol.OrchestrationStartPay
 	return args
 }
 
+func (m *OrchestrationManager) withClaudeApprovalArgs(args []string, configPath string) []string {
+	if configPath == "" {
+		return args
+	}
+	insertAt := len(args)
+	if insertAt > 0 {
+		insertAt--
+	}
+	extra := []string{
+		"--permission-mode", "default",
+		"--mcp-config", configPath,
+		"--permission-prompt-tool", "mcp__codex_bridge__browser_approval",
+	}
+	next := make([]string, 0, len(args)+len(extra))
+	next = append(next, args[:insertAt]...)
+	next = append(next, extra...)
+	next = append(next, args[insertAt:]...)
+	return next
+}
+
 func (m *OrchestrationManager) bypassApprovalsAndSandbox() bool {
 	return strings.EqualFold(m.cfg.Bridge.ApprovalPolicy, "never") &&
 		strings.EqualFold(m.cfg.Bridge.Sandbox, "danger-full-access")
+}
+
+func (m *OrchestrationManager) shouldBridgeClaudeApproval() bool {
+	return !m.bypassApprovalsAndSandbox()
+}
+
+func (m *OrchestrationManager) shouldRunCodexAppServer() bool {
+	return !m.bypassApprovalsAndSandbox()
+}
+
+func (m *OrchestrationManager) shouldRunFinalVerifier(history []orchestrationTurn) bool {
+	if len(history) == 0 {
+		return false
+	}
+	last := history[len(history)-1]
+	if strings.EqualFold(last.HandoffFields.Status, "resolved") && meaningfulHandoffValue(last.HandoffFields.Verified) && !meaningfulHandoffValue(last.HandoffFields.Changed) && !hasRiskyHandoff(last) && failedCommandCount(history) == 0 {
+		return false
+	}
+	for _, item := range history {
+		if item.Err != "" || failedCommandCount([]orchestrationTurn{item}) > 0 || hasRiskyHandoff(item) || meaningfulHandoffValue(item.HandoffFields.Changed) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRiskyHandoff(item orchestrationTurn) bool {
+	if meaningfulHandoffValue(item.HandoffFields.Risks) {
+		return true
+	}
+	status := strings.ToLower(strings.TrimSpace(item.HandoffFields.Status))
+	return status == "blocked"
+}
+
+func verifierRoleCLI(mode string, history []orchestrationTurn) (string, string) {
+	lastCLI := ""
+	if len(history) > 0 {
+		lastCLI = history[len(history)-1].CLI
+	}
+	if strings.EqualFold(lastCLI, "codex") {
+		if mode == "debate" {
+			return "proposer", "claude"
+		}
+		return "implementer", "claude"
+	}
+	return "verifier", "codex"
+}
+
+type claudeApprovalSocketRequest struct {
+	RequestID string          `json:"requestId,omitempty"`
+	Kind      string          `json:"kind,omitempty"`
+	Command   string          `json:"command,omitempty"`
+	CWD       string          `json:"cwd,omitempty"`
+	Reason    string          `json:"reason,omitempty"`
+	ToolName  string          `json:"toolName,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+}
+
+type claudeApprovalSocketResponse struct {
+	RequestID string `json:"requestId,omitempty"`
+	Decision  string `json:"decision,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+func serveClaudeApprovalSocket(ctx context.Context, listener net.Listener, requester orchestrationApprovalRequester) {
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Warn("[bridge] claude approval socket accept failed", "error", err)
+			return
+		}
+		go handleClaudeApprovalSocketConn(ctx, conn, requester)
+	}
+}
+
+func handleClaudeApprovalSocketConn(ctx context.Context, conn net.Conn, requester orchestrationApprovalRequester) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Minute))
+	var req claudeApprovalSocketRequest
+	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+		_ = json.NewEncoder(conn).Encode(claudeApprovalSocketResponse{Error: err.Error()})
+		return
+	}
+	raw := req.Input
+	if len(raw) == 0 {
+		raw = json.RawMessage(`{}`)
+	}
+	payload := protocol.ApprovalRequestPayload{
+		RequestID: req.RequestID,
+		Kind:      req.Kind,
+		Command:   req.Command,
+		CWD:       req.CWD,
+		Reason:    req.Reason,
+		Params:    raw,
+	}
+	if payload.Kind == "" {
+		payload.Kind = "claude.permission_prompt"
+	}
+	if payload.Command == "" {
+		payload.Command = claudeApprovalCommand(req.ToolName, raw)
+	}
+	if payload.Reason == "" {
+		payload.Reason = claudeApprovalReason(raw)
+	}
+	res, err := requester.RequestApproval(ctx, payload)
+	if err != nil {
+		_ = json.NewEncoder(conn).Encode(claudeApprovalSocketResponse{RequestID: payload.RequestID, Decision: "cancel", Error: err.Error()})
+		return
+	}
+	_ = json.NewEncoder(conn).Encode(claudeApprovalSocketResponse{RequestID: res.RequestID, Decision: res.Decision})
+}
+
+func claudeApprovalCommand(toolName string, raw json.RawMessage) string {
+	input := map[string]any{}
+	_ = json.Unmarshal(raw, &input)
+	for _, key := range []string{"command", "cmd", "shellCommand", "tool_input", "input"} {
+		if value := stringifyApprovalValue(input[key]); value != "" {
+			return value
+		}
+	}
+	name := firstString(input, "tool_name", "toolName", "name")
+	switch name {
+	case "Bash":
+		if value := stringifyApprovalValue(input["command"]); value != "" {
+			return value
+		}
+	case "Read", "Write", "Edit", "MultiEdit":
+		if value := stringifyApprovalValue(input["file_path"]); value != "" {
+			return name + " " + value
+		}
+		if value := stringifyApprovalValue(input["path"]); value != "" {
+			return name + " " + value
+		}
+	}
+	if name == "" {
+		name = toolName
+	}
+	if name != "" {
+		return name
+	}
+	return trimForPrompt(oneLine(string(raw)), 240)
+}
+
+func claudeApprovalReason(raw json.RawMessage) string {
+	input := map[string]any{}
+	_ = json.Unmarshal(raw, &input)
+	for _, key := range []string{"reason", "description", "permission", "prompt", "message"} {
+		if value := stringifyApprovalValue(input[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func stringifyApprovalValue(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if part := stringifyApprovalValue(item); part != "" {
+				parts = append(parts, part)
+			}
+		}
+		return strings.Join(parts, " ")
+	case map[string]any:
+		for _, key := range []string{"command", "file_path", "path", "description", "reason", "name"} {
+			if part := stringifyApprovalValue(v[key]); part != "" {
+				return part
+			}
+		}
+	}
+	return ""
 }
 
 func runningAsRoot() bool {
@@ -562,6 +1034,59 @@ func promptHeader(role, cli string, turn int) string {
 	return fmt.Sprintf("%s via %s, turn %d", role, cli, turn)
 }
 
+func nextRoleCLI(mode string, turn int) (string, string) {
+	if mode == "debate" {
+		if turn%2 == 1 {
+			return "critic", "codex"
+		}
+		return "proposer", "claude"
+	}
+	if turn%2 == 1 {
+		return "reviewer", "codex"
+	}
+	return "implementer", "claude"
+}
+
+func newOrchestrationTurnRecord(turnID, role, cli, content string, tools []RunnerToolEvent) orchestrationTurn {
+	handoff := extractHandoff(content)
+	return orchestrationTurn{
+		TurnID:        turnID,
+		Role:          role,
+		CLI:           cli,
+		Content:       content,
+		Msg:           extractMsg(content),
+		Handoff:       handoff,
+		HandoffFields: parseHandoffFields(handoff),
+		Tools:         tools,
+	}
+}
+
+func resolvedHandoffReady(content string) bool {
+	handoff := strings.ToLower(extractHandoff(content))
+	if !strings.Contains(handoff, "status=resolved") {
+		return false
+	}
+	return hasUserVisibleConclusion(content)
+}
+
+func hasUserVisibleConclusion(content string) bool {
+	visible := strings.TrimSpace(strings.Replace(content, extractHandoff(content), "", 1))
+	if visible == "" {
+		return false
+	}
+	lower := strings.ToLower(visible)
+	signals := []string{
+		"final conclusion", "conclusion:", "summary:", "verified", "verification", "completed", "remaining risk",
+		"最终结论", "结论：", "总结：", "验证", "通过", "完成", "剩余风险",
+	}
+	for _, signal := range signals {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return false
+}
+
 func finalTurnFallbackSummary(userPrompt string, turn, maxTurns int, history []orchestrationTurn, current orchestrationTurn) string {
 	if turn != maxTurns || !finalResponseNeedsFallback(current.Content) {
 		return ""
@@ -679,11 +1204,30 @@ func completedCommandSummaries(turns []orchestrationTurn, max int) []string {
 func failedCommandCount(turns []orchestrationTurn) int {
 	count := 0
 	for _, command := range commandStates(turns) {
-		if strings.EqualFold(command.Status, "failed") || strings.EqualFold(command.Status, "error") {
+		if commandFailed(command) {
 			count++
 		}
 	}
 	return count
+}
+
+func failedCommandSummaries(turns []orchestrationTurn, max int) []string {
+	commands := commandStates(turns)
+	var out []string
+	for i := len(commands) - 1; i >= 0 && len(out) < max; i-- {
+		command := commands[i]
+		if commandFailed(command) {
+			out = append(out, formatCommandSummary(command))
+		}
+	}
+	return reverseStrings(out)
+}
+
+func commandFailed(command orchestrationCommandState) bool {
+	if strings.EqualFold(command.Status, "failed") || strings.EqualFold(command.Status, "error") {
+		return true
+	}
+	return command.ExitCode != nil && *command.ExitCode != 0
 }
 
 type orchestrationCommandState struct {
@@ -774,27 +1318,51 @@ func containsCJK(value string) bool {
 	return false
 }
 
+const orchestrationHandoffContract = "Handoff: status=<needs_next|blocked|resolved>; changed=<files or none>; verified=<commands or none>; next=<one action>; risks=<open issue or none>"
+const orchestrationMsgContract = "Msg: to=<next-role|user>; intent=<implement|review|challenge|final>; need=<one request or none>"
+
 func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {
 	var b strings.Builder
 	b.WriteString("You are participating in a local CLI orchestration run.\n")
 	b.WriteString("Use your native file, shell, MCP, and skill capabilities when useful. Do not assume the other CLI can see your private reasoning.\n\n")
+	toRole, toCLI := nextRoleCLI(mode, turn)
+	if turn >= maxTurns {
+		toRole, toCLI = "user", ""
+	}
+	b.WriteString(fmt.Sprintf("From: %s/%s\n", role, cli))
+	if toCLI != "" {
+		b.WriteString(fmt.Sprintf("To: %s/%s\n", toRole, toCLI))
+	} else {
+		b.WriteString("To: user\n")
+	}
+	b.WriteString(fmt.Sprintf("Mode: %s\n\n", mode))
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Maintain continuity with the compacted context, while treating the latest user task as authoritative.\n\n")
 	}
 	if mode == "debate" {
 		if role == "proposer" {
-			b.WriteString("Role: proposer. Make concrete progress on the task, edit files if needed, and run verification commands when appropriate.\n")
+			b.WriteString("Strategy: evidence-focused debate. Keep claims testable, cite files or command results, and avoid repeating the full transcript.\n")
+			b.WriteString("Role: proposer. State the strongest concrete thesis or patch, make progress if needed, and leave a falsifiable handoff for the critic.\n")
 		} else {
-			b.WriteString("Role: critic. Review the previous work, identify concrete issues, and run verification commands when appropriate. Prefer actionable fixes over vague critique.\n")
+			b.WriteString("Strategy: evidence-focused debate. Keep claims testable, cite files or command results, and avoid repeating the full transcript.\n")
+			b.WriteString("Role: critic. Try to falsify the proposer with concrete counterexamples, command output, or code evidence. Fix clear issues when cheaper than describing them.\n")
 		}
 	} else {
 		if role == "implementer" {
-			b.WriteString("Role: implementer. Make concrete progress on the task and leave clear notes for the reviewer.\n")
+			b.WriteString("Strategy: builder-reviewer collaboration. Optimize for shared workspace progress with short, auditable handoffs.\n")
+			b.WriteString("Role: implementer. Make concrete progress on the task, edit files when appropriate, and leave only the key state the reviewer needs.\n")
 		} else {
-			b.WriteString("Role: reviewer. Review the implementer's work, fix clear issues, and verify the result when appropriate.\n")
+			b.WriteString("Strategy: builder-reviewer collaboration. Optimize for shared workspace progress with short, auditable handoffs.\n")
+			b.WriteString("Role: reviewer. Independently inspect the implementer's result, fix obvious issues, and verify with focused commands when appropriate.\n")
 		}
 	}
 	b.WriteString(fmt.Sprintf("Turn: %d of %d. CLI: %s.\n\n", turn, maxTurns, cli))
+	b.WriteString("Token budget rules: do not restate the full history, do not quote large files, and keep inter-agent notes compact. Prefer file paths, command names, and exact unresolved blockers.\n")
+	b.WriteString("End your visible response with two compact machine-scannable lines in exactly these shapes:\n")
+	b.WriteString(orchestrationMsgContract)
+	b.WriteByte('\n')
+	b.WriteString(orchestrationHandoffContract)
+	b.WriteString("\nUse status=resolved only when you also give a concise user-visible conclusion before the handoff.\n\n")
 	if strings.TrimSpace(contextSummary) != "" {
 		b.WriteString("Compacted context from earlier tasks in this conversation:\n")
 		b.WriteString(trimForPrompt(contextSummary, 14000))
@@ -804,24 +1372,52 @@ func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume 
 	b.WriteString(userPrompt)
 	b.WriteString("\n\n")
 	if len(history) > 0 {
-		b.WriteString("Prior turns:\n")
+		b.WriteString("Compact prior-turn handoffs:\n")
 		for _, item := range history {
-			b.WriteString(fmt.Sprintf("[%s via %s]\n", item.Role, item.CLI))
-			if item.Content != "" {
-				b.WriteString(trimForPrompt(item.Content, 5000))
-				b.WriteByte('\n')
-			}
-			if item.Err != "" {
-				b.WriteString("Error: ")
-				b.WriteString(trimForPrompt(item.Err, 1500))
-				b.WriteByte('\n')
-			}
-			b.WriteByte('\n')
+			b.WriteString(formatCompactPriorTurn(item))
 		}
+		b.WriteByte('\n')
 	}
 	if turn == maxTurns {
 		b.WriteString("This is the final scheduled turn. Summarize the final state, verification results, and remaining risks.\n")
 		b.WriteString("Return a concise user-visible final answer. Do not rely on command logs alone; state what was accomplished, what was verified, and any remaining issue.\n")
+	}
+	return b.String()
+}
+
+func composeFinalVerifierPrompt(mode, userPrompt, contextSummary string, resume bool, role, cli string, history []orchestrationTurn) string {
+	var b strings.Builder
+	b.WriteString("You are the lightweight final verifier for a local CLI orchestration run.\n")
+	b.WriteString("Inspect only the reported changes, failed commands, and unresolved risks. Avoid broad new work; make a small fix only if it is clearly required to complete verification.\n\n")
+	b.WriteString(fmt.Sprintf("From: %s/%s\n", role, cli))
+	b.WriteString("To: user\n")
+	b.WriteString(fmt.Sprintf("Mode: %s\n\n", mode))
+	if resume {
+		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Prefer the latest user task over older details.\n\n")
+	}
+	b.WriteString("End your visible response with a concise final conclusion and the same compact lines:\n")
+	b.WriteString(orchestrationMsgContract)
+	b.WriteByte('\n')
+	b.WriteString(orchestrationHandoffContract)
+	b.WriteString("\n\n")
+	if strings.TrimSpace(contextSummary) != "" {
+		b.WriteString("Compacted context from earlier tasks in this conversation:\n")
+		b.WriteString(trimForPrompt(contextSummary, 6000))
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Original user task:\n")
+	b.WriteString(userPrompt)
+	b.WriteString("\n\nStructured prior-turn state:\n")
+	for _, item := range history {
+		b.WriteString(formatCompactPriorTurn(item))
+	}
+	if failures := failedCommandSummaries(history, 4); len(failures) > 0 {
+		b.WriteString("\nFailed or suspicious command outcomes:\n")
+		for _, failure := range failures {
+			b.WriteString("- ")
+			b.WriteString(failure)
+			b.WriteByte('\n')
+		}
 	}
 	return b.String()
 }
@@ -832,6 +1428,150 @@ func trimForPrompt(value string, max int) string {
 		return value
 	}
 	return value[:max] + "\n[truncated]"
+}
+
+func formatCompactPriorTurn(item orchestrationTurn) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("- [%s via %s] ", item.Role, item.CLI))
+	if item.Msg != "" {
+		b.WriteString(oneLine(item.Msg))
+		if item.Handoff != "" {
+			b.WriteString("; ")
+		}
+	}
+	summary := formatHandoffFields(item.HandoffFields)
+	if summary == "" {
+		summary = item.Handoff
+	}
+	if summary == "" {
+		summary = compactTurnContent(item.Content, 700)
+	}
+	if summary == "" {
+		summary = "no visible answer"
+	}
+	b.WriteString(oneLine(summary))
+	if commands := completedCommandSummaries([]orchestrationTurn{item}, 2); len(commands) > 0 {
+		b.WriteString("; verified: ")
+		b.WriteString(strings.Join(commands, " | "))
+	}
+	if item.Err != "" {
+		b.WriteString("; error: ")
+		b.WriteString(oneLine(trimForPrompt(item.Err, 300)))
+	}
+	b.WriteByte('\n')
+	return b.String()
+}
+
+func formatHandoffFields(fields orchestrationHandoffFields) string {
+	var parts []string
+	if fields.Status != "" {
+		parts = append(parts, "status="+fields.Status)
+	}
+	if meaningfulHandoffValue(fields.Changed) {
+		parts = append(parts, "changed="+fields.Changed)
+	}
+	if meaningfulHandoffValue(fields.Verified) {
+		parts = append(parts, "verified="+fields.Verified)
+	}
+	if meaningfulHandoffValue(fields.Next) {
+		parts = append(parts, "next="+fields.Next)
+	}
+	if meaningfulHandoffValue(fields.Risks) {
+		parts = append(parts, "risks="+fields.Risks)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Handoff: " + strings.Join(parts, "; ")
+}
+
+func meaningfulHandoffValue(value string) bool {
+	value = strings.TrimSpace(strings.ToLower(value))
+	return value != "" && value != "none" && value != "n/a" && value != "na"
+}
+
+func compactTurnContent(content string, max int) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	if handoff := extractHandoff(content); handoff != "" {
+		return handoff
+	}
+	lines := strings.Split(content, "\n")
+	var selected []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "final") || strings.Contains(lower, "conclusion") ||
+			strings.Contains(lower, "summary") || strings.Contains(lower, "verified") ||
+			strings.Contains(lower, "remaining") || strings.Contains(lower, "risk") ||
+			strings.Contains(lower, "结论") || strings.Contains(lower, "总结") ||
+			strings.Contains(lower, "验证") || strings.Contains(lower, "风险") ||
+			len(selected) < 2 {
+			selected = append(selected, line)
+		}
+		if len(selected) >= 5 {
+			break
+		}
+	}
+	if len(selected) == 0 {
+		return trimForPrompt(oneLine(content), max)
+	}
+	return trimForPrompt(oneLine(strings.Join(selected, " ")), max)
+}
+
+func extractHandoff(content string) string {
+	return extractTrailingLine(content, "handoff:")
+}
+
+func extractMsg(content string) string {
+	return extractTrailingLine(content, "msg:")
+}
+
+func parseHandoffFields(line string) orchestrationHandoffFields {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "Handoff:")
+	line = strings.TrimPrefix(line, "handoff:")
+	out := orchestrationHandoffFields{}
+	for _, part := range strings.Split(line, ";") {
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		value = strings.TrimSpace(value)
+		switch key {
+		case "status":
+			out.Status = value
+		case "changed":
+			out.Changed = value
+		case "verified":
+			out.Verified = value
+		case "next":
+			out.Next = value
+		case "risks":
+			out.Risks = value
+		}
+	}
+	return out
+}
+
+func extractTrailingLine(content, prefix string) string {
+	lines := strings.Split(content, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(line), prefix) {
+			return line
+		}
+	}
+	return ""
 }
 
 func claudeAssistantText(msg map[string]any) string {

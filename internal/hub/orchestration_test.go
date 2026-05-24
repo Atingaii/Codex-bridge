@@ -182,6 +182,14 @@ func TestContinueOrchestrationSendsCompactedContext(t *testing.T) {
 
 	conn := &BridgeConn{
 		agentID: agentID,
+		capabilities: &protocol.BridgeCapabilities{
+			Sandbox:        "danger-full-access",
+			ApprovalPolicy: "never",
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: true},
+				"codex":  {Available: true},
+			},
+		},
 		wsSender: wsSender{
 			send: make(chan protocol.Envelope, 4),
 			done: make(chan struct{}),
@@ -213,6 +221,121 @@ func TestContinueOrchestrationSendsCompactedContext(t *testing.T) {
 	}
 	if !strings.Contains(payload.Context, "first task") || !strings.Contains(payload.Context, "implemented first task") {
 		t.Fatalf("payload context = %q", payload.Context)
+	}
+}
+
+func TestCreateOrchestrationRejectsReviewRequiredWithoutCodexApprovalCapability(t *testing.T) {
+	t.Parallel()
+
+	s, _, userID, agentID := newOrchestrationTestServer(t)
+	conn := &BridgeConn{
+		agentID: agentID,
+		capabilities: &protocol.BridgeCapabilities{
+			Sandbox:        "workspace-write",
+			ApprovalPolicy: "untrusted",
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: true, BrowserApproval: true},
+				"codex":  {Available: true, BrowserApproval: false},
+			},
+		},
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 2),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	body := createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId":  agentID,
+		"prompt":   "needs approval",
+		"maxTurns": 2,
+	}, http.StatusConflict)
+	if body["code"] != "ORCHESTRATION_CAPABILITY_UNAVAILABLE" || !strings.Contains(body["message"].(string), "Codex") {
+		t.Fatalf("capability error body = %#v", body)
+	}
+}
+
+func TestCreateOrchestrationAllowsAutoExecuteWithoutBrowserApprovalCapability(t *testing.T) {
+	t.Parallel()
+
+	s, _, userID, agentID := newOrchestrationTestServer(t)
+	conn := &BridgeConn{
+		agentID: agentID,
+		capabilities: &protocol.BridgeCapabilities{
+			Sandbox:        "danger-full-access",
+			ApprovalPolicy: "never",
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: true},
+				"codex":  {Available: true},
+			},
+		},
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 2),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	body := createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId":  agentID,
+		"prompt":   "trusted run",
+		"maxTurns": 2,
+	}, http.StatusCreated)
+	run := body["run"].(map[string]any)
+	if run["status"] != store.OrchestrationRunning {
+		t.Fatalf("run body = %#v", run)
+	}
+}
+
+func TestBridgeApprovalRequestRoutesToOrchestrationBrowsers(t *testing.T) {
+	t.Parallel()
+
+	s, _, _, _ := newOrchestrationTestServer(t)
+	conn := &BrowserConn{
+		sid: "orc_route",
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 2),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.AddOrchestrationBrowser("orc_route", conn)
+	defer s.pool.RemoveOrchestrationBrowser("orc_route", conn)
+
+	req := protocol.ApprovalRequestPayload{
+		RequestID: "apr_orc",
+		RunID:     "orc_route",
+		TurnID:    "turn_1",
+		Command:   "rm -rf build",
+	}
+	s.handleBridgeEnvelope(context.Background(), "agent_1", protocol.MustEnvelope(protocol.TypeApprovalRequest, "", req))
+
+	select {
+	case env := <-conn.send:
+		if env.Type != protocol.TypeApprovalRequest || env.Sid != "" {
+			t.Fatalf("routed envelope = %#v", env)
+		}
+		got, err := protocol.Decode[protocol.ApprovalRequestPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.RequestID != "apr_orc" || got.RunID != "orc_route" || got.Command != "rm -rf build" {
+			t.Fatalf("routed approval = %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for orchestration approval request")
+	}
+}
+
+func TestValidApprovalDecisionNormalizesExpectedValues(t *testing.T) {
+	for _, decision := range []string{"accept", "decline", "cancel"} {
+		if !validApprovalDecision(decision) {
+			t.Fatalf("decision %q should be valid", decision)
+		}
+	}
+	if validApprovalDecision("approve") {
+		t.Fatal("unexpected approval decision accepted")
 	}
 }
 
@@ -302,6 +425,31 @@ func continueOrchestration(t *testing.T, s *Server, userID, runID string, payloa
 	var decoded map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode continue body: %v: %s", err, rr.Body.String())
+	}
+	return decoded
+}
+
+func createOrchestrationHTTP(t *testing.T, s *Server, userID string, payload map[string]any, wantStatus int) map[string]any {
+	t.Helper()
+
+	token, _, err := s.signer.Sign(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/orchestrations", bytes.NewReader(body))
+	req.AddCookie(&http.Cookie{Name: accessCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != wantStatus {
+		t.Fatalf("create HTTP status = %d, want %d, body = %s", rr.Code, wantStatus, rr.Body.String())
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode create body: %v: %s", err, rr.Body.String())
 	}
 	return decoded
 }

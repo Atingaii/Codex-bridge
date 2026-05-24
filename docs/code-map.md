@@ -14,7 +14,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Bridge reverse WebSocket | `internal/hub/ws_bridge.go`, `internal/bridge/client.go` |
 | Browser/Bridge connection pools | `internal/hub/pool.go` |
 | Orchestration HTTP/WS | `internal/hub/orchestration.go`, `internal/bridge/orchestration.go` |
-| Runner abstraction | `internal/bridge/runner.go`, `internal/bridge/session.go` |
+| Runner abstraction | `internal/bridge/runner.go`, `internal/bridge/appserver_runner.go`, `internal/bridge/session.go` |
 | SQLite schema and CRUD | `internal/store/store.go`, `internal/store/id.go` |
 | Wire protocol | `internal/protocol/envelope.go` |
 | Frontend source | `frontend/src/app/App.tsx`, `frontend/src/styles/` |
@@ -63,6 +63,44 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 5. `internal/hub/ws_bridge.go:handlePromptComplete` writes the new thread id
    after a prompt completes.
 
+### Change Agent-Scoped Chat Sessions
+
+1. `internal/store/store.go:Session` owns `AgentID`.
+2. `internal/hub/server.go:handleCreateSession` creates sessions for the
+   selected agent.
+3. `frontend/src/app/App.tsx:Workspace` filters sessions by selected agent and
+   stores per-agent active session ids in browser local storage.
+4. Update
+   [docs/features/agent-scoped-chat-sessions.md](features/agent-scoped-chat-sessions.md).
+
+### Change Browser Approval Flow
+
+1. `internal/protocol/envelope.go` defines `approval_request` and
+   `approval_response`.
+2. `internal/bridge/appserver_runner.go` maps Codex app-server approval requests
+   to Bridge protocol frames.
+3. `internal/bridge/orchestration.go:runCodexAppServer` reuses the app-server
+   runner for review-required Codex orchestration and emits run-scoped approval
+   frames.
+4. `internal/bridge/orchestration.go:runClaude` maps Claude Code permission
+   prompts through `codex-bridge claude-approval-mcp` and run-scoped approval
+   frames.
+5. `internal/bridge/session.go:ApprovalResponse` routes browser decisions back
+   to the waiting runner.
+6. `internal/bridge/orchestration.go:ApprovalResponse` routes run-scoped
+   browser decisions back to the waiting Claude MCP or Codex app-server turn.
+7. `internal/hub/ws_bridge.go:handleBridgeEnvelope` forwards Bridge approval
+   requests to chat browsers by `sid` or orchestration browsers by
+   `payload.runId`.
+8. `internal/hub/orchestration.go:validateOrchestrationCapabilities` blocks
+   review-required orchestration if the selected online Bridge does not report
+   browser approval support for both CLIs.
+9. `internal/hub/ws_browser.go:handleBrowserEnvelope` and
+   `internal/hub/orchestration.go:handleOrchestrationWS` forward browser
+   approval decisions back to the Bridge.
+10. `frontend/src/app/App.tsx` renders capability status, approval cards, and
+    approve/deny responses in chat and orchestration views.
+
 ### Change Orchestration Continuity
 
 1. `internal/hub/orchestration.go:handleCreateOrchestration` creates a new run.
@@ -73,6 +111,21 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 4. `frontend/src/app/App.tsx:OrchestrationWorkspace` must keep selecting the
    current run and call the continue endpoint for follow-up tasks.
 5. Update [docs/features/orchestration-continuity.md](features/orchestration-continuity.md).
+
+### Change Orchestration Strategy
+
+1. `internal/bridge/orchestration.go:roleForTurn` controls which CLI owns each
+   turn.
+2. `internal/bridge/orchestration.go:composeOrchestrationPrompt` controls
+   strategy instructions and the compact `Msg:` / `Handoff:` contracts.
+3. `internal/bridge/orchestration.go:formatCompactPriorTurn` controls how much
+   prior output is sent to the next CLI.
+4. `internal/bridge/orchestration.go:parseHandoffFields` and
+   `composeFinalVerifierPrompt` control structured handoff context and the
+   conditional final verifier turn.
+5. Keep event kinds compatible with `frontend/src/app/App.tsx:visibleOrchestrationEvents`.
+6. Update
+   [docs/features/orchestration-strategy-optimization.md](features/orchestration-strategy-optimization.md).
 
 ### Change SQLite Schema
 

@@ -11,8 +11,10 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +24,11 @@ import (
 	"github.com/tencent/codex-bridge/internal/hub"
 	"github.com/tencent/codex-bridge/internal/protocol"
 	"github.com/tencent/codex-bridge/internal/store"
+)
+
+var (
+	freePortMu   sync.Mutex
+	freePortUsed = map[int]struct{}{}
 )
 
 func TestEchoBridgeEndToEnd(t *testing.T) {
@@ -369,6 +376,166 @@ func TestDuplicatePromptRejectedWhileRunActive(t *testing.T) {
 	}
 }
 
+func TestBrowserApprovalResponseRoutesToBridge(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tmp := t.TempDir()
+	port := freePort(t)
+	cfg := config.Default()
+	cfg.Gateway.Host = "127.0.0.1"
+	cfg.Gateway.Port = port
+	cfg.Gateway.ReadTimeout.Duration = 5 * time.Second
+	cfg.Hub.DBPath = tmp + "/bridge.db"
+	cfg.Auth.JWTSecret = "integration-test-secret-32-byte-minimum"
+	cfg.Auth.AccessTokenTTL.Duration = time.Hour
+	cfg.Bridge.HubURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	cfg.Bridge.Token = store.NewToken("enr")
+
+	st, err := store.Open(cfg.Hub.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
+	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
+	go func() { _ = srv.Run(ctx) }()
+	waitHTTP(t, cfg.Bridge.HubURL+"/health")
+
+	fakeBridge := dialFakeBridge(t, cfg.Bridge.HubURL, cfg.Bridge.Token)
+	defer fakeBridge.Close()
+
+	client := httpClient(t)
+	postJSON(t, client, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
+	waitAgents(t, client, cfg.Bridge.HubURL)
+
+	sid := createSession(t, client, cfg.Bridge.HubURL, "approval")
+	ws := dialBrowserWS(t, client, cfg.Bridge.HubURL, sid)
+	defer ws.Close()
+	waitBridgeEnvelope(t, fakeBridge, protocol.TypeOpenSession, sid)
+
+	req := protocol.ApprovalRequestPayload{RequestID: "apr_1", Kind: "item/commandExecution/requestApproval", Command: "rm -rf build", CWD: "/repo"}
+	if err := fakeBridge.WriteJSON(protocol.MustEnvelope(protocol.TypeApprovalRequest, sid, req)); err != nil {
+		t.Fatal(err)
+	}
+	browserEnv := waitBrowserEnvelope(t, ws, protocol.TypeApprovalRequest, sid)
+	gotReq, err := protocol.Decode[protocol.ApprovalRequestPayload](browserEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotReq.RequestID != "apr_1" || gotReq.Command != "rm -rf build" {
+		t.Fatalf("approval request = %#v", gotReq)
+	}
+	if err := ws.WriteJSON(protocol.MustEnvelope(protocol.TypeApprovalResponse, sid, protocol.ApprovalResponsePayload{RequestID: "apr_1", Decision: "accept"})); err != nil {
+		t.Fatal(err)
+	}
+	bridgeEnv := waitBridgeEnvelope(t, fakeBridge, protocol.TypeApprovalResponse, sid)
+	gotRes, err := protocol.Decode[protocol.ApprovalResponsePayload](bridgeEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRes.RequestID != "apr_1" || gotRes.Decision != "accept" {
+		t.Fatalf("approval response = %#v", gotRes)
+	}
+}
+
+func TestOrchestrationApprovalResponseRoutesToBridge(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tmp := t.TempDir()
+	port := freePort(t)
+	cfg := config.Default()
+	cfg.Gateway.Host = "127.0.0.1"
+	cfg.Gateway.Port = port
+	cfg.Gateway.ReadTimeout.Duration = 5 * time.Second
+	cfg.Hub.DBPath = tmp + "/bridge.db"
+	cfg.Auth.JWTSecret = "integration-test-secret-32-byte-minimum"
+	cfg.Auth.AccessTokenTTL.Duration = time.Hour
+	cfg.Bridge.HubURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	cfg.Bridge.Token = store.NewToken("enr")
+
+	st, err := store.Open(cfg.Hub.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	user, err := st.UpsertUser(ctx, "admin", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
+	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
+	go func() { _ = srv.Run(ctx) }()
+	waitHTTP(t, cfg.Bridge.HubURL+"/health")
+
+	fakeBridge := dialFakeBridge(t, cfg.Bridge.HubURL, cfg.Bridge.Token)
+	defer fakeBridge.Close()
+	registered := waitRegisteredAgent(t, st, "fake-bridge")
+
+	client := httpClient(t)
+	postJSON(t, client, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
+	waitAgents(t, client, cfg.Bridge.HubURL)
+	run, err := st.CreateOrchestrationRun(ctx, store.CreateOrchestrationRunParams{
+		UserID:   user.ID,
+		AgentID:  registered.ID,
+		Title:    "approval",
+		Mode:     "collaboration",
+		Prompt:   "approval",
+		MaxTurns: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ws := dialOrchestrationWS(t, client, cfg.Bridge.HubURL, run.ID)
+	defer ws.Close()
+	req := protocol.ApprovalRequestPayload{RequestID: "apr_orc_1", Kind: "claude.permission_prompt", RunID: run.ID, TurnID: "turn_1", Command: "rm -rf build"}
+	if err := fakeBridge.WriteJSON(protocol.MustEnvelope(protocol.TypeApprovalRequest, "", req)); err != nil {
+		t.Fatal(err)
+	}
+	browserEnv := waitBrowserEnvelope(t, ws, protocol.TypeApprovalRequest, "")
+	gotReq, err := protocol.Decode[protocol.ApprovalRequestPayload](browserEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotReq.RequestID != "apr_orc_1" || gotReq.RunID != run.ID || gotReq.Command != "rm -rf build" {
+		t.Fatalf("orchestration approval request = %#v", gotReq)
+	}
+	if err := ws.WriteJSON(protocol.MustEnvelope(protocol.TypeApprovalResponse, "", protocol.ApprovalResponsePayload{RequestID: "apr_orc_1", Decision: "accept"})); err != nil {
+		t.Fatal(err)
+	}
+	bridgeEnv := waitBridgeEnvelope(t, fakeBridge, protocol.TypeApprovalResponse, "")
+	gotRes, err := protocol.Decode[protocol.ApprovalResponsePayload](bridgeEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRes.RequestID != "apr_orc_1" || gotRes.Decision != "accept" {
+		t.Fatalf("orchestration approval response = %#v", gotRes)
+	}
+}
+
 func TestOrchestrationEndToEndWithFakeCLIs(t *testing.T) {
 	t.Parallel()
 
@@ -407,6 +574,8 @@ func TestOrchestrationEndToEndWithFakeCLIs(t *testing.T) {
 	cfg.Bridge.Runner = "echo"
 	cfg.Bridge.CodexPath = codexPath
 	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
 	cfg.Bridge.ReconnectMin.Duration = 50 * time.Millisecond
 	cfg.Bridge.ReconnectMax.Duration = 100 * time.Millisecond
 	cfg.Bridge.HeartbeatInterval.Duration = 200 * time.Millisecond
@@ -643,7 +812,7 @@ func TestNonAdminCanOnlyUseOrchestrationAPIs(t *testing.T) {
 	}
 }
 
-func TestRegistrationBridgeTokenBindsAgentToUser(t *testing.T) {
+func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -672,41 +841,111 @@ func TestRegistrationBridgeTokenBindsAgentToUser(t *testing.T) {
 	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
 		t.Fatal(err)
 	}
+	worker, err := st.UpsertUser(ctx, "bridge-user", "long-secret-123")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
 	waitHTTP(t, cfg.Bridge.HubURL+"/health")
 
 	workerClient := httpClient(t)
-	registerBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/register", map[string]string{
+	loginBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/login", map[string]string{
 		"username": "bridge-user",
 		"password": "long-secret-123",
-	}, http.StatusCreated)
-	worker := registerBody["user"].(map[string]any)
+	}, http.StatusOK)
+	workerLogin := loginBody["user"].(map[string]any)
+	if workerLogin["id"] != worker.ID {
+		t.Fatalf("worker login = %#v, user = %#v", workerLogin, worker)
+	}
 	tokenBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/bridge-tokens", map[string]string{
 		"label": "wsl2-cli",
 	}, http.StatusCreated)
 	token := tokenBody["token"].(string)
+	if tokenBody["permissionProfile"] != "review-required" {
+		t.Fatalf("default permission profile = %#v", tokenBody["permissionProfile"])
+	}
+	profiles := tokenBody["permissionProfiles"].([]any)
+	if len(profiles) != 2 {
+		t.Fatalf("permissionProfiles = %#v", profiles)
+	}
+	profileCommands := map[string]string{}
+	for _, raw := range profiles {
+		profile := raw.(map[string]any)
+		id := profile["id"].(string)
+		setup := profile["setupCommand"].(string)
+		if strings.Contains(setup, "\n") {
+			t.Fatalf("profile setup command should be one line: %q", setup)
+		}
+		if out, err := exec.Command("sh", "-n", "-c", setup).CombinedOutput(); err != nil {
+			t.Fatalf("profile setup command shell syntax: %v\n%s\n%s", err, out, setup)
+		}
+		profileCommands[id] = setup
+	}
+	if !strings.Contains(profileCommands["review-required"], "--runner codex-app-server --sandbox workspace-write --approval-policy untrusted") {
+		t.Fatalf("review-required command missing conservative flags: %s", profileCommands["review-required"])
+	}
+	if !strings.Contains(profileCommands["auto-execute"], "--runner codex --sandbox danger-full-access --approval-policy never") {
+		t.Fatalf("auto-execute command missing bypass flags: %s", profileCommands["auto-execute"])
+	}
 	commands := tokenBody["commands"].([]any)
-	if len(commands) != 2 || !strings.Contains(commands[0].(string), "/install.sh") || !strings.Contains(commands[1].(string), "codex-bridge") {
+	if len(commands) != 1 || !strings.Contains(commands[0].(string), "/install.sh") || !strings.Contains(commands[0].(string), "codex-bridge") {
 		t.Fatalf("commands = %#v", commands)
 	}
-	connectCommand := commands[1].(string)
+	setupCommand := commands[0].(string)
+	if strings.Contains(setupCommand, "\n") {
+		t.Fatalf("setup command should be one line: %q", setupCommand)
+	}
+	if out, err := exec.Command("sh", "-n", "-c", setupCommand).CombinedOutput(); err != nil {
+		t.Fatalf("setup command shell syntax: %v\n%s\n%s", err, out, setupCommand)
+	}
+	if tokenBody["setupCommand"] != setupCommand {
+		t.Fatalf("setupCommand mismatch: %#v != %#v", tokenBody["setupCommand"], setupCommand)
+	}
+	connectCommand := tokenBody["connectCommand"].(string)
+	if strings.Contains(connectCommand, "\n") {
+		t.Fatalf("connect command should be one line: %q", connectCommand)
+	}
 	for _, want := range []string{
 		`CB_SERVICE_NAME="codex-bridge-${CB_HASH}.service"`,
 		`systemctl --user daemon-reload && systemctl --user enable "$CB_SERVICE_NAME" && systemctl --user restart "$CB_SERVICE_NAME"`,
+		`systemctl --user is-active --quiet "$CB_SERVICE_NAME"`,
+		`${CB_HASH}.env`,
+		`HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy`,
+		`set -a; . "$CB_HOME/services/${CB_HASH}.env"; set +a`,
+		`: > "$CB_LOG"`,
+		`CB_WAIT=0`,
+		`codex-bridge service started but Hub connection is not confirmed`,
+		`codex-bridge connected: $CB_SERVICE_NAME log=$CB_LOG`,
+		`codex-bridge user service did not stay active; falling back to nohup`,
 		`loginctl enable-linger "$(id -un)"`,
-		`ExecStart=%h/.codex-bridge/services/${CB_HASH}.sh`,
+		`ExecStart=%h/.codex-bridge/services/`,
 		`nohup "$CB_START" > "$CB_LOG" 2>&1 &`,
-		`--cwd "\$CB_CWD"`,
-		`--name "\$CB_NAME"`,
-		`--machine-id-file "\$CB_HOME/machines/\${CB_HASH}"`,
-		`codex-bridge user service enabled`,
+		`codex-bridge started in background but Hub connection is not confirmed`,
+		`--cwd "$CB_CWD"`,
+		`--name "$CB_NAME"`,
+		`--machine-id-file "$CB_HOME/machines/${CB_HASH}"`,
+		`--runner codex-app-server --sandbox workspace-write --approval-policy untrusted`,
 	} {
 		if !strings.Contains(connectCommand, want) {
 			t.Fatalf("connect command missing %q: %s", want, connectCommand)
 		}
 	}
+	autoBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/bridge-tokens", map[string]string{
+		"label":             "auto-cli",
+		"permissionProfile": "auto-execute",
+	}, http.StatusCreated)
+	if autoBody["permissionProfile"] != "auto-execute" {
+		t.Fatalf("auto permission profile = %#v", autoBody["permissionProfile"])
+	}
+	autoConnect := autoBody["connectCommand"].(string)
+	if !strings.Contains(autoConnect, "--runner codex --sandbox danger-full-access --approval-policy never") {
+		t.Fatalf("auto connect command missing full access flags: %s", autoConnect)
+	}
+	postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/bridge-tokens", map[string]string{
+		"permissionProfile": "surprise-me",
+	}, http.StatusBadRequest)
 
 	fakeBridge := dialFakeBridge(t, cfg.Bridge.HubURL, token)
 	defer fakeBridge.Close()
@@ -717,7 +956,7 @@ func TestRegistrationBridgeTokenBindsAgentToUser(t *testing.T) {
 		t.Fatalf("worker agents = %#v", agents)
 	}
 	agent := agents[0].(map[string]any)
-	if agent["userId"] != worker["id"] || agent["online"] != true {
+	if agent["userId"] != worker.ID || agent["online"] != true {
 		t.Fatalf("bound agent = %#v, user = %#v", agent, worker)
 	}
 
@@ -830,12 +1069,28 @@ func TestOrchestrationContinueReusesRunAndSendsContext(t *testing.T) {
 
 func freePort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	for attempts := 0; attempts < 100; attempts++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		if err := ln.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		freePortMu.Lock()
+		_, used := freePortUsed[port]
+		if !used {
+			freePortUsed[port] = struct{}{}
+		}
+		freePortMu.Unlock()
+		if !used {
+			return port
+		}
 	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
+	t.Fatal("could not allocate a unique test port")
+	return 0
 }
 
 func waitHTTP(t *testing.T, target string) {
@@ -876,6 +1131,25 @@ func waitAgents(t *testing.T, client *http.Client, baseURL string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("bridge agent did not come online")
+}
+
+func waitRegisteredAgent(t *testing.T, st *store.Store, name string) store.Agent {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		agents, err := st.ListAgents(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, agent := range agents {
+			if agent.Name == name {
+				return agent
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for registered agent %q", name)
+	return store.Agent{}
 }
 
 func dialBrowserWS(t *testing.T, client *http.Client, baseURL, sid string) *websocket.Conn {
@@ -962,6 +1236,15 @@ func dialFakeBridge(t *testing.T, baseURL, token string) *fakeBridgeConn {
 		MachineID: "fake-machine-" + store.NewID("test"),
 		Hostname:  "test-host",
 		Version:   "test",
+		Capabilities: &protocol.BridgeCapabilities{
+			Sandbox:        "danger-full-access",
+			ApprovalPolicy: "never",
+			Metadata:       map[string]string{"approvalMode": "auto-execute"},
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: true},
+				"codex":  {Available: true},
+			},
+		},
 	}
 	if err := ws.WriteJSON(protocol.MustEnvelope(protocol.TypeRegister, "", reg)); err != nil {
 		t.Fatal(err)

@@ -1,8 +1,14 @@
 package bridge
 
 import (
+	"context"
+	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
@@ -46,6 +52,67 @@ func TestOrchestrationClaudeArgsDoNotBypassPermissionsForWorkspaceSandbox(t *tes
 	args := NewOrchestrationManager(&cfg).claudeArgs(protocol.OrchestrationStartPayload{}, "task")
 	if containsArg(args, "--permission-mode") {
 		t.Fatalf("claude args should not bypass permissions for workspace sandbox: %#v", args)
+	}
+}
+
+func TestOrchestrationClaudeApprovalArgsAttachMCPBeforePrompt(t *testing.T) {
+	args := NewOrchestrationManager(&config.Config{}).withClaudeApprovalArgs(
+		[]string{"--print", "--output-format=stream-json", "task"},
+		"/tmp/codex-bridge-mcp.json",
+	)
+	for _, want := range []string{"--permission-mode", "default", "--mcp-config", "/tmp/codex-bridge-mcp.json", "--permission-prompt-tool", "mcp__codex_bridge__browser_approval"} {
+		if !containsArg(args, want) {
+			t.Fatalf("claude args missing %q: %#v", want, args)
+		}
+	}
+	if got := args[len(args)-1]; got != "task" {
+		t.Fatalf("last claude arg = %q, want prompt: %#v", got, args)
+	}
+}
+
+func TestOrchestrationCodexUsesAppServerWhenApprovalIsRequired(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "workspace-write"
+	cfg.Bridge.ApprovalPolicy = "untrusted"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 16)
+	manager.AttachOut(out)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for env := range out {
+			if env.Type != protocol.TypeApprovalRequest {
+				continue
+			}
+			req, err := protocol.Decode[protocol.ApprovalRequestPayload](env)
+			if err == nil {
+				manager.ApprovalResponse(protocol.ApprovalResponsePayload{RequestID: req.RequestID, Decision: "accept"})
+			}
+		}
+	}()
+
+	content, tools, err := manager.runCodex(context.Background(), protocol.OrchestrationStartPayload{
+		RunID: "orc_app",
+		CWD:   tmp,
+	}, "turn_app", "reviewer", "run it")
+	close(out)
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "done" {
+		t.Fatalf("content = %q", content)
+	}
+	if len(tools) == 0 {
+		t.Fatal("expected app-server tool event")
 	}
 }
 
@@ -106,6 +173,130 @@ func TestComposeOrchestrationPromptIncludesResumeContext(t *testing.T) {
 	}
 }
 
+func TestComposeOrchestrationPromptUsesCompactHandoffs(t *testing.T) {
+	longDetail := strings.Repeat("very long implementation detail ", 120)
+	history := []orchestrationTurn{{
+		Role:    "implementer",
+		CLI:     "claude",
+		Msg:     "Msg: to=reviewer; intent=review; need=check prompt contract",
+		Content: "Changed internal/bridge/orchestration.go.\n\n" + longDetail + "\n\nMsg: to=reviewer; intent=review; need=check prompt contract\nHandoff: status=needs_next; changed=internal/bridge/orchestration.go; verified=go test ./internal/bridge; next=review prompt; risks=none",
+		Handoff: "Handoff: status=needs_next; changed=internal/bridge/orchestration.go; verified=go test ./internal/bridge; next=review prompt; risks=none",
+		HandoffFields: orchestrationHandoffFields{
+			Status:   "needs_next",
+			Changed:  "internal/bridge/orchestration.go",
+			Verified: "go test ./internal/bridge",
+			Next:     "review prompt",
+		},
+	}}
+
+	prompt := composeOrchestrationPrompt("collaboration", "review it", "", false, "reviewer", "codex", 2, 4, history)
+	for _, want := range []string{"From: reviewer/codex", "To: implementer/claude", "Mode: collaboration", "builder-reviewer collaboration", orchestrationMsgContract, orchestrationHandoffContract, "Compact prior-turn handoffs", "intent=review", "status=needs_next"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "very long implementation detail") {
+		t.Fatalf("prompt included raw long transcript instead of compact handoff:\n%s", prompt)
+	}
+}
+
+func TestParseHandoffFieldsAndCompactPromptAvoidsRawTranscript(t *testing.T) {
+	fields := parseHandoffFields("Handoff: status=needs_next; changed=main.go, README.md; verified=go test ./...; next=fix lint; risks=doc drift")
+	if fields.Status != "needs_next" || fields.Changed != "main.go, README.md" || fields.Verified != "go test ./..." || fields.Next != "fix lint" || fields.Risks != "doc drift" {
+		t.Fatalf("fields = %#v", fields)
+	}
+	turn := orchestrationTurn{
+		Role:          "implementer",
+		CLI:           "claude",
+		Content:       strings.Repeat("verbose details ", 200),
+		HandoffFields: fields,
+	}
+	got := formatCompactPriorTurn(turn)
+	for _, want := range []string{"changed=main.go, README.md", "verified=go test ./...", "risks=doc drift"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("compact turn missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "verbose details") {
+		t.Fatalf("compact turn included raw transcript:\n%s", got)
+	}
+}
+
+func TestFinalVerifierRunsOnlyWhenRiskSignalsExist(t *testing.T) {
+	manager := NewOrchestrationManager(&config.Config{})
+	clean := []orchestrationTurn{{
+		HandoffFields: orchestrationHandoffFields{Status: "resolved", Verified: "go test ./...", Risks: "none"},
+	}}
+	if manager.shouldRunFinalVerifier(clean) {
+		t.Fatal("clean resolved run should skip final verifier")
+	}
+	resolvedChanged := []orchestrationTurn{{
+		HandoffFields: orchestrationHandoffFields{Status: "resolved", Changed: "main.go", Verified: "go test ./...", Risks: "none"},
+	}}
+	if !manager.shouldRunFinalVerifier(resolvedChanged) {
+		t.Fatal("resolved file changes should still trigger final verifier")
+	}
+	changed := []orchestrationTurn{{
+		HandoffFields: orchestrationHandoffFields{Status: "needs_next", Changed: "main.go"},
+	}}
+	if !manager.shouldRunFinalVerifier(changed) {
+		t.Fatal("changed files should trigger final verifier")
+	}
+	exitCode := 1
+	failed := []orchestrationTurn{{
+		Tools: []RunnerToolEvent{{Command: "go test ./...", Status: "completed", ExitCode: &exitCode}},
+	}}
+	if !manager.shouldRunFinalVerifier(failed) {
+		t.Fatal("failed command should trigger final verifier")
+	}
+}
+
+func TestComposeFinalVerifierPromptUsesStructuredState(t *testing.T) {
+	prompt := composeFinalVerifierPrompt("collaboration", "finish task", "", false, "verifier", "codex", []orchestrationTurn{{
+		Role:          "implementer",
+		CLI:           "claude",
+		Content:       strings.Repeat("raw transcript ", 100),
+		HandoffFields: orchestrationHandoffFields{Status: "needs_next", Changed: "main.go", Verified: "none", Next: "run tests", Risks: "tests not run"},
+	}})
+	for _, want := range []string{"lightweight final verifier", "changed=main.go", "risks=tests not run", "finish task"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("verifier prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "raw transcript") {
+		t.Fatalf("verifier prompt included raw transcript:\n%s", prompt)
+	}
+}
+
+func TestComposeOrchestrationPromptDebateGuidance(t *testing.T) {
+	proposer := composeOrchestrationPrompt("debate", "is this correct?", "", false, "proposer", "claude", 1, 3, nil)
+	critic := composeOrchestrationPrompt("debate", "is this correct?", "", false, "critic", "codex", 2, 3, nil)
+	for _, tc := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{"proposer", proposer, "falsifiable handoff"},
+		{"critic", critic, "Try to falsify"},
+	} {
+		if !strings.Contains(tc.text, "evidence-focused debate") || !strings.Contains(tc.text, tc.want) {
+			t.Fatalf("%s prompt missing debate guidance:\n%s", tc.name, tc.text)
+		}
+	}
+}
+
+func TestResolvedHandoffRequiresVisibleConclusion(t *testing.T) {
+	if !resolvedHandoffReady("Final conclusion: verification passed.\n\nHandoff: status=resolved; changed=none; verified=go test ./...; next=none; risks=none") {
+		t.Fatal("resolved handoff with final conclusion should be ready")
+	}
+	if resolvedHandoffReady("Handoff: status=resolved; changed=none; verified=go test ./...; next=none; risks=none") {
+		t.Fatal("resolved handoff without visible conclusion should not stop early")
+	}
+	if resolvedHandoffReady("Final conclusion: work remains.\n\nHandoff: status=needs_next; changed=main.go; verified=none; next=fix tests; risks=failing tests") {
+		t.Fatal("non-resolved handoff should not stop early")
+	}
+}
+
 func TestComposeOrchestrationPromptFinalTurnRequiresUserVisibleAnswer(t *testing.T) {
 	prompt := composeOrchestrationPrompt("collaboration", "finish it", "", false, "reviewer", "codex", 4, 4, nil)
 	for _, want := range []string{"final scheduled turn", "user-visible final answer", "what was verified"} {
@@ -153,6 +344,92 @@ func TestFinalTurnFallbackSummarySkipsClearFinalOutput(t *testing.T) {
 	)
 	if summary != "" {
 		t.Fatalf("summary = %q, want empty", summary)
+	}
+}
+
+func TestExtractMsgFindsTrailingContract(t *testing.T) {
+	content := "done\n\nMsg: to=reviewer; intent=review; need=none\nHandoff: status=needs_next; changed=main.go; verified=none; next=review; risks=none"
+	if got := extractMsg(content); got != "Msg: to=reviewer; intent=review; need=none" {
+		t.Fatalf("extractMsg = %q", got)
+	}
+}
+
+func TestOrchestrationApprovalRequesterRoundTrip(t *testing.T) {
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 2)
+	manager.AttachOut(out)
+	requester := orchestrationApprovalRequester{manager: manager, runID: "orc_1", turnID: "turn_1", cwd: "/repo"}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	done := make(chan protocol.ApprovalResponsePayload, 1)
+	go func() {
+		res, err := requester.RequestApproval(ctx, protocol.ApprovalRequestPayload{
+			RequestID: "apr_1",
+			Kind:      "claude.permission_prompt",
+			Command:   "echo ok",
+		})
+		if err == nil {
+			done <- res
+		}
+	}()
+
+	env := <-out
+	if env.Type != protocol.TypeApprovalRequest || env.Sid != "" {
+		t.Fatalf("approval envelope = %#v", env)
+	}
+	req, err := protocol.Decode[protocol.ApprovalRequestPayload](env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.RunID != "orc_1" || req.TurnID != "turn_1" || req.CWD != "/repo" || req.Command != "echo ok" {
+		t.Fatalf("approval request = %#v", req)
+	}
+	if !manager.ApprovalResponse(protocol.ApprovalResponsePayload{RequestID: "apr_1", Decision: "accept"}) {
+		t.Fatal("approval response was not accepted")
+	}
+	select {
+	case res := <-done:
+		if res.Decision != "accept" {
+			t.Fatalf("response = %#v", res)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for approval response")
+	}
+}
+
+func TestClaudeApprovalMCPToolCallUsesSocketDecision(t *testing.T) {
+	socketPath := t.TempDir() + "/approval.sock"
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	got := make(chan claudeApprovalSocketRequest, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var req claudeApprovalSocketRequest
+		_ = json.NewDecoder(conn).Decode(&req)
+		got <- req
+		_ = json.NewEncoder(conn).Encode(claudeApprovalSocketResponse{RequestID: req.RequestID, Decision: "accept"})
+	}()
+
+	raw := json.RawMessage(`{"name":"browser_approval","arguments":{"command":"rm -rf build","cwd":"/repo","reason":"test"}}`)
+	res, err := handleClaudeApprovalMCPToolCall(socketPath, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := res.(map[string]any)
+	if result["behavior"] != "allow" {
+		t.Fatalf("mcp result = %#v", result)
+	}
+	req := <-got
+	if req.Command != "rm -rf build" || req.CWD != "/repo" || req.Reason != "test" {
+		t.Fatalf("socket request = %#v", req)
 	}
 }
 

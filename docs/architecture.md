@@ -13,6 +13,11 @@ Bridge (Go)
 codex exec --json
 ```
 
+CLI endpoints created with the review-required profile use
+`internal/bridge/appserver_runner.go` instead of `codex exec --json` for Codex
+chat. That runner keeps a `codex app-server --listen stdio://` JSON-RPC session
+open for the turn so Codex approval requests can be relayed to the browser.
+
 The orchestration UI uses HTTP for create/continue/cancel plus a run-scoped
 WebSocket for event streaming:
 
@@ -27,6 +32,37 @@ Bridge
   | spawn per turn
 Codex CLI / Claude CLI
 ```
+
+The Bridge keeps orchestration deterministic and low overhead: it still spawns
+one CLI per turn in auto-execute mode, and uses `codex app-server` for Codex
+turns when browser approval is required. Prompts use compact `Msg:` and
+`Handoff:` lines between turns, and the Bridge stores parsed handoff fields as
+turn state so the next CLI receives structured context instead of the full
+transcript. In collaboration mode Claude acts as builder and Codex as reviewer;
+in debate mode Claude proposes and Codex criticizes with evidence. The handoff
+contract is documented in
+[docs/features/orchestration-strategy-optimization.md](features/orchestration-strategy-optimization.md).
+
+Review-required Claude orchestration uses Claude Code's
+`--permission-prompt-tool` support. `internal/bridge/orchestration.go:runClaude`
+writes a temporary MCP config, runs `codex-bridge claude-approval-mcp` as a
+stdio MCP server, and forwards MCP permission prompts back to the parent Bridge
+over a Unix socket. Hub then reuses existing `approval_request` and
+`approval_response` frames with `payload.runId` for browser approval on the
+orchestration timeline.
+
+Review-required Codex orchestration reuses
+`internal/bridge/appserver_runner.go:Prompt`. App-server
+approval callbacks are mapped to run-scoped `approval_request` frames with
+`payload.runId`, and browser decisions return as `approval_response` frames to
+the owning Bridge.
+
+Bridge registration includes `protocol.RegisterPayload.Capabilities`. Hub keeps
+the latest online capabilities in `internal/hub/pool.go` and returns them from
+`GET /api/agents`, allowing the frontend to show whether Codex and Claude
+orchestration browser approval are available. Hub blocks review-required
+orchestration when the selected endpoint cannot provide the required approvals
+instead of falling back to `codex exec --json`.
 
 ## Decisions
 
@@ -56,6 +92,7 @@ Implemented frame types:
 - `register`, `registered`, `heartbeat`
 - `open_session`, `session_opened`, `close_session`
 - `prompt`, `session_update`, `prompt_complete`
+- `approval_request`, `approval_response`
 - `cancel`, `error`, `status`
 - `orchestration_start`, `orchestration_event`, `orchestration_cancel`
 
@@ -77,6 +114,14 @@ Orchestration continuity:
 4. Bridge receives the same `runID` with `Resume=true`.
 5. The frontend stores the last selected run id locally and restores it on
    `/orchestrate`.
+
+Chat session isolation:
+
+1. Each `sessions` row stores its owning CLI endpoint in `sessions.agent_id`.
+2. The frontend filters the chat sidebar by the selected agent.
+3. Switching agents closes the active chat WebSocket and restores that agent's
+   remembered session from `codexBridge.activeSessionByAgent`.
+4. Sending from an empty agent space creates a new session for that agent.
 
 ## Storage
 

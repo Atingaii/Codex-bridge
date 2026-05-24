@@ -7,7 +7,7 @@ import {
   RefreshCw, Check, Clipboard,
   Menu, X, Server, Activity, Command,
   Trash2, Edit2, GitBranch, Swords, UsersRound, ArrowLeft,
-  FileUp, FileText, FolderInput
+  FileUp, FileText, FolderInput, ShieldQuestion
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -33,6 +33,23 @@ type Agent = {
   workingDirs?: string[];
   lastSeenAt: number;
   online: boolean;
+  capabilities?: BridgeCapabilities;
+};
+
+type BridgeCapabilities = {
+  runner?: string;
+  sandbox?: string;
+  approvalPolicy?: string;
+  chat?: Record<string, BridgeCLICapability | undefined>;
+  orchestration?: Record<string, BridgeCLICapability | undefined>;
+  metadata?: Record<string, string | undefined>;
+};
+
+type BridgeCLICapability = {
+  available?: boolean;
+  execution?: string;
+  browserApproval?: boolean;
+  approvalMode?: string;
 };
 
 type Session = {
@@ -106,9 +123,29 @@ type ToolEvent = {
   exitCode?: number;
 };
 
+type ApprovalRequest = {
+  requestId: string;
+  kind: string;
+  command?: string;
+  cwd?: string;
+  reason?: string;
+  runId?: string;
+  turnId?: string;
+  promptId?: string;
+};
+
+type ApprovalStatus = 'pending' | 'accepted' | 'declined' | 'canceled';
+
 type ChatItem =
   | { id: string; type: 'message'; role: 'user' | 'assistant' | 'system'; content: string; createdAt?: number }
-  | { id: string; type: 'tool'; tool: ToolEvent };
+  | { id: string; type: 'tool'; tool: ToolEvent }
+  | { id: string; type: 'approval'; approval: ApprovalRequest; status?: ApprovalStatus };
+
+type ApprovalItemState = {
+  id: string;
+  approval: ApprovalRequest;
+  status?: ApprovalStatus;
+};
 
 type OrchestrationVisibleEvent =
   | {
@@ -165,9 +202,20 @@ type BridgeTokenResponse = {
   label: string;
   hubUrl: string;
   downloadUrl: string;
+  permissionProfile: PermissionProfileId;
+  permissionProfiles?: BridgePermissionProfile[];
+  setupCommand: string;
   installCommand: string;
   connectCommand: string;
   commands: string[];
+};
+
+type PermissionProfileId = 'review-required' | 'auto-execute';
+
+type BridgePermissionProfile = {
+  id: PermissionProfileId;
+  setupCommand: string;
+  connectCommand: string;
 };
 
 type ImageAttachment = {
@@ -194,13 +242,6 @@ const uiText = {
     secureConnection: 'Secure connection to your workspace',
     username: 'Username',
     password: 'Password',
-    createAccount: 'Create account',
-    signIn: 'Sign in',
-    haveAccount: 'Already have an account?',
-    needAccount: 'Need an account?',
-    switchToRegister: 'Create a new account',
-    switchToLogin: 'Back to sign in',
-    passwordHint: '10+ characters with letters and numbers',
     connectToWorkspace: 'Connect to Workspace',
     connectionFailed: 'Connection failed.',
     disconnected: 'Disconnected',
@@ -212,6 +253,7 @@ const uiText = {
     idle: 'idle',
     failedLoadOrchestration: 'Failed to load orchestration state',
     failedStartOrchestration: 'Failed to start orchestration',
+    orchestrationCapabilityUnavailable: 'Selected CLI endpoint cannot run review-required browser approval for both orchestration CLIs.',
     jumpToLatestMessage: 'Jump to latest message',
     jumpToBottom: 'Jump to bottom',
     uploadImages: 'Upload images',
@@ -281,8 +323,21 @@ const uiText = {
     deleteCliEndpoint: 'Delete CLI Endpoint',
     deleteCliEndpointConfirm: 'Delete this CLI endpoint? Running background bridge processes for this endpoint should also be stopped locally.',
     endpointLabel: 'Endpoint label',
+    permissionProfile: 'Permission profile',
+    reviewRequired: 'Review required',
+    reviewRequiredDescription: 'Codex chat, Codex orchestration, and Claude Code orchestration ask in the browser before untrusted commands.',
+    autoExecute: 'Auto execute',
+    autoExecuteDescription: 'Trusted mode. Codex and Claude run without local permission prompts and can modify files directly.',
+    selectedProfileCommand: 'Selected profile',
+    alternateProfileCommand: 'Alternative profile',
+    approvalRequired: 'Approval required',
+    approve: 'Approve',
+    deny: 'Deny',
+    approved: 'Approved',
+    denied: 'Denied',
+    approvalCanceled: 'Canceled',
     generating: 'Generating',
-    installCommand: 'Install',
+    setupCommand: 'Install and connect',
     connectCommand: 'Connect',
     enrollToken: 'Token',
     expiresIn24h: 'Expires in 24h',
@@ -297,6 +352,12 @@ const uiText = {
     sessionName: 'Session name',
     cliOrchestration: 'CLI Orchestration',
     workers: 'Workers',
+    capabilityMatrix: 'Capabilities',
+    browserApproval: 'Browser approval',
+    notAvailable: 'Not available',
+    available: 'Available',
+    codexOrchestrationApprovalMissing: 'Codex orchestration browser approval is unavailable on this endpoint.',
+    claudeOrchestrationApprovalMissing: 'Claude orchestration browser approval is unavailable on this endpoint.',
     stream: 'Stream',
     coordinateClaudeCodex: 'Coordinate Claude Code and Codex',
     startCollaborationHint: 'Start a collaboration or debate run from the panel on the right.',
@@ -322,13 +383,6 @@ const uiText = {
     secureConnection: '安全连接到你的工作区',
     username: '用户名',
     password: '密码',
-    createAccount: '创建账户',
-    signIn: '登录',
-    haveAccount: '已有账户？',
-    needAccount: '需要账户？',
-    switchToRegister: '注册新账户',
-    switchToLogin: '返回登录',
-    passwordHint: '至少 10 位，包含字母和数字',
     connectToWorkspace: '连接工作区',
     connectionFailed: '连接失败。',
     disconnected: '已断开',
@@ -340,6 +394,7 @@ const uiText = {
     idle: '空闲',
     failedLoadOrchestration: '加载编排状态失败',
     failedStartOrchestration: '启动编排失败',
+    orchestrationCapabilityUnavailable: '所选 CLI 端不能同时为两个编排 CLI 提供网页审批。',
     jumpToLatestMessage: '跳转到最新消息',
     jumpToBottom: '跳到底部',
     uploadImages: '上传图片',
@@ -409,8 +464,21 @@ const uiText = {
     deleteCliEndpoint: '删除 CLI 端',
     deleteCliEndpointConfirm: '确定删除这个 CLI 端？这个端对应的本地后台 bridge 进程也应该在本机停止。',
     endpointLabel: '端名称',
+    permissionProfile: '权限策略',
+    reviewRequired: '需要确认',
+    reviewRequiredDescription: 'Codex 聊天、Codex 编排和 Claude Code 编排都会在网页端确认不可信命令。',
+    autoExecute: '无需授权',
+    autoExecuteDescription: '可信模式。Codex 和 Claude 不再弹本机权限确认，可直接修改文件和执行命令。',
+    selectedProfileCommand: '当前策略',
+    alternateProfileCommand: '备用策略',
+    approvalRequired: '需要确认',
+    approve: '允许',
+    deny: '拒绝',
+    approved: '已允许',
+    denied: '已拒绝',
+    approvalCanceled: '已取消',
     generating: '生成中',
-    installCommand: '安装',
+    setupCommand: '安装并连接',
     connectCommand: '连接',
     enrollToken: 'Token',
     expiresIn24h: '24 小时内有效',
@@ -425,6 +493,12 @@ const uiText = {
     sessionName: '会话名称',
     cliOrchestration: 'CLI 编排',
     workers: '工作器',
+    capabilityMatrix: '能力矩阵',
+    browserApproval: '网页审批',
+    notAvailable: '不可用',
+    available: '可用',
+    codexOrchestrationApprovalMissing: '该端的 Codex 编排网页审批不可用。',
+    claudeOrchestrationApprovalMissing: '该端的 Claude 编排网页审批不可用。',
     stream: '流连接',
     coordinateClaudeCodex: '协同 Claude Code 与 Codex',
     startCollaborationHint: '从右侧面板启动协作或辩论运行。',
@@ -518,6 +592,33 @@ function activeOrchestrationStatus(status?: string) {
 }
 
 const activeOrchestrationRunStorageKey = 'codexBridge.activeOrchestrationRunId';
+const activeOrchestrationRunByAgentStorageKey = 'codexBridge.activeOrchestrationRunByAgent';
+
+function readActiveOrchestrationRunByAgent(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(activeOrchestrationRunByAgentStorageKey);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, string> : {};
+  } catch {
+    return {};
+  }
+}
+
+function rememberActiveOrchestrationRunForAgent(agentId: string, runId: string) {
+  if (!agentId || !runId) return;
+  const current = readActiveOrchestrationRunByAgent();
+  current[agentId] = runId;
+  localStorage.setItem(activeOrchestrationRunByAgentStorageKey, JSON.stringify(current));
+}
+
+function forgetActiveOrchestrationRunForAgent(agentId: string, runId?: string) {
+  if (!agentId) return;
+  const current = readActiveOrchestrationRunByAgent();
+  if (!runId || current[agentId] === runId) {
+    delete current[agentId];
+    localStorage.setItem(activeOrchestrationRunByAgentStorageKey, JSON.stringify(current));
+  }
+}
 
 function canCancelOrchestrationStatus(status?: string) {
   return status === 'queued' || status === 'running';
@@ -568,6 +669,22 @@ function upsertOrchestrationRun(current: OrchestrationRun[], next: Orchestration
   const found = current.some((run) => run.id === next.id);
   const runs = found ? current.map((run) => run.id === next.id ? { ...run, ...next } : run) : [next, ...current];
   return runs.slice().sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+}
+
+function upsertApprovalItem(current: ApprovalItemState[], approval: ApprovalRequest): ApprovalItemState[] {
+  const found = current.some((item) => item.approval.requestId === approval.requestId);
+  const next: ApprovalItemState = { id: approval.requestId, approval, status: 'pending' };
+  return found
+    ? current.map((item) => item.approval.requestId === approval.requestId ? { ...item, approval } : item)
+    : [...current, next];
+}
+
+function updateApprovalItemStatus(current: ApprovalItemState[], requestId: string, status: ApprovalStatus): ApprovalItemState[] {
+  return current.map((item) => item.approval.requestId === requestId ? { ...item, status } : item);
+}
+
+function approvalStatusFromDecision(decision: 'accept' | 'decline' | 'cancel'): ApprovalStatus {
+  return decision === 'accept' ? 'accepted' : decision === 'decline' ? 'declined' : 'canceled';
 }
 
 function orchestrationToolID(event: OrchestrationEvent) {
@@ -843,23 +960,27 @@ function AgentSelector({
   className?: string;
   disabled?: boolean;
 }) {
-  const selected = agents.find((agent) => agent.id === selectedAgentId) || agents.find((agent) => agent.online) || agents[0];
+  const selected = agents.find((agent) => agent.id === selectedAgentId) || null;
+  const value = selected ? selected.id : '';
   return (
     <label className={cn("relative inline-flex min-w-[180px] items-center", className)}>
       <Server className="absolute left-2.5 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
       <select
-        value={selected?.id || ''}
+        value={value}
         onChange={(event) => onSelect(event.target.value)}
         disabled={disabled || agents.length === 0}
         className="h-8 w-full rounded-lg border border-border bg-secondary/50 py-1 pl-8 pr-7 text-xs text-foreground shadow-sm outline-none focus:ring-1 focus:ring-ring disabled:opacity-60"
         aria-label={t.selectEndpoint}
         title={selected?.name || t.noBridgeConnected}
       >
-        {agents.length ? agents.map((agent) => (
-          <option key={agent.id} value={agent.id}>
-            {agent.online ? '● ' : '○ '}{agent.name || agent.hostname || agent.machineId}
-          </option>
-        )) : (
+        {!selected && agents.length > 0 && <option value="" disabled>{t.selectEndpoint}</option>}
+        {agents.length ? (
+          agents.map((agent) => (
+            <option key={agent.id} value={agent.id}>
+              {agent.online ? '● ' : '○ '}{agent.name || agent.hostname || agent.machineId}
+            </option>
+          ))
+        ) : (
           <option value="">{t.noBridgeConnected}</option>
         )}
       </select>
@@ -880,6 +1001,56 @@ function startWSHeartbeat(ws: WebSocket, sid?: string) {
 
 function defaultAgentID(agents: Agent[]) {
   return (agents.find((agent) => agent.online) || agents[0])?.id || '';
+}
+
+function orchestrationApprovalMode(agent?: Agent | null) {
+  const caps = agent?.capabilities;
+  if (!caps) return agent?.online ? 'unknown' : 'offline';
+  if (caps.approvalPolicy === 'never' && caps.sandbox === 'danger-full-access') return 'auto-execute';
+  if (caps.metadata?.approvalMode === 'auto-execute') return 'auto-execute';
+  return 'review-required';
+}
+
+function orchestrationCapability(agent: Agent | null | undefined, cli: 'claude' | 'codex') {
+  return agent?.capabilities?.orchestration?.[cli];
+}
+
+function orchestrationCapabilityProblems(agent: Agent | null | undefined, t: UIText) {
+  if (!agent) return [t.noBridgeConnected];
+  if (!agent.online) return [t.agentOffline];
+  if (orchestrationApprovalMode(agent) !== 'review-required') return [];
+  const problems: string[] = [];
+  if (!orchestrationCapability(agent, 'claude')?.browserApproval) problems.push(t.claudeOrchestrationApprovalMissing);
+  if (!orchestrationCapability(agent, 'codex')?.browserApproval) problems.push(t.codexOrchestrationApprovalMissing);
+  return problems;
+}
+
+const activeSessionByAgentStorageKey = 'codexBridge.activeSessionByAgent';
+
+function readActiveSessionByAgent(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(activeSessionByAgentStorageKey);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, string> : {};
+  } catch {
+    return {};
+  }
+}
+
+function rememberActiveSessionForAgent(agentId: string, sessionId: string) {
+  if (!agentId || !sessionId) return;
+  const current = readActiveSessionByAgent();
+  current[agentId] = sessionId;
+  localStorage.setItem(activeSessionByAgentStorageKey, JSON.stringify(current));
+}
+
+function forgetActiveSessionForAgent(agentId: string, sessionId?: string) {
+  if (!agentId) return;
+  const current = readActiveSessionByAgent();
+  if (!sessionId || current[agentId] === sessionId) {
+    delete current[agentId];
+    localStorage.setItem(activeSessionByAgentStorageKey, JSON.stringify(current));
+  }
 }
 
 function agentStatusClass(agent?: Agent) {
@@ -1125,7 +1296,6 @@ function LoginScreen({
 }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [registering, setRegistering] = useState(false);
 
   const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -1133,7 +1303,7 @@ function LoginScreen({
     setError('');
     const form = new FormData(e.currentTarget);
     try {
-      const data = await api<{ user: UserAccount }>(registering ? '/api/register' : '/api/login', {
+      const data = await api<{ user: UserAccount }>('/api/login', {
         method: 'POST',
         body: JSON.stringify({
           username: String(form.get('username') || ''),
@@ -1159,29 +1329,6 @@ function LoginScreen({
           <p className="text-sm text-muted-foreground">{t.secureConnection}</p>
         </div>
 
-        <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1">
-          <button
-            type="button"
-            className={cn("h-9 rounded-md text-sm font-medium", !registering ? "bg-background shadow-sm" : "text-muted-foreground")}
-            onClick={() => {
-              setRegistering(false);
-              setError('');
-            }}
-          >
-            {t.signIn}
-          </button>
-          <button
-            type="button"
-            className={cn("h-9 rounded-md text-sm font-medium", registering ? "bg-background shadow-sm" : "text-muted-foreground")}
-            onClick={() => {
-              setRegistering(true);
-              setError('');
-            }}
-          >
-            {t.createAccount}
-          </button>
-        </div>
-
         <form onSubmit={handleLogin} className="flex flex-col gap-4">
           <div className="space-y-4">
             <div className="space-y-2">
@@ -1199,7 +1346,7 @@ function LoginScreen({
               </label>
               <div className="relative">
                 <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                <Input id="password" name="password" type="password" placeholder={registering ? t.passwordHint : '••••••••'} className="pl-9" autoComplete={registering ? 'new-password' : 'current-password'} minLength={registering ? 10 : undefined} required />
+                <Input id="password" name="password" type="password" placeholder="••••••••" className="pl-9" autoComplete="current-password" required />
               </div>
             </div>
           </div>
@@ -1212,38 +1359,9 @@ function LoginScreen({
           )}
 
           <Button type="submit" className="w-full" disabled={loading}>
-            {loading ? <RefreshCw className="h-4 w-4 animate-spin" /> : registering ? t.createAccount : t.connectToWorkspace}
+            {loading ? <RefreshCw className="h-4 w-4 animate-spin" /> : t.connectToWorkspace}
           </Button>
-          {!registering && (
-            <Button
-              variant="secondary"
-              type="button"
-              className="w-full border border-border"
-              onClick={() => {
-                setRegistering(true);
-                setError('');
-              }}
-            >
-              {t.createAccount}
-            </Button>
-          )}
         </form>
-
-        <div className="flex items-center justify-center gap-2 text-sm">
-          <span className="text-muted-foreground">{registering ? t.haveAccount : t.needAccount}</span>
-          <Button
-            variant="ghost"
-            size="sm"
-            type="button"
-            className="h-8 px-2 text-primary hover:text-primary"
-            onClick={() => {
-              setRegistering(!registering);
-              setError('');
-            }}
-          >
-            {registering ? t.switchToLogin : t.switchToRegister}
-          </Button>
-        </div>
 
         <div className="flex justify-center mt-4">
           <Button variant="ghost" size="sm" className="text-muted-foreground gap-2" onClick={() => setLanguage(language === 'zh' ? 'en' : 'zh')}>
@@ -1303,13 +1421,18 @@ function Workspace({
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
   const activeSessionIdRef = useRef('');
+  const selectedAgentIdRef = useRef(selectedAgentId);
   const assistantItemIdRef = useRef<string | null>(null);
   const assistantTextRef = useRef('');
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) || null;
-  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || agents.find((agent) => agent.online) || agents[0];
+  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
   const onlineAgent = selectedAgent?.online ? selectedAgent : agents.find((agent) => agent.online);
   const isGenerating = Boolean(activeRun && activeStatus(activeRun.status));
+  const agentSessions = useMemo(() => {
+    if (!selectedAgent?.id) return [];
+    return sessions.filter((session) => session.agentId === selectedAgent.id);
+  }, [sessions, selectedAgent?.id]);
 
   const loadAgents = useCallback(async () => {
     const data = await api<{ agents: Agent[] }>('/api/agents');
@@ -1317,10 +1440,12 @@ function Workspace({
     setAgents(nextAgents);
     setSelectedAgentId((current) => {
       const next = nextAgents.some((agent) => agent.id === current) ? current : defaultAgentID(nextAgents);
+      selectedAgentIdRef.current = next;
       if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
       else localStorage.removeItem('codexBridge.selectedAgentId');
       return next;
     });
+    return nextAgents;
   }, []);
 
   const loadSessions = useCallback(async () => {
@@ -1342,6 +1467,7 @@ function Workspace({
 
   const loadMessages = useCallback(async (sessionId: string) => {
     const data = await api<{ messages: Message[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/messages`);
+    if (activeSessionIdRef.current !== sessionId) return;
     setItems((data.messages || []).map((message) => ({
       id: message.id,
       type: 'message',
@@ -1379,8 +1505,23 @@ function Workspace({
 
   const loadRuns = useCallback(async (sessionId: string) => {
     const data = await api<{ runs: Run[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/runs`);
+    if (activeSessionIdRef.current !== sessionId) return;
     setActiveRun((data.runs || []).find((run) => activeStatus(run.status)) || null);
   }, []);
+
+  const clearActiveChat = useCallback(() => {
+    closeWS();
+    activeSessionIdRef.current = '';
+    assistantItemIdRef.current = null;
+    assistantTextRef.current = '';
+    setActiveSessionId('');
+    setItems([]);
+    setRunner('-');
+    setThread('-');
+    setActiveRun(null);
+    setConnectionStatus(t.disconnected);
+    setShowScrollBottom(false);
+  }, [closeWS, t.disconnected]);
 
   const touchSession = useCallback((sessionId: string) => {
     setSessions((current) => {
@@ -1392,7 +1533,7 @@ function Workspace({
   }, []);
 
   const handleEnvelope = useCallback((env: Envelope) => {
-    if (env.sid && activeSessionIdRef.current && env.sid !== activeSessionIdRef.current) return;
+    if (!env.sid || env.sid !== activeSessionIdRef.current) return;
     const payload = env.payload || {};
 
     switch (env.type) {
@@ -1442,6 +1583,17 @@ function Workspace({
           setItems((current) => upsertAssistant(current, id, content));
         }
         break;
+      case 'approval_request':
+        if (payload.requestId) {
+          const approval = payload as ApprovalRequest;
+          setItems((current) => {
+            const existing = current.findIndex((item) => item.type === 'approval' && item.approval.requestId === approval.requestId);
+            const next: ChatItem = { id: approval.requestId, type: 'approval', approval, status: 'pending' };
+            if (existing === -1) return [...current, next];
+            return current.map((item, index) => index === existing ? next : item);
+          });
+        }
+        break;
       case 'prompt_complete':
         if (payload.content) {
           if (!assistantItemIdRef.current) assistantItemIdRef.current = newID('msg');
@@ -1458,10 +1610,7 @@ function Workspace({
         break;
       case 'error':
         if (payload.code === 'SESSION_DELETED') {
-          closeWS();
-          setActiveSessionId('');
-          setItems([]);
-          setActiveRun(null);
+          clearActiveChat();
           return;
         }
         appendSystem(payload.message || payload.code || t.error);
@@ -1471,7 +1620,7 @@ function Workspace({
       default:
         break;
     }
-  }, [appendSystem, closeWS, t.connected, t.error, t.ready, thread, touchSession]);
+  }, [appendSystem, clearActiveChat, t.connected, t.error, t.ready, thread, touchSession]);
 
   const connectWS = useCallback((sessionId: string) => {
     closeWS();
@@ -1481,17 +1630,21 @@ function Workspace({
     setConnectionStatus(t.connecting);
     let stopHeartbeat: (() => void) | null = null;
     ws.onopen = () => {
+      if (activeSessionIdRef.current !== sessionId || wsRef.current !== ws) return;
       setConnectionStatus(t.connected);
       stopHeartbeat = startWSHeartbeat(ws, sessionId);
     };
     ws.onmessage = (event) => {
+      if (activeSessionIdRef.current !== sessionId || wsRef.current !== ws) return;
       try {
         handleEnvelope(JSON.parse(event.data));
       } catch {
         // Ignore malformed frames.
       }
     };
-    ws.onerror = () => setConnectionStatus(t.connectionError);
+    ws.onerror = () => {
+      if (activeSessionIdRef.current === sessionId && wsRef.current === ws) setConnectionStatus(t.connectionError);
+    };
     ws.onclose = () => {
       stopHeartbeat?.();
       if (activeSessionIdRef.current === sessionId) setConnectionStatus(t.disconnected);
@@ -1500,25 +1653,74 @@ function Workspace({
   }, [closeWS, handleEnvelope, startWSHeartbeat, t.connected, t.connecting, t.connectionError, t.disconnected]);
 
   const selectSession = useCallback(async (sessionId: string) => {
+    const session = sessions.find((item) => item.id === sessionId);
+    if (!session) {
+      clearActiveChat();
+      return;
+    }
+    if (session.agentId !== selectedAgentIdRef.current) {
+      selectedAgentIdRef.current = session.agentId;
+      setSelectedAgentId(session.agentId);
+      localStorage.setItem('codexBridge.selectedAgentId', session.agentId);
+    }
+    rememberActiveSessionForAgent(session.agentId, session.id);
     stickToBottomRef.current = true;
     setShowScrollBottom(false);
     setActiveSessionId(sessionId);
     activeSessionIdRef.current = sessionId;
     setRunner('-');
-    setThread(sessions.find((session) => session.id === sessionId)?.remoteThreadId || '-');
+    setThread(session.remoteThreadId || '-');
     setActiveRun(null);
     setMobileMenuOpen(false);
     await loadMessages(sessionId);
     await loadRuns(sessionId);
+    if (activeSessionIdRef.current !== sessionId) return;
     connectWS(sessionId);
-  }, [connectWS, loadMessages, loadRuns, sessions]);
+  }, [clearActiveChat, connectWS, loadMessages, loadRuns, sessions]);
+
+  const selectLoadedSession = useCallback(async (session: Session) => {
+    rememberActiveSessionForAgent(session.agentId, session.id);
+    stickToBottomRef.current = true;
+    setShowScrollBottom(false);
+    setActiveSessionId(session.id);
+    activeSessionIdRef.current = session.id;
+    setRunner('-');
+    setThread(session.remoteThreadId || '-');
+    setActiveRun(null);
+    setMobileMenuOpen(false);
+    await loadMessages(session.id);
+    await loadRuns(session.id);
+    if (activeSessionIdRef.current !== session.id) return;
+    connectWS(session.id);
+  }, [connectWS, loadMessages, loadRuns]);
+
+  const switchAgentSession = useCallback(async (agentId: string, availableSessions: Session[] = sessions) => {
+    if (!agentId) {
+      clearActiveChat();
+      return;
+    }
+    const scoped = availableSessions.filter((session) => session.agentId === agentId);
+    const remembered = readActiveSessionByAgent()[agentId];
+    const next = scoped.find((session) => session.id === remembered) || scoped[0];
+    if (next) {
+      await selectLoadedSession(next);
+    } else {
+      clearActiveChat();
+      forgetActiveSessionForAgent(agentId);
+    }
+  }, [clearActiveChat, selectLoadedSession, sessions]);
 
   const refreshAll = useCallback(async () => {
-    const [_, loadedSessions] = await Promise.all([loadAgents(), loadSessions()]);
-    if (!activeSessionIdRef.current && loadedSessions.length) {
-      await selectSession(loadedSessions[0].id);
+    const [loadedAgents, loadedSessions] = await Promise.all([loadAgents(), loadSessions()]);
+    const savedAgentId = localStorage.getItem('codexBridge.selectedAgentId') || selectedAgentIdRef.current;
+    const agentId = loadedAgents.some((agent) => agent.id === savedAgentId) ? savedAgentId : defaultAgentID(loadedAgents);
+    selectedAgentIdRef.current = agentId;
+    const activeSession = loadedSessions.find((session) => session.id === activeSessionIdRef.current);
+    if (activeSession && (!agentId || activeSession.agentId === agentId)) {
+      return;
     }
-  }, [loadAgents, loadSessions, selectSession]);
+    await switchAgentSession(agentId, loadedSessions);
+  }, [loadAgents, loadSessions, switchAgentSession]);
 
   useEffect(() => {
     refreshAll().catch((err) => appendSystem(err.message));
@@ -1528,6 +1730,10 @@ function Workspace({
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    selectedAgentIdRef.current = selectedAgentId;
+  }, [selectedAgentId]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -1543,7 +1749,7 @@ function Workspace({
   }, [activeSessionId, items, scrollMessagesToBottom]);
 
   const createSession = async (title = t.newSession) => {
-    const agent = selectedAgent || agents.find((item) => item.online) || agents[0];
+    const agent = selectedAgent;
     if (!agent) {
       appendSystem(t.noBridgeConnected);
       return;
@@ -1553,8 +1759,18 @@ function Workspace({
       body: JSON.stringify({ agentId: agent.id, title }),
     });
     setSessions((current) => [data.session, ...current.filter((session) => session.id !== data.session.id)]);
-    await selectSession(data.session.id);
+    await selectLoadedSession(data.session);
   };
+
+  useEffect(() => {
+    if (!selectedAgent?.id) {
+      clearActiveChat();
+      return;
+    }
+    const activeSession = sessions.find((session) => session.id === activeSessionIdRef.current);
+    if (activeSession?.agentId === selectedAgent.id) return;
+    switchAgentSession(selectedAgent.id).catch((err) => appendSystem(err.message));
+  }, [appendSystem, clearActiveChat, selectedAgent?.id, sessions, switchAgentSession]);
 
   const renameSession = (session: Session) => {
     setRenameTarget(session);
@@ -1603,11 +1819,13 @@ function Workspace({
     const remaining = sessions.filter((item) => item.id !== session.id);
     setSessions(remaining);
     if (activeSessionId === session.id) {
-      closeWS();
-      setItems([]);
-      setActiveRun(null);
-      setActiveSessionId('');
-      if (remaining[0]) await selectSession(remaining[0].id);
+      const sameAgent = remaining.filter((item) => item.agentId === session.agentId);
+      forgetActiveSessionForAgent(session.agentId, session.id);
+      if (sameAgent[0]) {
+        await selectLoadedSession(sameAgent[0]);
+      } else {
+        clearActiveChat();
+      }
     }
   };
 
@@ -1669,6 +1887,19 @@ function Workspace({
     }));
   };
 
+  const respondApproval = (requestId: string, decision: 'accept' | 'decline' | 'cancel') => {
+    if (!wsRef.current || !activeSessionId) return;
+    wsRef.current.send(JSON.stringify({
+      type: 'approval_response',
+      sid: activeSessionId,
+      payload: { requestId, decision },
+    }));
+    setItems((current) => current.map((item) => {
+      if (item.type !== 'approval' || item.approval.requestId !== requestId) return item;
+      return { ...item, status: approvalStatusFromDecision(decision) };
+    }));
+  };
+
   const stopRun = () => {
     if (!wsRef.current || !activeSessionId) return;
     setActiveRun((current) => current ? { ...current, status: 'canceling' } : current);
@@ -1682,9 +1913,11 @@ function Workspace({
   };
 
   const selectAgent = (agentId: string) => {
+    selectedAgentIdRef.current = agentId;
     setSelectedAgentId(agentId);
     if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
     else localStorage.removeItem('codexBridge.selectedAgentId');
+    switchAgentSession(agentId).catch((err) => appendSystem(err.message));
   };
 
   const openSettings = (focus: 'cli' | '' = '') => {
@@ -1694,7 +1927,7 @@ function Workspace({
 
   const groupedSessions = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return sessions
+    return agentSessions
       .filter((session) => !query || displaySessionTitle(session, t).toLowerCase().includes(query))
       .reduce((acc, session) => {
         const label = sessionDateLabel(session.updatedAt || session.createdAt, t);
@@ -1702,7 +1935,7 @@ function Workspace({
         acc[label].push(session);
         return acc;
       }, {} as Record<string, Session[]>);
-  }, [sessions, search]);
+  }, [agentSessions, search]);
 
   return (
     <div className="h-screen w-full flex bg-background text-foreground overflow-hidden font-sans">
@@ -1778,7 +2011,7 @@ function Workspace({
           <div className="flex items-center gap-3 shrink-0">
             <AgentSelector
               agents={agents}
-              selectedAgentId={selectedAgent?.id || selectedAgentId}
+              selectedAgentId={selectedAgentId}
               onSelect={selectAgent}
               t={t}
               className="hidden sm:inline-flex"
@@ -1811,9 +2044,13 @@ function Workspace({
             <Command className="h-3.5 w-3.5" />
             <span>{t.status}: {connectionStatus}</span>
           </div>
-          <div className="flex sm:hidden items-center gap-1.5">
-            <span>{t.cliEndpoint}: {selectedAgent?.name || t.noBridgeConnected}</span>
-          </div>
+          <AgentSelector
+            agents={agents}
+            selectedAgentId={selectedAgentId}
+            onSelect={selectAgent}
+            t={t}
+            className="sm:hidden min-w-[220px]"
+          />
         </div>
 
         <div className="relative flex-1 min-h-0">
@@ -1828,6 +2065,11 @@ function Workspace({
                   <Terminal className="h-6 w-6 text-primary" />
                 </div>
                 <h2 className="text-lg font-medium">{t.howCanIHelp}</h2>
+                <div className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-muted-foreground">
+                  <Server className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{selectedAgent?.name || t.noBridgeConnected}</span>
+                  {!agentSessions.length && <span className="shrink-0">· {t.noSessions}</span>}
+                </div>
                 <p className="text-sm text-muted-foreground mb-4">
                   {t.codexCapability}
                 </p>
@@ -1845,7 +2087,9 @@ function Workspace({
             ) : (
               items.map((item) => item.type === 'message'
                 ? <MessageItem key={item.id} msg={item} t={t} />
-                : <ToolItem key={item.id} tool={item.tool} t={t} />
+                : item.type === 'tool'
+                  ? <ToolItem key={item.id} tool={item.tool} t={t} />
+                  : <ApprovalCard key={item.id} item={item} t={t} onDecision={respondApproval} />
               )
             )}
             <div ref={messageEndRef} className="h-4" />
@@ -1953,7 +2197,7 @@ function Workspace({
         <SettingsModal
           user={user}
           agents={agents}
-          selectedAgentId={selectedAgent?.id || selectedAgentId}
+          selectedAgentId={selectedAgentId}
           onSelectAgent={selectAgent}
           onAgentsChanged={loadAgents}
           onLogout={logout}
@@ -2019,6 +2263,7 @@ function OrchestrationWorkspace({
   const [runs, setRuns] = useState<OrchestrationRun[]>([]);
   const [activeRunId, setActiveRunId] = useState('');
   const [events, setEvents] = useState<OrchestrationEvent[]>([]);
+  const [approvals, setApprovals] = useState<ApprovalItemState[]>([]);
   const [mode, setMode] = useState<'collaboration' | 'debate'>('collaboration');
   const [prompt, setPrompt] = useState('');
   const [cwd, setCwd] = useState('');
@@ -2034,19 +2279,26 @@ function OrchestrationWorkspace({
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const activeRunIdRef = useRef('');
+  const selectedAgentIdRef = useRef(selectedAgentId);
   const stickToBottomRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const taskInputRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
 
-  const activeRun = runs.find((run) => run.id === activeRunId) || null;
-  const visibleEvents = useMemo(() => visibleOrchestrationEvents(events, activeRunId), [events, activeRunId]);
-  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || agents.find((agent) => agent.online) || agents[0];
+  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
   const onlineAgent = selectedAgent?.online ? selectedAgent : agents.find((agent) => agent.online);
+  const agentRuns = useMemo(() => {
+    if (!selectedAgent?.id) return [];
+    return runs.filter((run) => run.agentId === selectedAgent.id);
+  }, [runs, selectedAgent?.id]);
+  const activeRun = runs.find((run) => run.id === activeRunId && (!selectedAgent?.id || run.agentId === selectedAgent.id)) || null;
+  const visibleEvents = useMemo(() => activeRun ? visibleOrchestrationEvents(events, activeRunId) : [], [activeRun, events, activeRunId]);
+  const visibleApprovals = useMemo(() => approvals.filter((item) => item.approval.runId === activeRunId), [approvals, activeRunId]);
   const isRunning = activeOrchestrationStatus(activeRun?.status);
   const continuingRun = Boolean(activeRun && !isRunning);
   const canCancelRun = canCancelOrchestrationStatus(activeRun?.status);
+  const capabilityProblems = useMemo(() => orchestrationCapabilityProblems(selectedAgent, t), [selectedAgent, t]);
   const workingDirs = useMemo(() => {
     return Array.from(new Set((selectedAgent?.workingDirs || []).map((dir) => dir.trim()).filter(Boolean)));
   }, [selectedAgent]);
@@ -2057,10 +2309,12 @@ function OrchestrationWorkspace({
     setAgents(nextAgents);
     setSelectedAgentId((current) => {
       const next = nextAgents.some((agent) => agent.id === current) ? current : defaultAgentID(nextAgents);
+      selectedAgentIdRef.current = next;
       if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
       else localStorage.removeItem('codexBridge.selectedAgentId');
       return next;
     });
+    return nextAgents;
   }, []);
 
   const loadRuns = useCallback(async () => {
@@ -2106,8 +2360,8 @@ function OrchestrationWorkspace({
     }
     const nearBottom = isNearBottom(container);
     stickToBottomRef.current = nearBottom;
-    setShowScrollBottom(visibleEvents.length > 0 && !nearBottom);
-  }, [visibleEvents.length]);
+    setShowScrollBottom((visibleEvents.length + visibleApprovals.length) > 0 && !nearBottom);
+  }, [visibleApprovals.length, visibleEvents.length]);
 
   const clearReconnect = useCallback(() => {
     if (reconnectTimerRef.current !== null) {
@@ -2123,6 +2377,21 @@ function OrchestrationWorkspace({
       wsRef.current = null;
     }
   }, [clearReconnect]);
+
+  const clearActiveOrchestration = useCallback((forget = false) => {
+    closeWS();
+    if (forget) {
+      const activeRun = runs.find((run) => run.id === activeRunIdRef.current);
+      if (activeRun?.agentId) forgetActiveOrchestrationRunForAgent(activeRun.agentId, activeRun.id);
+    }
+    activeRunIdRef.current = '';
+    setActiveRunId('');
+    localStorage.removeItem(activeOrchestrationRunStorageKey);
+    setEvents([]);
+    setApprovals([]);
+    setConnectionStatus(t.disconnected);
+    setShowScrollBottom(false);
+  }, [closeWS, runs, t.disconnected]);
 
   const applyEvent = useCallback((event: OrchestrationEvent) => {
     setEvents((current) => {
@@ -2158,6 +2427,11 @@ function OrchestrationWorkspace({
         if (env.type === 'orchestration_event') {
           const event = env.payload as OrchestrationEvent;
           if (event.runId === runId) applyEvent(event);
+        } else if (env.type === 'approval_request') {
+          const approval = env.payload as ApprovalRequest;
+          if (approval.requestId && approval.runId === runId) {
+            setApprovals((current) => upsertApprovalItem(current, approval));
+          }
         } else if (env.type === 'status') {
           setConnectionStatus(env.payload?.status || t.connected);
         }
@@ -2190,33 +2464,107 @@ function OrchestrationWorkspace({
     };
   }, [applyEvent, clearReconnect, closeWS, loadRun, loadRunEvents, startWSHeartbeat, t.connected, t.connecting, t.connectionError, t.disconnected]);
 
-  const selectRun = useCallback(async (runId: string) => {
-    activeRunIdRef.current = runId;
-    setActiveRunId(runId);
-    localStorage.setItem(activeOrchestrationRunStorageKey, runId);
-    setEvents((current) => current.filter((event) => event.runId === runId));
-    const [run] = await Promise.all([loadRun(runId), loadRunEvents(runId, true)]);
+  const activateRun = useCallback(async (run: OrchestrationRun) => {
+    const runAgentId = run.agentId || selectedAgentIdRef.current;
+    activeRunIdRef.current = run.id;
+    setActiveRunId(run.id);
+    setRuns((current) => upsertOrchestrationRun(current, run));
+    localStorage.setItem(activeOrchestrationRunStorageKey, run.id);
+    if (runAgentId) {
+      selectedAgentIdRef.current = runAgentId;
+      setSelectedAgentId(runAgentId);
+      localStorage.setItem('codexBridge.selectedAgentId', runAgentId);
+      rememberActiveOrchestrationRunForAgent(runAgentId, run.id);
+    }
+    setEvents((current) => current.filter((event) => event.runId === run.id));
+    setApprovals((current) => current.filter((item) => item.approval.runId === run.id));
     setMode(run.mode === 'debate' ? 'debate' : 'collaboration');
     setCwd(run.cwd || '');
     setMaxTurns(run.maxTurns || 4);
-    if (run.agentId) {
-      setSelectedAgentId(run.agentId);
-      localStorage.setItem('codexBridge.selectedAgentId', run.agentId);
+    stickToBottomRef.current = true;
+    setShowScrollBottom(false);
+    await loadRunEvents(run.id, true);
+    if (activeRunIdRef.current !== run.id) return;
+    connectRun(run.id);
+  }, [connectRun, loadRunEvents]);
+
+  const selectRun = useCallback(async (runId: string) => {
+    activeRunIdRef.current = runId;
+    setActiveRunId(runId);
+    setEvents((current) => current.filter((event) => event.runId === runId));
+    setApprovals((current) => current.filter((item) => item.approval.runId === runId));
+    const run = await loadRun(runId);
+    if (activeRunIdRef.current !== runId) return;
+    await activateRun(run);
+  }, [activateRun, loadRun]);
+
+  const respondOrchestrationApproval = useCallback((requestId: string, decision: 'accept' | 'decline' | 'cancel') => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !activeRunIdRef.current) return;
+    wsRef.current.send(JSON.stringify({
+      type: 'approval_response',
+      payload: { requestId, decision },
+    }));
+    setApprovals((current) => updateApprovalItemStatus(current, requestId, approvalStatusFromDecision(decision)));
+  }, []);
+
+  const switchAgentRun = useCallback(async (agentId: string, availableRuns: OrchestrationRun[] = runs) => {
+    if (!agentId) {
+      clearActiveOrchestration();
+      return;
     }
-    connectRun(runId);
-  }, [connectRun, loadRun, loadRunEvents]);
+    const scopedRuns = availableRuns.filter((run) => run.agentId === agentId);
+    const rememberedRunId = readActiveOrchestrationRunByAgent()[agentId] || '';
+    const legacyRunId = localStorage.getItem(activeOrchestrationRunStorageKey) || '';
+    const nextRun =
+      scopedRuns.find((run) => run.id === rememberedRunId) ||
+      scopedRuns.find((run) => run.id === legacyRunId) ||
+      scopedRuns[0];
+    if (!nextRun) {
+      clearActiveOrchestration();
+      forgetActiveOrchestrationRunForAgent(agentId);
+      return;
+    }
+    activeRunIdRef.current = nextRun.id;
+    setActiveRunId(nextRun.id);
+    const loaded = await loadRun(nextRun.id);
+    if (activeRunIdRef.current !== nextRun.id) return;
+    await activateRun(loaded);
+  }, [activateRun, clearActiveOrchestration, loadRun, runs]);
+
+  const refreshOrchestration = useCallback(async () => {
+    const [loadedAgents, loadedRuns] = await Promise.all([loadAgents(), loadRuns()]);
+    const savedAgentId = localStorage.getItem('codexBridge.selectedAgentId') || selectedAgentIdRef.current;
+    const agentId = loadedAgents.some((agent) => agent.id === savedAgentId) ? savedAgentId : defaultAgentID(loadedAgents);
+    selectedAgentIdRef.current = agentId;
+    setSelectedAgentId(agentId);
+    if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
+    else localStorage.removeItem('codexBridge.selectedAgentId');
+    const currentRun = loadedRuns.find((run) => run.id === activeRunIdRef.current);
+    if (currentRun && (!agentId || currentRun.agentId === agentId)) {
+      rememberActiveOrchestrationRunForAgent(currentRun.agentId, currentRun.id);
+      return;
+    }
+    await switchAgentRun(agentId, loadedRuns);
+  }, [loadAgents, loadRuns, switchAgentRun]);
 
   useEffect(() => {
-    Promise.all([loadAgents(), loadRuns()])
-      .then(([, loadedRuns]) => {
-        const savedRunId = localStorage.getItem(activeOrchestrationRunStorageKey) || '';
-        const savedRun = loadedRuns.find((run) => run.id === savedRunId);
-        if (savedRun) return selectRun(savedRun.id);
-        if (loadedRuns[0]) return selectRun(loadedRuns[0].id);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
+    refreshOrchestration().catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
     return () => closeWS();
   }, []);
+
+  useEffect(() => {
+    selectedAgentIdRef.current = selectedAgentId;
+  }, [selectedAgentId]);
+
+  useEffect(() => {
+    if (!selectedAgent?.id) {
+      clearActiveOrchestration();
+      return;
+    }
+    const currentRun = runs.find((run) => run.id === activeRunIdRef.current);
+    if (currentRun?.agentId === selectedAgent.id) return;
+    switchAgentRun(selectedAgent.id).catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
+  }, [clearActiveOrchestration, runs, selectedAgent?.id, switchAgentRun, t.failedLoadOrchestration]);
 
   useEffect(() => {
     if (!activeRunId || !activeOrchestrationStatus(activeRun?.status)) return;
@@ -2250,10 +2598,10 @@ function OrchestrationWorkspace({
         scrollTimelineToBottom('auto');
         return;
       }
-      setShowScrollBottom(visibleEvents.length > 0 && !isNearBottom(container));
+      setShowScrollBottom((visibleEvents.length + visibleApprovals.length) > 0 && !isNearBottom(container));
     });
     return () => window.cancelAnimationFrame(id);
-  }, [activeRunId, visibleEvents, scrollTimelineToBottom]);
+  }, [activeRunId, visibleApprovals.length, visibleEvents, scrollTimelineToBottom]);
 
   useEffect(() => {
     if (!workingDirs.length) {
@@ -2279,6 +2627,10 @@ function OrchestrationWorkspace({
   const startRun = async () => {
     const task = prompt.trim();
     if (!task || creating || isRunning) return;
+    if (capabilityProblems.length > 0) {
+      setError(capabilityProblems.join(' '));
+      return;
+    }
     setCreating(true);
     setError('');
     try {
@@ -2299,6 +2651,7 @@ function OrchestrationWorkspace({
       setPrompt('');
       setFiles([]);
       localStorage.setItem(activeOrchestrationRunStorageKey, data.run.id);
+      rememberActiveOrchestrationRunForAgent(data.run.agentId, data.run.id);
       await selectRun(data.run.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : t.failedStartOrchestration);
@@ -2323,9 +2676,11 @@ function OrchestrationWorkspace({
   };
 
   const selectAgent = (agentId: string) => {
+    selectedAgentIdRef.current = agentId;
     setSelectedAgentId(agentId);
     if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
     else localStorage.removeItem('codexBridge.selectedAgentId');
+    switchAgentRun(agentId).catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
   };
 
   const openSettings = (focus: 'cli' | '' = '') => {
@@ -2334,11 +2689,7 @@ function OrchestrationWorkspace({
   };
 
   const startDraftRun = () => {
-    closeWS();
-    activeRunIdRef.current = '';
-    setActiveRunId('');
-    localStorage.removeItem(activeOrchestrationRunStorageKey);
-    setEvents([]);
+    clearActiveOrchestration(true);
     setPrompt(t.reviewCurrentRepository);
     setFiles([]);
     setError('');
@@ -2369,9 +2720,9 @@ function OrchestrationWorkspace({
           </Button>
         </div>
         <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1 elegant-scrollbar">
-          {runs.length === 0 ? (
+          {agentRuns.length === 0 ? (
             <div className="px-2 py-1.5 text-xs text-muted-foreground">{t.noOrchestrationRuns}</div>
-          ) : runs.map((run) => (
+          ) : agentRuns.map((run) => (
             <button
               key={run.id}
               onClick={() => selectRun(run.id).catch((err) => setError(err.message))}
@@ -2414,26 +2765,38 @@ function OrchestrationWorkspace({
           <div className="flex items-center gap-2">
             <AgentSelector
               agents={agents}
-              selectedAgentId={selectedAgent?.id || selectedAgentId}
+              selectedAgentId={selectedAgentId}
               onSelect={selectAgent}
               t={t}
               className="hidden sm:inline-flex"
-              disabled={creating || isRunning}
+              disabled={creating}
             />
             <Button variant="secondary" size="sm" className="hidden sm:inline-flex h-8 gap-1.5 rounded-lg" onClick={() => openSettings('cli')}>
               <Plus className="h-3.5 w-3.5" />
               {t.addCliEndpoint}
             </Button>
-            <Button variant="ghost" size="icon" className="text-muted-foreground rounded-full h-8 w-8" onClick={() => Promise.all([loadAgents(), loadRuns()]).catch((err) => setError(err.message))}>
+            <Button variant="ghost" size="icon" className="text-muted-foreground rounded-full h-8 w-8" onClick={() => refreshOrchestration().catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration))}>
               <RefreshCw className="h-4 w-4" />
             </Button>
           </div>
         </header>
 
         <div className="bg-muted/30 border-b border-border px-4 py-2 flex items-center gap-4 text-xs text-muted-foreground overflow-x-auto whitespace-nowrap elegant-scrollbar">
+          <AgentSelector
+            agents={agents}
+            selectedAgentId={selectedAgentId}
+            onSelect={selectAgent}
+            t={t}
+            className="sm:hidden min-w-[220px] shrink-0"
+            disabled={creating}
+          />
           <div className="flex items-center gap-1.5">
             <Server className="h-3.5 w-3.5" />
             <span>{t.workers}: Claude Code + Codex CLI</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <ShieldQuestion className="h-3.5 w-3.5" />
+            <span>{t.browserApproval}: {orchestrationApprovalMode(selectedAgent) === 'auto-execute' ? t.autoExecute : capabilityProblems.length ? t.notAvailable : t.available}</span>
           </div>
           <div className="flex items-center gap-1.5">
             <Activity className="h-3.5 w-3.5" />
@@ -2442,9 +2805,6 @@ function OrchestrationWorkspace({
           <div className="flex items-center gap-1.5">
             <Command className="h-3.5 w-3.5" />
             <span>{t.stream}: {connectionStatus}</span>
-          </div>
-          <div className="flex sm:hidden items-center gap-1.5">
-            <span>{t.cliEndpoint}: {selectedAgent?.name || t.noBridgeConnected}</span>
           </div>
         </div>
 
@@ -2455,15 +2815,25 @@ function OrchestrationWorkspace({
               onScroll={updateTimelineScrollState}
               className="h-full overflow-y-auto p-4 md:p-6 space-y-3 elegant-scrollbar"
             >
-              {!visibleEvents.length ? (
+              {!visibleEvents.length && !visibleApprovals.length ? (
                 <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4">
                   <div className="h-12 w-12 rounded-2xl bg-primary/5 border border-border flex items-center justify-center">
                     <GitBranch className="h-6 w-6 text-primary" />
                   </div>
                   <h2 className="text-lg font-medium">{t.coordinateClaudeCodex}</h2>
+                  <div className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-muted-foreground">
+                    <Server className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">{selectedAgent?.name || t.noBridgeConnected}</span>
+                    {!agentRuns.length && <span className="shrink-0">· {t.noOrchestrationRuns}</span>}
+                  </div>
                   <p className="text-sm text-muted-foreground">{t.startCollaborationHint}</p>
                 </div>
-              ) : visibleEvents.map((event) => <OrchestrationEventItem key={event.key} item={event} t={t} />)}
+              ) : (
+                <>
+                  {visibleEvents.map((event) => <OrchestrationEventItem key={event.key} item={event} t={t} />)}
+                  {visibleApprovals.map((item) => <ApprovalCard key={item.id} item={item} t={t} onDecision={respondOrchestrationApproval} />)}
+                </>
+              )}
               <div ref={endRef} className="h-4" />
             </div>
 
@@ -2512,13 +2882,21 @@ function OrchestrationWorkspace({
                 <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.cliEndpoint}</span>
                 <AgentSelector
                   agents={agents}
-                  selectedAgentId={selectedAgent?.id || selectedAgentId}
+                  selectedAgentId={selectedAgentId}
                   onSelect={selectAgent}
                   t={t}
                   className="w-full sm:hidden"
-                  disabled={creating || isRunning}
+                  disabled={creating}
                 />
               </label>
+
+              <CapabilityMatrix agent={selectedAgent} t={t} />
+              {capabilityProblems.length > 0 && (
+                <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>{capabilityProblems.join(' ')}</span>
+                </div>
+              )}
 
               <label className="space-y-2 block">
                 <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.workingDirectory}</span>
@@ -2587,7 +2965,7 @@ function OrchestrationWorkspace({
                     {canCancelRun ? t.stopRun : t.stopping}
                   </Button>
                 ) : (
-                  <Button className="w-full gap-2" onClick={() => startRun()} disabled={!prompt.trim() || creating || !agents.length}>
+                  <Button className="w-full gap-2" onClick={() => startRun()} disabled={!prompt.trim() || creating || !selectedAgent || capabilityProblems.length > 0}>
                     {creating ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                     {continuingRun ? t.continueRun : t.start}
                   </Button>
@@ -2602,7 +2980,7 @@ function OrchestrationWorkspace({
         <SettingsModal
           user={user}
           agents={agents}
-          selectedAgentId={selectedAgent?.id || selectedAgentId}
+          selectedAgentId={selectedAgentId}
           onSelectAgent={selectAgent}
           onAgentsChanged={loadAgents}
           onLogout={logout}
@@ -2615,6 +2993,42 @@ function OrchestrationWorkspace({
           close={() => setSettingsOpen(false)}
         />
       )}
+    </div>
+  );
+}
+
+function CapabilityMatrix({ agent, t }: { agent: Agent | null; t: UIText }) {
+  const rows: Array<{ cli: 'claude' | 'codex'; label: string; cap?: BridgeCLICapability }> = [
+    { cli: 'claude', label: 'Claude', cap: orchestrationCapability(agent, 'claude') },
+    { cli: 'codex', label: 'Codex', cap: orchestrationCapability(agent, 'codex') },
+  ];
+  const auto = orchestrationApprovalMode(agent) === 'auto-execute';
+  return (
+    <div className="rounded-md border border-border bg-muted/20 p-2.5">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.capabilityMatrix}</span>
+        <span className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+          {auto ? t.autoExecute : t.reviewRequired}
+        </span>
+      </div>
+      <div className="space-y-1.5">
+        {rows.map((row) => {
+          const ok = auto || Boolean(row.cap?.available && row.cap.browserApproval);
+          return (
+            <div key={row.cli} className="grid grid-cols-[64px_minmax(0,1fr)_auto] items-center gap-2 text-xs">
+              <span className="font-medium">{row.label}</span>
+              <span className="truncate text-muted-foreground">{row.cap?.execution || t.notAvailable}</span>
+              <span className={cn(
+                "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px]",
+                ok ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-destructive/20 bg-destructive/10 text-destructive"
+              )}>
+                {ok ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
+                {auto ? t.autoExecute : row.cap?.browserApproval ? t.browserApproval : t.notAvailable}
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -3039,6 +3453,7 @@ function SettingsModal({
   close: () => void;
 }) {
   const [label, setLabel] = useState('');
+  const [permissionProfile, setPermissionProfile] = useState<PermissionProfileId>('review-required');
   const [tokenInfo, setTokenInfo] = useState<BridgeTokenResponse | null>(null);
   const [tokenError, setTokenError] = useState('');
   const [generatingToken, setGeneratingToken] = useState(false);
@@ -3051,7 +3466,7 @@ function SettingsModal({
     try {
       const data = await api<BridgeTokenResponse>('/api/bridge-tokens', {
         method: 'POST',
-        body: JSON.stringify({ label: label.trim() || 'wsl2-cli' }),
+        body: JSON.stringify({ label: label.trim() || 'wsl2-cli', permissionProfile }),
       });
       setTokenInfo(data);
       await onAgentsChanged();
@@ -3061,6 +3476,19 @@ function SettingsModal({
       setGeneratingToken(false);
     }
   };
+  const permissionOptions: Array<{ id: PermissionProfileId; title: string; description: string }> = [
+    { id: 'review-required', title: t.reviewRequired, description: t.reviewRequiredDescription },
+    { id: 'auto-execute', title: t.autoExecute, description: t.autoExecuteDescription },
+  ];
+  const profileCommand = (profileId: PermissionProfileId) =>
+    tokenInfo?.permissionProfiles?.find((profile) => profile.id === profileId)?.setupCommand || '';
+  const selectedSetupCommand =
+    (tokenInfo && profileCommand(tokenInfo.permissionProfile)) ||
+    tokenInfo?.setupCommand ||
+    tokenInfo?.commands?.[0] ||
+    (tokenInfo ? `${tokenInfo.installCommand} && ${tokenInfo.connectCommand}` : '');
+  const alternateProfile = tokenInfo?.permissionProfile === 'auto-execute' ? 'review-required' : 'auto-execute';
+  const alternateSetupCommand = tokenInfo ? profileCommand(alternateProfile) : '';
   const copyCommand = async (value: string, key: string) => {
     await copyText(value);
     setCopiedCommand(key);
@@ -3166,15 +3594,29 @@ function SettingsModal({
               {agents.length ? agents.map((agent) => (
                 <div
                   key={agent.id}
+                  onClick={() => onSelectAgent(agent.id)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      onSelectAgent(agent.id);
+                    }
+                  }}
                   className={cn(
-                    "w-full flex items-center justify-between gap-2 p-2.5 rounded-lg border bg-muted/20 text-left transition-colors",
+                    "w-full flex cursor-pointer items-center justify-between gap-2 p-2.5 rounded-lg border bg-muted/20 text-left transition-colors",
                     selectedAgentId === agent.id ? "border-primary/40 bg-primary/5" : "border-border hover:bg-muted/40"
                   )}
                 >
-                  <button type="button" onClick={() => onSelectAgent(agent.id)} className="flex flex-col min-w-0 flex-1 text-left">
+                  <span className="flex flex-col min-w-0 flex-1 text-left">
                     <span className="text-sm font-medium truncate">{agent.name}</span>
                     <span className="text-xs text-muted-foreground font-mono mt-0.5 truncate">{agent.hostname || agent.machineId}</span>
-                  </button>
+                    {agent.online && agent.capabilities && (
+                      <span className="mt-1 text-[10px] text-muted-foreground truncate">
+                        {t.browserApproval}: {orchestrationApprovalMode(agent) === 'auto-execute' ? t.autoExecute : orchestrationCapabilityProblems(agent, t).length ? t.notAvailable : t.available}
+                      </span>
+                    )}
+                  </span>
                   <div className="flex items-center gap-2 shrink-0">
                     {selectedAgentId === agent.id && <Check className="h-3.5 w-3.5 text-primary" />}
                     <div className={cn(
@@ -3190,7 +3632,11 @@ function SettingsModal({
                       size="icon"
                       type="button"
                       className="h-7 w-7 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                      onClick={() => deleteAgent(agent)}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        deleteAgent(agent);
+                      }}
                       disabled={deletingAgentId === agent.id}
                       aria-label={t.deleteCliEndpoint}
                       title={t.deleteCliEndpoint}
@@ -3218,6 +3664,28 @@ function SettingsModal({
                 <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.endpointLabel}</span>
                 <Input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="wsl2-cli" className="h-8 bg-background/60" />
               </label>
+              <div className="space-y-2">
+                <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.permissionProfile}</span>
+                <div className="grid gap-2">
+                  {permissionOptions.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onClick={() => setPermissionProfile(option.id)}
+                      className={cn(
+                        "w-full rounded-lg border p-2.5 text-left transition-colors",
+                        permissionProfile === option.id ? "border-primary/50 bg-primary/5" : "border-border bg-background/50 hover:bg-muted/40"
+                      )}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-medium">{option.title}</span>
+                        {permissionProfile === option.id && <Check className="h-3.5 w-3.5 text-primary" />}
+                      </div>
+                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{option.description}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
               {tokenError && (
                 <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -3234,19 +3702,21 @@ function SettingsModal({
                     t={t}
                   />
                   <CommandBlock
-                    label={t.installCommand}
-                    value={tokenInfo.installCommand}
-                    copied={copiedCommand === 'install'}
-                    onCopy={() => copyCommand(tokenInfo.installCommand, 'install').catch(() => undefined)}
+                    label={`${t.setupCommand} · ${t.selectedProfileCommand}`}
+                    value={selectedSetupCommand}
+                    copied={copiedCommand === 'setup'}
+                    onCopy={() => copyCommand(selectedSetupCommand, 'setup').catch(() => undefined)}
                     t={t}
                   />
-                  <CommandBlock
-                    label={t.connectCommand}
-                    value={tokenInfo.connectCommand}
-                    copied={copiedCommand === 'connect'}
-                    onCopy={() => copyCommand(tokenInfo.connectCommand, 'connect').catch(() => undefined)}
-                    t={t}
-                  />
+                  {alternateSetupCommand && (
+                    <CommandBlock
+                      label={`${t.setupCommand} · ${t.alternateProfileCommand}`}
+                      value={alternateSetupCommand}
+                      copied={copiedCommand === 'setup-alt'}
+                      onCopy={() => copyCommand(alternateSetupCommand, 'setup-alt').catch(() => undefined)}
+                      t={t}
+                    />
+                  )}
                 </div>
               )}
             </div>
@@ -3256,6 +3726,57 @@ function SettingsModal({
         <div className="p-4 border-t border-border flex justify-end gap-2 bg-muted/30">
           <Button variant="ghost" size="sm" onClick={close}>{t.cancel}</Button>
           <Button size="sm" onClick={close}>{t.savePreferences}</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApprovalCard({
+  item,
+  t,
+  onDecision,
+}: {
+  item: { approval: ApprovalRequest; status?: ApprovalStatus };
+  t: UIText;
+  onDecision: (requestId: string, decision: 'accept' | 'decline' | 'cancel') => void;
+}) {
+  const pending = !item.status || item.status === 'pending';
+  const statusText =
+    item.status === 'accepted' ? t.approved :
+      item.status === 'declined' ? t.denied :
+        item.status === 'canceled' ? t.approvalCanceled :
+          t.approvalRequired;
+  const detail = [item.approval.command, item.approval.cwd, item.approval.reason].filter(Boolean).join('\n');
+
+  return (
+    <div className="w-full max-w-4xl mx-auto rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-3">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300">
+          <ShieldQuestion className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1 space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium">{t.approvalRequired}</span>
+            <span className="rounded border border-border bg-background/70 px-1.5 py-0.5 text-[10px] text-muted-foreground">{statusText}</span>
+          </div>
+          {detail && (
+            <pre className="max-h-32 overflow-x-auto whitespace-pre-wrap rounded-md border border-border bg-background/70 p-2 font-mono text-[11px] text-muted-foreground elegant-scrollbar">
+              {detail}
+            </pre>
+          )}
+          {pending && (
+            <div className="flex gap-2">
+              <Button size="sm" type="button" className="h-8" onClick={() => onDecision(item.approval.requestId, 'accept')}>
+                <Check className="mr-1.5 h-3.5 w-3.5" />
+                {t.approve}
+              </Button>
+              <Button variant="secondary" size="sm" type="button" className="h-8" onClick={() => onDecision(item.approval.requestId, 'decline')}>
+                <X className="mr-1.5 h-3.5 w-3.5" />
+                {t.deny}
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     </div>

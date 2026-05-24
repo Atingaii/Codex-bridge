@@ -20,10 +20,14 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P1 | `codex exec --json` runner | implemented |
 | P2 | Multiple `sid` sessions over one Bridge connection | implemented |
 | P3 | SQLite users, agents, sessions, messages | implemented |
+| P3.1 | Agent-scoped chat session spaces | implemented |
 | P4 | Cookie JWT login and Caddy/systemd deployment files | implemented |
 | P5 | Heartbeat, reconnect, cancel, close-session cleanup | partial |
 | P6 | Orchestration create/continue event stream | implemented |
-| P7 | Browser permission prompts over app-server | deferred |
+| P6.1 | Low-token orchestration handoff strategies | implemented |
+| P6.2 | Deep collaboration routing and orchestration browser approval | implemented |
+| P6.3 | Orchestration capability matrix, structured handoffs, and conditional verifier | implemented |
+| P7 | Browser permission prompts over app-server | implemented for Codex chat and Codex orchestration |
 
 ## Engineering Workflow
 

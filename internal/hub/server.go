@@ -17,8 +17,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/tencent/codex-bridge/internal/auth"
 	"github.com/tencent/codex-bridge/internal/config"
@@ -31,11 +29,14 @@ import (
 const accessCookieName = "cb_access"
 
 const (
-	loginRateLimitMax       = 8
-	registerRateLimitMax    = 5
-	authRateLimitWindow     = 10 * time.Minute
-	minRegisterPasswordRune = 10
-	maxRegisterPasswordByte = 256
+	loginRateLimitMax   = 8
+	authRateLimitWindow = 10 * time.Minute
+	maxPasswordBytes    = 256
+)
+
+const (
+	permissionProfileReviewRequired = "review-required"
+	permissionProfileAutoExecute    = "auto-execute"
 )
 
 type BuildInfo struct {
@@ -200,7 +201,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		serverutil.WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many attempts, please try again later")
 		return
 	}
-	if username == "" || req.Password == "" || len(req.Password) > maxRegisterPasswordByte {
+	if username == "" || req.Password == "" || len(req.Password) > maxPasswordBytes {
 		serverutil.WriteError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid username or password")
 		return
 	}
@@ -228,117 +229,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.Auth.AllowRegistration {
-		serverutil.WriteError(w, http.StatusForbidden, "REGISTRATION_DISABLED", "registration is disabled")
-		return
-	}
-	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
-		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid registration payload")
-		return
-	}
-	username := normalizeUsername(req.Username)
-	password := req.Password
-	if !s.allowAuthAttempt(r, "register", username, registerRateLimitMax, authRateLimitWindow) {
-		serverutil.WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many attempts, please try again later")
-		return
-	}
-	if err := validateUsername(username); err != nil {
-		serverutil.WriteError(w, http.StatusBadRequest, "BAD_USERNAME", err.Error())
-		return
-	}
-	if err := validateRegisterPassword(password); err != nil {
-		serverutil.WriteError(w, http.StatusBadRequest, "WEAK_PASSWORD", err.Error())
-		return
-	}
-	user, err := s.store.CreateUser(r.Context(), username, password)
-	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			serverutil.WriteError(w, http.StatusConflict, "USERNAME_EXISTS", "username already exists")
-			return
-		}
-		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to register user")
-		return
-	}
-	token, expires, err := s.signer.Sign(user.ID)
-	if err != nil {
-		serverutil.WriteError(w, http.StatusInternalServerError, "TOKEN_ERROR", "failed to issue token")
-		return
-	}
-	user.IsAdmin = s.isAdminUser(user)
-	http.SetCookie(w, &http.Cookie{
-		Name:     accessCookieName,
-		Value:    token,
-		Path:     "/",
-		Expires:  expires,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   s.secureCookie(r),
-	})
-	serverutil.WriteJSON(w, http.StatusCreated, map[string]any{"user": user, "expiresAt": expires.Unix()})
+	serverutil.WriteError(w, http.StatusForbidden, "REGISTRATION_DISABLED", "registration is disabled")
 }
 
 func normalizeUsername(username string) string {
 	return strings.TrimSpace(username)
-}
-
-func validateUsername(username string) error {
-	if username == "" {
-		return errors.New("username is required")
-	}
-	if !utf8.ValidString(username) {
-		return errors.New("username is invalid")
-	}
-	runes := []rune(username)
-	if len(runes) < 3 || len(runes) > 64 {
-		return errors.New("username must be 3 to 64 characters")
-	}
-	for _, r := range runes {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.' {
-			continue
-		}
-		return errors.New("username may only contain letters, numbers, dots, underscores, and dashes")
-	}
-	return nil
-}
-
-func validateRegisterPassword(password string) error {
-	if password == "" {
-		return errors.New("password is required")
-	}
-	if isQuotedEmptyString(password) {
-		return errors.New("password is invalid")
-	}
-	if len(password) > maxRegisterPasswordByte {
-		return errors.New("password is too long")
-	}
-	if !utf8.ValidString(password) {
-		return errors.New("password is invalid")
-	}
-	if len([]rune(password)) < minRegisterPasswordRune {
-		return errors.New("password must be at least 10 characters")
-	}
-	var hasLetter, hasDigit bool
-	for _, r := range password {
-		if unicode.IsLetter(r) {
-			hasLetter = true
-		}
-		if unicode.IsDigit(r) {
-			hasDigit = true
-		}
-	}
-	if !hasLetter || !hasDigit {
-		return errors.New("password must include letters and numbers")
-	}
-	return nil
-}
-
-func isQuotedEmptyString(value string) bool {
-	trimmed := strings.TrimSpace(value)
-	return trimmed == `""` || trimmed == `''`
 }
 
 func (s *Server) allowAuthAttempt(r *http.Request, scope, username string, maxAttempts int, window time.Duration) bool {
@@ -423,13 +318,21 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request, uid string
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to list agents")
 		return
 	}
+	out := make([]agentResponse, 0, len(agents))
 	for i := range agents {
 		agents[i].Online = s.pool.AgentOnline(agents[i].ID)
+		item := agentResponse{Agent: agents[i]}
+		if caps, ok := s.pool.AgentCapabilities(agents[i].ID); ok {
+			item.Capabilities = caps
+		}
+		out = append(out, item)
 	}
-	if agents == nil {
-		agents = []store.Agent{}
-	}
-	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"agents": agents})
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"agents": out})
+}
+
+type agentResponse struct {
+	store.Agent
+	Capabilities *protocol.BridgeCapabilities `json:"capabilities,omitempty"`
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request, uid string) {
@@ -460,8 +363,9 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request, uid s
 
 func (s *Server) handleCreateBridgeToken(w http.ResponseWriter, r *http.Request, uid string) {
 	var req struct {
-		Label string `json:"label"`
-		TTL   string `json:"ttl"`
+		Label             string `json:"label"`
+		TTL               string `json:"ttl"`
+		PermissionProfile string `json:"permissionProfile"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid bridge token payload")
@@ -490,75 +394,131 @@ func (s *Server) handleCreateBridgeToken(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	hubURL := s.publicBaseURL(r)
-	installCommand := fmt.Sprintf("curl -fsSL %s/install.sh | sh", hubURL)
-	connectCommand := s.bridgeConnectCommand(hubURL, value)
+	profile := normalizePermissionProfile(req.PermissionProfile)
+	if profile == "" {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_PERMISSION_PROFILE", "permissionProfile must be review-required or auto-execute")
+		return
+	}
+	installCommand := s.bridgeInstallCommand(hubURL)
+	connectCommand := s.bridgeConnectCommand(hubURL, value, profile)
+	setupCommand := bridgeSetupCommand(installCommand, connectCommand)
+	profiles := s.bridgePermissionProfiles(hubURL, value, installCommand)
 	serverutil.WriteJSON(w, http.StatusCreated, map[string]any{
-		"token":          value,
-		"expiresAt":      expiresAt.Unix(),
-		"label":          label,
-		"hubUrl":         hubURL,
-		"downloadUrl":    strings.TrimSpace(s.cfg.Hub.BridgeDownloadURL),
-		"installCommand": installCommand,
-		"connectCommand": connectCommand,
-		"commands":       []string{installCommand, connectCommand},
+		"token":              value,
+		"expiresAt":          expiresAt.Unix(),
+		"label":              label,
+		"hubUrl":             hubURL,
+		"downloadUrl":        strings.TrimSpace(s.cfg.Hub.BridgeDownloadURL),
+		"permissionProfile":  profile,
+		"permissionProfiles": profiles,
+		"setupCommand":       setupCommand,
+		"installCommand":     installCommand,
+		"connectCommand":     connectCommand,
+		"commands":           []string{setupCommand},
 	})
 }
 
-func (s *Server) bridgeConnectCommand(hubURL, token string) string {
+func normalizePermissionProfile(profile string) string {
+	switch strings.TrimSpace(strings.ToLower(profile)) {
+	case "", permissionProfileReviewRequired:
+		return permissionProfileReviewRequired
+	case permissionProfileAutoExecute:
+		return permissionProfileAutoExecute
+	default:
+		return ""
+	}
+}
+
+func (s *Server) bridgePermissionProfiles(hubURL, token, installCommand string) []map[string]string {
+	return []map[string]string{
+		s.bridgePermissionProfile(hubURL, token, installCommand, permissionProfileReviewRequired),
+		s.bridgePermissionProfile(hubURL, token, installCommand, permissionProfileAutoExecute),
+	}
+}
+
+func (s *Server) bridgePermissionProfile(hubURL, token, installCommand, profile string) map[string]string {
+	connectCommand := s.bridgeConnectCommand(hubURL, token, profile)
+	return map[string]string{
+		"id":             profile,
+		"setupCommand":   bridgeSetupCommand(installCommand, connectCommand),
+		"connectCommand": connectCommand,
+	}
+}
+
+func (s *Server) bridgeInstallCommand(hubURL string) string {
+	return fmt.Sprintf("curl -fsSL %s | sh", shellQuote(strings.TrimRight(hubURL, "/")+"/install.sh"))
+}
+
+func bridgeSetupCommand(installCommand, connectCommand string) string {
+	return installCommand + " && { " + connectCommand + "; }"
+}
+
+func (s *Server) bridgeConnectCommand(hubURL, token, permissionProfile string) string {
 	hubArg := ""
 	if hubURL != strings.TrimRight(s.cfg.Bridge.HubURL, "/") {
 		hubArg = " --hub " + shellQuote(hubURL)
 	}
-	return fmt.Sprintf(`CB_CWD="${PWD:-.}"
-CB_DIR="$(basename "$CB_CWD")"
-CB_HASH="$(printf '%%s' "$CB_CWD" | cksum | awk '{print $1}')"
-CB_NAME="${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}"
-CB_HOME="$HOME/.codex-bridge"
-CB_LOG_DIR="$CB_HOME/logs"
-CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"
-CB_START="$CB_HOME/services/${CB_HASH}.sh"
-CB_SERVICE_DIR="$HOME/.config/systemd/user"
-CB_SERVICE_NAME="codex-bridge-${CB_HASH}.service"
-mkdir -p "$CB_HOME/machines" "$CB_LOG_DIR" "$CB_HOME/services" "$CB_SERVICE_DIR"
-printf '%%s\n' "$CB_CWD" > "$CB_HOME/services/${CB_HASH}.cwd"
-printf '%%s\n' "$CB_NAME" > "$CB_HOME/services/${CB_HASH}.name"
-cat > "$CB_START" <<EOF
-#!/bin/sh
-set -eu
-CB_HASH="$CB_HASH"
-CB_HOME="\${HOME}/.codex-bridge"
-CB_CWD=\$(cat "\$CB_HOME/services/\${CB_HASH}.cwd")
-CB_NAME=\$(cat "\$CB_HOME/services/\${CB_HASH}.name")
-exec "\$HOME/.local/bin/codex-bridge" connect%s --cwd "\$CB_CWD" --name "\$CB_NAME" --machine-id-file "\$CB_HOME/machines/\${CB_HASH}" %s
-EOF
-chmod 700 "$CB_START"
-if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
-  cat > "$CB_SERVICE_DIR/$CB_SERVICE_NAME" <<EOF
-[Unit]
-Description=Codex Bridge endpoint for $CB_CWD
-After=network-online.target
-Wants=network-online.target
+	permissionArg := bridgePermissionArgs(permissionProfile)
+	startScript := []string{
+		shellQuote("#!/bin/sh"),
+		shellQuote("set -eu"),
+		shellExpandWord(`CB_HASH="$CB_HASH"`),
+		shellExpandWord(`CB_HOME="$CB_HOME"`),
+		shellQuote(`CB_PROXY_ENV=$(cat "$CB_HOME/services/${CB_HASH}.env" 2>/dev/null || true)`),
+		shellQuote(`if [ -n "$CB_PROXY_ENV" ]; then set -a; . "$CB_HOME/services/${CB_HASH}.env"; set +a; fi`),
+		shellQuote(`CB_CWD=$(cat "$CB_HOME/services/${CB_HASH}.cwd")`),
+		shellQuote(`CB_NAME=$(cat "$CB_HOME/services/${CB_HASH}.name")`),
+		shellQuote(fmt.Sprintf(`exec "$HOME/.local/bin/codex-bridge" connect%s%s --cwd "$CB_CWD" --name "$CB_NAME" --machine-id-file "$CB_HOME/machines/${CB_HASH}" %s`, hubArg, permissionArg, shellQuote(token))),
+	}
+	serviceFile := []string{
+		shellQuote("[Unit]"),
+		shellExpandWord("Description=Codex Bridge endpoint for $CB_CWD"),
+		shellQuote("After=network-online.target"),
+		shellQuote("Wants=network-online.target"),
+		shellQuote(""),
+		shellQuote("[Service]"),
+		shellQuote("Type=simple"),
+		shellExpandWord("ExecStart=%h/.codex-bridge/services/${CB_HASH}.sh"),
+		shellQuote("Restart=always"),
+		shellQuote("RestartSec=5"),
+		shellExpandWord("StandardOutput=append:%h/.codex-bridge/logs/${CB_HASH}.log"),
+		shellExpandWord("StandardError=append:%h/.codex-bridge/logs/${CB_HASH}.log"),
+		shellQuote(""),
+		shellQuote("[Install]"),
+		shellQuote("WantedBy=default.target"),
+	}
+	return shellJoin(
+		`CB_CWD="${PWD:-.}"`,
+		`CB_DIR="$(basename "$CB_CWD")"`,
+		`CB_HASH="$(printf '%s' "$CB_CWD" | cksum | awk '{print $1}')"`,
+		`CB_NAME="${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}"`,
+		`CB_HOME="$HOME/.codex-bridge"`,
+		`CB_LOG_DIR="$CB_HOME/logs"`,
+		`CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"`,
+		`CB_START="$CB_HOME/services/${CB_HASH}.sh"`,
+		`CB_SERVICE_DIR="$HOME/.config/systemd/user"`,
+		`CB_SERVICE_NAME="codex-bridge-${CB_HASH}.service"`,
+		`mkdir -p "$CB_HOME/machines" "$CB_LOG_DIR" "$CB_HOME/services" "$CB_SERVICE_DIR"`,
+		`printf '%s\n' "$CB_CWD" > "$CB_HOME/services/${CB_HASH}.cwd"`,
+		`printf '%s\n' "$CB_NAME" > "$CB_HOME/services/${CB_HASH}.name"`,
+		`: > "$CB_HOME/services/${CB_HASH}.env"`,
+		`for CB_ENV_NAME in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do eval "CB_ENV_VALUE=\${$CB_ENV_NAME:-}"; if [ -n "$CB_ENV_VALUE" ]; then printf '%s=%s\n' "$CB_ENV_NAME" "$(printf '%s' "$CB_ENV_VALUE" | sed "s/'/'\\\\''/g; 1s/^/'/; \$s/\$/'/")" >> "$CB_HOME/services/${CB_HASH}.env"; fi; done`,
+		fmt.Sprintf(`printf '%%s\n' %s > "$CB_START"`, strings.Join(startScript, " ")),
+		`chmod 700 "$CB_START"`,
+		`: > "$CB_LOG"`,
+		`CB_STARTED=0`,
+		fmt.Sprintf(`if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then printf '%%s\n' %s > "$CB_SERVICE_DIR/$CB_SERVICE_NAME"; if systemctl --user daemon-reload && systemctl --user enable "$CB_SERVICE_NAME" && systemctl --user restart "$CB_SERVICE_NAME"; then sleep 2; if systemctl --user is-active --quiet "$CB_SERVICE_NAME"; then loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true; CB_WAIT=0; while [ "$CB_WAIT" -lt 10 ] && ! grep -q '\[bridge\] connected' "$CB_LOG" 2>/dev/null; do sleep 1; CB_WAIT=$((CB_WAIT + 1)); done; if grep -q '\[bridge\] connected' "$CB_LOG" 2>/dev/null; then echo "codex-bridge connected: $CB_SERVICE_NAME log=$CB_LOG"; else echo "codex-bridge service started but Hub connection is not confirmed. log=$CB_LOG" >&2; tail -n 40 "$CB_LOG" >&2 2>/dev/null || true; fi; CB_STARTED=1; else echo "codex-bridge user service did not stay active; falling back to nohup" >&2; systemctl --user status "$CB_SERVICE_NAME" --no-pager >&2 || true; if command -v journalctl >/dev/null 2>&1; then journalctl --user -u "$CB_SERVICE_NAME" -n 30 --no-pager >&2 || true; fi; systemctl --user stop "$CB_SERVICE_NAME" >/dev/null 2>&1 || true; fi; fi; fi`, strings.Join(serviceFile, " ")),
+		`if [ "$CB_STARTED" != "1" ]; then nohup "$CB_START" > "$CB_LOG" 2>&1 & CB_PID=$!; CB_WAIT=0; while [ "$CB_WAIT" -lt 10 ] && ! grep -q '\[bridge\] connected' "$CB_LOG" 2>/dev/null; do sleep 1; CB_WAIT=$((CB_WAIT + 1)); done; if grep -q '\[bridge\] connected' "$CB_LOG" 2>/dev/null; then echo "codex-bridge connected in background: pid=$CB_PID log=$CB_LOG"; else echo "codex-bridge started in background but Hub connection is not confirmed: pid=$CB_PID log=$CB_LOG" >&2; tail -n 40 "$CB_LOG" >&2 2>/dev/null || true; fi; fi`,
+	)
+}
 
-[Service]
-Type=simple
-ExecStart=%%h/.codex-bridge/services/${CB_HASH}.sh
-Restart=always
-RestartSec=5
-StandardOutput=append:%%h/.codex-bridge/logs/${CB_HASH}.log
-StandardError=append:%%h/.codex-bridge/logs/${CB_HASH}.log
-
-[Install]
-WantedBy=default.target
-EOF
-  if systemctl --user daemon-reload && systemctl --user enable "$CB_SERVICE_NAME" && systemctl --user restart "$CB_SERVICE_NAME"; then
-    loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
-    echo "codex-bridge user service enabled: $CB_SERVICE_NAME log=$CB_LOG"
-    exit 0
-  fi
-fi
-nohup "$CB_START" > "$CB_LOG" 2>&1 &
-CB_PID=$!
-echo "codex-bridge started in background: pid=$CB_PID log=$CB_LOG"`, hubArg, shellQuote(token))
+func bridgePermissionArgs(profile string) string {
+	switch profile {
+	case permissionProfileAutoExecute:
+		return " --runner codex --sandbox danger-full-access --approval-policy never"
+	default:
+		return " --runner codex-app-server --sandbox workspace-write --approval-policy untrusted"
+	}
 }
 
 func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
@@ -574,18 +534,25 @@ set -eu
 
 BIN_DIR="${HOME}/.local/bin"
 BIN="${BIN_DIR}/codex-bridge"
+TMP="${BIN}.tmp.$$"
 DOWNLOAD_URL=%s
 
 mkdir -p "$BIN_DIR"
+cleanup() {
+  rm -f "$TMP"
+}
+trap cleanup EXIT HUP INT TERM
 if command -v curl >/dev/null 2>&1; then
-  curl -fL --retry 3 -o "$BIN" "$DOWNLOAD_URL"
+  curl -fL --retry 3 -o "$TMP" "$DOWNLOAD_URL"
 elif command -v wget >/dev/null 2>&1; then
-  wget -O "$BIN" "$DOWNLOAD_URL"
+  wget -O "$TMP" "$DOWNLOAD_URL"
 else
   echo "curl or wget is required" >&2
   exit 1
 fi
-chmod +x "$BIN"
+chmod +x "$TMP"
+mv -f "$TMP" "$BIN"
+trap - EXIT HUP INT TERM
 echo "installed $BIN"
 `, shellQuote(downloadURL))
 }
@@ -639,6 +606,14 @@ func shellQuote(value string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func shellExpandWord(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
+}
+
+func shellJoin(commands ...string) string {
+	return strings.Join(commands, "; ")
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request, uid string) {

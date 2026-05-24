@@ -207,6 +207,26 @@ func TestCodexExecArgsUseResumeSupportedFlags(t *testing.T) {
 	}
 }
 
+func TestCodexExecResumeArgsKeepConservativePolicy(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.Runner = "codex"
+	cfg.Bridge.CWD = "/tmp/work"
+	cfg.Bridge.Sandbox = "workspace-write"
+	cfg.Bridge.ApprovalPolicy = "untrusted"
+
+	args := NewCodexExecRunner(&cfg).args(RunnerRequest{RemoteThreadID: "thr_123"})
+	for _, want := range []string{"exec", "resume", "--json", "--skip-git-repo-check", "-c", `sandbox_mode="workspace-write"`, "-c", `approval_policy="untrusted"`, "thr_123", "-"} {
+		if !containsArg(args, want) {
+			t.Fatalf("resume args missing %q: %#v", want, args)
+		}
+	}
+	for _, disallowed := range []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox", "--cd"} {
+		if containsArg(args, disallowed) {
+			t.Fatalf("resume args include %s: %#v", disallowed, args)
+		}
+	}
+}
+
 func TestCodexExecArgsUseBypassForNewSession(t *testing.T) {
 	cfg := config.Default()
 	cfg.Bridge.Runner = "codex"

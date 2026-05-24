@@ -64,7 +64,6 @@ type AuthConfig struct {
 	AccessTokenTTL    Duration `yaml:"access_token_ttl"`
 	BootstrapUsername string   `yaml:"bootstrap_username"`
 	BootstrapPassword string   `yaml:"bootstrap_password"`
-	AllowRegistration bool     `yaml:"allow_registration"`
 }
 
 type ObservabilityConfig struct {
@@ -120,7 +119,6 @@ func Default() Config {
 			JWTSecret:         "dev-only-change-me-32-byte-minimum-secret",
 			AccessTokenTTL:    Duration{Duration: 24 * 60 * 60 * 1_000_000_000},
 			BootstrapUsername: "admin",
-			AllowRegistration: true,
 		},
 		Observability: ObservabilityConfig{
 			LogLevel:  "info",

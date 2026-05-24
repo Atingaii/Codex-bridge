@@ -15,23 +15,18 @@ import (
 	"github.com/tencent/codex-bridge/internal/store"
 )
 
-func TestRegisterValidatesCredentialsAndLoginNormalizesUsername(t *testing.T) {
+func TestRegisterDisabledAndExistingUserLoginNormalizesUsername(t *testing.T) {
 	t.Parallel()
 
 	s, st := newAuthTestServer(t)
-	register(t, s, map[string]string{"username": "ab", "password": "abc1234567"}, http.StatusBadRequest)
-	register(t, s, map[string]string{"username": "new user", "password": "abc1234567"}, http.StatusBadRequest)
-	register(t, s, map[string]string{"username": "new-user", "password": "abcdefghij"}, http.StatusBadRequest)
-	register(t, s, map[string]string{"username": "quoted-empty-a", "password": `""`}, http.StatusBadRequest)
-	register(t, s, map[string]string{"username": "quoted-empty-b", "password": `''`}, http.StatusBadRequest)
-	for _, username := range []string{"quoted-empty-a", "quoted-empty-b"} {
-		if _, err := st.UserByUsername(context.Background(), username); !errors.Is(err, store.ErrNotFound) {
-			t.Fatalf("quoted empty password created user %q: %v", username, err)
-		}
+	body := register(t, s, map[string]string{"username": "new-user", "password": "abc1234567"}, http.StatusForbidden)
+	if body["code"] != "REGISTRATION_DISABLED" {
+		t.Fatalf("register error = %#v", body)
 	}
-	register(t, s, map[string]string{"username": " new-user ", "password": "abc1234567"}, http.StatusCreated)
-
-	if _, err := st.UserByUsername(context.Background(), "new-user"); err != nil {
+	if _, err := st.UserByUsername(context.Background(), "new-user"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("disabled registration created user: %v", err)
+	}
+	if _, err := st.UpsertUser(context.Background(), "new-user", "abc1234567"); err != nil {
 		t.Fatal(err)
 	}
 	login(t, s, map[string]string{"username": " new-user ", "password": "abc1234567"}, http.StatusOK)
@@ -63,6 +58,16 @@ func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
 	if !strings.Contains(body, "https://sparkapi.test/downloads/codex-bridge-linux-amd64") {
 		t.Fatalf("install script did not use hub binary download: %s", body)
 	}
+	for _, want := range []string{
+		`TMP="${BIN}.tmp.$$"`,
+		`curl -fL --retry 3 -o "$TMP" "$DOWNLOAD_URL"`,
+		`wget -O "$TMP" "$DOWNLOAD_URL"`,
+		`mv -f "$TMP" "$BIN"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("install script missing %q: %s", want, body)
+		}
+	}
 }
 
 func TestDeleteAgentHidesVisibleAgent(t *testing.T) {
@@ -70,9 +75,11 @@ func TestDeleteAgentHidesVisibleAgent(t *testing.T) {
 
 	s, st := newAuthTestServer(t)
 	ctx := context.Background()
-	userBody := register(t, s, map[string]string{"username": "worker", "password": "abc1234567"}, http.StatusCreated)
-	user := userBody["user"].(map[string]any)
-	agent, err := st.UpsertAgentForUser(ctx, user["id"].(string), "worker-cli", "machine-delete", "host", "inst", nil)
+	user, err := st.UpsertUser(ctx, "worker", "abc1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgentForUser(ctx, user.ID, "worker-cli", "machine-delete", "host", "inst", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

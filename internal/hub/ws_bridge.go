@@ -64,7 +64,7 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 		s.scheduleAgentRunFailure(agent.ID, reg.Instance, 0)
 	}
 
-	conn := NewBridgeConn(agent.ID, ws, s.cfg.Hub.MaxBridgeSendQueue)
+	conn := NewBridgeConn(agent.ID, ws, s.cfg.Hub.MaxBridgeSendQueue, reg.Capabilities)
 	s.pool.RegisterAgent(conn)
 	defer func() {
 		s.pool.UnregisterAgent(agent.ID, conn)
@@ -155,6 +155,13 @@ func (s *Server) handleBridgeEnvelope(ctx context.Context, agentID string, env p
 		s.pool.BroadcastToBrowsers(env.Sid, env)
 	case protocol.TypePromptComplete:
 		s.handlePromptComplete(ctx, env)
+	case protocol.TypeApprovalRequest:
+		payload, err := protocol.Decode[protocol.ApprovalRequestPayload](env)
+		if err == nil && payload.RunID != "" {
+			s.pool.BroadcastToOrchestrationBrowsers(payload.RunID, protocol.MustEnvelope(protocol.TypeApprovalRequest, "", payload))
+			return
+		}
+		s.pool.BroadcastToBrowsers(env.Sid, env)
 	case protocol.TypeOrchestrationEvent:
 		s.handleOrchestrationEvent(ctx, env)
 	case protocol.TypeError:

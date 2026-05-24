@@ -83,6 +83,7 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 	if err != nil {
 		return err
 	}
+	slog.Info("[bridge] connecting", "hub", c.cfg.Bridge.HubURL, "name", c.cfg.Bridge.Name, "machine_id", c.machineID)
 	header := http.Header{}
 	ws, resp, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
 	if err != nil {
@@ -94,12 +95,13 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 	defer ws.Close()
 
 	reg := protocol.RegisterPayload{
-		Name:        c.cfg.Bridge.Name,
-		MachineID:   c.machineID,
-		Hostname:    c.hostname,
-		Version:     c.version,
-		Instance:    c.instance,
-		WorkingDirs: DiscoverWorkingDirs(c.cfg),
+		Name:         c.cfg.Bridge.Name,
+		MachineID:    c.machineID,
+		Hostname:     c.hostname,
+		Version:      c.version,
+		Instance:     c.instance,
+		WorkingDirs:  DiscoverWorkingDirs(c.cfg),
+		Capabilities: BridgeCapabilities(c.cfg),
 	}
 	if err := ws.WriteJSON(protocol.MustEnvelope(protocol.TypeRegister, "", reg)); err != nil {
 		return err
@@ -175,6 +177,60 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 	}
 }
 
+func BridgeCapabilities(cfg *config.Config) *protocol.BridgeCapabilities {
+	runner := strings.ToLower(strings.TrimSpace(cfg.Bridge.Runner))
+	if runner == "" {
+		runner = "echo"
+	}
+	reviewRequired := !bridgeBypassApprovalsAndSandbox(cfg)
+	caps := &protocol.BridgeCapabilities{
+		Runner:         runner,
+		Sandbox:        cfg.Bridge.Sandbox,
+		ApprovalPolicy: cfg.Bridge.ApprovalPolicy,
+		Chat:           map[string]protocol.BridgeCLICapability{},
+		Orchestration:  map[string]protocol.BridgeCLICapability{},
+		Metadata:       map[string]string{"approvalMode": approvalMode(cfg)},
+	}
+	caps.Chat["codex"] = protocol.BridgeCLICapability{
+		Available:       runner == "codex-app-server" || runner == "codex-appserver" || runner == "app-server",
+		Execution:       runner,
+		BrowserApproval: runner == "codex-app-server" || runner == "codex-appserver" || runner == "app-server",
+		ApprovalMode:    approvalMode(cfg),
+	}
+	caps.Orchestration["claude"] = protocol.BridgeCLICapability{
+		Available:       true,
+		Execution:       "claude --print",
+		BrowserApproval: reviewRequired,
+		ApprovalMode:    approvalMode(cfg),
+	}
+	caps.Orchestration["codex"] = protocol.BridgeCLICapability{
+		Available:       true,
+		Execution:       codexOrchestrationExecution(cfg),
+		BrowserApproval: reviewRequired,
+		ApprovalMode:    approvalMode(cfg),
+	}
+	return caps
+}
+
+func codexOrchestrationExecution(cfg *config.Config) string {
+	if bridgeBypassApprovalsAndSandbox(cfg) {
+		return "codex exec --json"
+	}
+	return "codex app-server"
+}
+
+func approvalMode(cfg *config.Config) string {
+	if bridgeBypassApprovalsAndSandbox(cfg) {
+		return "auto-execute"
+	}
+	return "review-required"
+}
+
+func bridgeBypassApprovalsAndSandbox(cfg *config.Config) bool {
+	return strings.EqualFold(cfg.Bridge.ApprovalPolicy, "never") &&
+		strings.EqualFold(cfg.Bridge.Sandbox, "danger-full-access")
+}
+
 func (c *Client) bridgeURL(token string) (string, error) {
 	base, err := url.Parse(c.cfg.Bridge.HubURL)
 	if err != nil {
@@ -215,6 +271,21 @@ func (c *Client) handleEnvelope(ctx context.Context, env protocol.Envelope, out 
 	case protocol.TypeCancel:
 		payload, _ := protocol.Decode[protocol.PromptPayload](env)
 		c.sessions.Cancel(env.Sid, payload.RunID, payload.PromptID)
+	case protocol.TypeApprovalResponse:
+		payload, err := protocol.Decode[protocol.ApprovalResponsePayload](env)
+		if err != nil {
+			send(out, protocol.MustEnvelope(protocol.TypeError, env.Sid, protocol.ErrorPayload{Code: "BAD_APPROVAL_RESPONSE", Message: err.Error()}))
+			return
+		}
+		if env.Sid == "" {
+			if !c.orchestrations.ApprovalResponse(payload) {
+				send(out, protocol.MustEnvelope(protocol.TypeError, "", protocol.ErrorPayload{Code: "APPROVAL_NOT_FOUND", Message: "orchestration approval request not found"}))
+			}
+			return
+		}
+		if !c.sessions.ApprovalResponse(env.Sid, payload) {
+			send(out, protocol.MustEnvelope(protocol.TypeError, env.Sid, protocol.ErrorPayload{Code: "APPROVAL_NOT_FOUND", Message: "approval request not found"}))
+		}
 	case protocol.TypeCloseSession:
 		c.sessions.Close(env.Sid)
 	case protocol.TypeOrchestrationStart:

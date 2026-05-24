@@ -74,6 +74,10 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		serverutil.WriteError(w, status, "BAD_AGENT", err.Error())
 		return
 	}
+	if err := s.validateOrchestrationCapabilities(agentID); err != nil {
+		serverutil.WriteError(w, http.StatusConflict, "ORCHESTRATION_CAPABILITY_UNAVAILABLE", err.Error())
+		return
+	}
 	files := orchestrationFileMeta(normalized.Files)
 	run, err := s.store.CreateOrchestrationRun(r.Context(), store.CreateOrchestrationRunParams{
 		UserID:   uid,
@@ -150,6 +154,10 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 			status = http.StatusBadRequest
 		}
 		serverutil.WriteError(w, status, "BAD_AGENT", err.Error())
+		return
+	}
+	if err := s.validateOrchestrationCapabilities(agentID); err != nil {
+		serverutil.WriteError(w, http.StatusConflict, "ORCHESTRATION_CAPABILITY_UNAVAILABLE", err.Error())
 		return
 	}
 	normalized.AgentID = agentID
@@ -249,6 +257,52 @@ func (s *Server) startOrchestration(ctx context.Context, run store.Orchestration
 	return nil
 }
 
+func (s *Server) validateOrchestrationCapabilities(agentID string) error {
+	if agentID == "" {
+		return errors.New("agent id is required")
+	}
+	caps, ok := s.pool.AgentCapabilities(agentID)
+	if !ok {
+		return errors.New("selected CLI endpoint is offline or did not advertise orchestration approval capabilities")
+	}
+	if strings.EqualFold(caps.ApprovalPolicy, "never") && strings.EqualFold(caps.Sandbox, "danger-full-access") {
+		return nil
+	}
+	if strings.EqualFold(caps.Metadata["approvalMode"], permissionProfileAutoExecute) {
+		return nil
+	}
+	missing := missingOrchestrationBrowserApproval(caps)
+	if len(missing) > 0 {
+		return fmt.Errorf("review-required orchestration needs browser approval for %s; reconnect the endpoint with a review-required bridge that supports app-server orchestration", strings.Join(missing, " and "))
+	}
+	return nil
+}
+
+func missingOrchestrationBrowserApproval(caps *protocol.BridgeCapabilities) []string {
+	if caps == nil {
+		return []string{"Claude", "Codex"}
+	}
+	var missing []string
+	for _, cli := range []string{"claude", "codex"} {
+		capability, ok := caps.Orchestration[cli]
+		if !ok || !capability.Available || !capability.BrowserApproval {
+			missing = append(missing, cliDisplayName(cli))
+		}
+	}
+	return missing
+}
+
+func cliDisplayName(cli string) string {
+	switch strings.ToLower(cli) {
+	case "claude":
+		return "Claude"
+	case "codex":
+		return "Codex"
+	default:
+		return cli
+	}
+}
+
 func (s *Server) handleGetOrchestration(w http.ResponseWriter, r *http.Request, uid string) {
 	run, err := s.store.OrchestrationRunByID(r.Context(), r.PathValue("runID"), uid)
 	if err != nil {
@@ -264,7 +318,8 @@ func (s *Server) handleGetOrchestration(w http.ResponseWriter, r *http.Request, 
 
 func (s *Server) handleOrchestrationEvents(w http.ResponseWriter, r *http.Request, uid string) {
 	runID := r.PathValue("runID")
-	if _, err := s.store.OrchestrationRunByID(r.Context(), runID, uid); err != nil {
+	_, err := s.store.OrchestrationRunByID(r.Context(), runID, uid)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "orchestration run not found")
 			return
@@ -498,10 +553,31 @@ func (s *Server) handleOrchestrationWS(w http.ResponseWriter, r *http.Request, u
 			return
 		}
 		_ = ws.SetReadDeadline(time.Now().Add(s.browserReadTimeout()))
-		if env.Type == protocol.TypeHeartbeat {
+		switch env.Type {
+		case protocol.TypeHeartbeat:
 			_ = conn.Send(protocol.MustEnvelope(protocol.TypeHeartbeat, "", map[string]any{"ts": time.Now().Unix()}))
+		case protocol.TypeApprovalResponse:
+			payload, err := protocol.Decode[protocol.ApprovalResponsePayload](env)
+			decision := strings.ToLower(strings.TrimSpace(payload.Decision))
+			if err != nil || payload.RequestID == "" || !validApprovalDecision(decision) {
+				_ = conn.Send(protocol.MustEnvelope(protocol.TypeError, "", protocol.ErrorPayload{Code: "BAD_APPROVAL_RESPONSE", Message: "invalid approval response"}))
+				continue
+			}
+			payload.Decision = decision
+			latest, err := s.store.OrchestrationRunByID(r.Context(), runID, uid)
+			if err != nil {
+				_ = conn.Send(protocol.MustEnvelope(protocol.TypeError, "", protocol.ErrorPayload{Code: "RUN_NOT_FOUND", Message: "orchestration run not found"}))
+				continue
+			}
+			if err := s.pool.SendToAgent(latest.AgentID, protocol.MustEnvelope(protocol.TypeApprovalResponse, "", payload)); err != nil {
+				_ = conn.Send(protocol.MustEnvelope(protocol.TypeError, "", protocol.ErrorPayload{Code: "AGENT_OFFLINE", Message: err.Error()}))
+			}
 		}
 	}
+}
+
+func validApprovalDecision(decision string) bool {
+	return decision == "accept" || decision == "decline" || decision == "cancel"
 }
 
 func (s *Server) handleOrchestrationEvent(ctx context.Context, env protocol.Envelope) {

@@ -203,12 +203,23 @@ func (s *wsSender) Close() {
 }
 
 type BridgeConn struct {
-	agentID string
+	agentID      string
+	capabilities *protocol.BridgeCapabilities
 	wsSender
 }
 
-func NewBridgeConn(agentID string, ws *websocket.Conn, queue int) *BridgeConn {
-	return &BridgeConn{agentID: agentID, wsSender: newWSSender(ws, queue)}
+func NewBridgeConn(agentID string, ws *websocket.Conn, queue int, capabilities *protocol.BridgeCapabilities) *BridgeConn {
+	return &BridgeConn{agentID: agentID, capabilities: capabilities, wsSender: newWSSender(ws, queue)}
+}
+
+func (p *Pool) AgentCapabilities(agentID string) (*protocol.BridgeCapabilities, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	conn := p.agents[agentID]
+	if conn == nil || conn.capabilities == nil {
+		return nil, false
+	}
+	return conn.capabilities, true
 }
 
 type BrowserConn struct {

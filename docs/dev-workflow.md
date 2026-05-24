@@ -52,13 +52,36 @@ cp configs/dev.yaml.example configs/dev.yaml
 
 Open `http://127.0.0.1:8088`.
 
+Browser self-registration is disabled. Use
+`/usr/local/go/bin/go run . user --username <name> --password <password>` to
+create or update local test accounts.
+
 ## CLI Install Flow
 
-`POST /api/bridge-tokens` returns two commands for the settings UI: an install
-command and a connect command. The connect command prefers a restartable
-`systemd --user` service, falls back to `nohup` when user systemd is not
-available, writes logs under `~/.codex-bridge/logs/`, and keeps a
-per-working-directory machine id under `~/.codex-bridge/machines/`.
+`POST /api/bridge-tokens` returns `setupCommand` for the settings UI. It is a
+single copyable shell line that runs `/install.sh` and then starts the Bridge.
+The retained `installCommand` and `connectCommand` fields are manual fallback
+parts. The connect command prefers a restartable `systemd --user` service,
+falls back to `nohup` when user systemd is not available, writes logs under
+`~/.codex-bridge/logs/`, and keeps a per-working-directory machine id under
+`~/.codex-bridge/machines/`. The setup command clears the per-directory log
+before starting and only prints `codex-bridge connected` after the Bridge logs
+`[bridge] connected`; otherwise it prints recent log lines for diagnosis. It
+also preserves common proxy environment variables in
+`~/.codex-bridge/services/<cwd-hash>.env` so background services keep the same
+Hub connectivity as the shell that ran the setup command.
+
+The settings UI exposes two permission profiles:
+
+- `review-required`: starts Bridge with `--runner codex-app-server --sandbox
+  workspace-write --approval-policy untrusted`. Codex chat and Codex
+  orchestration approval requests are shown in the browser and answered through
+  run-scoped approval frames. Claude Code orchestration uses a temporary MCP
+  permission tool so browser approval cards appear on the orchestration
+  timeline.
+- `auto-execute`: starts Bridge with `--runner codex --sandbox
+  danger-full-access --approval-policy never`, preserving the previous
+  browser-first trusted-machine behavior.
 
 For deterministic tests use `bridge.runner=echo`. For real Codex:
 

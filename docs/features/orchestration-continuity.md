@@ -12,7 +12,9 @@ context in the same `runID`.
 - Do not merge orchestration runs with chat sessions.
 - Do not introduce Redis, a queue, or a second database.
 - Do not change `internal/protocol.Envelope` unless a future runner requires it.
-- Do not add permission prompts; those belong to the deferred app-server runner.
+- Do not redefine permission prompts; review-required approval behavior is
+  covered by
+  `docs/features/orchestration-deep-collaboration-and-approval.md`.
 
 ## Current State
 
@@ -37,6 +39,9 @@ context in the same `runID`.
 - The frontend must render persisted `turn.delta` and `command.*` events as
   visible timeline entries. Detailed content that reaches `/events` must not be
   hidden behind only `turn.start` status cards.
+- Turn-to-turn strategy now uses compact handoffs documented in
+  [orchestration-strategy-optimization.md](orchestration-strategy-optimization.md);
+  this preserves continuity without replaying full prior turn transcripts.
 
 ## Design
 

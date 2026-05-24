@@ -14,6 +14,8 @@ const (
 	TypePrompt              = "prompt"
 	TypeSessionUpdate       = "session_update"
 	TypePromptComplete      = "prompt_complete"
+	TypeApprovalRequest     = "approval_request"
+	TypeApprovalResponse    = "approval_response"
 	TypeCancel              = "cancel"
 	TypeCloseSession        = "close_session"
 	TypeOrchestrationStart  = "orchestration_start"
@@ -61,16 +63,33 @@ func Decode[T any](env Envelope) (T, error) {
 }
 
 type RegisterPayload struct {
-	Name        string   `json:"name"`
-	MachineID   string   `json:"machineId"`
-	Hostname    string   `json:"hostname"`
-	Version     string   `json:"version"`
-	Instance    string   `json:"instance,omitempty"`
-	WorkingDirs []string `json:"workingDirs,omitempty"`
+	Name         string              `json:"name"`
+	MachineID    string              `json:"machineId"`
+	Hostname     string              `json:"hostname"`
+	Version      string              `json:"version"`
+	Instance     string              `json:"instance,omitempty"`
+	WorkingDirs  []string            `json:"workingDirs,omitempty"`
+	Capabilities *BridgeCapabilities `json:"capabilities,omitempty"`
 }
 
 type RegisteredPayload struct {
 	AgentID string `json:"agentId"`
+}
+
+type BridgeCapabilities struct {
+	Runner         string                         `json:"runner,omitempty"`
+	Sandbox        string                         `json:"sandbox,omitempty"`
+	ApprovalPolicy string                         `json:"approvalPolicy,omitempty"`
+	Chat           map[string]BridgeCLICapability `json:"chat,omitempty"`
+	Orchestration  map[string]BridgeCLICapability `json:"orchestration,omitempty"`
+	Metadata       map[string]string              `json:"metadata,omitempty"`
+}
+
+type BridgeCLICapability struct {
+	Available       bool   `json:"available"`
+	Execution       string `json:"execution,omitempty"`
+	BrowserApproval bool   `json:"browserApproval"`
+	ApprovalMode    string `json:"approvalMode,omitempty"`
 }
 
 type OpenSessionPayload struct {
@@ -120,6 +139,25 @@ type ErrorPayload struct {
 	Code     string `json:"code,omitempty"`
 	RunID    string `json:"runId,omitempty"`
 	PromptID string `json:"promptId,omitempty"`
+}
+
+type ApprovalRequestPayload struct {
+	RequestID string          `json:"requestId"`
+	Kind      string          `json:"kind"`
+	Command   string          `json:"command,omitempty"`
+	CWD       string          `json:"cwd,omitempty"`
+	Reason    string          `json:"reason,omitempty"`
+	ThreadID  string          `json:"threadId,omitempty"`
+	TurnID    string          `json:"turnId,omitempty"`
+	ItemID    string          `json:"itemId,omitempty"`
+	RunID     string          `json:"runId,omitempty"`
+	PromptID  string          `json:"promptId,omitempty"`
+	Params    json.RawMessage `json:"params,omitempty"`
+}
+
+type ApprovalResponsePayload struct {
+	RequestID string `json:"requestId"`
+	Decision  string `json:"decision"`
 }
 
 type OrchestrationStartPayload struct {

@@ -48,6 +48,24 @@ codex-bridge user --username admin --password '...'
 codex-bridge enroll --ttl 24h
 ```
 
+Browser self-registration is disabled. Create or update approved users with
+`codex-bridge user --username <name> --password <password>`.
+
+After login, create a CLI token in Settings and copy the single install-and-connect
+command. The command writes logs under `~/.codex-bridge/logs/` and only prints
+`codex-bridge connected` after the Bridge logs `[bridge] connected`; otherwise
+it prints recent log lines for diagnosis. It preserves common proxy variables
+for the background service so WSL/Linux shells that need a proxy keep working
+after `systemd --user` starts the Bridge.
+
+The Settings flow offers two permission profiles. Review required uses the
+Codex app-server runner so Codex command/file approval requests appear in the
+browser for chat and orchestration. Auto execute keeps the previous
+trusted-machine mode with `danger-full-access` and no prompts. Claude Code
+orchestration also uses browser-side approval in review-required mode through
+Claude Code's permission prompt MCP hook. The orchestration page shows each
+connected endpoint's Codex/Claude approval capabilities before a run starts.
+
 ## Android APK
 
 The Android wrapper uses Capacitor and points at `https://sparkapi.tech`.
@@ -112,7 +130,10 @@ Then install the systemd units from `deploy/` and reload Caddy. With Cloudflare 
 
 ## Notes
 
-`codex exec --json` is the first practical Codex runner because it is already available in the installed CLI and keeps the bridge simple. The runner boundary is intentionally small so a later `codex app-server` JSON-RPC adapter can replace it without changing Hub, storage, or the browser protocol.
+`codex exec --json` remains the automated trusted-machine runner. The
+review-required profile uses the `codex app-server` JSON-RPC runner so approval
+requests can round-trip through Hub and the browser for both chat and Codex
+orchestration.
 
 ## Project Workflow
 

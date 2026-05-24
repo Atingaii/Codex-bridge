@@ -459,6 +459,7 @@ func (m *OrchestrationManager) runCodexAppServer(ctx context.Context, payload pr
 	runner := NewCodexAppServerRunner(m.cfg)
 	defer runner.Close()
 	var tools []RunnerToolEvent
+	toolStarts := make(map[string]time.Time)
 	result, err := runner.Prompt(ctx, RunnerRequest{
 		Content:  prompt,
 		RunID:    payload.RunID,
@@ -480,6 +481,7 @@ func (m *OrchestrationManager) runCodexAppServer(ctx context.Context, payload pr
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: update.Content})
 		}
 		if update.Tool != nil {
+			stampToolTiming(update.Tool, toolStarts)
 			tools = append(tools, *update.Tool)
 			m.emitTool(payload.RunID, turnID, role, "codex", update.Tool)
 		}
@@ -839,6 +841,15 @@ func (m *OrchestrationManager) scanCodexJSONL(stdout io.Reader, runID, turnID, r
 	var content strings.Builder
 	var eventErr string
 	var tools []RunnerToolEvent
+	toolStarts := make(map[string]time.Time)
+	emitCodexTool := func(tool *RunnerToolEvent) {
+		if tool == nil {
+			return
+		}
+		stampToolTiming(tool, toolStarts)
+		tools = append(tools, *tool)
+		m.emitTool(runID, turnID, role, "codex", tool)
+	}
 	for {
 		line, err := readJSONLLine(reader, 32*1024*1024)
 		if err != nil {
@@ -878,19 +889,13 @@ func (m *OrchestrationManager) scanCodexJSONL(stdout io.Reader, runID, turnID, r
 				}
 			}
 			if itemType == "command_execution" || itemType == "commandExecution" {
-				if tool := commandExecutionEvent(item); tool != nil {
-					tools = append(tools, *tool)
-					m.emitTool(runID, turnID, role, "codex", tool)
-				}
+				emitCodexTool(commandExecutionEvent(item))
 			}
 		case "item.started", "item.updated":
 			item, _ := msg["item"].(map[string]any)
 			itemType, _ := item["type"].(string)
 			if itemType == "command_execution" || itemType == "commandExecution" {
-				if tool := commandExecutionEvent(item); tool != nil {
-					tools = append(tools, *tool)
-					m.emitTool(runID, turnID, role, "codex", tool)
-				}
+				emitCodexTool(commandExecutionEvent(item))
 			}
 		}
 	}
@@ -905,6 +910,7 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 	var content strings.Builder
 	var tools []RunnerToolEvent
 	toolCommands := make(map[string]string)
+	toolStarts := make(map[string]time.Time)
 	deferredReadStarts := make(map[string]*RunnerToolEvent)
 	emitClaudeTool := func(tool *RunnerToolEvent) {
 		if tool == nil {
@@ -925,6 +931,7 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 			delete(deferredReadStarts, tool.ID)
 			return
 		}
+		stampToolTiming(tool, toolStarts)
 		if tool.ID != "" {
 			if start := deferredReadStarts[tool.ID]; start != nil {
 				tools = append(tools, *start)
@@ -1000,9 +1007,46 @@ func isClaudeEmptyPagesReadFailure(tool *RunnerToolEvent) bool {
 	return strings.Contains(output, `Invalid pages parameter: ""`) && strings.Contains(output, "Pages are 1-indexed")
 }
 
+func stampToolTiming(tool *RunnerToolEvent, starts map[string]time.Time) {
+	if tool == nil {
+		return
+	}
+	now := time.Now()
+	if isRunningToolStatus(tool.Status) {
+		if tool.StartedAt.IsZero() {
+			tool.StartedAt = now
+		}
+		if tool.ID != "" && starts[tool.ID].IsZero() {
+			starts[tool.ID] = tool.StartedAt
+		}
+		return
+	}
+	if tool.ID != "" {
+		if start := starts[tool.ID]; !start.IsZero() {
+			tool.StartedAt = start
+			delete(starts, tool.ID)
+		}
+	}
+	if tool.StartedAt.IsZero() {
+		tool.StartedAt = now
+	}
+	if tool.CompletedAt.IsZero() {
+		tool.CompletedAt = now
+	}
+}
+
+func isRunningToolStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "in_progress", "running", "started":
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *OrchestrationManager) emitTool(runID, turnID, role, cli string, tool *RunnerToolEvent) {
 	kind := "command.end"
-	if strings.EqualFold(tool.Status, "in_progress") || strings.EqualFold(tool.Status, "running") || strings.EqualFold(tool.Status, "started") {
+	if isRunningToolStatus(tool.Status) {
 		kind = "command.start"
 	}
 	data := map[string]any{
@@ -1013,6 +1057,15 @@ func (m *OrchestrationManager) emitTool(runID, turnID, role, cli string, tool *R
 	}
 	if tool.ExitCode != nil {
 		data["exitCode"] = *tool.ExitCode
+	}
+	if !tool.StartedAt.IsZero() {
+		data["startedAt"] = tool.StartedAt.Unix()
+	}
+	if !tool.CompletedAt.IsZero() {
+		data["completedAt"] = tool.CompletedAt.Unix()
+		if !tool.StartedAt.IsZero() {
+			data["durationMs"] = tool.CompletedAt.Sub(tool.StartedAt).Milliseconds()
+		}
 	}
 	m.emit(runID, protocol.OrchestrationEventPayload{
 		Kind:   kind,

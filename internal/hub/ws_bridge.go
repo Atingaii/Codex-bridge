@@ -134,6 +134,27 @@ func (s *Server) scheduleAgentRunFailure(agentID, instance string, delay time.Du
 		} else if n > 0 {
 			slog.Warn("[hub] marked active runs failed", "agent_id", agentID, "instance", instance, "count", n, "reason", reason)
 		}
+		runs, err := s.store.MarkActiveOrchestrationRunsForAgentFailed(ctx, agentID, reason)
+		if err != nil {
+			slog.Error("[hub] mark active orchestration runs failed", "agent_id", agentID, "error", err)
+			return
+		}
+		for _, run := range runs {
+			events, err := s.store.ListOrchestrationEvents(ctx, run.ID, 2000)
+			if err != nil {
+				slog.Error("[hub] list failed orchestration events failed", "run_id", run.ID, "error", err)
+				continue
+			}
+			for i := len(events) - 1; i >= 0; i-- {
+				if events[i].Kind == "run.error" {
+					s.pool.BroadcastToOrchestrationBrowsers(run.ID, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", eventToPayload(events[i])))
+					break
+				}
+			}
+		}
+		if len(runs) > 0 {
+			slog.Warn("[hub] marked active orchestration runs failed", "agent_id", agentID, "instance", instance, "count", len(runs), "reason", reason)
+		}
 	}()
 }
 

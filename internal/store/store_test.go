@@ -149,6 +149,41 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 	if offline.Status != RunFailed || offline.Error != "offline" {
 		t.Fatalf("offline-marked run = %#v", offline)
 	}
+	orchestration, err := st.CreateOrchestrationRun(ctx, CreateOrchestrationRunParams{
+		UserID:   user.ID,
+		AgentID:  agent.ID,
+		Title:    "active orchestration",
+		Mode:     "collaboration",
+		Prompt:   "prove it",
+		MaxTurns: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateOrchestrationRunStatus(ctx, orchestration.ID, OrchestrationRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+	markedOrchestrations, err := st.MarkActiveOrchestrationRunsForAgentFailed(ctx, agent.ID, "offline orchestration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(markedOrchestrations) != 1 || markedOrchestrations[0].ID != orchestration.ID {
+		t.Fatalf("marked orchestrations = %#v, want %s", markedOrchestrations, orchestration.ID)
+	}
+	failedOrchestration, err := st.OrchestrationRunByID(ctx, orchestration.ID, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failedOrchestration.Status != OrchestrationFailed || failedOrchestration.Error != "offline orchestration" || failedOrchestration.FinishedAt == 0 {
+		t.Fatalf("offline-marked orchestration = %#v", failedOrchestration)
+	}
+	orchestrationEvents, err := st.ListOrchestrationEvents(ctx, orchestration.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orchestrationEvents) != 1 || orchestrationEvents[0].Kind != "run.error" || orchestrationEvents[0].Error != "offline orchestration" {
+		t.Fatalf("offline orchestration events = %#v", orchestrationEvents)
+	}
 	if err := st.DeleteAgent(ctx, agent.ID); err != nil {
 		t.Fatal(err)
 	}

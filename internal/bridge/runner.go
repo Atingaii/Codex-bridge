@@ -10,6 +10,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
@@ -44,11 +45,13 @@ type RunnerUpdate struct {
 }
 
 type RunnerToolEvent struct {
-	ID       string
-	Status   string
-	Command  string
-	Output   string
-	ExitCode *int
+	ID          string
+	Status      string
+	Command     string
+	Output      string
+	ExitCode    *int
+	StartedAt   time.Time
+	CompletedAt time.Time
 }
 
 type ApprovalRequester interface {

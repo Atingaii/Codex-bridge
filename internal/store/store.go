@@ -219,6 +219,86 @@ func (s *Store) MarkActiveRunsForAgentFailed(ctx context.Context, agentID, reaso
 	return res.RowsAffected()
 }
 
+func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, agentID, reason string) ([]OrchestrationRun, error) {
+	if agentID == "" {
+		return nil, errors.New("agent id is required")
+	}
+	if reason == "" {
+		reason = "bridge disconnected while orchestration run was active"
+	}
+	now := time.Now().Unix()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, user_id, agent_id, title, mode, prompt, COALESCE(cwd,''), max_turns, status,
+			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+		FROM orchestration_runs
+		WHERE agent_id = ? AND status IN (?, ?)
+		ORDER BY updated_at ASC, created_at ASC
+	`, agentID, OrchestrationQueued, OrchestrationRunning)
+	if err != nil {
+		return nil, err
+	}
+	var runs []OrchestrationRun
+	for rows.Next() {
+		run, err := scanOrchestrationRun(rows)
+		if err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range runs {
+		runs[i].Status = OrchestrationFailed
+		runs[i].Error = reason
+		runs[i].UpdatedAt = now
+		runs[i].FinishedAt = now
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE orchestration_runs
+			SET status = ?, error = ?, finished_at = ?, updated_at = ?
+			WHERE id = ? AND status IN (?, ?)
+		`, OrchestrationFailed, reason, now, now, runs[i].ID, OrchestrationQueued, OrchestrationRunning); err != nil {
+			return nil, err
+		}
+		event := OrchestrationEvent{
+			ID:        NewID("evt"),
+			RunID:     runs[i].ID,
+			Kind:      "run.error",
+			Content:   reason,
+			Status:    OrchestrationFailed,
+			Error:     reason,
+			CreatedAt: now,
+		}
+		row := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) + 1 FROM orchestration_events WHERE run_id = ?`, event.RunID)
+		if err := row.Scan(&event.Seq); err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO orchestration_events
+				(id, run_id, seq, kind, role, cli, turn_id, content, status, error, data_json, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, event.ID, event.RunID, event.Seq, event.Kind, nullString(event.Role), nullString(event.CLI),
+			nullString(event.TurnID), nullString(event.Content), nullString(event.Status), nullString(event.Error),
+			nullString(""), now); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
 type User struct {
 	ID        string `json:"id"`
 	Username  string `json:"username"`

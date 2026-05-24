@@ -37,6 +37,12 @@ context in the same `runID`.
   process note and command events, the Bridge appends a concise, human-readable
   fallback summary from prior conclusions and successful verification commands
   instead of raw command-log prose.
+- Command events include timing metadata so long-running checks such as
+  Isabelle, Coq, and Lean builds show when the command started and how long it
+  has been running or took to finish.
+- If a Bridge disconnects or restarts while an orchestration run is active, Hub
+  marks that run failed and appends a `run.error` event instead of leaving the
+  browser stuck in `running`.
 - The frontend must render persisted `turn.delta` and `command.*` events as
   visible timeline entries. Detailed content that reaches `/events` must not be
   hidden behind only `turn.start` status cards.
@@ -73,8 +79,9 @@ without repeating full timestamps inside the run list.
 Assistant deltas are merged by `runId`, `turnId`, role, and CLI before timeline
 rendering. This keeps token-level app-server deltas from becoming one card per
 word while still preserving the final streamed text. Command events are rendered
-in the timeline with expandable command details so users can confirm which
-command/output payload arrived from Hub.
+in the timeline with expandable command details and runtime labels so users can
+confirm which command/output payload arrived from Hub and whether a long proof
+build is still running.
 When the user scrolls away from the latest orchestration event, the timeline
 shows a floating jump-to-bottom control; if the user is already at the bottom,
 new events continue to follow automatically.
@@ -104,6 +111,10 @@ after the draft upload list is cleared.
     button when the user has scrolled up.
 11. Persist uploaded file metadata on `user.message` orchestration events and
     render that metadata in the timeline and selected-run side panel.
+12. Include command timing metadata in Bridge-emitted command events and show
+    active runtime or completed duration in the frontend timeline.
+13. Mark active orchestration runs failed with a visible `run.error` event when
+    their Bridge connection disconnects or restarts.
 
 ## Exit Gates
 
@@ -122,10 +133,14 @@ after the draft upload list is cleared.
   dates.
 - Persisted assistant deltas and command outputs returned from `/events` are
   visible in the timeline, with token-sized deltas merged into one turn entry.
+- Running command cards show elapsed time, and completed command cards show
+  total duration.
 - Scrolling up in the orchestration timeline exposes a jump-to-bottom button,
   and clicking it returns to the latest event.
 - Uploaded files appear beside the user message that submitted them, and prior
   selected-run files remain visible in the side panel after send.
+- Active orchestration runs do not remain permanently `running` after their
+  Bridge disconnects or restarts.
 
 ## Reviewer Q&A
 

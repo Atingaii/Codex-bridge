@@ -150,9 +150,17 @@ func TestOrchestrationScanClaudeJSONLEmitsToolEvents(t *testing.T) {
 	for _, event := range events {
 		if event.Kind == "command.start" && event.Status == "in_progress" && event.CLI == "claude" && event.Data["command"] == "mkdir -p isabelle_bridge_demo" {
 			sawStart = true
+			if _, ok := event.Data["startedAt"].(float64); !ok {
+				t.Fatalf("command.start missing startedAt: %#v", event.Data)
+			}
 		}
 		if event.Kind == "command.end" && event.Status == "completed" && event.CLI == "claude" && event.Data["output"] == "created\n" {
 			sawEnd = true
+			for _, key := range []string{"startedAt", "completedAt", "durationMs"} {
+				if _, ok := event.Data[key].(float64); !ok {
+					t.Fatalf("command.end missing %s: %#v", key, event.Data)
+				}
+			}
 		}
 	}
 	if !sawStart || !sawEnd {

@@ -269,6 +269,8 @@ const uiText = {
     commandEvent: 'command event',
     commandDetails: 'Command details',
     commands: 'Commands',
+    runningFor: 'Running',
+    duration: 'Duration',
     noVisibleAnswer: 'No user-visible answer was returned for this turn.',
     agent: 'agent',
     reviewCurrentRepository: 'Review the current repository, implement the requested change, and verify with tests.',
@@ -424,6 +426,8 @@ const uiText = {
     commandEvent: '命令事件',
     commandDetails: '命令详情',
     commands: '命令',
+    runningFor: '已运行',
+    duration: '耗时',
     noVisibleAnswer: '这一轮没有返回面向用户的可读回答。',
     agent: 'agent',
     reviewCurrentRepository: '审查当前仓库，完成请求的改动，并用测试验证。',
@@ -599,6 +603,17 @@ function formatTime(timestamp?: number) {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+function formatDuration(ms?: number) {
+  if (!Number.isFinite(ms || NaN) || !ms || ms < 0) return '';
+  const totalSeconds = Math.max(1, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
 function sessionDateLabel(timestamp: number, t: UIText = uiText.en) {
   const date = new Date(timestamp * 1000);
   const now = new Date();
@@ -762,10 +777,24 @@ function mergeOrchestrationToolEvents(events: OrchestrationEvent[]): Orchestrati
       return;
     }
     const previous = merged[index];
+    const mergedData = mergeOrchestrationToolData(previous.data, event.data);
+    if (typeof mergedData.startedAt !== 'number' && previous.createdAt) {
+      mergedData.startedAt = previous.createdAt;
+    }
+    if (typeof mergedData.completedAt !== 'number' && event.createdAt && event.kind === 'command.end') {
+      mergedData.completedAt = event.createdAt;
+    }
+    if (
+      typeof mergedData.durationMs !== 'number' &&
+      typeof mergedData.startedAt === 'number' &&
+      typeof mergedData.completedAt === 'number'
+    ) {
+      mergedData.durationMs = Math.max(0, (mergedData.completedAt - mergedData.startedAt) * 1000);
+    }
     merged[index] = {
       ...previous,
       ...event,
-      data: mergeOrchestrationToolData(previous.data, event.data),
+      data: mergedData,
       content: event.content || previous.content,
       error: event.error || previous.error,
       createdAt: event.createdAt || previous.createdAt,
@@ -782,6 +811,11 @@ function mergeOrchestrationToolData(previous?: Record<string, any>, next?: Recor
   };
   for (const field of ['command', 'input', 'name']) {
     if (typeof data[field] === 'string' && !data[field].trim() && typeof previous?.[field] === 'string' && previous[field].trim()) {
+      data[field] = previous[field];
+    }
+  }
+  for (const field of ['startedAt', 'completedAt', 'durationMs']) {
+    if (typeof data[field] !== 'number' && typeof previous?.[field] === 'number') {
       data[field] = previous[field];
     }
   }
@@ -3365,19 +3399,40 @@ function OpenAIMark() {
 }
 
 function CommandEvent({ event, t, open = false }: { event: OrchestrationEvent, t: UIText, open?: boolean }) {
+  const [, setClockTick] = useState(0);
   const data = event.data || {};
   const command = typeof data.command === 'string' ? data.command : '';
   const output = typeof data.output === 'string' ? data.output : '';
   const status = typeof data.status === 'string' ? data.status : event.status || '';
   const exitCode = typeof data.exitCode === 'number' ? data.exitCode : undefined;
   const isActive = event.kind === 'command.start' || status === 'running' || status === 'in_progress';
+  const startedAt = typeof data.startedAt === 'number' ? data.startedAt : event.createdAt;
+  const completedAt = typeof data.completedAt === 'number' ? data.completedAt : undefined;
+  const durationMs = typeof data.durationMs === 'number'
+    ? data.durationMs
+    : startedAt && completedAt
+      ? Math.max(0, (completedAt - startedAt) * 1000)
+      : isActive && startedAt
+        ? Math.max(0, Date.now() - startedAt * 1000)
+        : undefined;
+  const durationLabel = formatDuration(durationMs);
+  useEffect(() => {
+    if (!isActive || !startedAt) return undefined;
+    const timer = window.setInterval(() => setClockTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [isActive, startedAt]);
 
   return (
     <details className="rounded-md border border-border bg-background/70 overflow-hidden" open={open || Boolean(output || event.error)}>
       <summary className="flex cursor-pointer items-center gap-2 border-b border-border bg-muted/30 px-3 py-2 text-[11px] marker:content-none">
         {isActive ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" /> : <Terminal className="h-3.5 w-3.5 text-muted-foreground" />}
         <code className="min-w-0 flex-1 truncate text-foreground">{command || t.commandEvent}</code>
-        {event.createdAt && <span className="shrink-0 text-[10px] text-muted-foreground">{formatTime(event.createdAt)}</span>}
+        {startedAt && <span className="shrink-0 text-[10px] text-muted-foreground">{formatTime(startedAt)}</span>}
+        {durationLabel && (
+          <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            {isActive ? t.runningFor : t.duration} {durationLabel}
+          </span>
+        )}
         {status && <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
         {typeof exitCode === 'number' && <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">exit {exitCode}</span>}
         <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />

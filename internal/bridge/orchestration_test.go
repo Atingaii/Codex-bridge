@@ -324,6 +324,7 @@ func TestPrepareOrchestrationPromptFilesWarnsAgainstEmptyPDFPages(t *testing.T) 
 	}
 	for _, want := range []string{
 		"inspect them with shell commands",
+		"do not use Claude's Read tool",
 		"Do not send an empty pages field to any file-reading tool",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -409,7 +410,7 @@ func TestResolvedHandoffRequiresVisibleConclusion(t *testing.T) {
 
 func TestComposeOrchestrationPromptFinalTurnRequiresUserVisibleAnswer(t *testing.T) {
 	prompt := composeOrchestrationPrompt("collaboration", "finish it", "", false, "reviewer", "codex", 4, 4, nil)
-	for _, want := range []string{"final scheduled turn", "user-visible final answer", "what was verified"} {
+	for _, want := range []string{"final scheduled turn", "user-visible final answer", "what was verified", "write all user-visible prose in Chinese"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("final prompt missing %q:\n%s", want, prompt)
 		}
@@ -437,10 +438,70 @@ func TestFinalTurnFallbackSummaryForProcessOnlyFinalOutput(t *testing.T) {
 			},
 		},
 	)
-	for _, want := range []string{"最终结论", "已验证", "isabelle build -D .", "0:00:05 elapsed time"} {
+	for _, want := range []string{"最终结论", "已验证", "执行完成：`isabelle build -D .`"} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("summary missing %q:\n%s", want, summary)
 		}
+	}
+	for _, bad := range []string{"output:", "0:00:05 elapsed time"} {
+		if strings.Contains(summary, bad) {
+			t.Fatalf("summary should not expose raw command detail %q:\n%s", bad, summary)
+		}
+	}
+}
+
+func TestFinalTurnFallbackSummarySummarizesReadCommandsForHumans(t *testing.T) {
+	summary := finalTurnFallbackSummary(
+		"请检查这些上传文件",
+		1,
+		1,
+		nil,
+		orchestrationTurn{
+			Role:    "implementer",
+			CLI:     "claude",
+			Content: "我会只读取上传文件前三行。",
+			Tools: []RunnerToolEvent{
+				{ID: "read_1", Status: "in_progress", Command: "Read /tmp/orc/01-Model.thy"},
+				{ID: "read_1", Status: "completed", Command: "Read /tmp/orc/01-Model.thy", Output: "0\ttheory Model\n1\timports Main\n2\tbegin"},
+				{ID: "read_2", Status: "in_progress", Command: "Read /tmp/orc/02-Termination.thy"},
+				{ID: "read_2", Status: "completed", Command: "Read /tmp/orc/02-Termination.thy", Output: "0\ttheory Termination\n1\timports Model\n2\tbegin"},
+				{ID: "read_3", Status: "completed", Command: "Read /tmp/orc/03-ROOT", Output: "0\tsession \"BridgeSmoke\" = HOL +"},
+			},
+		},
+	)
+	for _, want := range []string{"最终结论", "读取并检查了 3 个文件", "`01-Model.thy`", "`02-Termination.thy`", "`03-ROOT`"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+	for _, bad := range []string{"Read /tmp/orc", "completed; output", "0\ttheory"} {
+		if strings.Contains(summary, bad) {
+			t.Fatalf("summary should be human-readable and omit %q:\n%s", bad, summary)
+		}
+	}
+}
+
+func TestFinalTurnFallbackSummaryAllowsExplicitEnglish(t *testing.T) {
+	summary := finalTurnFallbackSummary(
+		"Please inspect the uploaded files and reply in English.",
+		1,
+		1,
+		nil,
+		orchestrationTurn{
+			Content: "I will inspect the files.",
+			Tools: []RunnerToolEvent{
+				{ID: "read_1", Status: "completed", Command: "Read /tmp/orc/01-Model.thy", Output: "0\ttheory Model"},
+				{ID: "read_2", Status: "completed", Command: "Read /tmp/orc/02-ROOT", Output: "0\tsession"},
+			},
+		},
+	)
+	for _, want := range []string{"Final conclusion", "Read and checked 2 file(s): `01-Model.thy`, `02-ROOT`"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+	if strings.Contains(summary, "最终结论") {
+		t.Fatalf("summary should honor explicit English request:\n%s", summary)
 	}
 }
 

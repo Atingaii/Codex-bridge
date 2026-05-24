@@ -1150,54 +1150,76 @@ func finalTurnFallbackSummary(userPrompt string, turn, maxTurns int, history []o
 	if turn != maxTurns || !finalResponseNeedsFallback(current.Content) {
 		return ""
 	}
-	zh := containsCJK(userPrompt + current.Content)
+	zh := !explicitEnglishResponseRequested(userPrompt)
 	prior := latestMeaningfulConclusion(history)
-	commands := completedCommandSummaries([]orchestrationTurn{current}, 3)
-	if len(commands) == 0 {
-		commands = completedCommandSummaries(history, 3)
+	verified := completedVerificationSummaries([]orchestrationTurn{current}, zh, 3)
+	if len(verified) == 0 {
+		verified = completedVerificationSummaries(history, zh, 3)
 	}
 	failed := failedCommandCount(append(history, current))
 
 	var b strings.Builder
 	if zh {
-		b.WriteString("最终结论：本次编排已完成。最后一轮没有给出清晰总结，因此这里根据前序结论和成功验证命令生成摘要。")
+		b.WriteString("最终结论：本次编排已完成。")
 		if prior != "" {
-			b.WriteString("\n\n依据：")
+			b.WriteString("\n\n结果概览：")
 			b.WriteString(prior)
 		}
-		if len(commands) > 0 {
+		if len(verified) > 0 {
 			b.WriteString("\n\n已验证：")
-			for _, command := range commands {
+			for _, item := range verified {
 				b.WriteString("\n- ")
-				b.WriteString(command)
+				b.WriteString(item)
 			}
+		} else {
+			b.WriteString("\n\n已验证：没有可提炼的命令摘要；可展开命令详情审计原始事件。")
 		}
 		if failed > 0 {
-			b.WriteString("\n\n剩余风险：命令详情里有失败命令，需要结合具体输出判断；以上结论以成功的最终验证命令和前序结论为准。")
+			b.WriteString("\n\n剩余风险：命令详情里仍有失败命令，需要结合具体输出判断。")
 		} else {
-			b.WriteString("\n\n剩余风险：未发现新的阻塞问题；如需审计细节，可展开命令详情查看原始命令输出。")
+			b.WriteString("\n\n剩余风险：未发现新的阻塞问题；如需审计细节，可展开命令详情查看原始事件。")
 		}
 		return b.String()
 	}
 
-	b.WriteString("Final conclusion: this orchestration completed. The final turn did not provide a clear summary, so this fallback summarizes prior conclusions and successful verification commands.")
+	b.WriteString("Final conclusion: this orchestration completed.")
 	if prior != "" {
-		b.WriteString("\n\nBasis: ")
+		b.WriteString("\n\nResult overview: ")
 		b.WriteString(prior)
 	}
-	if len(commands) > 0 {
+	if len(verified) > 0 {
 		b.WriteString("\n\nVerified:")
-		for _, command := range commands {
+		for _, item := range verified {
 			b.WriteString("\n- ")
-			b.WriteString(command)
+			b.WriteString(item)
 		}
+	} else {
+		b.WriteString("\n\nVerified: no concise command summary was available; expand command details to audit raw events.")
 	}
 	if failed > 0 {
-		b.WriteString("\n\nRemaining risk: some command events failed; check command details for raw output. The conclusion above is based on the successful final verification command and prior findings.")
+		b.WriteString("\n\nRemaining risk: some command events failed; check command details for raw output.")
 	} else {
-		b.WriteString("\n\nRemaining risk: no new blocking issue was reported. Expand command details for the raw command output.")
+		b.WriteString("\n\nRemaining risk: no new blocking issue was reported. Expand command details to audit raw events.")
 	}
 	return b.String()
+}
+
+func explicitEnglishResponseRequested(value string) bool {
+	lower := strings.ToLower(value)
+	for _, signal := range []string{
+		"reply in english",
+		"respond in english",
+		"answer in english",
+		"use english",
+		"用英文",
+		"使用英文",
+		"英文回复",
+	} {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return false
 }
 
 func finalResponseNeedsFallback(content string) bool {
@@ -1258,6 +1280,68 @@ func completedCommandSummaries(turns []orchestrationTurn, max int) []string {
 		out = append(out, formatCommandSummary(command))
 	}
 	return reverseStrings(out)
+}
+
+func completedVerificationSummaries(turns []orchestrationTurn, zh bool, max int) []string {
+	commands := commandStates(turns)
+	var readFiles []string
+	var commandLabels []string
+	for _, command := range commands {
+		if !strings.EqualFold(command.Status, "completed") {
+			continue
+		}
+		label := strings.TrimSpace(command.Command)
+		if isClaudeReadCommand(label) {
+			path := strings.TrimSpace(strings.TrimPrefix(label, "Read "))
+			if path != "" {
+				name := filepath.Base(path)
+				if name != "." && name != string(filepath.Separator) {
+					readFiles = append(readFiles, name)
+				}
+			}
+			continue
+		}
+		if label != "" {
+			commandLabels = append(commandLabels, trimForPrompt(oneLine(label), 120))
+		}
+	}
+
+	var out []string
+	if len(readFiles) > 0 && len(out) < max {
+		if zh {
+			out = append(out, fmt.Sprintf("读取并检查了 %d 个文件：%s。", len(readFiles), formatInlineList(readFiles, "、")))
+		} else {
+			out = append(out, fmt.Sprintf("Read and checked %d file(s): %s.", len(readFiles), formatInlineList(readFiles, ", ")))
+		}
+	}
+	for _, label := range commandLabels {
+		if len(out) >= max {
+			break
+		}
+		if zh {
+			out = append(out, fmt.Sprintf("执行完成：`%s`。", label))
+		} else {
+			out = append(out, fmt.Sprintf("Completed `%s`.", label))
+		}
+	}
+	return out
+}
+
+func formatInlineList(values []string, separator string) string {
+	var out []string
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, "`"+value+"`")
+	}
+	if separator == "" {
+		separator = ", "
+	}
+	return strings.Join(out, separator)
 }
 
 func failedCommandCount(turns []orchestrationTurn) int {
@@ -1379,6 +1463,7 @@ func containsCJK(value string) bool {
 
 const orchestrationHandoffContract = "Handoff: status=<needs_next|blocked|resolved>; changed=<files or none>; verified=<commands or none>; next=<one action>; risks=<open issue or none>"
 const orchestrationMsgContract = "Msg: to=<next-role|user>; intent=<implement|review|challenge|final>; need=<one request or none>"
+const orchestrationLanguageRule = "Language rule: write all user-visible prose in Chinese by default unless the user explicitly asks for another language. Keep the machine-readable Msg: and Handoff: field names and values in the required English shape."
 
 func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {
 	var b strings.Builder
@@ -1395,6 +1480,8 @@ func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume 
 		b.WriteString("To: user\n")
 	}
 	b.WriteString(fmt.Sprintf("Mode: %s\n\n", mode))
+	b.WriteString(orchestrationLanguageRule)
+	b.WriteString("\n\n")
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Maintain continuity with the compacted context, while treating the latest user task as authoritative.\n\n")
 	}
@@ -1451,6 +1538,8 @@ func composeFinalVerifierPrompt(mode, userPrompt, contextSummary string, resume 
 	b.WriteString(fmt.Sprintf("From: %s/%s\n", role, cli))
 	b.WriteString("To: user\n")
 	b.WriteString(fmt.Sprintf("Mode: %s\n\n", mode))
+	b.WriteString(orchestrationLanguageRule)
+	b.WriteString("\n\n")
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Prefer the latest user task over older details.\n\n")
 	}
@@ -1826,7 +1915,7 @@ func PrepareOrchestrationPromptFiles(cfg *config.Config, runID, prompt string, f
 		b.WriteByte('\n')
 	}
 	b.WriteString("\nUse these local file paths directly when the task refers to uploaded files.")
-	b.WriteString("\nFor uploaded source/text files such as .thy, ROOT, .go, .md, and .txt, inspect them with shell commands like sed -n '1,220p' <path>, cat <path>, or wc -l <path>.")
+	b.WriteString("\nFor uploaded source/text files such as .thy, ROOT, .go, .md, and .txt, inspect them with shell commands like sed -n '1,220p' <path>, cat <path>, or wc -l <path>; do not use Claude's Read tool for these uploaded text/source files.")
 	b.WriteString("\nDo not send an empty pages field to any file-reading tool. Only include pages when a non-empty page range is required for a real PDF/document; otherwise omit the page filter.")
 	return b.String(), metas, nil
 }

@@ -34,8 +34,9 @@ context in the same `runID`.
   selected run is active, the frontend reconnects and reloads persisted events
   so progress that arrived during the gap is rendered.
 - The final turn must leave a user-readable conclusion. If the CLI only emits a
-  process note and command events, the Bridge appends a concise fallback summary
-  from prior conclusions and successful verification commands.
+  process note and command events, the Bridge appends a concise, human-readable
+  fallback summary from prior conclusions and successful verification commands
+  instead of raw command-log prose.
 - The frontend must render persisted `turn.delta` and `command.*` events as
   visible timeline entries. Detailed content that reaches `/events` must not be
   hidden behind only `turn.start` status cards.

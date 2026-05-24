@@ -60,6 +60,10 @@ Msg: to=<next-role|user>; intent=<implement|review|challenge|final>; need=<one r
 Handoff: status=<needs_next|blocked|resolved>; changed=<files or none>; verified=<commands or none>; next=<one action>; risks=<open issue or none>
 ```
 
+User-visible prose defaults to Chinese unless the user explicitly asks for a
+different language. The `Msg:` and `Handoff:` field names and values stay in the
+English machine-readable shape so the Bridge can parse them consistently.
+
 `Msg:` borrows the external project's explicit route idea without adding a
 mailbox. `Handoff:` remains for compatibility and early-stop detection. Prior
 turns are compacted to one line per turn with role, CLI, `Msg`, `Handoff`, and

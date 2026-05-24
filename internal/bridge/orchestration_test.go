@@ -160,6 +160,37 @@ func TestOrchestrationScanClaudeJSONLEmitsToolEvents(t *testing.T) {
 	}
 }
 
+func TestOrchestrationEventsBufferWhileBridgeDisconnected(t *testing.T) {
+	manager := NewOrchestrationManager(&config.Config{})
+	firstOut := make(chan protocol.Envelope, 2)
+	manager.AttachOut(firstOut)
+	manager.DetachOut(firstOut)
+
+	manager.emit("orc_1", protocol.OrchestrationEventPayload{Kind: "turn.start", TurnID: "turn_1"})
+	manager.emit("orc_1", protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: "turn_1", Content: "working"})
+
+	nextOut := make(chan protocol.Envelope, 2)
+	manager.AttachOut(nextOut)
+
+	for _, wantKind := range []string{"turn.start", "turn.delta"} {
+		select {
+		case env := <-nextOut:
+			if env.Type != protocol.TypeOrchestrationEvent {
+				t.Fatalf("env type = %q", env.Type)
+			}
+			payload, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if payload.RunID != "orc_1" || payload.Kind != wantKind || payload.TurnID != "turn_1" {
+				t.Fatalf("payload = %#v, want kind %s for orc_1/turn_1", payload, wantKind)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for buffered %s event", wantKind)
+		}
+	}
+}
+
 func TestComposeOrchestrationPromptIncludesResumeContext(t *testing.T) {
 	prompt := composeOrchestrationPrompt("collaboration", "continue the fix", "tests already pass", true, "reviewer", "codex", 1, 2, nil)
 	if !strings.Contains(prompt, "continuation of the same user-visible orchestration conversation") {

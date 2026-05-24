@@ -30,6 +30,7 @@ type OrchestrationManager struct {
 	mu        sync.Mutex
 	runs      map[string]context.CancelFunc
 	output    chan<- protocol.Envelope
+	pending   []protocol.Envelope
 	approvals map[string]orchestrationApproval
 }
 
@@ -71,8 +72,13 @@ func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
 
 func (m *OrchestrationManager) AttachOut(out chan<- protocol.Envelope) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	pending := append([]protocol.Envelope(nil), m.pending...)
+	m.pending = nil
+	for _, env := range pending {
+		send(out, env)
+	}
 	m.output = out
+	m.mu.Unlock()
 }
 
 func (m *OrchestrationManager) DetachOut(out chan<- protocol.Envelope) {
@@ -985,9 +991,21 @@ func (m *OrchestrationManager) emit(runID string, event protocol.OrchestrationEv
 func (m *OrchestrationManager) send(env protocol.Envelope) {
 	m.mu.Lock()
 	out := m.output
+	buffered := false
+	if out == nil && env.Type == protocol.TypeOrchestrationEvent {
+		m.pending = append(m.pending, env)
+		if len(m.pending) > 1000 {
+			m.pending = m.pending[len(m.pending)-1000:]
+		}
+		buffered = true
+	}
 	m.mu.Unlock()
 	if out == nil {
-		slog.Warn("[bridge] orchestration event dropped: bridge disconnected", "type", env.Type)
+		if buffered {
+			slog.Warn("[bridge] orchestration event buffered: bridge disconnected", "type", env.Type)
+		} else {
+			slog.Warn("[bridge] orchestration event dropped: bridge disconnected", "type", env.Type)
+		}
 		return
 	}
 	send(out, env)

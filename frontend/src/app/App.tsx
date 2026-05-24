@@ -113,6 +113,12 @@ type OrchestrationEvent = {
   createdAt?: number;
 };
 
+type OrchestrationTurnInfo = {
+  ordinal?: number;
+  total?: number;
+  verifier?: boolean;
+};
+
 type ToolEvent = {
   id?: string;
   name?: string;
@@ -369,6 +375,10 @@ const uiText = {
     codexOrchestrationApprovalMissing: 'Codex orchestration browser approval is unavailable on this endpoint.',
     claudeOrchestrationApprovalMissing: 'Claude orchestration browser approval is unavailable on this endpoint.',
     stream: 'Stream',
+    currentTurn: 'Current turn',
+    turnPrefix: 'Turn',
+    turnSuffix: '',
+    verifierTurn: 'Verifier',
     coordinateClaudeCodex: 'Coordinate Claude Code and Codex',
     startCollaborationHint: 'Start a collaboration or debate run from the panel on the right.',
     mode: 'Mode',
@@ -518,6 +528,10 @@ const uiText = {
     codexOrchestrationApprovalMissing: '该端的 Codex 编排网页审批不可用。',
     claudeOrchestrationApprovalMissing: '该端的 Claude 编排网页审批不可用。',
     stream: '流连接',
+    currentTurn: '当前轮次',
+    turnPrefix: '第',
+    turnSuffix: '轮',
+    verifierTurn: '验证轮',
     coordinateClaudeCodex: '协同 Claude Code 与 Codex',
     startCollaborationHint: '从右侧面板启动协作或辩论运行。',
     mode: '模式',
@@ -771,6 +785,38 @@ function mergeOrchestrationToolData(previous?: Record<string, any>, next?: Recor
 
 function orchestrationTurnKey(event: OrchestrationEvent) {
   return `${event.runId}:${event.turnId || ''}:${event.role || ''}:${event.cli || ''}`;
+}
+
+function parseOrchestrationTurnInfo(turnId?: string): OrchestrationTurnInfo {
+  const value = String(turnId || '');
+  if (!value) return {};
+  if (/(?:^|-)verifier$/.test(value)) return { verifier: true };
+  const match = value.match(/-(\d{2,})$/);
+  if (!match) return {};
+  const ordinal = Number(match[1]);
+  return Number.isFinite(ordinal) && ordinal > 0 ? { ordinal } : {};
+}
+
+function orchestrationTurnInfoFromEvents(events: OrchestrationEvent[], runId: string, maxTurns?: number): OrchestrationTurnInfo {
+  let latest: OrchestrationEvent | null = null;
+  for (const event of events) {
+    if (event.runId !== runId || !event.turnId) continue;
+    if (!latest || compareOrchestrationEvents(latest, event) <= 0) latest = event;
+  }
+  if (!latest) return {};
+  const info = parseOrchestrationTurnInfo(latest.turnId);
+  if (typeof info.ordinal === 'number' && maxTurns) {
+    return { ...info, total: maxTurns };
+  }
+  return info;
+}
+
+function orchestrationTurnLabel(info: OrchestrationTurnInfo, t: UIText) {
+  if (info.verifier) return t.verifierTurn;
+  if (typeof info.ordinal !== 'number') return '';
+  const suffix = info.total ? `/${info.total}` : '';
+  if (t.turnPrefix === '第') return `${t.turnPrefix}${info.ordinal}${suffix}${t.turnSuffix}`;
+  return `${t.turnPrefix} ${info.ordinal}${suffix}`;
 }
 
 function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string): OrchestrationVisibleEvent[] {
@@ -2367,6 +2413,8 @@ function OrchestrationWorkspace({
   }, [runs, selectedAgent?.id]);
   const activeRun = runs.find((run) => run.id === activeRunId && (!selectedAgent?.id || run.agentId === selectedAgent.id)) || null;
   const visibleEvents = useMemo(() => activeRun ? visibleOrchestrationEvents(events, activeRunId) : [], [activeRun, events, activeRunId]);
+  const currentTurnInfo = useMemo(() => activeRun ? orchestrationTurnInfoFromEvents(events, activeRun.id, activeRun.maxTurns) : {}, [activeRun, events]);
+  const currentTurnLabel = useMemo(() => orchestrationTurnLabel(currentTurnInfo, t), [currentTurnInfo, t]);
   const visibleApprovals = useMemo(() => approvals.filter((item) => item.approval.runId === activeRunId), [approvals, activeRunId]);
   const isRunning = activeOrchestrationStatus(activeRun?.status);
   const continuingRun = Boolean(activeRun && !isRunning);
@@ -2875,6 +2923,12 @@ function OrchestrationWorkspace({
             <Activity className="h-3.5 w-3.5" />
             <span>{t.status}: {activeRun?.status || t.idle}</span>
           </div>
+          {currentTurnLabel && (
+            <div className="flex items-center gap-1.5">
+              <GitBranch className="h-3.5 w-3.5" />
+              <span>{t.currentTurn}: {currentTurnLabel}</span>
+            </div>
+          )}
           <div className="flex items-center gap-1.5">
             <Command className="h-3.5 w-3.5" />
             <span>{t.stream}: {connectionStatus}</span>

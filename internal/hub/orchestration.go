@@ -655,6 +655,9 @@ func (s *Server) handleOrchestrationEvent(ctx context.Context, env protocol.Enve
 	if err != nil || payload.RunID == "" {
 		return
 	}
+	if suppressEmptyPagesReadFailure(payload) {
+		return
+	}
 	status := payload.Status
 	runStatus := ""
 	switch payload.Kind {
@@ -697,6 +700,23 @@ func (s *Server) handleOrchestrationEvent(ctx context.Context, env protocol.Enve
 		return
 	}
 	s.pool.BroadcastToOrchestrationBrowsers(payload.RunID, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", eventToPayload(event)))
+}
+
+func suppressEmptyPagesReadFailure(payload protocol.OrchestrationEventPayload) bool {
+	if !strings.HasPrefix(payload.Kind, "command.") {
+		return false
+	}
+	status := strings.ToLower(strings.TrimSpace(payload.Status))
+	if status != "failed" && status != "error" {
+		return false
+	}
+	output := strings.TrimSpace(payload.Error + "\n" + payload.Content)
+	if payload.Data != nil {
+		if value, ok := payload.Data["output"].(string); ok {
+			output += "\n" + value
+		}
+	}
+	return strings.Contains(output, `Invalid pages parameter: ""`) && strings.Contains(output, "Pages are 1-indexed")
 }
 
 func (s *Server) validateOrchestrationFiles(files []protocol.AttachmentPayload) error {

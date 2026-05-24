@@ -131,6 +131,42 @@ func TestCommandStatusDoesNotUpdateOrchestrationRunStatus(t *testing.T) {
 	}
 }
 
+func TestEmptyPagesReadFailureEventsAreSuppressed(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	s.handleOrchestrationEvent(ctx, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+		RunID:  run.ID,
+		Kind:   "command.end",
+		Status: "failed",
+		Data: map[string]any{
+			"id":     "read_1",
+			"status": "failed",
+			"output": `<tool_use_error>Invalid pages parameter: "". Use formats like "1-5", "3", or "10-20". Pages are 1-indexed.</tool_use_error>`,
+		},
+	}))
+	events, err := st.ListOrchestrationEvents(ctx, run.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("empty pages read failure was persisted: %#v", events)
+	}
+	loaded, err := st.OrchestrationRunByID(ctx, run.ID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != store.OrchestrationRunning {
+		t.Fatalf("suppressed event changed run status to %q", loaded.Status)
+	}
+}
+
 func TestCompactOrchestrationContextCarriesPriorState(t *testing.T) {
 	run := store.OrchestrationRun{ID: "orc_test", Mode: "collaboration", CWD: "/repo", Status: store.OrchestrationCompleted}
 	events := []store.OrchestrationEvent{

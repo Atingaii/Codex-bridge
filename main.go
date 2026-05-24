@@ -83,6 +83,7 @@ func runConnect(cfg *config.Config, args []string) error {
 	cwd := fs.String("cwd", "", "workspace directory")
 	runner := fs.String("runner", "codex", "runner: codex, claude, echo")
 	machineIDFile := fs.String("machine-id-file", cfg.Bridge.MachineIDFile, "machine id file")
+	machineID := fs.String("machine-id", "", "existing machine id to write before connecting")
 	sandbox := fs.String("sandbox", cfg.Bridge.Sandbox, "runner sandbox")
 	approvalPolicy := fs.String("approval-policy", cfg.Bridge.ApprovalPolicy, "runner approval policy")
 	token, flagArgs, err := normalizeConnectArgs(args)
@@ -122,6 +123,11 @@ func runConnect(cfg *config.Config, args []string) error {
 			*name = "codex-cli"
 		}
 	}
+	if strings.TrimSpace(*machineID) != "" {
+		if err := writeMachineID(*machineIDFile, *machineID); err != nil {
+			return err
+		}
+	}
 	cfg.Bridge.HubURL = *hubURL
 	cfg.Bridge.Token = token
 	cfg.Bridge.TokenFile = ""
@@ -132,6 +138,38 @@ func runConnect(cfg *config.Config, args []string) error {
 	cfg.Bridge.Sandbox = *sandbox
 	cfg.Bridge.ApprovalPolicy = *approvalPolicy
 	return bridge.NewClient(cfg, Version).Run(context.Background())
+}
+
+func writeMachineID(path, machineID string) error {
+	machineID = strings.TrimSpace(machineID)
+	if machineID == "" {
+		return nil
+	}
+	path = expandUserPath(path)
+	if path == "" {
+		path = expandUserPath("~/.codex-bridge/machine_id")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(machineID+"\n"), 0o600)
+}
+
+func expandUserPath(path string) string {
+	if path == "" || path[0] != '~' {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }
 
 func normalizeConnectArgs(args []string) (string, []string, error) {

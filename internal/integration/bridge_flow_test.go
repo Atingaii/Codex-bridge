@@ -889,6 +889,9 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	if !strings.Contains(profileCommands["auto-execute"], "--runner codex --sandbox danger-full-access --approval-policy never") {
 		t.Fatalf("auto-execute command missing bypass flags: %s", profileCommands["auto-execute"])
 	}
+	if strings.Contains(profileCommands["review-required"], "--machine-id ") {
+		t.Fatalf("new endpoint command should not pin a machine id: %s", profileCommands["review-required"])
+	}
 	commands := tokenBody["commands"].([]any)
 	if len(commands) != 1 || !strings.Contains(commands[0].(string), "/install.sh") || !strings.Contains(commands[0].(string), "codex-bridge") {
 		t.Fatalf("commands = %#v", commands)
@@ -947,7 +950,7 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		"permissionProfile": "surprise-me",
 	}, http.StatusBadRequest)
 
-	fakeBridge := dialFakeBridge(t, cfg.Bridge.HubURL, token)
+	fakeBridge := dialFakeBridgeWithOptions(t, cfg.Bridge.HubURL, token, fakeBridgeOptions{WorkingDirs: []string{tmp}})
 	defer fakeBridge.Close()
 	waitAgents(t, workerClient, cfg.Bridge.HubURL)
 	agentsBody := getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/agents", http.StatusOK)
@@ -959,6 +962,47 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	if agent["userId"] != worker.ID || agent["online"] != true {
 		t.Fatalf("bound agent = %#v, user = %#v", agent, worker)
 	}
+	repairBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/agents/"+url.PathEscape(agent["id"].(string))+"/repair-token", map[string]string{}, http.StatusCreated)
+	if repairBody["permissionProfile"] != "review-required" || repairBody["agentId"] != agent["id"] || repairBody["machineId"] != agent["machineId"] {
+		t.Fatalf("repair body = %#v, agent = %#v", repairBody, agent)
+	}
+	repairSetup := repairBody["setupCommand"].(string)
+	if strings.Contains(repairSetup, "\n") {
+		t.Fatalf("repair setup command should be one line: %q", repairSetup)
+	}
+	if out, err := exec.Command("sh", "-n", "-c", repairSetup).CombinedOutput(); err != nil {
+		t.Fatalf("repair setup command shell syntax: %v\n%s\n%s", err, out, repairSetup)
+	}
+	repairConnect := repairBody["connectCommand"].(string)
+	for _, want := range []string{
+		`CB_CWD=` + shellSingleQuote(tmp),
+		`CB_NAME=` + shellSingleQuote("fake-bridge"),
+		`--machine-id`,
+		agent["machineId"].(string),
+		`--runner codex-app-server --sandbox workspace-write --approval-policy untrusted`,
+	} {
+		if !strings.Contains(repairConnect, want) {
+			t.Fatalf("repair connect command missing %q: %s", want, repairConnect)
+		}
+	}
+	repairProfiles := repairBody["permissionProfiles"].([]any)
+	if len(repairProfiles) != 2 {
+		t.Fatalf("repair profiles = %#v", repairProfiles)
+	}
+	var sawPinnedAuto bool
+	for _, raw := range repairProfiles {
+		profile := raw.(map[string]any)
+		connect := profile["connectCommand"].(string)
+		if !strings.Contains(connect, `--machine-id`) || !strings.Contains(connect, agent["machineId"].(string)) {
+			t.Fatalf("repair profile missing machine id: %#v", profile)
+		}
+		if profile["id"] == "auto-execute" && strings.Contains(connect, "--runner codex --sandbox danger-full-access --approval-policy never") {
+			sawPinnedAuto = true
+		}
+	}
+	if !sawPinnedAuto {
+		t.Fatalf("repair profiles missing auto-execute fallback: %#v", repairProfiles)
+	}
 
 	adminClient := httpClient(t)
 	postJSON(t, adminClient, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
@@ -966,6 +1010,21 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	if len(adminAgents) != 1 {
 		t.Fatalf("admin agents = %#v", adminAgents)
 	}
+	postJSON(t, adminClient, cfg.Bridge.HubURL+"/api/agents/"+url.PathEscape(agent["id"].(string))+"/repair-token", map[string]string{
+		"permissionProfile": "auto-execute",
+	}, http.StatusCreated)
+	other, err := st.UpsertUser(ctx, "other-user", "long-secret-456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = other
+	otherClient := httpClient(t)
+	postJSON(t, otherClient, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "other-user", "password": "long-secret-456"}, http.StatusOK)
+	postJSON(t, otherClient, cfg.Bridge.HubURL+"/api/agents/"+url.PathEscape(agent["id"].(string))+"/repair-token", map[string]string{}, http.StatusNotFound)
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 func TestOrchestrationContinueReusesRunAndSendsContext(t *testing.T) {
@@ -1216,7 +1275,15 @@ func (c *fakeBridgeConn) Close() error {
 	return c.ws.Close()
 }
 
+type fakeBridgeOptions struct {
+	WorkingDirs []string
+}
+
 func dialFakeBridge(t *testing.T, baseURL, token string) *fakeBridgeConn {
+	return dialFakeBridgeWithOptions(t, baseURL, token, fakeBridgeOptions{})
+}
+
+func dialFakeBridgeWithOptions(t *testing.T, baseURL, token string, opts fakeBridgeOptions) *fakeBridgeConn {
 	t.Helper()
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
@@ -1232,10 +1299,11 @@ func dialFakeBridge(t *testing.T, baseURL, token string) *fakeBridgeConn {
 		t.Fatal(err)
 	}
 	reg := protocol.RegisterPayload{
-		Name:      "fake-bridge",
-		MachineID: "fake-machine-" + store.NewID("test"),
-		Hostname:  "test-host",
-		Version:   "test",
+		Name:        "fake-bridge",
+		MachineID:   "fake-machine-" + store.NewID("test"),
+		Hostname:    "test-host",
+		Version:     "test",
+		WorkingDirs: opts.WorkingDirs,
 		Capabilities: &protocol.BridgeCapabilities{
 			Sandbox:        "danger-full-access",
 			ApprovalPolicy: "never",

@@ -37,9 +37,12 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 1. `internal/hub/server.go:handleAgents` lists visible endpoints.
 2. `internal/hub/server.go:handleDeleteAgent` soft-deletes an endpoint and
    disconnects its active Bridge connection.
-3. `internal/store/store.go:DeleteAgent` owns agent soft deletion.
-4. `frontend/src/app/App.tsx:SettingsModal` renders add/delete controls.
-5. Update the relevant feature doc and tests.
+3. `internal/hub/server.go:handleCreateAgentRepairToken` generates repair
+   commands for existing endpoints.
+4. `internal/store/store.go:DeleteAgent` owns agent soft deletion.
+5. `frontend/src/app/App.tsx:SettingsModal` renders add/delete/detail/repair
+   controls.
+6. Update the relevant feature doc and tests.
 
 ### Add A WebSocket Frame
 

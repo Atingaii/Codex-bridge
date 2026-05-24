@@ -53,6 +53,7 @@ token 由网页生成，默认 24 小时内有效。一个 token 绑定一个 CL
 - 在线/离线状态会显示在 CLI 端列表里。
 - 主对话和编排页顶部都有 CLI 端选择器，可以在多个 WSL2/服务器终端之间切换。
 - “需要确认”权限策略会把 Codex 聊天、Codex 编排和 Claude Code 编排审批都展示到浏览器；编排页会显示当前 CLI 端的能力矩阵。
+- 每个 CLI 端可以展开“详情”并生成“修复连接”命令；旧版启动命令接入的端点可用该命令更新 Bridge、保留原 machine id 并重连同一个端点。
 - 删除 CLI 端会让 Hub 断开该端连接并让已消费 token 失效；如果本地仍有后台进程，
   可以用 `systemctl --user list-units 'codex-bridge-*'` 找到并停止对应服务。
 - 非管理员只能看到自己接入的 CLI 端；管理员可以看到所有 CLI 端。
@@ -118,6 +119,8 @@ HUB_BRIDGE_DOWNLOAD_URL='https://your-release-url/codex-bridge-linux-amd64'
 ```
 
 先用 `codex-bridge user --username <name> --password <password>` 创建用户。用户登录后在网页里自己生成 CLI token，然后复制执行页面生成的单行“安装并连接”命令。该命令会把日志写到 `~/.codex-bridge/logs/`，保留当前 shell 的常见代理变量，只有 Bridge 日志出现 `[bridge] connected` 后才会提示已连接；否则会打印最近日志方便定位。
+
+如果某个已添加 CLI 端没有上报能力矩阵，打开设置里的 `Agent 与运行时`，展开该端并点击 `生成修复命令`。修复命令会下载最新 Bridge，并用该端原有的 machine id、端名称和已知工作目录重启连接，避免误注册成新端点。
 
 添加 CLI 端时有两种权限策略：
 

@@ -89,6 +89,7 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("GET /api/me", s.withAuth(s.handleMe))
 	mux.HandleFunc("GET /api/agents", s.withAuth(s.handleAgents))
 	mux.HandleFunc("DELETE /api/agents/{agentID}", s.withAuth(s.handleDeleteAgent))
+	mux.HandleFunc("POST /api/agents/{agentID}/repair-token", s.withAuth(s.handleCreateAgentRepairToken))
 	mux.HandleFunc("POST /api/bridge-tokens", s.withAuth(s.handleCreateBridgeToken))
 	mux.HandleFunc("GET /install.sh", s.handleInstallScript)
 	mux.HandleFunc("GET /downloads/codex-bridge-linux-amd64", s.handleBridgeBinaryDownload)
@@ -387,35 +388,125 @@ func (s *Server) handleCreateBridgeToken(w http.ResponseWriter, r *http.Request,
 	if runes := []rune(label); len(runes) > 80 {
 		label = string(runes[:80])
 	}
+	profile := normalizePermissionProfile(req.PermissionProfile)
+	if profile == "" {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_PERMISSION_PROFILE", "permissionProfile must be review-required or auto-execute")
+		return
+	}
 	value := store.NewToken("enr")
 	expiresAt := time.Now().Add(ttl)
 	if err := s.store.CreateEnrollTokenForUser(r.Context(), value, uid, label, &expiresAt); err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to create bridge token")
 		return
 	}
-	hubURL := s.publicBaseURL(r)
+	serverutil.WriteJSON(w, http.StatusCreated, s.bridgeTokenResponse(r, bridgeTokenResponseParams{
+		Token:             value,
+		ExpiresAt:         expiresAt,
+		Label:             label,
+		PermissionProfile: profile,
+	}))
+}
+
+func (s *Server) handleCreateAgentRepairToken(w http.ResponseWriter, r *http.Request, uid string) {
+	agent, err := s.visibleAgentByID(r.Context(), uid, r.PathValue("agentID"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "agent not found")
+			return
+		}
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load agent")
+		return
+	}
+	var req struct {
+		TTL               string `json:"ttl"`
+		PermissionProfile string `json:"permissionProfile"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid repair token payload")
+		return
+	}
+	ttl := 24 * time.Hour
+	if strings.TrimSpace(req.TTL) != "" {
+		parsed, err := time.ParseDuration(strings.TrimSpace(req.TTL))
+		if err != nil || parsed <= 0 || parsed > 7*24*time.Hour {
+			serverutil.WriteError(w, http.StatusBadRequest, "BAD_TTL", "ttl must be between 1s and 168h")
+			return
+		}
+		ttl = parsed
+	}
 	profile := normalizePermissionProfile(req.PermissionProfile)
 	if profile == "" {
 		serverutil.WriteError(w, http.StatusBadRequest, "BAD_PERMISSION_PROFILE", "permissionProfile must be review-required or auto-execute")
 		return
 	}
+	value := store.NewToken("enr")
+	expiresAt := time.Now().Add(ttl)
+	label := "repair " + agent.Name
+	tokenUserID := uid
+	if strings.TrimSpace(agent.UserID) != "" {
+		tokenUserID = agent.UserID
+	}
+	if err := s.store.CreateEnrollTokenForUser(r.Context(), value, tokenUserID, label, &expiresAt); err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to create repair token")
+		return
+	}
+	cwd := ""
+	if len(agent.WorkingDirs) > 0 {
+		cwd = agent.WorkingDirs[0]
+	}
+	serverutil.WriteJSON(w, http.StatusCreated, s.bridgeTokenResponse(r, bridgeTokenResponseParams{
+		Token:             value,
+		ExpiresAt:         expiresAt,
+		Label:             label,
+		PermissionProfile: profile,
+		Agent:             &agent,
+		CWD:               cwd,
+		MachineID:         agent.MachineID,
+	}))
+}
+
+type bridgeTokenResponseParams struct {
+	Token             string
+	ExpiresAt         time.Time
+	Label             string
+	PermissionProfile string
+	Agent             *store.Agent
+	CWD               string
+	MachineID         string
+}
+
+func (s *Server) bridgeTokenResponse(r *http.Request, params bridgeTokenResponseParams) map[string]any {
+	hubURL := s.publicBaseURL(r)
 	installCommand := s.bridgeInstallCommand(hubURL)
-	connectCommand := s.bridgeConnectCommand(hubURL, value, profile)
+	connectCommand := s.bridgeConnectCommand(hubURL, params.Token, params.PermissionProfile, bridgeConnectOptions{
+		Agent:     params.Agent,
+		CWD:       params.CWD,
+		MachineID: params.MachineID,
+	})
 	setupCommand := bridgeSetupCommand(installCommand, connectCommand)
-	profiles := s.bridgePermissionProfiles(hubURL, value, installCommand)
-	serverutil.WriteJSON(w, http.StatusCreated, map[string]any{
-		"token":              value,
-		"expiresAt":          expiresAt.Unix(),
-		"label":              label,
+	profiles := s.bridgePermissionProfiles(hubURL, params.Token, installCommand, bridgeConnectOptions{
+		Agent:     params.Agent,
+		CWD:       params.CWD,
+		MachineID: params.MachineID,
+	})
+	out := map[string]any{
+		"token":              params.Token,
+		"expiresAt":          params.ExpiresAt.Unix(),
+		"label":              params.Label,
 		"hubUrl":             hubURL,
 		"downloadUrl":        strings.TrimSpace(s.cfg.Hub.BridgeDownloadURL),
-		"permissionProfile":  profile,
+		"permissionProfile":  params.PermissionProfile,
 		"permissionProfiles": profiles,
 		"setupCommand":       setupCommand,
 		"installCommand":     installCommand,
 		"connectCommand":     connectCommand,
 		"commands":           []string{setupCommand},
-	})
+	}
+	if params.Agent != nil {
+		out["agentId"] = params.Agent.ID
+		out["machineId"] = params.Agent.MachineID
+	}
+	return out
 }
 
 func normalizePermissionProfile(profile string) string {
@@ -429,15 +520,15 @@ func normalizePermissionProfile(profile string) string {
 	}
 }
 
-func (s *Server) bridgePermissionProfiles(hubURL, token, installCommand string) []map[string]string {
+func (s *Server) bridgePermissionProfiles(hubURL, token, installCommand string, opts bridgeConnectOptions) []map[string]string {
 	return []map[string]string{
-		s.bridgePermissionProfile(hubURL, token, installCommand, permissionProfileReviewRequired),
-		s.bridgePermissionProfile(hubURL, token, installCommand, permissionProfileAutoExecute),
+		s.bridgePermissionProfile(hubURL, token, installCommand, permissionProfileReviewRequired, opts),
+		s.bridgePermissionProfile(hubURL, token, installCommand, permissionProfileAutoExecute, opts),
 	}
 }
 
-func (s *Server) bridgePermissionProfile(hubURL, token, installCommand, profile string) map[string]string {
-	connectCommand := s.bridgeConnectCommand(hubURL, token, profile)
+func (s *Server) bridgePermissionProfile(hubURL, token, installCommand, profile string, opts bridgeConnectOptions) map[string]string {
+	connectCommand := s.bridgeConnectCommand(hubURL, token, profile, opts)
 	return map[string]string{
 		"id":             profile,
 		"setupCommand":   bridgeSetupCommand(installCommand, connectCommand),
@@ -453,12 +544,30 @@ func bridgeSetupCommand(installCommand, connectCommand string) string {
 	return installCommand + " && { " + connectCommand + "; }"
 }
 
-func (s *Server) bridgeConnectCommand(hubURL, token, permissionProfile string) string {
+type bridgeConnectOptions struct {
+	Agent     *store.Agent
+	CWD       string
+	MachineID string
+}
+
+func (s *Server) bridgeConnectCommand(hubURL, token, permissionProfile string, opts bridgeConnectOptions) string {
 	hubArg := ""
 	if hubURL != strings.TrimRight(s.cfg.Bridge.HubURL, "/") {
 		hubArg = " --hub " + shellQuote(hubURL)
 	}
 	permissionArg := bridgePermissionArgs(permissionProfile)
+	machineIDArg := ""
+	if strings.TrimSpace(opts.MachineID) != "" {
+		machineIDArg = " --machine-id " + shellQuote(strings.TrimSpace(opts.MachineID))
+	}
+	cwdDefault := `"${PWD:-.}"`
+	if strings.TrimSpace(opts.CWD) != "" {
+		cwdDefault = shellQuote(strings.TrimSpace(opts.CWD))
+	}
+	nameDefault := `"${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}"`
+	if opts.Agent != nil && strings.TrimSpace(opts.Agent.Name) != "" {
+		nameDefault = shellQuote(strings.TrimSpace(opts.Agent.Name))
+	}
 	startScript := []string{
 		shellQuote("#!/bin/sh"),
 		shellQuote("set -eu"),
@@ -468,7 +577,7 @@ func (s *Server) bridgeConnectCommand(hubURL, token, permissionProfile string) s
 		shellQuote(`if [ -n "$CB_PROXY_ENV" ]; then set -a; . "$CB_HOME/services/${CB_HASH}.env"; set +a; fi`),
 		shellQuote(`CB_CWD=$(cat "$CB_HOME/services/${CB_HASH}.cwd")`),
 		shellQuote(`CB_NAME=$(cat "$CB_HOME/services/${CB_HASH}.name")`),
-		shellQuote(fmt.Sprintf(`exec "$HOME/.local/bin/codex-bridge" connect%s%s --cwd "$CB_CWD" --name "$CB_NAME" --machine-id-file "$CB_HOME/machines/${CB_HASH}" %s`, hubArg, permissionArg, shellQuote(token))),
+		shellQuote(fmt.Sprintf(`exec "$HOME/.local/bin/codex-bridge" connect%s%s%s --cwd "$CB_CWD" --name "$CB_NAME" --machine-id-file "$CB_HOME/machines/${CB_HASH}" %s`, hubArg, permissionArg, machineIDArg, shellQuote(token))),
 	}
 	serviceFile := []string{
 		shellQuote("[Unit]"),
@@ -488,10 +597,10 @@ func (s *Server) bridgeConnectCommand(hubURL, token, permissionProfile string) s
 		shellQuote("WantedBy=default.target"),
 	}
 	return shellJoin(
-		`CB_CWD="${PWD:-.}"`,
+		`CB_CWD=`+cwdDefault,
 		`CB_DIR="$(basename "$CB_CWD")"`,
 		`CB_HASH="$(printf '%s' "$CB_CWD" | cksum | awk '{print $1}')"`,
-		`CB_NAME="${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}"`,
+		`CB_NAME=`+nameDefault,
 		`CB_HOME="$HOME/.codex-bridge"`,
 		`CB_LOG_DIR="$CB_HOME/logs"`,
 		`CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"`,

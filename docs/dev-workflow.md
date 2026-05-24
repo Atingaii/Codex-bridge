@@ -83,6 +83,12 @@ The settings UI exposes two permission profiles:
   danger-full-access --approval-policy never`, preserving the previous
   browser-first trusted-machine behavior.
 
+Existing endpoints in the settings UI can be expanded to generate a repair
+command. The repair command mints a fresh enroll token, installs the latest
+Bridge binary, and reconnects with the endpoint's existing machine id, name, and
+first known working directory so older endpoints do not accidentally register as
+new agents.
+
 For deterministic tests use `bridge.runner=echo`. For real Codex:
 
 ```yaml

@@ -7,7 +7,7 @@ import {
   RefreshCw, Check, Clipboard,
   Menu, X, Server, Activity, Command,
   Trash2, Edit2, GitBranch, Swords, UsersRound, ArrowLeft,
-  FileUp, FileText, FolderInput, ShieldQuestion
+  FileUp, FileText, FolderInput, ShieldQuestion, Wrench
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -208,6 +208,8 @@ type BridgeTokenResponse = {
   installCommand: string;
   connectCommand: string;
   commands: string[];
+  agentId?: string;
+  machineId?: string;
 };
 
 type PermissionProfileId = 'review-required' | 'auto-execute';
@@ -339,6 +341,14 @@ const uiText = {
     generating: 'Generating',
     setupCommand: 'Install and connect',
     connectCommand: 'Connect',
+    repairConnection: 'Repair connection',
+    repairConnectionCommand: 'Repair command',
+    generateRepairCommand: 'Generate repair command',
+    repairCommandHint: 'Run this on the endpoint machine to update Bridge and reconnect this same CLI endpoint.',
+    failedCreateRepairToken: 'Failed to create repair command',
+    agentDetails: 'Details',
+    machineId: 'Machine ID',
+    noCapabilitiesReported: 'No capabilities reported. Reconnect with the latest command.',
     enrollToken: 'Token',
     expiresIn24h: 'Expires in 24h',
     failedCreateBridgeToken: 'Failed to create CLI token',
@@ -480,6 +490,14 @@ const uiText = {
     generating: '生成中',
     setupCommand: '安装并连接',
     connectCommand: '连接',
+    repairConnection: '修复连接',
+    repairConnectionCommand: '修复命令',
+    generateRepairCommand: '生成修复命令',
+    repairCommandHint: '在这个端点所在机器上运行，用最新 Bridge 重连同一个 CLI 端。',
+    failedCreateRepairToken: '创建修复命令失败',
+    agentDetails: '详情',
+    machineId: 'Machine ID',
+    noCapabilitiesReported: '尚未上报能力。请用最新命令重新连接。',
     enrollToken: 'Token',
     expiresIn24h: '24 小时内有效',
     failedCreateBridgeToken: '创建 CLI token 失败',
@@ -3458,6 +3476,10 @@ function SettingsModal({
   const [tokenError, setTokenError] = useState('');
   const [generatingToken, setGeneratingToken] = useState(false);
   const [deletingAgentId, setDeletingAgentId] = useState('');
+  const [expandedAgentId, setExpandedAgentId] = useState(selectedAgentId || '');
+  const [repairingAgentId, setRepairingAgentId] = useState('');
+  const [repairTokens, setRepairTokens] = useState<Record<string, BridgeTokenResponse>>({});
+  const [repairErrorByAgent, setRepairErrorByAgent] = useState<Record<string, string>>({});
   const [copiedCommand, setCopiedCommand] = useState('');
   const cliSectionRef = useRef<HTMLDivElement | null>(null);
   const generateToken = async () => {
@@ -3489,6 +3511,8 @@ function SettingsModal({
     (tokenInfo ? `${tokenInfo.installCommand} && ${tokenInfo.connectCommand}` : '');
   const alternateProfile = tokenInfo?.permissionProfile === 'auto-execute' ? 'review-required' : 'auto-execute';
   const alternateSetupCommand = tokenInfo ? profileCommand(alternateProfile) : '';
+  const repairProfileCommand = (info: BridgeTokenResponse | undefined, profileId: PermissionProfileId) =>
+    info?.permissionProfiles?.find((profile) => profile.id === profileId)?.setupCommand || '';
   const copyCommand = async (value: string, key: string) => {
     await copyText(value);
     setCopiedCommand(key);
@@ -3504,11 +3528,31 @@ function SettingsModal({
         localStorage.removeItem('codexBridge.selectedAgentId');
         onSelectAgent('');
       }
+      if (expandedAgentId === agent.id) setExpandedAgentId('');
       await onAgentsChanged();
     } catch (err) {
       setTokenError(err instanceof Error ? err.message : t.failedDeleteAgent);
     } finally {
       setDeletingAgentId('');
+    }
+  };
+  const generateRepairToken = async (agent: Agent) => {
+    setRepairingAgentId(agent.id);
+    setRepairErrorByAgent((prev) => ({ ...prev, [agent.id]: '' }));
+    try {
+      const data = await api<BridgeTokenResponse>(`/api/agents/${encodeURIComponent(agent.id)}/repair-token`, {
+        method: 'POST',
+        body: JSON.stringify({ permissionProfile: 'review-required' }),
+      });
+      setRepairTokens((prev) => ({ ...prev, [agent.id]: data }));
+      await onAgentsChanged();
+    } catch (err) {
+      setRepairErrorByAgent((prev) => ({
+        ...prev,
+        [agent.id]: err instanceof Error ? err.message : t.failedCreateRepairToken,
+      }));
+    } finally {
+      setRepairingAgentId('');
     }
   };
 
@@ -3591,61 +3635,131 @@ function SettingsModal({
           <div className="space-y-3">
             <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.agentsRuntime}</h3>
             <div className="space-y-2">
-              {agents.length ? agents.map((agent) => (
-                <div
-                  key={agent.id}
-                  onClick={() => onSelectAgent(agent.id)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      onSelectAgent(agent.id);
-                    }
-                  }}
-                  className={cn(
-                    "w-full flex cursor-pointer items-center justify-between gap-2 p-2.5 rounded-lg border bg-muted/20 text-left transition-colors",
-                    selectedAgentId === agent.id ? "border-primary/40 bg-primary/5" : "border-border hover:bg-muted/40"
-                  )}
-                >
-                  <span className="flex flex-col min-w-0 flex-1 text-left">
-                    <span className="text-sm font-medium truncate">{agent.name}</span>
-                    <span className="text-xs text-muted-foreground font-mono mt-0.5 truncate">{agent.hostname || agent.machineId}</span>
-                    {agent.online && agent.capabilities && (
-                      <span className="mt-1 text-[10px] text-muted-foreground truncate">
-                        {t.browserApproval}: {orchestrationApprovalMode(agent) === 'auto-execute' ? t.autoExecute : orchestrationCapabilityProblems(agent, t).length ? t.notAvailable : t.available}
-                      </span>
+              {agents.length ? agents.map((agent) => {
+                const expanded = expandedAgentId === agent.id;
+                const repairInfo = repairTokens[agent.id];
+                const selectedRepairCommand =
+                  (repairInfo && repairProfileCommand(repairInfo, repairInfo.permissionProfile)) ||
+                  repairInfo?.setupCommand ||
+                  repairInfo?.commands?.[0] ||
+                  '';
+                const alternateRepairProfile = repairInfo?.permissionProfile === 'auto-execute' ? 'review-required' : 'auto-execute';
+                const alternateRepairCommand = repairInfo ? repairProfileCommand(repairInfo, alternateRepairProfile) : '';
+                return (
+                  <div
+                    key={agent.id}
+                    className={cn(
+                      "rounded-lg border bg-muted/20 transition-colors",
+                      selectedAgentId === agent.id ? "border-primary/40 bg-primary/5" : "border-border"
                     )}
-                  </span>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {selectedAgentId === agent.id && <Check className="h-3.5 w-3.5 text-primary" />}
-                    <div className={cn(
-                      "px-2 py-0.5 rounded-full text-[10px] font-medium border uppercase tracking-wide",
-                      agent.online
-                        ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20 dark:text-emerald-400"
-                        : "bg-muted text-muted-foreground border-border"
-                    )}>
-                      {agent.online ? t.online : t.offline}
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
+                  >
+                    <button
                       type="button"
-                      className="h-7 w-7 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                      onClick={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        deleteAgent(agent);
+                      onClick={() => {
+                        onSelectAgent(agent.id);
+                        setExpandedAgentId(expanded ? '' : agent.id);
                       }}
-                      disabled={deletingAgentId === agent.id}
-                      aria-label={t.deleteCliEndpoint}
-                      title={t.deleteCliEndpoint}
+                      className="w-full flex cursor-pointer items-center justify-between gap-2 p-2.5 text-left"
                     >
-                      {deletingAgentId === agent.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                    </Button>
+                      <span className="flex flex-col min-w-0 flex-1 text-left">
+                        <span className="text-sm font-medium truncate">{agent.name}</span>
+                        <span className="text-xs text-muted-foreground font-mono mt-0.5 truncate">{agent.hostname || agent.machineId}</span>
+                        <span className="mt-1 text-[10px] text-muted-foreground truncate">
+                          {t.browserApproval}: {orchestrationApprovalMode(agent) === 'auto-execute' ? t.autoExecute : orchestrationCapabilityProblems(agent, t).length ? t.notAvailable : t.available}
+                        </span>
+                      </span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {selectedAgentId === agent.id && <Check className="h-3.5 w-3.5 text-primary" />}
+                        <div className={cn(
+                          "px-2 py-0.5 rounded-full text-[10px] font-medium border uppercase tracking-wide",
+                          agent.online
+                            ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20 dark:text-emerald-400"
+                            : "bg-muted text-muted-foreground border-border"
+                        )}>
+                          {agent.online ? t.online : t.offline}
+                        </div>
+                        <ChevronDown className={cn("h-3.5 w-3.5 text-muted-foreground transition-transform", expanded && "rotate-180")} />
+                      </div>
+                    </button>
+                    {expanded && (
+                      <div className="space-y-3 border-t border-border px-2.5 py-3">
+                        <div className="grid gap-1.5 text-xs text-muted-foreground">
+                          <div className="flex items-center justify-between gap-2">
+                            <span>{t.machineId}</span>
+                            <span className="truncate font-mono">{agent.machineId}</span>
+                          </div>
+                          <div className="flex items-center justify-between gap-2">
+                            <span>{t.runner}</span>
+                            <span className="truncate font-mono">{agent.capabilities?.runner || t.notAvailable}</span>
+                          </div>
+                          <div className="flex items-center justify-between gap-2">
+                            <span>{t.workingDirectory}</span>
+                            <span className="truncate font-mono">{agent.workingDirs?.[0] || t.noWorkingDirs}</span>
+                          </div>
+                        </div>
+                        {!agent.capabilities && (
+                          <div className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-700 dark:text-amber-300">
+                            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span>{t.noCapabilitiesReported}</span>
+                          </div>
+                        )}
+                        {agent.capabilities && <CapabilityMatrix agent={agent} t={t} />}
+                        <div className="flex items-center justify-between gap-2">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            className="h-8 gap-1.5"
+                            onClick={() => generateRepairToken(agent)}
+                            disabled={repairingAgentId === agent.id}
+                          >
+                            {repairingAgentId === agent.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Wrench className="h-3.5 w-3.5" />}
+                            {repairingAgentId === agent.id ? t.generating : t.generateRepairCommand}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            type="button"
+                            className="h-8 w-8 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                            onClick={() => deleteAgent(agent)}
+                            disabled={deletingAgentId === agent.id}
+                            aria-label={t.deleteCliEndpoint}
+                            title={t.deleteCliEndpoint}
+                          >
+                            {deletingAgentId === agent.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                          </Button>
+                        </div>
+                        {repairErrorByAgent[agent.id] && (
+                          <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span>{repairErrorByAgent[agent.id]}</span>
+                          </div>
+                        )}
+                        {repairInfo && (
+                          <div className="space-y-2">
+                            <p className="text-xs leading-relaxed text-muted-foreground">{t.repairCommandHint}</p>
+                            <CommandBlock
+                              label={`${t.repairConnectionCommand} · ${t.selectedProfileCommand}`}
+                              value={selectedRepairCommand}
+                              copied={copiedCommand === `repair-${agent.id}`}
+                              onCopy={() => copyCommand(selectedRepairCommand, `repair-${agent.id}`).catch(() => undefined)}
+                              t={t}
+                            />
+                            {alternateRepairCommand && (
+                              <CommandBlock
+                                label={`${t.repairConnectionCommand} · ${t.alternateProfileCommand}`}
+                                value={alternateRepairCommand}
+                                copied={copiedCommand === `repair-alt-${agent.id}`}
+                                onCopy={() => copyCommand(alternateRepairCommand, `repair-alt-${agent.id}`).catch(() => undefined)}
+                                t={t}
+                              />
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                </div>
-              )) : (
+                );
+              }) : (
                 <div className="text-sm text-muted-foreground p-2.5 rounded-lg border border-border bg-muted/20">{t.noAgentsEnrolled}</div>
               )}
             </div>

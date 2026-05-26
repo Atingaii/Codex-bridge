@@ -27,6 +27,9 @@ context in the same `runID`.
   same `runID` to the Bridge with `Resume=true`.
 - The frontend must preserve the selected run and call
   `/api/orchestrations/{runID}/prompts` for follow-ups.
+- Follow-up prompts stay on the run's original `agentId`; switching CLI
+  endpoint requires an explicit new run so the compacted context is not handed
+  to a different machine unexpectedly.
 - While a follow-up is active, the frontend must surface `turn.start`,
   `command.start`, and run status events instead of leaving the user message as
   the only visible item.
@@ -90,6 +93,23 @@ User message cards render attached file metadata from `event.data.files`.
 The right-side file panel also shows `OrchestrationRun.files` for the selected
 run when no draft files are pending, so historical uploads remain discoverable
 after the draft upload list is cleared.
+Follow-up prompts preserve previously uploaded run file metadata even when no
+new files are attached. New follow-up uploads are merged into the run-level
+metadata while each `user.message` event still records only that prompt's
+attachments.
+Successful turn-end events carry the final turn content so the UI can show the
+final answer after command events instead of visually ending on the last
+`command.end` card.
+Every successful turn-end must leave a human-readable conclusion visible at the
+end of the timeline. Machine-readable `Msg:` and `Handoff:` lines are preserved
+for orchestration control, but they do not count as the user-facing conclusion.
+When a CLI response only contains progress text, command output, or contract
+lines, Bridge appends a concise turn/final conclusion derived from the current
+turn's command state and prior handoffs.
+The browser event stream is only kept open for active runs. Completed, failed,
+or canceled runs are read from persisted Hub events and show the stream as idle,
+so the stream indicator cannot be confused with the selected worker's online
+state.
 
 ## Implementation Steps
 
@@ -115,6 +135,15 @@ after the draft upload list is cleared.
     active runtime or completed duration in the frontend timeline.
 13. Mark active orchestration runs failed with a visible `run.error` event when
     their Bridge connection disconnects or restarts.
+14. Preserve run-level file metadata across follow-up prompts and merge new
+    follow-up uploads without duplicating existing file entries.
+15. Emit successful `turn.end` content and render contentful turn-end events as
+    final answer cards after command events.
+16. Ensure every successful turn-end has a user-readable conclusion, including
+    early `resolved` turns and verifier turns, while preserving `Msg:` and
+    `Handoff:` contract lines.
+17. Only open `/ws/orchestrations` for active runs; terminal runs should use
+    persisted events and show an idle event stream.
 
 ## Exit Gates
 
@@ -141,6 +170,14 @@ after the draft upload list is cleared.
   selected-run files remain visible in the side panel after send.
 - Active orchestration runs do not remain permanently `running` after their
   Bridge disconnects or restarts.
+- Continuing a run without new uploads keeps the original uploaded files visible
+  in the selected-run side panel.
+- A final response carried on `turn.end.content` is visible in the timeline
+  after command cards.
+- A turn that otherwise ends with only command output or machine-readable
+  `Msg:`/`Handoff:` lines still renders a concise human-readable conclusion as
+  the last visible message for that turn.
+- Selecting a completed run does not show the browser event stream as connected.
 
 ## Reviewer Q&A
 

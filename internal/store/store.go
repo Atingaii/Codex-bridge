@@ -165,6 +165,19 @@ func (s *Store) Migrate(ctx context.Context) error {
 			FOREIGN KEY (run_id) REFERENCES orchestration_runs(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_orchestration_events_run_seq ON orchestration_events(run_id, seq);`,
+		`CREATE TABLE IF NOT EXISTS conversation_shares (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			kind TEXT NOT NULL CHECK(kind IN ('chat','orchestration')),
+			target_id TEXT NOT NULL,
+			title TEXT,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (user_id) REFERENCES users(id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_conversation_shares_target ON conversation_shares(user_id, kind, target_id, revoked_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_conversation_shares_active ON conversation_shares(id, revoked_at);`,
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -620,6 +633,15 @@ func (s *Store) SessionByID(ctx context.Context, id, userID string) (Session, er
 	return scanSession(row)
 }
 
+func (s *Store) SessionByIDAnyUser(ctx context.Context, id string) (Session, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, agent_id, user_id, COALESCE(title,''), COALESCE(remote_thread_id,''), created_at, updated_at
+		FROM sessions
+		WHERE id = ?
+	`, id)
+	return scanSession(row)
+}
+
 func (s *Store) ListSessions(ctx context.Context, userID string, limit int) ([]Session, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
@@ -716,6 +738,134 @@ type Message struct {
 	Content   string `json:"content"`
 	UsageJSON string `json:"usageJson,omitempty"`
 	CreatedAt int64  `json:"createdAt"`
+}
+
+const (
+	ShareKindChat          = "chat"
+	ShareKindOrchestration = "orchestration"
+)
+
+type ConversationShare struct {
+	ID        string `json:"id"`
+	UserID    string `json:"userId"`
+	Kind      string `json:"kind"`
+	TargetID  string `json:"targetId"`
+	Title     string `json:"title,omitempty"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
+	RevokedAt int64  `json:"revokedAt,omitempty"`
+}
+
+func (s *Store) CreateOrUpdateConversationShare(ctx context.Context, userID, kind, targetID, title string) (ConversationShare, error) {
+	userID = strings.TrimSpace(userID)
+	targetID = strings.TrimSpace(targetID)
+	kind = strings.TrimSpace(kind)
+	if userID == "" || targetID == "" {
+		return ConversationShare{}, errors.New("user id and target id are required")
+	}
+	if kind != ShareKindChat && kind != ShareKindOrchestration {
+		return ConversationShare{}, errors.New("share kind must be chat or orchestration")
+	}
+	title = cleanShareTitle(title)
+	now := time.Now().Unix()
+	share, err := s.activeConversationShareByTarget(ctx, userID, kind, targetID)
+	if err == nil {
+		_, err = s.db.ExecContext(ctx, `
+			UPDATE conversation_shares
+			SET title = ?, updated_at = ?
+			WHERE id = ? AND revoked_at IS NULL
+		`, nullString(title), now, share.ID)
+		if err != nil {
+			return ConversationShare{}, err
+		}
+		share.Title = title
+		share.UpdatedAt = now
+		return share, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return ConversationShare{}, err
+	}
+	share = ConversationShare{
+		ID:        NewToken("shr"),
+		UserID:    userID,
+		Kind:      kind,
+		TargetID:  targetID,
+		Title:     title,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO conversation_shares (id, user_id, kind, target_id, title, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, share.ID, userID, kind, targetID, nullString(title), now, now)
+	if err != nil {
+		return ConversationShare{}, err
+	}
+	return share, nil
+}
+
+func (s *Store) ActiveConversationShareByID(ctx context.Context, id string) (ConversationShare, error) {
+	id = CleanToken(id)
+	if id == "" {
+		return ConversationShare{}, ErrNotFound
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, kind, target_id, COALESCE(title,''), created_at, updated_at, COALESCE(revoked_at,0)
+		FROM conversation_shares
+		WHERE id = ? AND revoked_at IS NULL
+	`, id)
+	return scanConversationShare(row)
+}
+
+func (s *Store) RevokeConversationShare(ctx context.Context, id, userID string) error {
+	id = CleanToken(id)
+	userID = strings.TrimSpace(userID)
+	if id == "" || userID == "" {
+		return ErrNotFound
+	}
+	now := time.Now().Unix()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE conversation_shares
+		SET revoked_at = ?, updated_at = ?
+		WHERE id = ? AND user_id = ? AND revoked_at IS NULL
+	`, now, now, id, userID)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) activeConversationShareByTarget(ctx context.Context, userID, kind, targetID string) (ConversationShare, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, kind, target_id, COALESCE(title,''), created_at, updated_at, COALESCE(revoked_at,0)
+		FROM conversation_shares
+		WHERE user_id = ? AND kind = ? AND target_id = ? AND revoked_at IS NULL
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, userID, kind, targetID)
+	return scanConversationShare(row)
+}
+
+func scanConversationShare(row interface{ Scan(dest ...any) error }) (ConversationShare, error) {
+	var share ConversationShare
+	if err := row.Scan(&share.ID, &share.UserID, &share.Kind, &share.TargetID, &share.Title, &share.CreatedAt, &share.UpdatedAt, &share.RevokedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ConversationShare{}, ErrNotFound
+		}
+		return ConversationShare{}, err
+	}
+	return share, nil
+}
+
+func cleanShareTitle(title string) string {
+	title = strings.TrimSpace(title)
+	if runes := []rune(title); len(runes) > 120 {
+		return string(runes[:120])
+	}
+	return title
 }
 
 func (s *Store) AddMessage(ctx context.Context, sessionID, role, content, usageJSON string) (Message, error) {
@@ -1117,16 +1267,22 @@ func (s *Store) AddOrchestrationEvent(ctx context.Context, event OrchestrationEv
 }
 
 func (s *Store) ListOrchestrationEvents(ctx context.Context, runID string, limit int) ([]OrchestrationEvent, error) {
-	if limit <= 0 || limit > 2000 {
+	if limit <= 0 {
 		limit = 1000
+	} else if limit > 10000 {
+		limit = 10000
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, run_id, seq, kind, COALESCE(role,''), COALESCE(cli,''), COALESCE(turn_id,''),
 			COALESCE(content,''), COALESCE(status,''), COALESCE(error,''), COALESCE(data_json,''), created_at
-		FROM orchestration_events
-		WHERE run_id = ?
+		FROM (
+			SELECT id, run_id, seq, kind, role, cli, turn_id, content, status, error, data_json, created_at
+			FROM orchestration_events
+			WHERE run_id = ?
+			ORDER BY seq DESC
+			LIMIT ?
+		)
 		ORDER BY seq ASC
-		LIMIT ?
 	`, runID, limit)
 	if err != nil {
 		return nil, err

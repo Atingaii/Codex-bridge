@@ -116,6 +116,474 @@ func TestOrchestrationCodexUsesAppServerWhenApprovalIsRequired(t *testing.T) {
 	}
 }
 
+func TestCCBHelpersParseJobAndResult(t *testing.T) {
+	jobID := parseCCBJobID("accepted job=job_abc-123 target=codex\n[CCB_ASYNC_SUBMITTED job=job_abc-123 target=codex]")
+	if jobID != "job_abc-123" {
+		t.Fatalf("job id = %q", jobID)
+	}
+	result := parseCCBWatchResult("observer_view: watch\nstatus: completed\nreply: final line\nmore detail\njob_id: job_abc")
+	if result.Status != "completed" || result.Reply != "final line\nmore detail" {
+		t.Fatalf("result = %#v", result)
+	}
+	result = parseCCBWatchResult("status: completed\nreply: 检查结论：通过\n剩余风险：无\njob_id: job_abc")
+	if result.Reply != "检查结论：通过\n剩余风险：无" {
+		t.Fatalf("metadata parser stripped reply detail incorrectly: %#v", result)
+	}
+	result = parseCCBWatchResult("status: completed\nreply: Summary: ok\nStatus: verified\njob_id: job_abc")
+	if result.Reply != "Summary: ok\nStatus: verified" {
+		t.Fatalf("metadata parser stripped status detail incorrectly: %#v", result)
+	}
+}
+
+func TestCCBFinalReplyDoesNotExposeRawObserverDump(t *testing.T) {
+	output := strings.Join([]string{
+		"observer_view: watch",
+		"observer_authority: supplementary_snapshot",
+		"event: evt_1 job_parent codex job_completed 2026-05-26T00:00:00Z",
+		"event: evt_2 job_parent codex job_delegated_callback 2026-05-26T00:00:01Z",
+		"watch_status: terminal",
+		"job_id: job_parent",
+		"status: completed",
+		"reply:",
+	}, "\n")
+	reply, synthesized := ccbFinalReply(ccbJobResult{Status: "completed"}, output, &ccbWatchStreamState{
+		events: []ccbWatchStreamEvent{
+			{Data: map[string]any{"agent": "codex", "eventType": "job_accepted"}},
+			{Data: map[string]any{"agent": "codex", "eventType": "job_delegated_callback", "payload": map[string]any{"callback_child_job_id": "job_child"}}},
+		},
+	}, "codex")
+	if !synthesized {
+		t.Fatal("empty observer reply should be synthesized")
+	}
+	if strings.Contains(reply, "observer_view") || strings.Contains(reply, "evt_") {
+		t.Fatalf("raw observer dump leaked into reply:\n%s", reply)
+	}
+	for _, want := range []string{"CCB ended without a final user-visible reply", "Observed codex", "job_child"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply missing %q:\n%s", want, reply)
+		}
+	}
+}
+
+func TestDetectCCBTerminalPromptRecognizesCodexTrustPrompt(t *testing.T) {
+	lines := []string{
+		"Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.",
+		"› 1. Yes, continue",
+		"2. No, quit",
+		"Press enter to continue",
+	}
+	prompt, ok := detectCCBTerminalPrompt(lines)
+	if !ok {
+		t.Fatal("trust prompt was not detected")
+	}
+	if prompt.Type != "workspace_trust" || prompt.Input != "Enter" {
+		t.Fatalf("prompt = %#v", prompt)
+	}
+	if !strings.Contains(prompt.Reason, "Do you trust") || !strings.Contains(prompt.Command, "Enter") {
+		t.Fatalf("prompt text = %#v", prompt)
+	}
+}
+
+func TestCCBTerminalInputArgsUsesSameTmuxPane(t *testing.T) {
+	got := ccbTerminalInputArgs("/tmp/ccb/tmux.sock", "%7", "Enter")
+	want := []string{"-S", "/tmp/ccb/tmux.sock", "send-keys", "-t", "%7", "Enter"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+func TestCCBWatchStreamLineEvent(t *testing.T) {
+	event, ok := ccbWatchStreamLineEvent("event: evt_1 job_abc codex completion_item 2026-05-26T00:00:00Z", nil)
+	if !ok {
+		t.Fatal("event line was not emitted")
+	}
+	if event.Content != "CCB codex: completion item" {
+		t.Fatalf("content = %q", event.Content)
+	}
+	if event.Data["eventType"] != "completion_item" || event.Data["jobId"] != "job_abc" || event.Data["target"] != "codex" {
+		t.Fatalf("data = %#v", event.Data)
+	}
+	if _, ok := ccbWatchStreamLineEvent("observer_view: watch", nil); ok {
+		t.Fatal("observer metadata should not be emitted")
+	}
+	event, ok = ccbWatchStreamLineEvent("reply: final answer", nil)
+	if !ok || event.Content != "final answer" {
+		t.Fatalf("reply event = %#v ok=%v", event, ok)
+	}
+}
+
+func TestCCBWatchStreamLineEventExtractsAgentTextPayload(t *testing.T) {
+	line := `event: evt_1 job_abc codex completion_item {"kind":"assistant_chunk","agent_name":"codex","payload":{"merged_text":"hello from codex"}}`
+	event, ok := ccbWatchStreamLineEvent(line, &ccbWatchStreamState{})
+	if !ok {
+		t.Fatal("completion item line was not emitted")
+	}
+	if event.Content != "hello from codex" || event.Data["agent"] != "codex" || event.Data["contentKind"] != "agent_text" {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
+func TestCCBStructuredWatchEventExtractsCompletionPayload(t *testing.T) {
+	record := map[string]any{
+		"event_id":    "evt_1",
+		"job_id":      "job_abc",
+		"agent_name":  "codex",
+		"target_name": "codex",
+		"type":        "completion_item",
+		"timestamp":   "2026-05-26T00:00:00Z",
+		"payload": map[string]any{
+			"kind":       "assistant_chunk",
+			"agent_name": "codex",
+			"payload": map[string]any{
+				"merged_text": "hello from codex",
+			},
+		},
+	}
+	event, ok := ccbStructuredWatchStreamEvent(record, &ccbWatchStreamState{})
+	if !ok {
+		t.Fatal("structured completion item was not emitted")
+	}
+	if event.Content != "hello from codex" || event.Data["agent"] != "codex" || event.Data["contentKind"] != "agent_text" {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
+func TestCCBStructuredWatchEventDiscoversCallbackJobs(t *testing.T) {
+	record := map[string]any{
+		"event_id":   "evt_2",
+		"job_id":     "job_parent",
+		"agent_name": "codex",
+		"type":       "job_delegated_callback",
+		"payload": map[string]any{
+			"callback_child_job_id": "job_child",
+		},
+	}
+	ids := ccbRelatedJobIDs(record)
+	if strings.Join(ids, ",") != "job_parent,job_child" {
+		t.Fatalf("related ids = %#v", ids)
+	}
+	event, ok := ccbStructuredWatchStreamEvent(record, nil)
+	if !ok || !strings.Contains(event.Content, "job_child") {
+		t.Fatalf("callback event = %#v ok=%v", event, ok)
+	}
+}
+
+func TestCCBSocketWatchCompleteRequiresCallbackFollowup(t *testing.T) {
+	jobs := map[string]*ccbSocketWatchJob{
+		"job_parent": {Terminal: true, PendingCallback: true},
+	}
+	if ccbSocketWatchComplete(jobs, "job_parent", ccbWatchBatch{Status: "completed"}) {
+		t.Fatal("callback parent should not complete before a final visible reply is available")
+	}
+	if !ccbSocketWatchComplete(jobs, "job_parent", ccbWatchBatch{Status: "completed", Reply: "final"}) {
+		t.Fatal("callback parent should complete as soon as CCB exposes a final visible reply")
+	}
+	jobs["job_child"] = &ccbSocketWatchJob{Terminal: true}
+	if !ccbSocketWatchComplete(jobs, "job_parent", ccbWatchBatch{Status: "completed"}) {
+		t.Fatal("callback parent with no reply should complete after related jobs are terminal")
+	}
+}
+
+func TestCCBCompletionItemTextPrefersReadableDelta(t *testing.T) {
+	got := ccbCompletionItemText("assistant_chunk", map[string]any{
+		"text":        "second",
+		"merged_text": "first\nsecond",
+	})
+	if got != "second" {
+		t.Fatalf("completion text = %q", got)
+	}
+}
+
+func TestSanitizeCCBConsoleLinesRedactsSecretsAndANSI(t *testing.T) {
+	lines := sanitizeCCBConsoleLines("\x1b[31mOPENAI_API_KEY=sk-test\nAuthorization: Bearer abc.def\nplain\x1b[0m\n", 10)
+	got := strings.Join(lines, "\n")
+	if strings.Contains(got, "\x1b") || strings.Contains(got, "sk-test") || strings.Contains(got, "abc.def") {
+		t.Fatalf("console was not sanitized:\n%s", got)
+	}
+	if !strings.Contains(got, "OPENAI_API_KEY=[REDACTED]") || !strings.Contains(got, "[REDACTED]") || !strings.Contains(got, "plain") {
+		t.Fatalf("console redaction lost expected text:\n%s", got)
+	}
+}
+
+func TestCCBProviderSessionToolEvents(t *testing.T) {
+	startLine := []byte(`{"timestamp":"2026-05-26T12:06:50.891Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"command ask --callback claude -- \\\"Reply OK\\\"\",\"workdir\":\"/tmp/work\"}","call_id":"call_1"}}`)
+	start := ccbProviderSessionToolEvent(startLine)
+	if start == nil || start.Status != "in_progress" || start.ID != "call_1" || start.Command != `command ask --callback claude -- "Reply OK"` {
+		t.Fatalf("start event = %#v", start)
+	}
+	endLine := []byte(`{"timestamp":"2026-05-26T12:06:51.388Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"Chunk ID: abc\nWall time: 0.1 seconds\nProcess exited with code 0\nOriginal token count: 26\nOutput:\naccepted job=job_child target=claude\n[CCB_ASYNC_SUBMITTED job=job_child target=claude]\n"}}`)
+	end := ccbProviderSessionToolEvent(endLine)
+	if end == nil || end.Status != "completed" || end.ID != "call_1" {
+		t.Fatalf("end event = %#v", end)
+	}
+	if strings.Contains(end.Output, "Chunk ID:") || !strings.Contains(end.Output, "accepted job=job_child") {
+		t.Fatalf("output not cleaned for readers:\n%s", end.Output)
+	}
+}
+
+func TestParseCCBSocketPath(t *testing.T) {
+	got := parseCCBSocketPath("start_status: ok\nsocket_path: /tmp/ccb-runtime/ccbd.sock\nagents: codex, claude\n")
+	if got != "/tmp/ccb-runtime/ccbd.sock" {
+		t.Fatalf("socket path = %q", got)
+	}
+}
+
+func TestCCBTraceReplyEventsExtractAgentReplies(t *testing.T) {
+	events := ccbTraceReplyEvents("reply: id=rep_1 message=msg_1 attempt=att_1 agent=claude terminal=completed size=24 notice=false kind=None reason=task_complete finished=2026-05-26T00:00:00Z preview=hello from claude\n")
+	if len(events) != 1 {
+		t.Fatalf("events = %#v", events)
+	}
+	if events[0].CLI != "claude" || events[0].Role != "claude" || events[0].Content != "hello from claude" {
+		t.Fatalf("event = %#v", events[0])
+	}
+}
+
+func TestCCBTraceReplyEventsFromPayloadSkipsAlreadyStreamedText(t *testing.T) {
+	state := &ccbWatchStreamState{agentContent: map[string]string{"claude": "hello from claude"}}
+	payload := map[string]any{
+		"replies": []any{
+			map[string]any{
+				"reply_id":        "rep_1",
+				"message_id":      "msg_1",
+				"attempt_id":      "att_1",
+				"agent_name":      "claude",
+				"terminal_status": "completed",
+				"reply":           "hello from claude",
+				"finished_at":     "2026-05-26T00:00:00Z",
+			},
+			map[string]any{
+				"reply_id":        "rep_2",
+				"message_id":      "msg_2",
+				"attempt_id":      "att_2",
+				"agent_name":      "codex",
+				"terminal_status": "completed",
+				"reply":           "hello from codex",
+				"finished_at":     "2026-05-26T00:00:01Z",
+			},
+		},
+	}
+	events := ccbTraceReplyEventsFromPayload(payload, state)
+	if len(events) != 1 || events[0].Role != "codex" || events[0].Content != "hello from codex" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestCCBDefaultTargetIsCodex(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.CCBTarget = ""
+	manager := NewOrchestrationManager(&cfg)
+	if got := manager.ccbTarget(); got != "codex" {
+		t.Fatalf("ccb target = %q", got)
+	}
+}
+
+func TestOrchestrationCCBEnvPrependsConfiguredCLIDirs(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = "/opt/codex/bin/codex"
+	cfg.Bridge.ClaudePath = "/opt/claude/bin/claude"
+	cfg.Bridge.CCBPath = "/opt/ccb/ccb"
+
+	env := orchestrationCCBEnv([]string{"PATH=/usr/bin", "BRIDGE_CODEX_PATH=old"}, &cfg)
+	path := envValue(env, "PATH")
+	for _, want := range []string{"/opt/codex/bin", "/opt/claude/bin", "/opt/ccb", "/usr/bin"} {
+		if !strings.Contains(path, want) {
+			t.Fatalf("PATH %q missing %q", path, want)
+		}
+	}
+	if got := envValue(env, "BRIDGE_CODEX_PATH"); got != cfg.Bridge.CodexPath {
+		t.Fatalf("BRIDGE_CODEX_PATH = %q, want %q", got, cfg.Bridge.CodexPath)
+	}
+	if got := envValue(env, "BRIDGE_CLAUDE_PATH"); got != cfg.Bridge.ClaudePath {
+		t.Fatalf("BRIDGE_CLAUDE_PATH = %q, want %q", got, cfg.Bridge.ClaudePath)
+	}
+	if got := envValue(env, "BRIDGE_CCB_PATH"); got != cfg.Bridge.CCBPath {
+		t.Fatalf("BRIDGE_CCB_PATH = %q, want %q", got, cfg.Bridge.CCBPath)
+	}
+}
+
+func TestEnsureCCBConfigWritesOnlyCodexAndClaudeWhenMissing(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := config.Default()
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	if err := manager.ensureCCBConfig(protocol.OrchestrationStartPayload{}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(tmp, ".ccb", "ccb.config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != "codex:codex, claude:claude" {
+		t.Fatalf("ccb config = %q", got)
+	}
+}
+
+func TestEnsureCCBConfigAllowsExistingCodexClaudeConfig(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, ".ccb", "ccb.config")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte("cmd; codex:codex, claude:claude\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	if err := manager.ensureCCBConfig(protocol.OrchestrationStartPayload{}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(raw); got != "cmd; codex:codex, claude:claude\n" {
+		t.Fatalf("existing ccb config overwritten: %q", got)
+	}
+}
+
+func TestEnsureCCBConfigRejectsExistingNonCodexClaudeConfig(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, ".ccb", "ccb.config")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte("codex:codex, claude:claude, gemini:gemini\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	err := manager.ensureCCBConfig(protocol.OrchestrationStartPayload{})
+	if err == nil || !strings.Contains(err.Error(), "must declare only") {
+		t.Fatalf("expected restricted config error, got %v", err)
+	}
+}
+
+func TestOrchestrationSuccessfulTurnEndCarriesFinalContent(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudePrintScript("我会先检查。")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexExecScript("最终结论：构建通过。\n\n已验证：`isabelle build -D .`。\n\n剩余风险：仍有 sorry 占位。")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_final",
+		Mode:     "collaboration",
+		Prompt:   "检查证明框架",
+		MaxTurns: 2,
+		CWD:      tmp,
+	})
+
+	var sawFinalTurnEnd bool
+	for len(out) > 0 {
+		env := <-out
+		if env.Type != protocol.TypeOrchestrationEvent {
+			continue
+		}
+		event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == "turn.end" && event.CLI == "codex" && strings.Contains(event.Content, "最终结论") {
+			sawFinalTurnEnd = true
+			if !strings.Contains(event.Content, "sorry") {
+				t.Fatalf("final turn.end content lost risk detail: %#v", event)
+			}
+		}
+	}
+	if !sawFinalTurnEnd {
+		t.Fatal("codex final turn.end did not carry final content")
+	}
+}
+
+func TestOrchestrationResolvedMachineOnlyTurnGetsReadableConclusion(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudePrintScript("Msg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=none; next=none; risks=none")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexExecScript("unused")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_machine_only",
+		Mode:     "collaboration",
+		Prompt:   "检查证明框架",
+		MaxTurns: 1,
+		CWD:      tmp,
+	})
+
+	var sawReadableConclusion bool
+	for len(out) > 0 {
+		env := <-out
+		if env.Type != protocol.TypeOrchestrationEvent {
+			continue
+		}
+		event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == "turn.end" && event.CLI == "claude" {
+			if !strings.Contains(event.Content, "最终结论") {
+				t.Fatalf("machine-only turn.end did not get readable conclusion: %#v", event)
+			}
+			if !strings.Contains(event.Content, "Msg: to=user") || !strings.Contains(event.Content, "Handoff: status=resolved") {
+				t.Fatalf("machine contract lines were not preserved: %#v", event)
+			}
+			sawReadableConclusion = true
+		}
+	}
+	if !sawReadableConclusion {
+		t.Fatal("did not see readable turn.end conclusion")
+	}
+}
+
+func TestOrchestrationErroredFinalVerifierGetsReadableConclusion(t *testing.T) {
+	record := newOrchestrationTurnRecord("orc_1-verifier", "verifier", "codex", "", nil)
+	record.Verifier = true
+	record.Err = "server_error"
+
+	summary := erroredTurnFallbackSummary(
+		"检查 Isabelle 证明框架",
+		true,
+		[]orchestrationTurn{{
+			TurnID:  "orc_1-01",
+			Role:    "implementer",
+			CLI:     "claude",
+			Content: "本轮结论：已经创建可编译证明框架。",
+		}},
+		record,
+	)
+	if !strings.Contains(summary, "最终结论") {
+		t.Fatalf("errored verifier fallback missing final conclusion:\n%s", summary)
+	}
+}
+
 func TestOrchestrationScanClaudeJSONLEmitsToolEvents(t *testing.T) {
 	input := strings.NewReader(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_1","name":"Bash","input":{"command":"mkdir -p isabelle_bridge_demo"}}]}}
 {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_1","content":"created\n"}]}}
@@ -293,6 +761,67 @@ func TestComposeOrchestrationPromptUsesCompactHandoffs(t *testing.T) {
 	}
 }
 
+func TestComposeOrchestrationPromptRequiresGoalProgressAudit(t *testing.T) {
+	prompt := composeOrchestrationPrompt("collaboration", "先消除主定理的 sorry", "", false, "reviewer", "codex", 2, 4, []orchestrationTurn{{
+		Role:    "implementer",
+		CLI:     "claude",
+		Content: "本轮结论：只是确认项目能编译。\n\nHandoff: status=needs_next; changed=none; verified=isabelle build -D .; next=remove main theorem sorry; risks=main theorem sorry still present",
+		HandoffFields: orchestrationHandoffFields{
+			Status:   "needs_next",
+			Verified: "isabelle build -D .",
+			Next:     "remove main theorem sorry",
+			Risks:    "main theorem sorry still present",
+		},
+	}})
+	for _, want := range []string{
+		"Latest user task is authoritative",
+		"Explicitly audit whether the previous turn advanced the user's core acceptance criterion",
+		"do not treat a narrow validation such as compiling as resolved",
+		"main theorem sorry still present",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestFormatCompactPriorTurnDoesNotRecurseThroughFallbackConclusions(t *testing.T) {
+	turn := newOrchestrationTurnRecord("turn_1", "implementer", "claude", strings.Join([]string{
+		"本轮结论：本轮编排已完成，并已记录当前可确认的结果。",
+		"",
+		"结果概览：本轮结论：本轮编排已完成，并已记录当前可确认的结果。",
+		"",
+		"已验证：执行完成：`ToolSearch`。",
+		"",
+		"剩余风险：主定理 sorry 仍未消除。",
+	}, "\n"), nil)
+	got := formatCompactPriorTurn(turn)
+	if strings.Contains(got, "结果概览") || strings.Count(got, "本轮结论") > 1 {
+		t.Fatalf("compact prior turn kept recursive fallback text:\n%s", got)
+	}
+	if !strings.Contains(got, "主定理 sorry") {
+		t.Fatalf("compact prior turn lost concrete risk:\n%s", got)
+	}
+}
+
+func TestFormatCompactPriorTurnCarriesFailedCommands(t *testing.T) {
+	exitCode := 1
+	turn := orchestrationTurn{
+		Role:          "implementer",
+		CLI:           "claude",
+		HandoffFields: orchestrationHandoffFields{Status: "needs_next", Next: "fix failed command", Risks: "mkdir failed repeatedly"},
+		Tools: []RunnerToolEvent{
+			{ID: "cmd_1", Status: "failed", Command: "mkdir -p /root/Isabelle", Output: "Permission denied", ExitCode: &exitCode},
+		},
+	}
+	got := formatCompactPriorTurn(turn)
+	for _, want := range []string{"failed:", "mkdir -p /root/Isabelle", "Permission denied"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("compact prior turn missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestParseHandoffFieldsAndCompactPromptAvoidsRawTranscript(t *testing.T) {
 	fields := parseHandoffFields("Handoff: status=needs_next; changed=main.go, README.md; verified=go test ./...; next=fix lint; risks=doc drift")
 	if fields.Status != "needs_next" || fields.Changed != "main.go, README.md" || fields.Verified != "go test ./..." || fields.Next != "fix lint" || fields.Risks != "doc drift" {
@@ -370,6 +899,258 @@ func TestFinalVerifierRunsOnlyWhenRiskSignalsExist(t *testing.T) {
 	}
 }
 
+func TestRepeatedBlockedHandoffStopsRunAsFailed(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	blocked := strings.Join([]string{
+		"结论：没有推进主目标，创建 /root/Isabelle 的写入权限异常仍在阻塞。",
+		"",
+		"Msg: to=reviewer; intent=review; need=none",
+		"Handoff: status=blocked; changed=none; verified=none; next=create /root/Isabelle; risks=permission layer blocks mkdir",
+	}, "\n")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudePrintScript(blocked)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexExecScript(blocked)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_blocked",
+		Mode:     "collaboration",
+		Prompt:   "先消除主定理的 sorry",
+		MaxTurns: 6,
+		CWD:      tmp,
+	})
+
+	var runError protocol.OrchestrationEventPayload
+	turnStarts := 0
+	for len(out) > 0 {
+		env := <-out
+		if env.Type != protocol.TypeOrchestrationEvent {
+			continue
+		}
+		event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == "turn.start" {
+			turnStarts++
+		}
+		if event.Kind == "run.error" {
+			runError = event
+		}
+	}
+	if runError.Kind != "run.error" || !strings.Contains(runError.Error, "repeated blocker") {
+		t.Fatalf("missing repeated-blocker run.error: %#v", runError)
+	}
+	if turnStarts >= 6 {
+		t.Fatalf("run should stop before exhausting all turns, saw %d starts", turnStarts)
+	}
+}
+
+func TestUnresolvedFinalHandoffFailsRun(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	claudeDone := "结论：已确认任务，但还没有消除主定理 sorry。\n\nMsg: to=reviewer; intent=review; need=check main theorem sorry\nHandoff: status=needs_next; changed=none; verified=none; next=remove main theorem sorry; risks=主定理 sorry 仍未消除"
+	codexDone := "结论：复查后确认主定理 sorry 仍未消除，不能算完成。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=needs_next; changed=none; verified=isabelle build -D /root/Isabelle; next=remove main theorem sorry; risks=主定理 sorry 仍未消除"
+	if err := os.WriteFile(claudePath, []byte(fakeClaudePrintScript(claudeDone)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexExecScript(codexDone)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_unresolved_final",
+		Mode:     "collaboration",
+		Prompt:   "先消除主定理的 sorry",
+		MaxTurns: 2,
+		CWD:      tmp,
+	})
+
+	var sawRunError bool
+	for len(out) > 0 {
+		env := <-out
+		if env.Type != protocol.TypeOrchestrationEvent {
+			continue
+		}
+		event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == "run.end" {
+			t.Fatalf("unresolved final handoff should not complete run: %#v", event)
+		}
+		if event.Kind == "run.error" {
+			sawRunError = true
+			if !strings.Contains(event.Error, "主定理 sorry") {
+				t.Fatalf("run.error lost unresolved goal: %#v", event)
+			}
+		}
+	}
+	if !sawRunError {
+		t.Fatal("missing run.error for unresolved final handoff")
+	}
+}
+
+func TestResolvedHandoffWithContradictoryAcceptanceEvidenceFailsRun(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_1", "implementer", "claude", "结论：尝试处理用户要求。", nil),
+		newOrchestrationTurnRecord("turn_2", "reviewer", "codex", "最终结论：已检查，验收标准未满足，不能把当前状态视为完成。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=result.txt; verified=check acceptance; next=none; risks=none", []RunnerToolEvent{
+			{ID: "cmd_1", Status: "completed", Command: "check acceptance", Output: "acceptance criterion is not satisfied", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("检查最终状态", history, workspaceChangeReport{})
+	if !unresolved {
+		t.Fatal("resolved handoff with contradictory acceptance evidence should fail")
+	}
+	if !strings.Contains(reason, "acceptance criterion is not satisfied") {
+		t.Fatalf("reason should mention contradictory acceptance evidence: %q", reason)
+	}
+}
+
+func TestResolvedHandoffAllowsDomainSpecificCaveatWhenNoOpenRisk(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_1", "implementer", "claude", "结论：已经生成可编译证明框架。", nil),
+		newOrchestrationTurnRecord("turn_2", "reviewer", "codex", "最终结论：已验证可编译证明框架，剩余 sorry 属于用户允许的占位。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=Termination.thy; verified=isabelle build -D .; next=none; risks=none", []RunnerToolEvent{
+			{ID: "cmd_1", Status: "completed", Command: "isabelle build -D .", Output: "Build completed. Termination.thy still contains sorry placeholders.", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("检查证明框架", history, workspaceChangeReport{})
+	if unresolved {
+		t.Fatalf("domain-specific caveat should not fail generic acceptance check: %q", reason)
+	}
+}
+
+func TestChangeOrientedResolvedRunWithoutFileChangeFails(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_1", "implementer", "claude", "结论：检查了项目，但没有写入任何文件。\n\nMsg: to=reviewer; intent=review; need=none\nHandoff: status=needs_next; changed=none; verified=go test ./...; next=implement requested change; risks=none", []RunnerToolEvent{
+			{ID: "cmd_1", Status: "completed", Command: "go test ./...", Output: "ok", ExitCode: &exitCode},
+		}),
+		newOrchestrationTurnRecord("turn_2", "reviewer", "codex", "最终结论：任务已经处理。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=go test ./...; next=none; risks=none", []RunnerToolEvent{
+			{ID: "cmd_2", Status: "completed", Command: "go test ./...", Output: "ok", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("请实现用户要求并修改文件", history, workspaceChangeReport{Available: true})
+	if !unresolved {
+		t.Fatal("change-oriented resolved run without file changes should fail")
+	}
+	if !strings.Contains(reason, "no concrete file change") {
+		t.Fatalf("reason should mention missing file changes: %q", reason)
+	}
+}
+
+func TestChangeOrientedResolvedRunUsesWorkspaceSnapshotEvidence(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_1", "implementer", "claude", "结论：已实现。\n\nMsg: to=reviewer; intent=review; need=none\nHandoff: status=resolved; changed=none; verified=go test ./...; next=none; risks=none", []RunnerToolEvent{
+			{ID: "cmd_1", Status: "completed", Command: "go test ./...", Output: "ok", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("请实现用户要求并修改文件", history, workspaceChangeReport{Available: true, Changed: []string{"main.go"}})
+	if unresolved {
+		t.Fatalf("workspace snapshot change should satisfy file-change evidence: %q", reason)
+	}
+}
+
+func TestChangeOrientedRunRequiresActualSnapshotDiffWhenAvailable(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_1", "implementer", "codex", "最终结论：已写入文件。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=main.go; verified=go test ./...; next=none; risks=none", []RunnerToolEvent{
+			{ID: "cmd_1", Status: "completed", Command: "cat > main.go", Output: "ok", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("请实现用户要求并修改文件", history, workspaceChangeReport{Available: true})
+	if !unresolved {
+		t.Fatal("available workspace snapshot without a real diff should fail despite claimed changes")
+	}
+	if !strings.Contains(reason, "no concrete file change") {
+		t.Fatalf("reason should mention missing file changes: %q", reason)
+	}
+}
+
+func TestWorkspaceSnapshotDetectsRealFileChange(t *testing.T) {
+	tmp := t.TempDir()
+	before := snapshotWorkspace(tmp)
+	if err := os.WriteFile(filepath.Join(tmp, "result.txt"), []byte("done\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after := snapshotWorkspace(tmp)
+	report := diffWorkspaceSnapshots(before, after)
+	if !report.Available {
+		t.Fatalf("snapshot unavailable: %#v", report)
+	}
+	if len(report.Changed) != 1 || report.Changed[0] != "result.txt" {
+		t.Fatalf("changed files = %#v, want result.txt", report.Changed)
+	}
+}
+
+func TestWorkspaceSnapshotIgnoresRuntimeDBFiles(t *testing.T) {
+	tmp := t.TempDir()
+	dbPath := filepath.Join(tmp, "bridge.db")
+	before := snapshotWorkspace(tmp, dbPath, dbPath+"-wal", dbPath+"-shm")
+	for _, name := range []string{"bridge.db", "bridge.db-wal", "bridge.db-shm"} {
+		if err := os.WriteFile(filepath.Join(tmp, name), []byte("runtime\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := snapshotWorkspace(tmp, dbPath, dbPath+"-wal", dbPath+"-shm")
+	report := diffWorkspaceSnapshots(before, after)
+	if len(report.Changed) != 0 {
+		t.Fatalf("runtime DB files should be ignored, changed=%#v", report.Changed)
+	}
+}
+
+func TestErroredFallbackSummaryDoesNotClaimCompleted(t *testing.T) {
+	summary := erroredTurnFallbackSummary(
+		"先消除主定理的 sorry",
+		false,
+		nil,
+		orchestrationTurn{
+			Err: "server_error",
+			HandoffFields: orchestrationHandoffFields{
+				Status: "blocked",
+				Next:   "create /root/Isabelle",
+				Risks:  "permission layer blocks mkdir",
+			},
+		},
+	)
+	for _, bad := range []string{"本轮编排已完成", "最终结论：本次编排已完成"} {
+		if strings.Contains(summary, bad) {
+			t.Fatalf("errored fallback should not claim completion:\n%s", summary)
+		}
+	}
+	for _, want := range []string{"本轮结论", "未完成", "server_error", "permission layer blocks mkdir"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("errored fallback missing %q:\n%s", want, summary)
+		}
+	}
+}
+
 func TestComposeFinalVerifierPromptUsesStructuredState(t *testing.T) {
 	prompt := composeFinalVerifierPrompt("collaboration", "finish task", "", false, "verifier", "codex", []orchestrationTurn{{
 		Role:          "implementer",
@@ -377,7 +1158,7 @@ func TestComposeFinalVerifierPromptUsesStructuredState(t *testing.T) {
 		Content:       strings.Repeat("raw transcript ", 100),
 		HandoffFields: orchestrationHandoffFields{Status: "needs_next", Changed: "main.go", Verified: "none", Next: "run tests", Risks: "tests not run"},
 	}})
-	for _, want := range []string{"lightweight final verifier", "changed=main.go", "risks=tests not run", "finish task"} {
+	for _, want := range []string{"lightweight final verifier", "actual acceptance criterion", "concrete completion condition", "changed=main.go", "risks=tests not run", "finish task"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("verifier prompt missing %q:\n%s", want, prompt)
 		}
@@ -413,6 +1194,59 @@ func TestResolvedHandoffRequiresVisibleConclusion(t *testing.T) {
 	}
 	if resolvedHandoffReady("Final conclusion: work remains.\n\nHandoff: status=needs_next; changed=main.go; verified=none; next=fix tests; risks=failing tests") {
 		t.Fatal("non-resolved handoff should not stop early")
+	}
+}
+
+func TestResolvedHandoffWithMainTheoremSorryIsNotReady(t *testing.T) {
+	content := strings.Join([]string{
+		"最终结论：这个只能说通过编译了；用户要求先把主定理 termination modify_lin 的 sorry 消除，这一步没做出来，没有实质上的进展。",
+		"",
+		"Msg: to=user; intent=final; need=none",
+		"Handoff: status=resolved; changed=none; verified=isabelle build -D termination_framework; next=prove termination modify_lin without sorry; risks=Termination.thy contains sorry placeholders, not a completed proof",
+	}, "\n")
+	if resolvedHandoffReady(content) {
+		t.Fatal("resolved handoff with main theorem sorry risk must not be ready")
+	}
+}
+
+func TestUnresolvedFinalRunRejectsCompileOnlyIsabelleProofFramework(t *testing.T) {
+	history := []orchestrationTurn{{
+		TurnID:  "orc_1-verifier",
+		Role:    "verifier",
+		CLI:     "codex",
+		Content: "最终结论：这个只能说通过编译了。主定理 termination modify_lin 的 sorry 仍未消除，所以没有实质上的进展。",
+		Handoff: "Handoff: status=resolved; changed=none; verified=isabelle build -D termination_framework; next=prove remaining sorry placeholders; risks=Termination.thy contains sorry placeholders, not a completed proof",
+		HandoffFields: orchestrationHandoffFields{
+			Status:   "resolved",
+			Changed:  "none",
+			Verified: "isabelle build -D termination_framework",
+			Next:     "prove remaining sorry placeholders",
+			Risks:    "Termination.thy contains sorry placeholders, not a completed proof",
+		},
+		Tools: []RunnerToolEvent{{
+			ID:      "build",
+			Status:  "completed",
+			Command: "isabelle build -D termination_framework",
+			Output: strings.Join([]string{
+				"Finished Termination_Framework",
+				"Termination.thy: termination modify_lin",
+				"Termination.thy: sorry",
+				"ROOT: options [quick_and_dirty = true]",
+			}, "\n"),
+		}},
+	}}
+	reason, unresolved := unresolvedFinalRun(
+		"已上传文件 Model.thy Termination.thy ROOT。要求先把主定理的sorry消除。",
+		history,
+		workspaceChangeReport{Available: true, Changed: []string{"Termination.thy"}},
+	)
+	if !unresolved {
+		t.Fatal("compile-only Isabelle proof framework should remain unresolved")
+	}
+	for _, want := range []string{"acceptance check failed", "sorry"} {
+		if !strings.Contains(strings.ToLower(reason), strings.ToLower(want)) {
+			t.Fatalf("reason missing %q: %s", want, reason)
+		}
 	}
 }
 
@@ -523,6 +1357,29 @@ func TestFinalTurnFallbackSummarySkipsClearFinalOutput(t *testing.T) {
 	)
 	if summary != "" {
 		t.Fatalf("summary = %q, want empty", summary)
+	}
+}
+
+func TestCleanOrchestrationTurnContentTrimsRepeatedProgressBeforeConclusion(t *testing.T) {
+	content := strings.Join([]string{
+		"我会只核对已报告的框架文件和验证命令结果。",
+		"我先只核对已报告变更的 ROOT 和 Termination.thy。",
+		"我会只核对最终产物和验证记录，不做新的大范围证明工作。",
+		"结论：上述内容不是完整、正确的终止性证明，只能算是一个可编译的证明框架。",
+	}, "")
+	cleaned := cleanOrchestrationTurnContent(content)
+	if !strings.HasPrefix(cleaned, "结论：上述内容") {
+		t.Fatalf("cleaned content kept progress prefix:\n%s", cleaned)
+	}
+	if strings.Contains(cleaned, "我会只核对") {
+		t.Fatalf("cleaned content still contains repeated progress:\n%s", cleaned)
+	}
+}
+
+func TestCleanOrchestrationTurnContentKeepsPlainAnswer(t *testing.T) {
+	content := "我会说明原因：这个证明还依赖 sorry，因此不是完整证明。"
+	if got := cleanOrchestrationTurnContent(content); got != content {
+		t.Fatalf("cleaned plain answer = %q, want original", got)
 	}
 }
 
@@ -662,4 +1519,29 @@ func assertArgPair(t *testing.T, args []string, key, value string) {
 		}
 	}
 	t.Fatalf("args missing %s %q: %#v", key, value, args)
+}
+
+func fakeClaudePrintScript(text string) string {
+	raw, _ := json.Marshal(text)
+	return `#!/usr/bin/env python3
+import json
+
+text = ` + string(raw) + `
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
+print(json.dumps({"type":"result","result":text}), flush=True)
+`
+}
+
+func fakeCodexExecScript(text string) string {
+	raw, _ := json.Marshal(text)
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+text = ` + string(raw) + `
+if len(sys.argv) < 2 or sys.argv[1] != "exec":
+    print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
+    sys.exit(1)
+print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
+`
 }

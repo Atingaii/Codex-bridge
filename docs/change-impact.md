@@ -27,6 +27,7 @@ keeps only the top frequent subset.
 | Chat prompt flow | `internal/hub/ws_browser.go`, `internal/bridge/session.go`, `internal/bridge/runner.go`, run/message store methods, integration tests |
 | Codex thread resume behavior | `internal/bridge/runner.go:args`, `internal/hub/ws_bridge.go:handlePromptComplete`, `internal/store/store.go:UpdateSessionRemoteThreadByID`, tests |
 | Orchestration create/continue flow | `internal/hub/orchestration.go`, `internal/bridge/orchestration.go`, `frontend/src/app/App.tsx`, `docs/features/orchestration-continuity.md` |
+| Orchestration endpoint continuity | `internal/hub/orchestration.go:handleContinueOrchestration`, `frontend/src/app/App.tsx`, `docs/features/orchestration-continuity.md`, `docs/features/manual-orchestration-rounds.md` |
 | Bridge capability reporting | `internal/protocol.RegisterPayload`, `internal/bridge/client.go`, `internal/hub/pool.go`, `internal/hub/server.go:handleAgents`, frontend agent types/UI, policy tests |
 | Orchestration event shape | `internal/protocol.OrchestrationEventPayload`, `internal/store.OrchestrationEvent`, visible event reducer in `frontend/src/app/App.tsx`, integration tests |
 | Cancellation semantics | Hub cancel handler, Bridge cancel manager, status constants, frontend stop button, tests |

@@ -7,7 +7,7 @@ import {
   RefreshCw, Check, Clipboard,
   Menu, X, Server, Activity, Command,
   Trash2, Edit2, GitBranch, Swords, UsersRound, ArrowLeft,
-  FileUp, FileText, FolderInput, ShieldQuestion, Wrench
+  FileUp, FileText, FolderInput, ShieldQuestion, Wrench, Share2
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -214,6 +214,10 @@ type BridgeTokenResponse = {
   setupCommand: string;
   installCommand: string;
   connectCommand: string;
+  sudoSetupCommand?: string;
+  sudoInstallCommand?: string;
+  sudoConnectCommand?: string;
+  sudoCommands?: string[];
   commands: string[];
   agentId?: string;
   machineId?: string;
@@ -225,6 +229,54 @@ type BridgePermissionProfile = {
   id: PermissionProfileId;
   setupCommand: string;
   connectCommand: string;
+  sudoSetupCommand?: string;
+  sudoConnectCommand?: string;
+};
+
+type ShareInfo = {
+  id: string;
+  kind: 'chat' | 'orchestration';
+  title?: string;
+  url?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type PublicSession = {
+  id: string;
+  title?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type PublicMessage = {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  createdAt: number;
+};
+
+type PublicOrchestrationRun = {
+  id: string;
+  title: string;
+  mode: 'collaboration' | 'debate';
+  prompt: string;
+  cwd?: string;
+  maxTurns: number;
+  status: string;
+  error?: string;
+  files?: OrchestrationFile[];
+  createdAt: number;
+  updatedAt: number;
+  finishedAt?: number;
+};
+
+type PublicSharePayload = {
+  share: ShareInfo;
+  session?: PublicSession;
+  messages?: PublicMessage[];
+  run?: PublicOrchestrationRun;
+  events?: OrchestrationEvent[];
 };
 
 type ImageAttachment = {
@@ -279,6 +331,15 @@ const uiText = {
     language: 'Language',
     newSession: 'New Session',
     newRun: 'New Run',
+    conversationSnapshot: 'Conversation Snapshot',
+    shareConversation: 'Share conversation',
+    shareRun: 'Share run',
+    shareRunCopied: 'Share link copied',
+    publicShare: 'Public share',
+    signInToContinue: 'Sign in to continue',
+    failedCreateShare: 'Failed to create share link',
+    failedLoadShare: 'Failed to load shared conversation',
+    readOnlySnapshot: 'Read-only snapshot',
     orchestration: 'Orchestration',
     codexBridge: 'Codex Bridge',
     searchSessions: 'Search sessions...',
@@ -339,6 +400,7 @@ const uiText = {
     reviewRequiredDescription: 'Codex chat, Codex orchestration, and Claude Code orchestration ask in the browser before untrusted commands.',
     autoExecute: 'Auto execute',
     autoExecuteDescription: 'Trusted mode. Codex and Claude run without local permission prompts and can modify files directly.',
+    manualOrchestration: 'Claude Code + Codex CLI',
     selectedProfileCommand: 'Selected profile',
     alternateProfileCommand: 'Alternative profile',
     approvalRequired: 'Approval required',
@@ -349,6 +411,10 @@ const uiText = {
     approvalCanceled: 'Canceled',
     generating: 'Generating',
     setupCommand: 'Install and connect',
+    installCommand: 'Install command',
+    normalUserCommands: 'No sudo',
+    sudoRootCommands: 'With sudo',
+    linkCommand: 'Link command',
     connectCommand: 'Connect',
     repairConnection: 'Repair connection',
     repairConnectionCommand: 'Repair command',
@@ -377,11 +443,12 @@ const uiText = {
     available: 'Available',
     codexOrchestrationApprovalMissing: 'Codex orchestration browser approval is unavailable on this endpoint.',
     claudeOrchestrationApprovalMissing: 'Claude orchestration browser approval is unavailable on this endpoint.',
-    stream: 'Stream',
+    stream: 'Event stream',
     currentTurn: 'Current turn',
+    lastTurn: 'Last turn',
     turnPrefix: 'Turn',
     turnSuffix: '',
-    verifierTurn: 'Verifier',
+    verifierTurn: 'Final check',
     coordinateClaudeCodex: 'Coordinate Claude Code and Codex',
     startCollaborationHint: 'Start a collaboration or debate run from the panel on the right.',
     mode: 'Mode',
@@ -436,6 +503,15 @@ const uiText = {
     language: '语言',
     newSession: '新会话',
     newRun: '新运行',
+    conversationSnapshot: '对话快照',
+    shareConversation: '分享对话',
+    shareRun: '分享运行',
+    shareRunCopied: '分享链接已复制',
+    publicShare: '公开分享',
+    signInToContinue: '登录后继续',
+    failedCreateShare: '创建分享链接失败',
+    failedLoadShare: '加载分享对话失败',
+    readOnlySnapshot: '只读快照',
     orchestration: '编排',
     codexBridge: 'Codex Bridge',
     searchSessions: '搜索会话...',
@@ -496,6 +572,7 @@ const uiText = {
     reviewRequiredDescription: 'Codex 聊天、Codex 编排和 Claude Code 编排都会在网页端确认不可信命令。',
     autoExecute: '无需授权',
     autoExecuteDescription: '可信模式。Codex 和 Claude 不再弹本机权限确认，可直接修改文件和执行命令。',
+    manualOrchestration: 'Claude Code + Codex CLI',
     selectedProfileCommand: '当前策略',
     alternateProfileCommand: '备用策略',
     approvalRequired: '需要确认',
@@ -506,6 +583,10 @@ const uiText = {
     approvalCanceled: '已取消',
     generating: '生成中',
     setupCommand: '安装并连接',
+    installCommand: '安装命令',
+    normalUserCommands: '无需 sudo',
+    sudoRootCommands: '使用 sudo',
+    linkCommand: '链接命令',
     connectCommand: '连接',
     repairConnection: '修复连接',
     repairConnectionCommand: '修复命令',
@@ -534,11 +615,12 @@ const uiText = {
     available: '可用',
     codexOrchestrationApprovalMissing: '该端的 Codex 编排网页审批不可用。',
     claudeOrchestrationApprovalMissing: '该端的 Claude 编排网页审批不可用。',
-    stream: '流连接',
+    stream: '事件流',
     currentTurn: '当前轮次',
+    lastTurn: '最后轮次',
     turnPrefix: '第',
     turnSuffix: '轮',
-    verifierTurn: '验证轮',
+    verifierTurn: '最终检查',
     coordinateClaudeCodex: '协同 Claude Code 与 Codex',
     startCollaborationHint: '从右侧面板启动协作或辩论运行。',
     mode: '模式',
@@ -823,6 +905,14 @@ function mergeOrchestrationToolData(previous?: Record<string, any>, next?: Recor
 }
 
 function orchestrationTurnKey(event: OrchestrationEvent) {
+  const contentKind = typeof event.data?.contentKind === 'string' ? event.data.contentKind : '';
+  if (contentKind === 'agent_text' || contentKind === 'agent_reply') {
+    const eventId = typeof event.data?.eventId === 'string' ? event.data.eventId : '';
+    const replyId = typeof event.data?.replyId === 'string' ? event.data.replyId : '';
+    const jobId = typeof event.data?.jobId === 'string' ? event.data.jobId : '';
+    const contentId = eventId || replyId || `${jobId}:${event.seq || event.createdAt || ''}`;
+    if (contentId) return `${event.runId}:${event.turnId || ''}:${event.role || ''}:${event.cli || ''}:${contentId}`;
+  }
   return `${event.runId}:${event.turnId || ''}:${event.role || ''}:${event.cli || ''}`;
 }
 
@@ -836,7 +926,7 @@ function parseOrchestrationTurnInfo(turnId?: string): OrchestrationTurnInfo {
   return Number.isFinite(ordinal) && ordinal > 0 ? { ordinal } : {};
 }
 
-function orchestrationTurnInfoFromEvents(events: OrchestrationEvent[], runId: string, maxTurns?: number): OrchestrationTurnInfo {
+function orchestrationTurnInfoFromEvents(events: OrchestrationEvent[], runId: string, maxTurns?: number, includeTotal = true): OrchestrationTurnInfo {
   let latest: OrchestrationEvent | null = null;
   for (const event of events) {
     if (event.runId !== runId || !event.turnId) continue;
@@ -844,7 +934,7 @@ function orchestrationTurnInfoFromEvents(events: OrchestrationEvent[], runId: st
   }
   if (!latest) return {};
   const info = parseOrchestrationTurnInfo(latest.turnId);
-  if (typeof info.ordinal === 'number' && maxTurns) {
+  if (includeTotal && typeof info.ordinal === 'number' && maxTurns) {
     return { ...info, total: maxTurns };
   }
   return info;
@@ -858,12 +948,19 @@ function orchestrationTurnLabel(info: OrchestrationTurnInfo, t: UIText) {
   return `${t.turnPrefix} ${info.ordinal}${suffix}`;
 }
 
-function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string): OrchestrationVisibleEvent[] {
+function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string, run?: OrchestrationRun | PublicOrchestrationRun | null, t?: UIText): OrchestrationVisibleEvent[] {
   const ordered = mergeOrchestrationDeltaEvents(
     mergeOrchestrationToolEvents(events.filter((event) => event.runId === runId).slice().sort(compareOrchestrationEvents))
       .filter((event) => !isEmptyPagesReadFailureEvent(event))
   );
+  const contentfulTurnEnds = new Set(
+    ordered
+      .filter((event) => event.kind === 'turn.end' && stringsTrim(event.content))
+      .map(orchestrationTurnKey)
+  );
   const visible: OrchestrationVisibleEvent[] = [];
+  let segmentStartIndex = 0;
+  let segmentVisibleStart = 0;
 
   ordered.forEach((event, index) => {
     if (event.kind === 'user.message') {
@@ -888,8 +985,10 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string)
     }
 
     if (event.kind === 'turn.delta') {
-      const content = stringsTrim(event.content);
+      if (contentfulTurnEnds.has(orchestrationTurnKey(event))) return;
+      const content = cleanOrchestrationDisplayContent(event.content);
       if (!content) return;
+      if (isRawCCBObserverDump(content)) return;
       visible.push({
         type: 'message',
         key: orchestrationEventKey(event, index),
@@ -930,6 +1029,24 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string)
     }
 
     if (event.kind === 'turn.end') {
+      const content = cleanOrchestrationDisplayContent(event.content);
+      if (content && !isRawCCBObserverDump(content)) {
+        visible.push({
+          type: 'message',
+          key: orchestrationEventKey(event, index),
+          runId: event.runId,
+          kind: event.kind,
+          role: event.role,
+          cli: event.cli,
+          turnId: event.turnId,
+          content,
+          status: event.status,
+          error: event.error,
+          createdAt: event.createdAt,
+          commands: [],
+        });
+        return;
+      }
       if (event.error) {
         visible.push(statusVisibleEvent(event, index));
       }
@@ -939,9 +1056,301 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string)
     if (shouldShowOrchestrationStatus(event)) {
       visible.push(statusVisibleEvent(event, index));
     }
+
+    if (event.kind === 'run.end') {
+      const fallback = finalOrchestrationConclusionFallback(
+        ordered.slice(segmentStartIndex, index + 1),
+        visible.slice(segmentVisibleStart),
+        runId,
+        run,
+        t
+      );
+      if (fallback) visible.push(fallback);
+      segmentStartIndex = index + 1;
+      segmentVisibleStart = visible.length;
+    }
+  });
+  return visible;
+}
+
+function finalOrchestrationConclusionFallback(
+  segmentEvents: OrchestrationEvent[],
+  segmentVisible: OrchestrationVisibleEvent[],
+  runId: string,
+  run?: OrchestrationRun | PublicOrchestrationRun | null,
+  t: UIText = uiText.en
+): OrchestrationVisibleEvent | null {
+  const runEvents = segmentEvents.filter((event) => event.runId === runId);
+  if (!runEvents.length) return null;
+  const last = runEvents[runEvents.length - 1];
+  const completed = last.kind === 'run.end' && last.status === 'completed';
+  if (!completed) return null;
+  if (hasFreshFinalConclusion(runEvents)) return null;
+
+  const failedCommands = runEvents.filter((event) => event.kind.startsWith('command.') && commandEventFailed(event)).length;
+  const erroredTurns = runEvents.filter((event) => event.kind === 'turn.end' && (event.status === 'error' || Boolean(event.error))).length;
+  const completedCommands = runEvents.filter((event) => event.kind === 'command.end' && !commandEventFailed(event)).length;
+  const segmentFiles = orchestrationRunFilesFromEvents(runEvents, runId);
+  const fileNames = mergeOrchestrationFiles(segmentFiles.length ? segmentFiles : run?.files).map((file) => file.name).filter(Boolean);
+  const segmentPrompt = runEvents.find((event) => event.kind === 'user.message')?.content || run?.prompt;
+  const zh = t === uiText.zh || t.currentTurn === uiText.zh.currentTurn || textLooksChinese(segmentPrompt);
+  const issueCount = failedCommands + erroredTurns;
+  const ccbSummary = ccbOrchestrationSummary(runEvents);
+  const acceptanceIssue = unresolvedAcceptanceSummary(runEvents);
+  const content = zh
+    ? [
+        acceptanceIssue
+          ? '最终结论：本次编排已经结束，但当前记录显示用户的核心验收条件仍未满足，因此不能视为真正成功。'
+          : '最终结论：本次编排已经结束，但最后一轮没有返回可直接阅读的总结，因此这里根据已记录事件生成兜底摘要。',
+        ccbSummary ? `CCB 状态：${ccbSummary}` : '',
+        `进展：${completedCommands > 0 ? `记录到 ${completedCommands} 个完成的命令事件。` : '没有可提炼的完成命令摘要，可展开命令详情审计原始事件。'}`,
+        fileNames.length ? `相关文件：${fileNames.map((name) => `\`${name}\``).join('、')}。` : '',
+        acceptanceIssue ? `未满足验收：${acceptanceIssue}` : '',
+        issueCount > 0 ? `剩余风险：记录到 ${issueCount} 个失败命令或错误轮次；请展开命令详情查看原始输出。` : '剩余风险：未记录新的失败命令；请按需展开命令详情审计原始输出。',
+      ].filter(Boolean).join('\n\n')
+    : [
+        acceptanceIssue
+          ? 'Final conclusion: this orchestration ended, but the recorded state shows the user acceptance criterion is still unmet, so it must not be treated as a real success.'
+          : 'Final conclusion: this orchestration completed, but the last turn did not return a directly readable summary, so this fallback was generated from recorded events.',
+        ccbSummary ? `CCB state: ${ccbSummary}` : '',
+        `Progress: ${completedCommands > 0 ? `${completedCommands} completed command event(s) were recorded.` : 'no concise completed command summary was available; expand command details to audit raw events.'}`,
+        fileNames.length ? `Files: ${fileNames.map((name) => `\`${name}\``).join(', ')}.` : '',
+        acceptanceIssue ? `Unmet acceptance: ${acceptanceIssue}` : '',
+        issueCount > 0 ? `Remaining risk: ${issueCount} failed command or error turn event(s) were recorded; expand command details for raw output.` : 'Remaining risk: no new failed command was recorded; expand command details to audit raw output if needed.',
+      ].filter(Boolean).join('\n\n');
+  const lastTurn = findLastOrchestrationTurnEvent(runEvents);
+
+  return {
+    type: 'message',
+    key: `fallback-final-summary:${runId}:${last.seq || last.createdAt || segmentVisible.length}`,
+    runId,
+    kind: 'run.end',
+    role: 'summary',
+    cli: '',
+    turnId: lastTurn?.turnId,
+    content,
+    status: 'completed',
+    createdAt: last.createdAt,
+    commands: [],
+  };
+}
+
+function hasFreshFinalConclusion(runEvents: OrchestrationEvent[]) {
+  let latestCommandIndex = -1;
+  let latestTurnIndex = -1;
+  let latestTurn: OrchestrationEvent | null = null;
+  runEvents.forEach((event, index) => {
+    if (event.kind.startsWith('command.')) latestCommandIndex = index;
+    if (event.kind === 'turn.start' || event.kind === 'turn.end') {
+      latestTurnIndex = index;
+      latestTurn = event;
+    }
   });
 
-  return visible;
+  return runEvents.some((event, index) => {
+    if (event.kind !== 'turn.delta' && event.kind !== 'turn.end') return false;
+    if (!isReadableFinalConclusion(event.content)) return false;
+    if (index < latestCommandIndex) return false;
+    if (latestTurn && index < latestTurnIndex && orchestrationTurnKey(event) !== orchestrationTurnKey(latestTurn)) return false;
+    return true;
+  });
+}
+
+function findLastOrchestrationTurnEvent(runEvents: OrchestrationEvent[]) {
+  for (let index = runEvents.length - 1; index >= 0; index -= 1) {
+    const event = runEvents[index];
+    if (event.kind === 'turn.start' || event.kind === 'turn.end' || event.kind === 'turn.delta') return event;
+  }
+  return null;
+}
+
+function ccbOrchestrationSummary(runEvents: OrchestrationEvent[]) {
+  const agentState = new Map<string, Set<string>>();
+  const callbackJobs = new Set<string>();
+  runEvents.forEach((event) => {
+    const data = event.data || {};
+    let agent = stringsTrim(String(data.agent || data.target || event.role || event.cli || ''));
+    if (!agent && event.cli === 'ccb') agent = 'ccb';
+    const eventType = stringsTrim(String(data.eventType || ''));
+    const content = event.content || '';
+    if (!eventType && isRawCCBObserverDump(content)) {
+      rawCCBObserverEventTypes(content).forEach((raw) => {
+        if (!agent || agent === 'ccb') agent = raw.agent || agent || 'ccb';
+        recordCCBAgentState(agentState, raw.agent || agent || 'ccb', raw.eventType);
+      });
+      rawCCBCallbackJobIds(content).forEach((jobId) => callbackJobs.add(jobId));
+      return;
+    }
+    if (eventType) recordCCBAgentState(agentState, agent || 'ccb', eventType);
+    const payload = data.payload && typeof data.payload === 'object' ? data.payload as Record<string, any> : {};
+    for (const key of ['callback_child_job_id', 'child_job_id', 'continuation_job_id']) {
+      const jobId = stringsTrim(String(payload[key] || ''));
+      if (jobId) callbackJobs.add(jobId);
+    }
+    if (String(data.contentKind || '') === 'agent_console') {
+      recordCCBAgentState(agentState, agent || 'ccb', 'agent_console');
+    }
+  });
+  const parts: string[] = [];
+  Array.from(agentState.keys()).sort().forEach((agent) => {
+    const states = agentState.get(agent);
+    if (!states?.size) return;
+    parts.push(`${agent} ${Array.from(states).join('/')}`);
+  });
+  if (callbackJobs.size) parts.push(`callback ${Array.from(callbackJobs).join(', ')}`);
+  return parts.join('; ');
+}
+
+function recordCCBAgentState(map: Map<string, Set<string>>, agent: string, eventType: string) {
+  agent = stringsTrim(agent).toLowerCase() || 'ccb';
+  const state = ccbEventStateLabel(eventType);
+  if (!state) return;
+  if (!map.has(agent)) map.set(agent, new Set());
+  map.get(agent)?.add(state);
+}
+
+function ccbEventStateLabel(eventType: string) {
+  const value = stringsTrim(eventType).toLowerCase();
+  switch (value) {
+    case 'job_accepted':
+    case 'job_queued':
+      return 'accepted';
+    case 'job_started':
+      return 'started';
+    case 'completion_item':
+      return 'streaming';
+    case 'completion_terminal':
+    case 'job_completed':
+      return 'completed';
+    case 'job_failed':
+    case 'job_incomplete':
+    case 'job_cancelled':
+      return 'failed';
+    case 'job_delegated_callback':
+    case 'callback_edge_created':
+    case 'callback_continuation_submitted':
+      return 'callback';
+    case 'agent_console':
+      return 'console';
+    default:
+      return '';
+  }
+}
+
+function isReadableFinalConclusion(content?: string) {
+  const value = stringsTrim(content).toLowerCase();
+  if (!value) return false;
+  if (isRawCCBObserverDump(value)) return false;
+  if (hasUnresolvedAcceptanceSignal(value)) return false;
+  if (value.includes('最终结论') || value.includes('最终总结') || value.includes('final conclusion') || value.includes('final summary')) {
+    return true;
+  }
+  const hasConclusion = value.includes('结论') || value.includes('总结') || value.includes('conclusion') || value.includes('summary');
+  const hasCompletion = value.includes('完成') || value.includes('通过') || value.includes('验证') || value.includes('completed') || value.includes('verified') || value.includes('passed');
+  const hasRisk = value.includes('剩余风险') || value.includes('remaining risk');
+  return hasConclusion && (hasCompletion || hasRisk);
+}
+
+function unresolvedAcceptanceSummary(events: OrchestrationEvent[]) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    const candidates = [
+      event.content || '',
+      event.error || '',
+      typeof event.data?.output === 'string' ? event.data.output : '',
+      typeof event.data?.command === 'string' ? event.data.command : '',
+    ];
+    const hit = candidates.find(hasUnresolvedAcceptanceSignal);
+    if (hit) return acceptanceIssueLine(hit);
+  }
+  return '';
+}
+
+function hasUnresolvedAcceptanceSignal(content?: string) {
+  const value = stringsTrim(content).toLowerCase();
+  if (!value) return false;
+  if (hasResolvedSorrySignal(value) && !hasExplicitUnresolvedSorryRisk(value)) {
+    return false;
+  }
+  if (includesAny(value, ['main theorem', '主定理', 'termination modify_lin', 'modify_lin'])
+    && includesAny(value, ['sorry', '未消除', '没有消除', '还保留', 'placeholder', '占位'])) {
+    return true;
+  }
+  return includesAny(value, [
+    'sorry placeholder',
+    'sorry placeholders',
+    'still contains sorry',
+    'contains sorry',
+    'quick_and_dirty',
+    '可编译的证明框架',
+    '证明框架可编译',
+    '不是完整证明',
+    '不是完全无 sorry',
+    '只是通过编译',
+    '只能说通过编译',
+    '没有实质上的进展',
+  ]);
+}
+
+function hasExplicitUnresolvedSorryRisk(value: string) {
+  return includesAny(value, [
+    'sorry placeholder',
+    'sorry placeholders',
+    'still contains sorry',
+    'contains sorry',
+    'quick_and_dirty',
+    '可编译的证明框架',
+    '证明框架可编译',
+    '不是完整证明',
+    '不是完全无 sorry',
+    'not without sorry',
+    'not fully without sorry',
+    'not a completed proof',
+  ]);
+}
+
+function hasResolvedSorrySignal(value: string) {
+  if (includesAny(value, [
+    'without sorry',
+    'without any sorry',
+    'no sorry placeholders',
+    'no remaining sorry',
+    '无 sorry',
+    '无sorry',
+    '没有 sorry',
+    'without quick_and_dirty',
+    'quick_and_dirty = false',
+  ])) {
+    return true;
+  }
+  return /\bno\s+sorry\b/.test(value);
+}
+
+function acceptanceIssueLine(content?: string) {
+  const lines = decodeEscapedLineBreaks(String(content || '')).split(/\r?\n/);
+  const line = lines.find(hasUnresolvedAcceptanceSignal) || stringsTrim(content);
+  return line ? trimMiddle(line.trim(), 220) : 'the requested acceptance criterion remains unresolved';
+}
+
+function includesAny(value: string, signals: string[]) {
+  return signals.some((signal) => value.includes(signal.toLowerCase()));
+}
+
+function trimMiddle(value: string, max: number) {
+  if (value.length <= max) return value;
+  const left = Math.max(20, Math.floor((max - 3) * 0.6));
+  const right = Math.max(20, max - 3 - left);
+  return `${value.slice(0, left)}...${value.slice(-right)}`;
+}
+
+function textLooksChinese(content?: string) {
+  return /[\u3400-\u9fff]/.test(content || '');
+}
+
+function commandEventFailed(event: OrchestrationEvent) {
+  const status = String(event.data?.status || event.status || '').toLowerCase();
+  const exitCode = event.data?.exitCode;
+  return Boolean(event.error) || status === 'failed' || status === 'error' || (typeof exitCode === 'number' && exitCode !== 0);
 }
 
 function mergeOrchestrationDeltaEvents(events: OrchestrationEvent[]): OrchestrationEvent[] {
@@ -982,8 +1391,97 @@ function mergeDeltaContent(previous: string, next: string) {
   return previous + next;
 }
 
+function cleanOrchestrationDisplayContent(content?: string) {
+  const value = stringsTrim(stripMachineContractLines(content));
+  if (!value) return '';
+  if (isRawCCBObserverDump(value)) return '';
+  const index = conclusionDisplayTrimIndex(value);
+  return index > 0 && shouldTrimConclusionDisplayPrefix(value.slice(0, index)) ? value.slice(index).trim() : value;
+}
+
+function isRawCCBObserverDump(content?: string) {
+  const value = stringsTrim(content);
+  if (!value) return false;
+  const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length < 4) return false;
+  const metadata = lines.filter((line) => isCCBObserverMetadataLine(line)).length;
+  return metadata >= Math.max(4, Math.ceil(lines.length * 0.6));
+}
+
+function isCCBObserverMetadataLine(line: string) {
+  const key = stringsTrim(line.split(':', 1)[0]).toLowerCase();
+  return [
+    'observer_view',
+    'observer_authority',
+    'observer_terminal',
+    'observer_notice',
+    'watch_status',
+    'job_id',
+    'agent_name',
+    'target_name',
+    'status',
+    'reply',
+    'event',
+  ].includes(key);
+}
+
+function rawCCBObserverEventTypes(content?: string) {
+  return stringsTrim(content).split(/\r?\n/).flatMap((line) => {
+    const match = line.trim().match(/^event:\s+\S+\s+\S+\s+(\S+)\s+(\S+)/);
+    if (!match) return [];
+    return [{ agent: match[1], eventType: match[2] }];
+  });
+}
+
+function rawCCBCallbackJobIds(content?: string) {
+  return Array.from(new Set(stringsTrim(content).match(/\bjob_[A-Za-z0-9_-]+\b/g) || []));
+}
+
+function conclusionDisplayTrimIndex(value: string) {
+  const lower = value.toLowerCase();
+  const markerGroups = [
+    ['最终结论', '最终总结', 'final conclusion', 'final summary'],
+    ['审查结论', '本轮结论', '结论：', '结论:', 'conclusion:', 'summary:'],
+  ];
+  for (const markers of markerGroups) {
+    let best = -1;
+    markers.forEach((marker) => {
+      const index = lower.lastIndexOf(marker.toLowerCase());
+      if (index > best) best = index;
+    });
+    if (best >= 0) return best;
+  }
+  return -1;
+}
+
+function shouldTrimConclusionDisplayPrefix(prefix: string) {
+  const value = stringsTrim(prefix).toLowerCase();
+  if (!value) return false;
+  const signals = ['我会', '我先', '我将', '接下来', '正在', '不展开新的', 'i will', "i'll", 'i am going to', 'next i'];
+  const count = signals.reduce((sum, signal) => sum + value.split(signal).length - 1, 0);
+  return count >= 2 || value.startsWith('我会') || value.startsWith('我先') || Array.from(value).length > 240;
+}
+
 function stringsTrim(value?: string) {
   return decodeEscapedLineBreaks(String(value || '')).trim();
+}
+
+function stripMachineContractLines(content?: string) {
+  const value = decodeEscapedLineBreaks(String(content || ''));
+  if (!value) return '';
+  let changed = false;
+  const lines = value.split(/\r?\n/).filter((line) => {
+    const remove = isMachineContractLine(line);
+    if (remove) changed = true;
+    return !remove;
+  });
+  return changed ? lines.join('\n').trim() : value;
+}
+
+function isMachineContractLine(line: string) {
+  const value = line.trim();
+  return /^Msg:\s*to=[^;]+;\s*intent=[^;]+;\s*need=/i.test(value)
+    || /^Handoff:\s*status=(needs_next|blocked|resolved)\b/i.test(value);
 }
 
 function orchestrationEventFiles(event: OrchestrationEvent): OrchestrationFile[] {
@@ -999,6 +1497,32 @@ function orchestrationEventFiles(event: OrchestrationEvent): OrchestrationFile[]
     const size = Number.isFinite(parsedSize) && parsedSize > 0 ? parsedSize : 0;
     return [{ name, mimeType, size }];
   });
+}
+
+function mergeOrchestrationFiles(...groups: Array<OrchestrationFile[] | undefined>): OrchestrationFile[] {
+  const seen = new Set<string>();
+  const out: OrchestrationFile[] = [];
+  groups.forEach((group) => {
+    (group || []).forEach((file) => {
+      const name = stringsTrim(file.name);
+      if (!name) return;
+      const mimeType = stringsTrim(file.mimeType);
+      const size = Number.isFinite(Number(file.size)) && Number(file.size) > 0 ? Number(file.size) : 0;
+      const key = `${name}\u001f${mimeType}\u001f${size}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ name, mimeType, size });
+    });
+  });
+  return out;
+}
+
+function orchestrationRunFilesFromEvents(events: OrchestrationEvent[], runId: string): OrchestrationFile[] {
+  return mergeOrchestrationFiles(
+    ...events
+      .filter((event) => event.runId === runId && event.kind === 'user.message')
+      .map(orchestrationEventFiles)
+  );
 }
 
 function decodeEscapedLineBreaks(value: string) {
@@ -1081,11 +1605,11 @@ function isNearBottom(element: HTMLElement, threshold = 120) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
 }
 
-async function copyText(value: string) {
+async function copyText(value: string): Promise<boolean> {
   if (navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(value);
-      return;
+      return true;
     } catch {
       // Fall back for WebViews or browsers that expose clipboard but deny it.
     }
@@ -1099,7 +1623,7 @@ async function copyText(value: string) {
   textarea.select();
   const copied = document.execCommand('copy');
   document.body.removeChild(textarea);
-  if (!copied) throw new Error('Copy failed');
+  return copied;
 }
 
 function waitForOpen(ws: WebSocket, timeout = 3000) {
@@ -1194,12 +1718,22 @@ function defaultAgentID(agents: Agent[]) {
   return (agents.find((agent) => agent.online) || agents[0])?.id || '';
 }
 
+function preferredAgentID(agents: Agent[], current: string) {
+  const selected = agents.find((agent) => agent.id === current);
+  if (selected?.online) return selected.id;
+  return defaultAgentID(agents) || selected?.id || '';
+}
+
 function orchestrationApprovalMode(agent?: Agent | null) {
   const caps = agent?.capabilities;
   if (!caps) return agent?.online ? 'unknown' : 'offline';
   if (caps.approvalPolicy === 'never' && caps.sandbox === 'danger-full-access') return 'auto-execute';
   if (caps.metadata?.approvalMode === 'auto-execute') return 'auto-execute';
   return 'review-required';
+}
+
+function orchestrationWorkerLabel(agent: Agent | null | undefined, t: UIText) {
+  return t.manualOrchestration;
 }
 
 function orchestrationCapability(agent: Agent | null | undefined, cli: 'claude' | 'codex') {
@@ -1350,16 +1884,20 @@ function initialLanguage(): Language {
   return navigator.language?.toLowerCase().startsWith('zh') ? 'zh' : 'en';
 }
 
-function MessageContent({ content }: { content: string }) {
+function MessageContent({ content, stripMachineContracts = false }: { content: string; stripMachineContracts?: boolean }) {
+  const visibleContent = useMemo(
+    () => stripMachineContracts ? stripMachineContractLines(content) : String(content || ''),
+    [content, stripMachineContracts]
+  );
   const html = useMemo(() => {
-    const chunks = String(content || '').split(/```([\s\S]*?)```/g);
+    const chunks = String(visibleContent || '').split(/```([\s\S]*?)```/g);
     return chunks.map((chunk, index) => {
       if (index % 2 === 1) {
         return `<pre class="my-3 overflow-x-auto rounded-lg border border-border bg-muted/70 p-3 text-xs leading-relaxed text-foreground dark:bg-[#0f172a] dark:text-slate-200"><code>${escapeBasic(chunk.replace(/^\w+\n/, ''))}</code></pre>`;
       }
       return renderInlineMarkdown(chunk).replace(/\n/g, '<br />');
     }).join('');
-  }, [content]);
+  }, [visibleContent]);
 
   return <div className="text-[14px] leading-relaxed text-foreground" dangerouslySetInnerHTML={{ __html: html }} />;
 }
@@ -1413,6 +1951,8 @@ export default function App() {
   const [language, setLanguage] = useState<Language>(initialLanguage);
   const [path, setPath] = useState(() => window.location.pathname);
   const t = uiText[language];
+  const isSnapshotRoute = path.startsWith('/conversation-snapshot');
+  const isShareRoute = path.startsWith('/share/');
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDarkMode);
@@ -1425,11 +1965,15 @@ export default function App() {
   }, [language]);
 
   useEffect(() => {
+    if (isShareRoute) {
+      setBooting(false);
+      return;
+    }
     api<{ user: UserAccount }>('/api/me')
       .then((data) => setUser(data.user))
       .catch(() => setUser(null))
       .finally(() => setBooting(false));
-  }, []);
+  }, [isShareRoute]);
 
   useEffect(() => {
     const handlePop = () => setPath(window.location.pathname);
@@ -1438,14 +1982,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (user && !user.isAdmin && !path.startsWith('/orchestrate')) {
+    if (user && !user.isAdmin && !path.startsWith('/orchestrate') && !path.startsWith('/conversation-snapshot') && !path.startsWith('/share/')) {
       window.history.replaceState({}, '', '/orchestrate');
       setPath('/orchestrate');
     }
   }, [path, user]);
 
   const navigate = useCallback((nextPath: string) => {
-    if (user && !user.isAdmin && !nextPath.startsWith('/orchestrate')) {
+    if (user && !user.isAdmin && !nextPath.startsWith('/orchestrate') && !nextPath.startsWith('/conversation-snapshot') && !nextPath.startsWith('/share/')) {
       nextPath = '/orchestrate';
     }
     if (window.location.pathname !== nextPath) {
@@ -1462,8 +2006,16 @@ export default function App() {
     );
   }
 
+  if (isShareRoute) {
+    return <PublicSharePage shareID={decodeURIComponent(path.replace(/^\/share\/?/, '').split('/')[0] || '')} t={t} />;
+  }
+
   if (!user) {
     return <LoginScreen onLogin={setUser} language={language} setLanguage={setLanguage} t={t} />;
+  }
+
+  if (isSnapshotRoute) {
+    return <ConversationSnapshotPage t={t} />;
   }
 
   if (!user.isAdmin || path.startsWith('/orchestrate')) {
@@ -1627,6 +2179,8 @@ function Workspace({
   const [renameDraft, setRenameDraft] = useState('');
   const [renameError, setRenameError] = useState('');
   const [renaming, setRenaming] = useState(false);
+  const [sharingSessionId, setSharingSessionId] = useState('');
+  const [shareCopiedSessionId, setShareCopiedSessionId] = useState('');
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1652,7 +2206,7 @@ function Workspace({
     const nextAgents = data.agents || [];
     setAgents(nextAgents);
     setSelectedAgentId((current) => {
-      const next = nextAgents.some((agent) => agent.id === current) ? current : defaultAgentID(nextAgents);
+      const next = preferredAgentID(nextAgents, current);
       selectedAgentIdRef.current = next;
       if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
       else localStorage.removeItem('codexBridge.selectedAgentId');
@@ -1926,7 +2480,7 @@ function Workspace({
   const refreshAll = useCallback(async () => {
     const [loadedAgents, loadedSessions] = await Promise.all([loadAgents(), loadSessions()]);
     const savedAgentId = localStorage.getItem('codexBridge.selectedAgentId') || selectedAgentIdRef.current;
-    const agentId = loadedAgents.some((agent) => agent.id === savedAgentId) ? savedAgentId : defaultAgentID(loadedAgents);
+    const agentId = preferredAgentID(loadedAgents, savedAgentId);
     selectedAgentIdRef.current = agentId;
     const activeSession = loadedSessions.find((session) => session.id === activeSessionIdRef.current);
     if (activeSession && (!agentId || activeSession.agentId === agentId)) {
@@ -2039,6 +2593,22 @@ function Workspace({
       } else {
         clearActiveChat();
       }
+    }
+  };
+
+  const shareSession = async (session: Session | null) => {
+    if (!session || sharingSessionId) return;
+    setSharingSessionId(session.id);
+    try {
+      const data = await api<{ share: ShareInfo }>(`/api/sessions/${encodeURIComponent(session.id)}/share`, { method: 'POST', body: '{}' });
+      const url = data.share.url || `${window.location.origin}/share/${data.share.id}`;
+      await copyText(url);
+      setShareCopiedSessionId(session.id);
+      window.setTimeout(() => setShareCopiedSessionId(''), 1400);
+    } catch (err) {
+      appendSystem(err instanceof Error ? `${t.failedCreateShare}: ${err.message}` : t.failedCreateShare);
+    } finally {
+      setSharingSessionId('');
     }
   };
 
@@ -2163,6 +2733,7 @@ function Workspace({
           activeSession={activeSessionId}
           setActiveSession={(id) => selectSession(id).catch((err) => appendSystem(err.message))}
           createSession={() => createSession().catch((err) => appendSystem(err.message))}
+          shareSession={(session) => shareSession(session).catch((err) => appendSystem(err.message))}
           renameSession={renameSession}
           deleteSession={(session) => deleteSession(session).catch((err) => appendSystem(err.message))}
           search={search}
@@ -2170,6 +2741,8 @@ function Workspace({
           openSettings={() => openSettings()}
           agentOnline={Boolean(onlineAgent)}
           openOrchestration={() => navigate('/orchestrate')}
+          shareCopiedSessionId={shareCopiedSessionId}
+          sharingSessionId={sharingSessionId}
           t={t}
         />
       </aside>
@@ -2186,6 +2759,7 @@ function Workspace({
               activeSession={activeSessionId}
               setActiveSession={(id) => selectSession(id).catch((err) => appendSystem(err.message))}
               createSession={() => createSession().catch((err) => appendSystem(err.message))}
+              shareSession={(session) => shareSession(session).catch((err) => appendSystem(err.message))}
               renameSession={renameSession}
               deleteSession={(session) => deleteSession(session).catch((err) => appendSystem(err.message))}
               search={search}
@@ -2196,6 +2770,8 @@ function Workspace({
                 setMobileMenuOpen(false);
                 navigate('/orchestrate');
               }}
+              shareCopiedSessionId={shareCopiedSessionId}
+              sharingSessionId={sharingSessionId}
               t={t}
             />
           </div>
@@ -2232,6 +2808,21 @@ function Workspace({
 
             <Button variant="ghost" size="icon" className="text-muted-foreground rounded-full h-8 w-8" onClick={() => refreshAll().catch((err) => appendSystem(err.message))}>
               <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              className={cn(
+                "h-8 gap-1.5 rounded-lg",
+                shareCopiedSessionId === activeSession?.id && "text-emerald-600 dark:text-emerald-400"
+              )}
+              onClick={() => shareSession(activeSession).catch((err) => appendSystem(err.message))}
+              disabled={!activeSession || sharingSessionId === activeSession.id}
+              aria-label={t.shareConversation}
+              title={shareCopiedSessionId === activeSession?.id ? t.copied : t.shareConversation}
+            >
+              {sharingSessionId === activeSession?.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : shareCopiedSessionId === activeSession?.id ? <Check className="h-3.5 w-3.5" /> : <Share2 className="h-3.5 w-3.5" />}
+              <span>{shareCopiedSessionId === activeSession?.id ? t.copied : t.shareConversation}</span>
             </Button>
             <Button variant="secondary" size="sm" className="hidden sm:inline-flex h-8 gap-1.5 rounded-lg" onClick={() => openSettings('cli')}>
               <Plus className="h-3.5 w-3.5" />
@@ -2485,6 +3076,8 @@ function OrchestrationWorkspace({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsFocus, setSettingsFocus] = useState<'cli' | ''>('');
   const [error, setError] = useState('');
+  const [sharingRunId, setSharingRunId] = useState('');
+  const [shareCopiedRunId, setShareCopiedRunId] = useState('');
   const [creating, setCreating] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState(t.disconnected);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
@@ -2506,13 +3099,15 @@ function OrchestrationWorkspace({
     return runs.filter((run) => run.agentId === selectedAgent.id);
   }, [runs, selectedAgent?.id]);
   const activeRun = runs.find((run) => run.id === activeRunId && (!selectedAgent?.id || run.agentId === selectedAgent.id)) || null;
-  const activeRunFiles = activeRun?.files || [];
-  const visibleEvents = useMemo(() => activeRun ? visibleOrchestrationEvents(events, activeRunId) : [], [activeRun, events, activeRunId]);
-  const currentTurnInfo = useMemo(() => activeRun ? orchestrationTurnInfoFromEvents(events, activeRun.id, activeRun.maxTurns) : {}, [activeRun, events]);
+  const activeRunFiles = useMemo(() => {
+    return activeRun ? mergeOrchestrationFiles(activeRun.files, orchestrationRunFilesFromEvents(events, activeRun.id)) : [];
+  }, [activeRun, events]);
+  const visibleEvents = useMemo(() => activeRun ? visibleOrchestrationEvents(events, activeRunId, activeRun, t) : [], [activeRun, events, activeRunId, t]);
+  const isRunning = activeOrchestrationStatus(activeRun?.status);
+  const currentTurnInfo = useMemo(() => activeRun ? orchestrationTurnInfoFromEvents(events, activeRun.id, activeRun.maxTurns, isRunning) : {}, [activeRun, events, isRunning]);
   const currentTurnLabel = useMemo(() => orchestrationTurnLabel(currentTurnInfo, t), [currentTurnInfo, t]);
   const visibleApprovals = useMemo(() => approvals.filter((item) => item.approval.runId === activeRunId), [approvals, activeRunId]);
-  const isRunning = activeOrchestrationStatus(activeRun?.status);
-  const orchestrationStreamStatus = activeRun ? connectionStatus : t.idle;
+  const orchestrationStreamStatus = activeRun && isRunning ? connectionStatus : t.idle;
   const continuingRun = Boolean(activeRun && !isRunning);
   const canCancelRun = canCancelOrchestrationStatus(activeRun?.status);
   const capabilityProblems = useMemo(() => orchestrationCapabilityProblems(selectedAgent, t), [selectedAgent, t]);
@@ -2525,7 +3120,7 @@ function OrchestrationWorkspace({
     const nextAgents = data.agents || [];
     setAgents(nextAgents);
     setSelectedAgentId((current) => {
-      const next = nextAgents.some((agent) => agent.id === current) ? current : defaultAgentID(nextAgents);
+      const next = preferredAgentID(nextAgents, current);
       selectedAgentIdRef.current = next;
       if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
       else localStorage.removeItem('codexBridge.selectedAgentId');
@@ -2702,8 +3297,13 @@ function OrchestrationWorkspace({
     setShowScrollBottom(false);
     await loadRunEvents(run.id, true);
     if (activeRunIdRef.current !== run.id) return;
-    connectRun(run.id);
-  }, [connectRun, loadRunEvents]);
+    if (activeOrchestrationStatus(run.status)) {
+      connectRun(run.id);
+    } else {
+      closeWS();
+      setConnectionStatus(t.idle);
+    }
+  }, [closeWS, connectRun, loadRunEvents, t.idle]);
 
   const selectRun = useCallback(async (runId: string) => {
     activeRunIdRef.current = runId;
@@ -2751,7 +3351,7 @@ function OrchestrationWorkspace({
   const refreshOrchestration = useCallback(async () => {
     const [loadedAgents, loadedRuns] = await Promise.all([loadAgents(), loadRuns()]);
     const savedAgentId = localStorage.getItem('codexBridge.selectedAgentId') || selectedAgentIdRef.current;
-    const agentId = loadedAgents.some((agent) => agent.id === savedAgentId) ? savedAgentId : defaultAgentID(loadedAgents);
+    const agentId = preferredAgentID(loadedAgents, savedAgentId);
     selectedAgentIdRef.current = agentId;
     setSelectedAgentId(agentId);
     if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
@@ -2806,6 +3406,12 @@ function OrchestrationWorkspace({
       document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [activeRunId, activeRun?.status, loadRun, loadRunEvents]);
+
+  useEffect(() => {
+    if (!activeRunId || activeOrchestrationStatus(activeRun?.status)) return;
+    closeWS();
+    setConnectionStatus(t.idle);
+  }, [activeRunId, activeRun?.status, closeWS, t.idle]);
 
   useEffect(() => {
     const id = window.requestAnimationFrame(() => {
@@ -2886,6 +3492,23 @@ function OrchestrationWorkspace({
     }
   };
 
+  const shareRun = async (run: OrchestrationRun | null) => {
+    if (!run || sharingRunId) return;
+    setSharingRunId(run.id);
+    setError('');
+    try {
+      const data = await api<{ share: ShareInfo }>(`/api/orchestrations/${encodeURIComponent(run.id)}/share`, { method: 'POST', body: '{}' });
+      const url = data.share.url || `${window.location.origin}/share/${data.share.id}`;
+      await copyText(url);
+      setShareCopiedRunId(run.id);
+      window.setTimeout(() => setShareCopiedRunId(''), 1400);
+    } catch (err) {
+      setError(err instanceof Error ? `${t.failedCreateShare}: ${err.message}` : t.failedCreateShare);
+    } finally {
+      setSharingRunId('');
+    }
+  };
+
   const logout = async () => {
     closeWS();
     await api('/api/logout', { method: 'POST', body: '{}' });
@@ -2951,6 +3574,21 @@ function OrchestrationWorkspace({
               <div className="flex items-center gap-2">
                 {run.mode === 'debate' ? <Swords className="h-3.5 w-3.5 opacity-70 shrink-0" /> : <UsersRound className="h-3.5 w-3.5 opacity-70 shrink-0" />}
                 <span className="truncate font-medium">{run.title}</span>
+                <span
+                  className={cn(
+                    "ml-auto inline-flex h-6 shrink-0 items-center gap-1 rounded border border-sidebar-border bg-sidebar px-1.5 text-[10px] font-medium text-muted-foreground hover:bg-sidebar-border",
+                    shareCopiedRunId === run.id && "text-emerald-600 dark:text-emerald-400"
+                  )}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    shareRun(run).catch((err) => setError(err.message));
+                  }}
+                  title={shareCopiedRunId === run.id ? t.copied : t.shareRun}
+                >
+                  {sharingRunId === run.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : shareCopiedRunId === run.id ? <Check className="h-3 w-3" /> : <Share2 className="h-3 w-3" />}
+                  <span>{shareCopiedRunId === run.id ? t.copied : t.shareRun}</span>
+                </span>
               </div>
               <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
                 <span>{sessionDateLabel(run.updatedAt || run.createdAt, t)}</span>
@@ -2992,6 +3630,21 @@ function OrchestrationWorkspace({
               <Plus className="h-3.5 w-3.5" />
               {t.addCliEndpoint}
             </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              className={cn(
+                "h-8 gap-1.5 rounded-lg",
+                shareCopiedRunId === activeRun?.id && "text-emerald-600 dark:text-emerald-400"
+              )}
+              onClick={() => shareRun(activeRun).catch((err) => setError(err.message))}
+              disabled={!activeRun || sharingRunId === activeRun.id}
+              aria-label={t.shareRun}
+              title={shareCopiedRunId === activeRun?.id ? t.copied : t.shareRun}
+            >
+              {sharingRunId === activeRun?.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : shareCopiedRunId === activeRun?.id ? <Check className="h-3.5 w-3.5" /> : <Share2 className="h-3.5 w-3.5" />}
+              <span>{shareCopiedRunId === activeRun?.id ? t.copied : t.shareRun}</span>
+            </Button>
             <Button variant="ghost" size="icon" className="text-muted-foreground rounded-full h-8 w-8" onClick={() => refreshOrchestration().catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration))}>
               <RefreshCw className="h-4 w-4" />
             </Button>
@@ -3009,7 +3662,7 @@ function OrchestrationWorkspace({
           />
           <div className="flex items-center gap-1.5">
             <Server className="h-3.5 w-3.5" />
-            <span>{t.workers}: Claude Code + Codex CLI</span>
+            <span>{t.workers}: {orchestrationWorkerLabel(selectedAgent, t)} · {selectedAgent?.online ? t.online : t.offline}</span>
           </div>
           <div className="flex items-center gap-1.5">
             <ShieldQuestion className="h-3.5 w-3.5" />
@@ -3022,7 +3675,7 @@ function OrchestrationWorkspace({
           {currentTurnLabel && (
             <div className="flex items-center gap-1.5">
               <GitBranch className="h-3.5 w-3.5" />
-              <span>{t.currentTurn}: {currentTurnLabel}</span>
+              <span>{isRunning ? t.currentTurn : t.lastTurn}: {currentTurnLabel}</span>
             </div>
           )}
           <div className="flex items-center gap-1.5">
@@ -3244,7 +3897,7 @@ function CapabilityMatrix({ agent, t }: { agent: Agent | null; t: UIText }) {
         {rows.map((row) => {
           const ok = Boolean(row.cap?.available && (auto || row.cap.browserApproval));
           return (
-            <div key={row.cli} className="grid grid-cols-[64px_minmax(0,1fr)_auto] items-center gap-2 text-xs">
+            <div key={row.cli} className="grid grid-cols-[96px_minmax(0,1fr)_auto] items-center gap-2 text-xs">
               <span className="font-medium">{row.label}</span>
               <span className="truncate text-muted-foreground">{row.cap?.execution || t.notAvailable}</span>
               <span className={cn(
@@ -3267,7 +3920,8 @@ function OrchestrationEventItem({ item, t }: { item: OrchestrationVisibleEvent, 
   const isRun = item.kind.startsWith('run.');
   const avatar = orchestrationAvatar(item, t);
   const title = isUser ? t.user : isRun ? t.run : item.type === 'command' ? t.commands : `${item.role || t.agent}${item.cli ? ` · ${avatar.label}` : ''}`;
-  const content = item.error || item.content || '';
+  const rawContent = item.error || item.content || '';
+  const content = isUser ? rawContent : stripMachineContractLines(rawContent);
   const status = isUser ? '' : item.status;
 
   return (
@@ -3290,7 +3944,7 @@ function OrchestrationEventItem({ item, t }: { item: OrchestrationVisibleEvent, 
         {item.type === 'command' ? (
           <CommandEvent event={item.command} t={t} open />
         ) : content ? (
-          <MessageContent content={content} />
+          <MessageContent content={content} stripMachineContracts={!isUser} />
         ) : item.type === 'message' && item.commands.length > 0 ? (
           <p className="text-sm text-muted-foreground">{t.noVisibleAnswer}</p>
         ) : null}
@@ -3341,6 +3995,13 @@ function orchestrationAvatar(event: Pick<OrchestrationEvent, 'kind' | 'cli'>, t:
           ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-700 dark:text-emerald-300'
           : 'bg-muted border-border text-muted-foreground',
       icon: cli === 'claude' ? <ClaudeMark /> : cli === 'codex' ? <OpenAIMark /> : <Command className="h-3.5 w-3.5" />,
+    };
+  }
+  if (cli === 'ccb') {
+    return {
+      label: 'CCB',
+      className: 'bg-sky-500/10 border-sky-500/20 text-sky-700 dark:text-sky-300',
+      icon: <GitBranch className="h-3.5 w-3.5" />,
     };
   }
   if (cli === 'claude') {
@@ -3451,6 +4112,7 @@ function SidebarContent({
   activeSession,
   setActiveSession,
   createSession,
+  shareSession,
   renameSession,
   deleteSession,
   search,
@@ -3458,12 +4120,15 @@ function SidebarContent({
   openSettings,
   agentOnline,
   openOrchestration,
+  shareCopiedSessionId,
+  sharingSessionId,
   t,
 }: {
   groupedSessions: Record<string, Session[]>;
   activeSession: string;
   setActiveSession: (id: string) => void;
   createSession: () => void;
+  shareSession: (session: Session) => void;
   renameSession: (session: Session) => void;
   deleteSession: (session: Session) => void;
   search: string;
@@ -3471,6 +4136,8 @@ function SidebarContent({
   openSettings: () => void;
   agentOnline: boolean;
   openOrchestration: () => void;
+  shareCopiedSessionId: string;
+  sharingSessionId: string;
   t: UIText;
 }) {
   return (
@@ -3531,30 +4198,46 @@ function SidebarContent({
                   <MessageSquare className="h-3.5 w-3.5 opacity-70 shrink-0" />
                   <span className="truncate">{displaySessionTitle(session, t)}</span>
 
-                  {activeSession === session.id && (
-                    <div className="ml-auto flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
-                      <span
-                        className="h-5 w-5 rounded flex items-center justify-center hover:bg-sidebar-border text-muted-foreground"
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          renameSession(session);
-                        }}
-                      >
-                        <Edit2 className="h-3 w-3" />
-                      </span>
-                      <span
-                        className="h-5 w-5 rounded flex items-center justify-center hover:bg-destructive/10 hover:text-destructive text-muted-foreground"
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          deleteSession(session);
-                        }}
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </span>
-                    </div>
-                  )}
+                  <div className="ml-auto flex items-center gap-1">
+                    <span
+                      className={cn(
+                        "h-5 w-5 rounded flex items-center justify-center hover:bg-sidebar-border text-muted-foreground",
+                        shareCopiedSessionId === session.id && "text-emerald-600 dark:text-emerald-400"
+                      )}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        shareSession(session);
+                      }}
+                      title={shareCopiedSessionId === session.id ? t.copied : t.shareConversation}
+                    >
+                      {sharingSessionId === session.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : shareCopiedSessionId === session.id ? <Check className="h-3 w-3" /> : <Share2 className="h-3 w-3" />}
+                    </span>
+                    {activeSession === session.id && (
+                      <>
+                        <span
+                          className="h-5 w-5 rounded flex items-center justify-center hover:bg-sidebar-border text-muted-foreground"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            renameSession(session);
+                          }}
+                        >
+                          <Edit2 className="h-3 w-3" />
+                        </span>
+                        <span
+                          className="h-5 w-5 rounded flex items-center justify-center hover:bg-destructive/10 hover:text-destructive text-muted-foreground"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            deleteSession(session);
+                          }}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </span>
+                      </>
+                    )}
+                  </div>
                 </button>
               ))}
             </div>
@@ -3578,19 +4261,537 @@ function SidebarContent({
   );
 }
 
-function MessageItem({ msg, t }: { msg: Extract<ChatItem, { type: 'message' }>, t: UIText }) {
+function PublicSharePage({ shareID, t }: { shareID: string; t: UIText }) {
+  const [payload, setPayload] = useState<PublicSharePayload | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const visibleEvents = useMemo(() => {
+    if (!payload?.run) return [];
+    return visibleOrchestrationEvents(payload.events || [], payload.run.id, payload.run, t);
+  }, [payload, t]);
+
+  useEffect(() => {
+    let stopped = false;
+    if (!shareID) {
+      setError(t.failedLoadShare);
+      setLoading(false);
+      return () => {
+        stopped = true;
+      };
+    }
+    setLoading(true);
+    setError('');
+    api<PublicSharePayload>(`/api/public/shares/${encodeURIComponent(shareID)}`)
+      .then((data) => {
+        if (!stopped) setPayload(data);
+      })
+      .catch((err) => {
+        if (!stopped) setError(err instanceof Error ? err.message : t.failedLoadShare);
+      })
+      .finally(() => {
+        if (!stopped) setLoading(false);
+      });
+    return () => {
+      stopped = true;
+    };
+  }, [shareID, t.failedLoadShare]);
+
+  const title = payload?.share.title || payload?.session?.title || payload?.run?.title || t.publicShare;
+  const isOrchestration = payload?.share.kind === 'orchestration';
+  const messages = payload?.messages || [];
+  const goToLogin = () => {
+    window.location.href = '/';
+  };
+
+  return (
+    <div className="h-screen w-full flex bg-background text-foreground overflow-hidden font-sans">
+      <aside className="hidden md:flex w-[260px] flex-col border-r border-sidebar-border bg-sidebar">
+        <div className="h-14 flex items-center px-4 border-b border-sidebar-border shrink-0">
+          <div className="flex items-center gap-2 font-medium">
+            <div className="h-6 w-6 rounded-md bg-primary text-primary-foreground flex items-center justify-center">
+              <Share2 className="h-3.5 w-3.5" />
+            </div>
+            <span className="text-sm">{t.publicShare}</span>
+          </div>
+        </div>
+
+        <div className="p-3 space-y-2">
+          <Button variant="secondary" className="w-full justify-start gap-2 h-9 rounded-lg border border-sidebar-border shadow-sm pointer-events-none" disabled>
+            {isOrchestration ? <GitBranch className="h-4 w-4" /> : <MessageSquare className="h-4 w-4" />}
+            <span className="truncate">{title}</span>
+          </Button>
+          <Button variant="ghost" className="w-full justify-start gap-2 h-9 rounded-lg" onClick={goToLogin}>
+            <Lock className="h-4 w-4" />
+            {t.signInToContinue}
+          </Button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-3 py-2 elegant-scrollbar">
+          <div>
+            <h4 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1.5 px-2">
+              {payload?.share.updatedAt ? sessionDateLabel(payload.share.updatedAt, t) : t.readOnlySnapshot}
+            </h4>
+            <div className="w-full text-left px-2 py-1.5 rounded-md text-sm flex items-center gap-2 bg-sidebar-accent text-sidebar-accent-foreground font-medium">
+              {isOrchestration ? <GitBranch className="h-3.5 w-3.5 opacity-70 shrink-0" /> : <MessageSquare className="h-3.5 w-3.5 opacity-70 shrink-0" />}
+              <span className="truncate">{title}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="p-3 border-t border-sidebar-border shrink-0 mt-auto bg-sidebar">
+          <div className="flex items-center gap-2 px-2 py-1.5 rounded-md text-sm text-sidebar-foreground">
+            <div className="h-6 w-6 rounded-full bg-sidebar-primary/10 flex items-center justify-center">
+              <Check className="h-3.5 w-3.5" />
+            </div>
+            <span className="flex-1 text-left">{t.readOnlySnapshot}</span>
+            <div className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+          </div>
+        </div>
+      </aside>
+
+      <main className="flex-1 flex flex-col min-w-0 h-full">
+        <header className="h-14 shrink-0 border-b border-border flex items-center justify-between px-3 md:px-4 bg-background z-10">
+          <div className="flex items-center gap-2 min-w-0">
+            <Share2 className="h-4 w-4 text-muted-foreground shrink-0" />
+            <span className="text-sm font-medium truncate">{title}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="hidden sm:inline-flex rounded-full border border-border bg-muted/40 px-2.5 py-1 text-xs text-muted-foreground">
+              {t.readOnlySnapshot}
+            </span>
+            <Button variant="secondary" size="sm" className="h-8 gap-1.5 rounded-lg" onClick={goToLogin}>
+              <Lock className="h-3.5 w-3.5" />
+              {t.signInToContinue}
+            </Button>
+          </div>
+        </header>
+
+        <div className="bg-muted/30 border-b border-border px-4 py-2 flex items-center gap-4 text-xs text-muted-foreground overflow-x-auto whitespace-nowrap elegant-scrollbar">
+          <div className="flex items-center gap-1.5">
+            {isOrchestration ? <GitBranch className="h-3.5 w-3.5" /> : <MessageSquare className="h-3.5 w-3.5" />}
+            <span>{t.publicShare}: {payload?.share.kind || '-'}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Activity className="h-3.5 w-3.5" />
+            <span>{t.status}: {payload?.run?.status || t.ready}</span>
+          </div>
+          {payload?.share.updatedAt && (
+            <div className="flex items-center gap-1.5">
+              <Command className="h-3.5 w-3.5" />
+              <span>{t.thread}: {sessionDateLabel(payload.share.updatedAt, t)}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="relative flex-1 min-h-0">
+          <div className="h-full overflow-y-auto p-4 md:p-6 space-y-4 elegant-scrollbar">
+            {loading ? (
+              <div className="h-full flex items-center justify-center">
+                <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : error ? (
+              <div className="mx-auto mt-10 flex max-w-lg items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>{error}</span>
+              </div>
+            ) : isOrchestration ? (
+              visibleEvents.length > 0 ? (
+                visibleEvents.map((event) => <OrchestrationEventItem key={event.key} item={event} t={t} />)
+              ) : payload?.run?.prompt ? (
+                <MessageItem
+                  msg={{ id: `${payload.run.id}:prompt`, type: 'message', role: 'user', content: payload.run.prompt, createdAt: payload.run.createdAt }}
+                  t={t}
+                  readOnly
+                />
+              ) : null
+            ) : (
+              messages.map((message) => (
+                <MessageItem
+                  key={message.id}
+                  msg={{ id: message.id, type: 'message', role: message.role, content: message.content, createdAt: message.createdAt }}
+                  t={t}
+                  readOnly
+                />
+              ))
+            )}
+            <div className="h-4" />
+          </div>
+        </div>
+
+        <div className="shrink-0 p-4 border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+          <div className="max-w-4xl mx-auto flex flex-col bg-card border border-border rounded-xl shadow-sm">
+            <textarea
+              className="w-full bg-transparent border-0 resize-none p-3 text-sm focus:outline-none focus:ring-0 min-h-[60px] max-h-[120px] text-muted-foreground"
+              value=""
+              placeholder={t.askCodex}
+              disabled
+              readOnly
+            />
+            <div className="flex items-center justify-between p-2 pt-0">
+              <Button variant="ghost" size="icon" type="button" className="h-8 w-8 text-muted-foreground rounded-lg" disabled>
+                <ImagePlus className="h-4 w-4" />
+              </Button>
+              <Button size="sm" type="button" className="h-8 px-3 rounded-lg gap-1.5 text-xs font-medium" disabled>
+                {t.send}
+                <Send className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+          <div className="text-center mt-2">
+            <span className="text-[10px] text-muted-foreground/60 font-medium">{t.verifyNotice}</span>
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+type SnapshotItem =
+  | { id: string; type: 'message'; role: 'user' | 'assistant' | 'system'; content: string; createdAt: number }
+  | { id: string; type: 'tool'; title: string; command: string; output: string; createdAt: number; status?: string; kind?: string; defaultOpen?: boolean };
+
+const conversationSnapshotItems: SnapshotItem[] = [
+  {
+    id: 'snapshot-user-task',
+    type: 'message',
+    role: 'user',
+    createdAt: 1779634200,
+    content: [
+      '已上传了三个文件。Model.thy是HWQueue的Isabelle模型，现在想证明Termination.thy中的termination modify_lin。请你填上证明中的sorry。',
+      '',
+      'modify_lin的可终止性证明会非常复杂，建议你们先讨论出一个可用的证明框架，里面可以用sorry填充。但是不能更改原来的模型，也不能自行引入公理。',
+      '',
+      '我建议你们还是一步一步来，先生成一个可以编译通过的证明框架。checker可以接受证明框架里存在sorry。关于这个任务要求你们先商量出用户的真实意图再去做，放到该路径下新建的一个文件夹中',
+      '',
+      '上传文件：`Model.thy`、`Termination.thy`、`ROOT`',
+    ].join('\n'),
+  },
+  {
+    id: 'snapshot-assistant-implementer',
+    type: 'message',
+    role: 'assistant',
+    createdAt: 1779641618,
+    content: [
+      '最终编译成功、应该以它为准的是：',
+      '',
+      '`/home/zy/os/termination_framework`',
+      '',
+      '验证命令是：',
+      '',
+      '```bash',
+      'isabelle build -c -D /home/zy/os/termination_framework',
+      '```',
+      '',
+      '结果已经成功通过。',
+      '',
+      '补充：隐藏目录 `/home/zy/os/.codex-bridge/orchestrations/orc_abd603dc6f82ab5f2a90c16f415979a3/termination_framework` 也曾经构建成功，但那是 orchestration 运行中的中间副本。用户可见、最终应查看和提交的是 `/home/zy/os/termination_framework`。',
+      '',
+      'Msg: to=user; intent=final; need=none',
+      'Handoff: status=resolved; changed=none; verified=isabelle build -c -D /home/zy/os/termination_framework; next=none; risks=proof framework still contains sorry placeholders',
+    ].join('\n'),
+  },
+  {
+    id: 'snapshot-tool-files',
+    type: 'tool',
+    title: '命令',
+    kind: 'command.end',
+    command: '/bin/bash -lc "find /home/zy/os -maxdepth 3 -type f \\( -name ROOT -o -name Termination.thy -o -name Model.thy \\) | sort"',
+    output: [
+      '/home/zy/os/termination_framework/Model.thy',
+      '/home/zy/os/termination_framework/ROOT',
+      '/home/zy/os/termination_framework/Termination.thy',
+      '',
+    ].join('\n'),
+    createdAt: 1779641636,
+    status: 'completed',
+    defaultOpen: false,
+  },
+  {
+    id: 'snapshot-tool-risks',
+    type: 'tool',
+    title: '命令',
+    kind: 'command.end',
+    command: '/bin/bash -lc \'rg -n "termination modify_lin|sorry|modify_lin_.*decreases|quick_and_dirty" /home/zy/os/termination_framework\'',
+    output: [
+      '/home/zy/os/termination_framework/Termination.thy:24:lemma modify_lin_last_enq_branch_decreases:',
+      '/home/zy/os/termination_framework/Termination.thy:38:  sorry',
+      '/home/zy/os/termination_framework/Termination.thy:40:lemma modify_lin_o1_before_bt_branch_decreases:',
+      '/home/zy/os/termination_framework/Termination.thy:57:  sorry',
+      '/home/zy/os/termination_framework/Termination.thy:59:lemma modify_lin_b_before_o1_branch_decreases:',
+      '/home/zy/os/termination_framework/Termination.thy:76:  sorry',
+      '/home/zy/os/termination_framework/Termination.thy:78:lemma modify_lin_unordered_branch_decreases:',
+      '/home/zy/os/termination_framework/Termination.thy:96:  sorry',
+      '/home/zy/os/termination_framework/Termination.thy:98:termination modify_lin',
+      '/home/zy/os/termination_framework/Termination.thy:102:  sorry',
+      '/home/zy/os/termination_framework/ROOT:2:  options [document = false, quick_and_dirty = true]',
+      '',
+    ].join('\n'),
+    createdAt: 1779641636,
+    status: 'completed',
+    defaultOpen: false,
+  },
+  {
+    id: 'snapshot-tool-build',
+    type: 'tool',
+    title: '命令',
+    kind: 'command.end',
+    command: "/bin/bash -lc 'isabelle build -c -D /home/zy/os/termination_framework'",
+    output: [
+      'Cleaned Termination_Framework',
+      'Running Termination_Framework ...',
+      'Finished Termination_Framework (0:00:06 elapsed time, 0:00:06 cpu time, factor 1.04)',
+      '0:00:10 elapsed time, 0:00:06 cpu time, factor 0.60',
+      '',
+    ].join('\n'),
+    createdAt: 1779641653,
+    status: 'completed',
+    defaultOpen: true,
+  },
+  {
+    id: 'snapshot-assistant-final',
+    type: 'message',
+    role: 'assistant',
+    createdAt: 1779641669,
+    content: [
+      '最终成功构建的是：',
+      '',
+      '`/home/zy/os/termination_framework`',
+      '',
+      '我刚重新验证了这个目录：',
+      '',
+      '```bash',
+      'isabelle build -c -D /home/zy/os/termination_framework',
+      '```',
+      '',
+      '结果 exit 0，`Termination_Framework` 构建通过。',
+      '',
+      '注意：这表示“证明框架可编译通过”，不是完整证明已经完成。当前 `Termination.thy` 里仍有 5 个 `sorry`，并且 `ROOT` 使用了 `quick_and_dirty = true` 来允许带 `sorry` 的批量构建。',
+      '',
+      'Msg: to=user; intent=final; need=none',
+      'Handoff: status=resolved; changed=none; verified=isabelle build -c -D /home/zy/os/termination_framework; next=prove remaining sorry placeholders; risks=framework passes with quick_and_dirty but termination proof is not complete',
+    ].join('\n'),
+  },
+  {
+    id: 'snapshot-tool-glob',
+    type: 'tool',
+    title: '命令',
+    kind: 'command.end',
+    command: 'Glob termination_framework/**',
+    output: [
+      'termination_framework/Model.thy',
+      'termination_framework/Termination.thy',
+      'termination_framework/ROOT',
+    ].join('\n'),
+    createdAt: 1779641678,
+    status: 'completed',
+    defaultOpen: false,
+  },
+  {
+    id: 'snapshot-assistant-verifier',
+    type: 'message',
+    role: 'assistant',
+    createdAt: 1779641684,
+    content: [
+      '最终成功编译的是：',
+      '',
+      '`/home/zy/os/termination_framework`',
+      '',
+      '里面关键文件是：',
+      '',
+      '- `/home/zy/os/termination_framework/Termination.thy`',
+      '- `/home/zy/os/termination_framework/Model.thy`',
+      '- `/home/zy/os/termination_framework/ROOT`',
+      '',
+      '已报告通过的命令是：',
+      '',
+      '```bash',
+      'isabelle build -c -D /home/zy/os/termination_framework',
+      '```',
+      '',
+      '注意：这是**可编译的证明框架**，不是完全无 `sorry` 的最终证明；风险仍是 `Termination.thy` 中还保留了若干 `sorry` 占位。',
+      '',
+      'Msg: to=user; intent=final; need=none',
+      'Handoff: status=resolved; changed=none; verified=isabelle build -c -D /home/zy/os/termination_framework; next=prove remaining sorry placeholders; risks=proof framework still contains sorry placeholders',
+    ].join('\n'),
+  },
+];
+const conversationSnapshotDateLabel = '2026-05-24';
+
+function ConversationSnapshotPage({ t }: { t: UIText }) {
+  return (
+    <div className="h-screen w-full flex bg-background text-foreground overflow-hidden font-sans">
+      <aside className="hidden md:flex w-[260px] flex-col border-r border-sidebar-border bg-sidebar">
+        <div className="h-14 flex items-center px-4 border-b border-sidebar-border shrink-0">
+          <div className="flex items-center gap-2 font-medium">
+            <div className="h-6 w-6 rounded-md bg-primary text-primary-foreground flex items-center justify-center">
+              <FileText className="h-3.5 w-3.5" />
+            </div>
+            <span className="text-sm">{t.conversationSnapshot}</span>
+          </div>
+        </div>
+
+        <div className="p-3 space-y-2">
+          <Button variant="ghost" className="w-full justify-start gap-2 h-9 rounded-lg pointer-events-none opacity-60" disabled>
+            <ArrowLeft className="h-4 w-4" />
+            {t.codexBridge}
+          </Button>
+          <Button variant="secondary" className="w-full justify-start gap-2 h-9 rounded-lg border border-sidebar-border shadow-sm pointer-events-none" disabled>
+            <MessageSquare className="h-4 w-4" />
+            termination framework
+          </Button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-3 py-2 elegant-scrollbar">
+          <div>
+            <h4 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1.5 px-2">
+              {conversationSnapshotDateLabel}
+            </h4>
+            <div className="w-full text-left px-2 py-1.5 rounded-md text-sm flex items-center gap-2 bg-sidebar-accent text-sidebar-accent-foreground font-medium">
+              <MessageSquare className="h-3.5 w-3.5 opacity-70 shrink-0" />
+              <span className="truncate">termination framework</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="p-3 border-t border-sidebar-border shrink-0 mt-auto bg-sidebar">
+          <div className="flex items-center gap-2 px-2 py-1.5 rounded-md text-sm text-sidebar-foreground">
+            <div className="h-6 w-6 rounded-full bg-sidebar-primary/10 flex items-center justify-center">
+              <Check className="h-3.5 w-3.5" />
+            </div>
+            <span className="flex-1 text-left">{t.readOnlySnapshot}</span>
+            <div className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+          </div>
+        </div>
+      </aside>
+
+      <main className="flex-1 flex flex-col min-w-0 h-full">
+        <header className="h-14 shrink-0 border-b border-border flex items-center justify-between px-3 md:px-4 bg-background z-10">
+          <div className="flex items-center gap-2 min-w-0">
+            <Button variant="ghost" size="icon" className="text-muted-foreground pointer-events-none opacity-60" disabled>
+              <ArrowLeft className="h-5 w-5" />
+            </Button>
+            <div className="h-4 w-px bg-border mx-1 hidden md:block" />
+            <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+            <span className="text-sm font-medium truncate">termination framework</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="hidden sm:inline-flex rounded-full border border-border bg-muted/40 px-2.5 py-1 text-xs text-muted-foreground">
+              {t.readOnlySnapshot}
+            </span>
+          </div>
+        </header>
+
+        <div className="bg-muted/30 border-b border-border px-4 py-2 flex items-center gap-4 text-xs text-muted-foreground overflow-x-auto whitespace-nowrap elegant-scrollbar">
+          <div className="flex items-center gap-1.5">
+            <Server className="h-3.5 w-3.5" />
+            <span>{t.runner}: orchestration snapshot</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Activity className="h-3.5 w-3.5" />
+            <span>{t.thread}: /home/zy/os/termination_framework</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Command className="h-3.5 w-3.5" />
+            <span>{t.status}: {t.ready}</span>
+          </div>
+        </div>
+
+        <div className="relative flex-1 min-h-0">
+          <div className="h-full overflow-y-auto p-4 md:p-6 space-y-4 elegant-scrollbar">
+            {conversationSnapshotItems.map((item) => item.type === 'message'
+              ? <SnapshotMessageItem key={item.id} item={item} t={t} />
+              : <SnapshotToolBlock key={item.id} item={item} t={t} />
+            )}
+            <div className="h-4" />
+          </div>
+        </div>
+
+        <div className="shrink-0 p-4 border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+          <div className="max-w-4xl mx-auto flex flex-col bg-card border border-border rounded-xl shadow-sm">
+            <textarea
+              className="w-full bg-transparent border-0 resize-none p-3 text-sm focus:outline-none focus:ring-0 min-h-[60px] max-h-[120px] text-muted-foreground"
+              value=""
+              placeholder={t.askCodex}
+              disabled
+              readOnly
+            />
+            <div className="flex items-center justify-between p-2 pt-0">
+              <div className="flex items-center gap-1">
+                <Button variant="ghost" size="icon" type="button" className="h-8 w-8 text-muted-foreground rounded-lg" disabled>
+                  <ImagePlus className="h-4 w-4" />
+                </Button>
+              </div>
+              <Button size="sm" type="button" className="h-8 px-3 rounded-lg gap-1.5 text-xs font-medium" disabled>
+                {t.send}
+                <Send className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+          <div className="text-center mt-2">
+            <span className="text-[10px] text-muted-foreground/60 font-medium">{t.verifyNotice}</span>
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function SnapshotMessageItem({ item, t }: { item: Extract<SnapshotItem, { type: 'message' }>; t: UIText }) {
+  const msg: Extract<ChatItem, { type: 'message' }> = {
+    id: item.id,
+    type: 'message',
+    role: item.role,
+    content: item.content,
+    createdAt: item.createdAt,
+  };
+  return <MessageItem msg={msg} t={t} readOnly />;
+}
+
+function SnapshotToolBlock({ item, t }: { item: Extract<SnapshotItem, { type: 'tool' }>; t: UIText }) {
+  return (
+    <details className="w-full max-w-4xl mx-auto mt-2 bg-muted/30 border border-border rounded-lg overflow-hidden text-[13px] group/tool" open={item.defaultOpen}>
+      <summary className="flex cursor-pointer items-center gap-2 px-3 py-1.5 bg-muted/50 border-b border-border marker:content-none">
+        <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="font-medium text-xs">{item.title}</span>
+        {item.kind && <span className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">{item.kind}</span>}
+        <span className="ml-auto text-xs text-muted-foreground font-mono truncate max-w-[260px]">{item.command}</span>
+        {item.status && <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">{item.status}</span>}
+        <span className="shrink-0 text-[10px] text-muted-foreground">{formatTime(item.createdAt)}</span>
+        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground opacity-50 transition-transform group-open/tool:rotate-180" />
+      </summary>
+      <div className="grid gap-2 p-3 bg-background/50">
+        <pre className="overflow-x-auto whitespace-pre-wrap rounded-md border border-border bg-muted/40 p-3 font-mono text-[11px] leading-relaxed text-foreground/80 elegant-scrollbar">
+          {item.command}
+        </pre>
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/20 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground elegant-scrollbar">
+          {item.output}
+        </pre>
+      </div>
+    </details>
+  );
+}
+
+function MessageItem({ msg, t, readOnly = false }: { msg: Extract<ChatItem, { type: 'message' }>, t: UIText, readOnly?: boolean }) {
   const isUser = msg.role === 'user';
   const [copied, setCopied] = useState(false);
+  const stripContracts = !isUser;
+  const visibleContent = useMemo(
+    () => stripContracts ? stripMachineContractLines(msg.content) : msg.content,
+    [msg.content, stripContracts]
+  );
+  const hasVisibleContent = Boolean(stringsTrim(visibleContent));
 
   const copyMessage = async () => {
     try {
-      await copyText(msg.content || '');
+      await copyText(visibleContent);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1200);
     } catch {
       setCopied(false);
     }
   };
+
+  if (!isUser && !hasVisibleContent) return null;
 
   return (
     <div className="flex gap-4 w-full max-w-4xl mx-auto rounded-lg border border-border/70 bg-card/50 px-3 py-3 group">
@@ -3616,9 +4817,10 @@ function MessageItem({ msg, t }: { msg: Extract<ChatItem, { type: 'message' }>, 
             type="button"
             className={cn(
               "ml-auto h-6 w-6 rounded-md text-muted-foreground transition-opacity hover:text-foreground",
-              copied ? "opacity-100 text-emerald-600 dark:text-emerald-400" : "opacity-100 md:opacity-0 md:group-hover:opacity-100"
+              readOnly ? "pointer-events-none opacity-0" : copied ? "opacity-100 text-emerald-600 dark:text-emerald-400" : "opacity-100 md:opacity-0 md:group-hover:opacity-100"
             )}
             onClick={copyMessage}
+            disabled={readOnly}
             aria-label={t.copyMessage}
             title={copied ? t.copied : t.copy}
           >
@@ -3626,7 +4828,7 @@ function MessageItem({ msg, t }: { msg: Extract<ChatItem, { type: 'message' }>, 
           </Button>
         </div>
 
-        <MessageContent content={msg.content} />
+        <MessageContent content={visibleContent} stripMachineContracts={stripContracts} />
       </div>
     </div>
   );
@@ -3739,15 +4941,36 @@ function SettingsModal({
   ];
   const profileCommand = (profileId: PermissionProfileId) =>
     tokenInfo?.permissionProfiles?.find((profile) => profile.id === profileId)?.setupCommand || '';
+  const profileConnectCommand = (profileId: PermissionProfileId) =>
+    tokenInfo?.permissionProfiles?.find((profile) => profile.id === profileId)?.connectCommand || '';
+  const profileSudoConnectCommand = (profileId: PermissionProfileId) =>
+    tokenInfo?.permissionProfiles?.find((profile) => profile.id === profileId)?.sudoConnectCommand || '';
   const selectedSetupCommand =
     (tokenInfo && profileCommand(tokenInfo.permissionProfile)) ||
     tokenInfo?.setupCommand ||
     tokenInfo?.commands?.[0] ||
     (tokenInfo ? `${tokenInfo.installCommand} && ${tokenInfo.connectCommand}` : '');
+  const installCommand = tokenInfo?.installCommand || tokenInfo?.commands?.[0] || '';
+  const sudoInstallCommand = tokenInfo?.sudoInstallCommand || tokenInfo?.sudoCommands?.[0] || '';
+  const selectedLinkCommand =
+    (tokenInfo && profileConnectCommand(tokenInfo.permissionProfile)) ||
+    tokenInfo?.connectCommand ||
+    tokenInfo?.commands?.[1] ||
+    selectedSetupCommand;
+  const selectedSudoLinkCommand =
+    (tokenInfo && profileSudoConnectCommand(tokenInfo.permissionProfile)) ||
+    tokenInfo?.sudoConnectCommand ||
+    tokenInfo?.sudoCommands?.[1] ||
+    '';
   const alternateProfile = tokenInfo?.permissionProfile === 'auto-execute' ? 'review-required' : 'auto-execute';
-  const alternateSetupCommand = tokenInfo ? profileCommand(alternateProfile) : '';
+  const alternateSetupCommand = tokenInfo ? profileConnectCommand(alternateProfile) || profileCommand(alternateProfile) : '';
+  const alternateSudoCommand = tokenInfo ? profileSudoConnectCommand(alternateProfile) : '';
   const repairProfileCommand = (info: BridgeTokenResponse | undefined, profileId: PermissionProfileId) =>
     info?.permissionProfiles?.find((profile) => profile.id === profileId)?.setupCommand || '';
+  const repairProfileConnectCommand = (info: BridgeTokenResponse | undefined, profileId: PermissionProfileId) =>
+    info?.permissionProfiles?.find((profile) => profile.id === profileId)?.connectCommand || '';
+  const repairProfileSudoConnectCommand = (info: BridgeTokenResponse | undefined, profileId: PermissionProfileId) =>
+    info?.permissionProfiles?.find((profile) => profile.id === profileId)?.sudoConnectCommand || '';
   const copyCommand = async (value: string, key: string) => {
     await copyText(value);
     setCopiedCommand(key);
@@ -3874,12 +5097,19 @@ function SettingsModal({
                 const expanded = expandedAgentId === agent.id;
                 const repairInfo = repairTokens[agent.id];
                 const selectedRepairCommand =
-                  (repairInfo && repairProfileCommand(repairInfo, repairInfo.permissionProfile)) ||
-                  repairInfo?.setupCommand ||
-                  repairInfo?.commands?.[0] ||
+                  (repairInfo && repairProfileConnectCommand(repairInfo, repairInfo.permissionProfile)) ||
+                  repairInfo?.connectCommand ||
+                  repairInfo?.commands?.[1] ||
+                  repairProfileCommand(repairInfo, repairInfo?.permissionProfile || 'review-required') ||
+                  '';
+                const selectedRepairSudoCommand =
+                  (repairInfo && repairProfileSudoConnectCommand(repairInfo, repairInfo.permissionProfile)) ||
+                  repairInfo?.sudoConnectCommand ||
+                  repairInfo?.sudoCommands?.[1] ||
                   '';
                 const alternateRepairProfile = repairInfo?.permissionProfile === 'auto-execute' ? 'review-required' : 'auto-execute';
-                const alternateRepairCommand = repairInfo ? repairProfileCommand(repairInfo, alternateRepairProfile) : '';
+                const alternateRepairCommand = repairInfo ? repairProfileConnectCommand(repairInfo, alternateRepairProfile) || repairProfileCommand(repairInfo, alternateRepairProfile) : '';
+                const alternateRepairSudoCommand = repairInfo ? repairProfileSudoConnectCommand(repairInfo, alternateRepairProfile) : '';
                 return (
                   <div
                     key={agent.id}
@@ -3972,21 +5202,45 @@ function SettingsModal({
                         {repairInfo && (
                           <div className="space-y-2">
                             <p className="text-xs leading-relaxed text-muted-foreground">{t.repairCommandHint}</p>
-                            <CommandBlock
-                              label={`${t.repairConnectionCommand} · ${t.selectedProfileCommand}`}
-                              value={selectedRepairCommand}
-                              copied={copiedCommand === `repair-${agent.id}`}
-                              onCopy={() => copyCommand(selectedRepairCommand, `repair-${agent.id}`).catch(() => undefined)}
-                              t={t}
-                            />
-                            {alternateRepairCommand && (
+                            <div className="space-y-2">
+                              <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t.normalUserCommands}</div>
                               <CommandBlock
-                                label={`${t.repairConnectionCommand} · ${t.alternateProfileCommand}`}
-                                value={alternateRepairCommand}
-                                copied={copiedCommand === `repair-alt-${agent.id}`}
-                                onCopy={() => copyCommand(alternateRepairCommand, `repair-alt-${agent.id}`).catch(() => undefined)}
+                                label={`${t.repairConnectionCommand} · ${t.selectedProfileCommand}`}
+                                value={selectedRepairCommand}
+                                copied={copiedCommand === `repair-${agent.id}`}
+                                onCopy={() => copyCommand(selectedRepairCommand, `repair-${agent.id}`).catch(() => undefined)}
                                 t={t}
                               />
+                              {alternateRepairCommand && (
+                                <CommandBlock
+                                  label={`${t.repairConnectionCommand} · ${t.alternateProfileCommand}`}
+                                  value={alternateRepairCommand}
+                                  copied={copiedCommand === `repair-alt-${agent.id}`}
+                                  onCopy={() => copyCommand(alternateRepairCommand, `repair-alt-${agent.id}`).catch(() => undefined)}
+                                  t={t}
+                                />
+                              )}
+                            </div>
+                            {selectedRepairSudoCommand && (
+                              <div className="space-y-2">
+                                <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t.sudoRootCommands}</div>
+                                <CommandBlock
+                                  label={`${t.repairConnectionCommand} · ${t.selectedProfileCommand}`}
+                                  value={selectedRepairSudoCommand}
+                                  copied={copiedCommand === `repair-sudo-${agent.id}`}
+                                  onCopy={() => copyCommand(selectedRepairSudoCommand, `repair-sudo-${agent.id}`).catch(() => undefined)}
+                                  t={t}
+                                />
+                                {alternateRepairSudoCommand && (
+                                  <CommandBlock
+                                    label={`${t.repairConnectionCommand} · ${t.alternateProfileCommand}`}
+                                    value={alternateRepairSudoCommand}
+                                    copied={copiedCommand === `repair-sudo-alt-${agent.id}`}
+                                    onCopy={() => copyCommand(alternateRepairSudoCommand, `repair-sudo-alt-${agent.id}`).catch(() => undefined)}
+                                    t={t}
+                                  />
+                                )}
+                              </div>
                             )}
                           </div>
                         )}
@@ -4050,21 +5304,59 @@ function SettingsModal({
                     onCopy={() => copyCommand(tokenInfo.token, 'token').catch(() => undefined)}
                     t={t}
                   />
-                  <CommandBlock
-                    label={`${t.setupCommand} · ${t.selectedProfileCommand}`}
-                    value={selectedSetupCommand}
-                    copied={copiedCommand === 'setup'}
-                    onCopy={() => copyCommand(selectedSetupCommand, 'setup').catch(() => undefined)}
-                    t={t}
-                  />
-                  {alternateSetupCommand && (
+                  <div className="space-y-2">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t.normalUserCommands}</div>
                     <CommandBlock
-                      label={`${t.setupCommand} · ${t.alternateProfileCommand}`}
-                      value={alternateSetupCommand}
-                      copied={copiedCommand === 'setup-alt'}
-                      onCopy={() => copyCommand(alternateSetupCommand, 'setup-alt').catch(() => undefined)}
+                      label={t.installCommand}
+                      value={installCommand}
+                      copied={copiedCommand === 'install'}
+                      onCopy={() => copyCommand(installCommand, 'install').catch(() => undefined)}
                       t={t}
                     />
+                    <CommandBlock
+                      label={`${t.linkCommand} · ${t.selectedProfileCommand}`}
+                      value={selectedLinkCommand}
+                      copied={copiedCommand === 'link'}
+                      onCopy={() => copyCommand(selectedLinkCommand, 'link').catch(() => undefined)}
+                      t={t}
+                    />
+                    {alternateSetupCommand && (
+                      <CommandBlock
+                        label={`${t.linkCommand} · ${t.alternateProfileCommand}`}
+                        value={alternateSetupCommand}
+                        copied={copiedCommand === 'link-alt'}
+                        onCopy={() => copyCommand(alternateSetupCommand, 'link-alt').catch(() => undefined)}
+                        t={t}
+                      />
+                    )}
+                  </div>
+                  {sudoInstallCommand && selectedSudoLinkCommand && (
+                    <div className="space-y-2">
+                      <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t.sudoRootCommands}</div>
+                      <CommandBlock
+                        label={t.installCommand}
+                        value={sudoInstallCommand}
+                        copied={copiedCommand === 'sudo-install'}
+                        onCopy={() => copyCommand(sudoInstallCommand, 'sudo-install').catch(() => undefined)}
+                        t={t}
+                      />
+                      <CommandBlock
+                        label={`${t.linkCommand} · ${t.selectedProfileCommand}`}
+                        value={selectedSudoLinkCommand}
+                        copied={copiedCommand === 'sudo-link'}
+                        onCopy={() => copyCommand(selectedSudoLinkCommand, 'sudo-link').catch(() => undefined)}
+                        t={t}
+                      />
+                      {alternateSudoCommand && (
+                        <CommandBlock
+                          label={`${t.linkCommand} · ${t.alternateProfileCommand}`}
+                          value={alternateSudoCommand}
+                          copied={copiedCommand === 'sudo-link-alt'}
+                          onCopy={() => copyCommand(alternateSudoCommand, 'sudo-link-alt').catch(() => undefined)}
+                          t={t}
+                        />
+                      )}
+                    </div>
                   )}
                 </div>
               )}
@@ -4096,6 +5388,7 @@ function ApprovalCard({
       item.status === 'declined' ? t.denied :
         item.status === 'canceled' ? t.approvalCanceled :
           t.approvalRequired;
+  const approvalTitle = item.approval.kind === 'ccb.terminal_prompt' ? t.browserApproval : t.approvalRequired;
   const detail = [item.approval.command, item.approval.cwd, item.approval.reason].filter(Boolean).join('\n');
 
   return (
@@ -4106,7 +5399,7 @@ function ApprovalCard({
         </div>
         <div className="min-w-0 flex-1 space-y-2">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium">{t.approvalRequired}</span>
+            <span className="text-sm font-medium">{approvalTitle}</span>
             <span className="rounded border border-border bg-background/70 px-1.5 py-0.5 text-[10px] text-muted-foreground">{statusText}</span>
           </div>
           {detail && (

@@ -54,11 +54,21 @@ Bridge prompt construction uses three context layers:
 3. Compact prior-turn handoffs generated locally from visible outputs and tool
    summaries.
 
+Prompts require each CLI to track the user's core acceptance criterion
+explicitly. In collaboration mode the reviewer must audit whether the previous
+turn advanced that criterion, not merely whether the project compiles. This
+prevents any task with a stronger acceptance condition from being marked
+resolved after only a narrow validation check.
+
 The Bridge must avoid sending full raw previous outputs unless they are short.
 Each prior turn in the next prompt should be capped and should prefer parsed
 handoff fields when the agent provided them. The visible `Handoff:` line remains
 the compatibility surface, while `internal/bridge/orchestration.go:parseHandoffFields`
 stores the important values as structured turn state for later prompts.
+Compact prior turns include both successful verification commands and failed
+command summaries so the next CLI can see what has already been tried.
+Fallback summaries are stripped before reuse so generated "turn completed"
+boilerplate does not recursively grow across turns.
 
 Agents are instructed to end visible responses with compact routing and handoff
 lines:
@@ -74,6 +84,14 @@ early-stop detection.
 
 The `status=resolved` signal may end an orchestration early after at least two
 turns, but only when the same visible answer includes a user-facing conclusion.
+If a turn errors or reports `status=blocked`, fallback text must say the turn or
+run did not complete and must preserve the blocker. It must not claim the run is
+complete.
+
+When the same normalized blocker repeats for three consecutive turns without
+concrete progress, the Bridge emits `run.error` and stops the run before
+exhausting `maxTurns`. This keeps round-robin deterministic while avoiding a
+dead loop of the same failed command or environmental blocker.
 
 When a run reports changed files, unresolved risks, turn errors, or failed tool
 commands, the Bridge adds one lightweight final verifier turn. It is skipped for
@@ -88,9 +106,9 @@ fixed extra model call.
   [orchestration-deep-collaboration-and-approval.md](orchestration-deep-collaboration-and-approval.md).
 - No frontend event shape changes.
 - Existing `turn.start`, `turn.delta`, `command.start`, `command.end`,
-  `turn.end`, and `run.end` events remain the only emitted successful-path
-  event kinds. The verifier is represented as another normal turn with a
-  verifier turn id.
+  `turn.end`, and `run.end` events remain the only emitted successful-path event
+  kinds. Repeated blockers use the existing `run.error` event kind. The verifier
+  is represented as another normal turn with a verifier turn id.
 
 ## Implementation Steps
 
@@ -99,9 +117,11 @@ fixed extra model call.
    and compact prior-turn handoffs.
 3. Add early completion detection for explicit resolved handoffs.
 4. Add structured handoff parsing and a conditional final verifier prompt.
-5. Add tests for compact handoff prompts, collaboration guidance, debate
-   guidance, and completion detection.
-6. Run full Go tests, frontend build, Go build, and doc lint.
+5. Add blocker detection, failed-command carry-forward, and non-completion
+   fallback summaries for failed turns.
+6. Add tests for compact handoff prompts, collaboration guidance, debate
+   guidance, completion detection, and repeated blockers.
+7. Run full Go tests, frontend build, Go build, and doc lint.
 
 ## Exit Gates
 
@@ -113,6 +133,11 @@ fixed extra model call.
   branches.
 - `status=resolved` can stop after at least two turns only when a final answer
   is present.
+- Failed commands are carried into the next turn's compact state.
+- Failed turns do not receive fallback summaries that claim successful
+  completion.
+- A repeated blocker stops the run with `run.error` before all turns are
+  consumed.
 - A final verifier turn runs only for file changes, failed commands/errors, or
   unresolved risks.
 - Full test and build commands pass:

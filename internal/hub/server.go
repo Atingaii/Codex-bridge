@@ -99,12 +99,16 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("DELETE /api/sessions/{sid}", s.withAdmin(s.handleDeleteSession))
 	mux.HandleFunc("GET /api/sessions/{sid}/messages", s.withAdmin(s.handleMessages))
 	mux.HandleFunc("GET /api/sessions/{sid}/runs", s.withAdmin(s.handleRuns))
+	mux.HandleFunc("POST /api/sessions/{sid}/share", s.withAdmin(s.handleShareSession))
 	mux.HandleFunc("GET /api/orchestrations", s.withAuth(s.handleListOrchestrations))
 	mux.HandleFunc("POST /api/orchestrations", s.withAuth(s.handleCreateOrchestration))
 	mux.HandleFunc("GET /api/orchestrations/{runID}", s.withAuth(s.handleGetOrchestration))
 	mux.HandleFunc("GET /api/orchestrations/{runID}/events", s.withAuth(s.handleOrchestrationEvents))
 	mux.HandleFunc("POST /api/orchestrations/{runID}/prompts", s.withAuth(s.handleContinueOrchestration))
 	mux.HandleFunc("POST /api/orchestrations/{runID}/cancel", s.withAuth(s.handleCancelOrchestration))
+	mux.HandleFunc("POST /api/orchestrations/{runID}/share", s.withAuth(s.handleShareOrchestration))
+	mux.HandleFunc("DELETE /api/shares/{shareID}", s.withAuth(s.handleRevokeShare))
+	mux.HandleFunc("GET /api/public/shares/{shareID}", s.handlePublicShare)
 	mux.HandleFunc("GET /ws/orchestrations", s.withAuth(s.handleOrchestrationWS))
 	mux.HandleFunc("GET /ws/chat", s.withAdmin(s.handleBrowserWS))
 	mux.HandleFunc("GET /api/agents/connect", s.handleBridgeWS)
@@ -486,6 +490,12 @@ func (s *Server) bridgeTokenResponse(r *http.Request, params bridgeTokenResponse
 		CWD:       params.CWD,
 		MachineID: params.MachineID,
 	})
+	sudoInstallCommand := s.bridgeSudoInstallCommand(hubURL)
+	sudoConnectCommand := s.bridgeSudoConnectCommand(hubURL, params.Token, params.PermissionProfile, bridgeConnectOptions{
+		Agent:     params.Agent,
+		CWD:       params.CWD,
+		MachineID: params.MachineID,
+	})
 	setupCommand := bridgeSetupCommand(installCommand, connectCommand)
 	profiles := s.bridgePermissionProfiles(hubURL, params.Token, installCommand, bridgeConnectOptions{
 		Agent:     params.Agent,
@@ -503,7 +513,11 @@ func (s *Server) bridgeTokenResponse(r *http.Request, params bridgeTokenResponse
 		"setupCommand":       setupCommand,
 		"installCommand":     installCommand,
 		"connectCommand":     connectCommand,
-		"commands":           []string{setupCommand},
+		"sudoSetupCommand":   bridgeSetupCommand(sudoInstallCommand, sudoConnectCommand),
+		"sudoInstallCommand": sudoInstallCommand,
+		"sudoConnectCommand": sudoConnectCommand,
+		"sudoCommands":       []string{sudoInstallCommand, sudoConnectCommand},
+		"commands":           []string{installCommand, connectCommand},
 	}
 	if params.Agent != nil {
 		out["agentId"] = params.Agent.ID
@@ -532,10 +546,14 @@ func (s *Server) bridgePermissionProfiles(hubURL, token, installCommand string, 
 
 func (s *Server) bridgePermissionProfile(hubURL, token, installCommand, profile string, opts bridgeConnectOptions) map[string]string {
 	connectCommand := s.bridgeConnectCommand(hubURL, token, profile, opts)
+	sudoInstallCommand := s.bridgeSudoInstallCommand(hubURL)
+	sudoConnectCommand := s.bridgeSudoConnectCommand(hubURL, token, profile, opts)
 	return map[string]string{
-		"id":             profile,
-		"setupCommand":   bridgeSetupCommand(installCommand, connectCommand),
-		"connectCommand": connectCommand,
+		"id":                 profile,
+		"setupCommand":       bridgeSetupCommand(installCommand, connectCommand),
+		"connectCommand":     connectCommand,
+		"sudoSetupCommand":   bridgeSetupCommand(sudoInstallCommand, sudoConnectCommand),
+		"sudoConnectCommand": sudoConnectCommand,
 	}
 }
 
@@ -543,8 +561,12 @@ func (s *Server) bridgeInstallCommand(hubURL string) string {
 	return fmt.Sprintf("curl -fsSL %s | sh", shellQuote(strings.TrimRight(hubURL, "/")+"/install.sh"))
 }
 
+func (s *Server) bridgeSudoInstallCommand(hubURL string) string {
+	return fmt.Sprintf("curl -fsSL %s | sudo -H sh", shellQuote(strings.TrimRight(hubURL, "/")+"/install.sh"))
+}
+
 func bridgeSetupCommand(installCommand, connectCommand string) string {
-	return installCommand + " && { " + connectCommand + "; }"
+	return installCommand + " && " + connectCommand
 }
 
 type bridgeConnectOptions struct {
@@ -554,90 +576,35 @@ type bridgeConnectOptions struct {
 }
 
 func (s *Server) bridgeConnectCommand(hubURL, token, permissionProfile string, opts bridgeConnectOptions) string {
-	hubArg := ""
-	if hubURL != strings.TrimRight(s.cfg.Bridge.HubURL, "/") {
-		hubArg = " --hub " + shellQuote(hubURL)
-	}
-	permissionArg := bridgePermissionArgs(permissionProfile)
-	machineIDArg := ""
-	if strings.TrimSpace(opts.MachineID) != "" {
-		machineIDArg = " --machine-id " + shellQuote(strings.TrimSpace(opts.MachineID))
-	}
-	cwdDefault := `"${PWD:-.}"`
-	if strings.TrimSpace(opts.CWD) != "" {
-		cwdDefault = shellQuote(strings.TrimSpace(opts.CWD))
-	}
-	nameDefault := `"${HOSTNAME:-cli}-${CB_DIR}-${CB_HASH}"`
-	if opts.Agent != nil && strings.TrimSpace(opts.Agent.Name) != "" {
-		nameDefault = shellQuote(strings.TrimSpace(opts.Agent.Name))
-	}
-	startScript := []string{
-		shellQuote("#!/bin/sh"),
-		shellQuote("set -eu"),
-		shellExpandWord(`CB_HASH="$CB_HASH"`),
-		shellExpandWord(`CB_HOME="$CB_HOME"`),
-		shellQuote(`CB_PROXY_ENV=$(cat "$CB_HOME/services/${CB_HASH}.env" 2>/dev/null || true)`),
-		shellQuote(`if [ -n "$CB_PROXY_ENV" ]; then set -a; . "$CB_HOME/services/${CB_HASH}.env"; set +a; fi`),
-		shellQuote(`CB_CWD=$(cat "$CB_HOME/services/${CB_HASH}.cwd")`),
-		shellQuote(`CB_NAME=$(cat "$CB_HOME/services/${CB_HASH}.name")`),
-		shellQuote(fmt.Sprintf(`exec "$HOME/.local/bin/codex-bridge" connect%s%s%s --cwd "$CB_CWD" --name "$CB_NAME" --machine-id-file "$CB_HOME/machines/${CB_HASH}" %s`, hubArg, permissionArg, machineIDArg, shellQuote(token))),
-	}
-	serviceFile := []string{
-		shellQuote("[Unit]"),
-		shellExpandWord("Description=Codex Bridge endpoint for $CB_CWD"),
-		shellQuote("After=network-online.target"),
-		shellQuote("Wants=network-online.target"),
-		shellQuote(""),
-		shellQuote("[Service]"),
-		shellQuote("Type=simple"),
-		shellExpandWord("ExecStart=%h/.codex-bridge/services/${CB_HASH}.sh"),
-		shellQuote("Restart=always"),
-		shellQuote("RestartSec=5"),
-		shellExpandWord("StandardOutput=append:%h/.codex-bridge/logs/${CB_HASH}.log"),
-		shellExpandWord("StandardError=append:%h/.codex-bridge/logs/${CB_HASH}.log"),
-		shellQuote(""),
-		shellQuote("[Install]"),
-		shellQuote("WantedBy=default.target"),
-	}
-	return shellJoin(
-		`CB_CWD=`+cwdDefault,
-		`CB_DIR="$(basename "$CB_CWD")"`,
-		`CB_HASH="$(printf '%s' "$CB_CWD" | cksum | awk '{print $1}')"`,
-		`CB_NAME=`+nameDefault,
-		`CB_HOME="$HOME/.codex-bridge"`,
-		`CB_LOG_DIR="$CB_HOME/logs"`,
-		`CB_LOG="$CB_LOG_DIR/${CB_HASH}.log"`,
-		`CB_START="$CB_HOME/services/${CB_HASH}.sh"`,
-		`CB_SERVICE_DIR="$HOME/.config/systemd/user"`,
-		`CB_SERVICE_NAME="codex-bridge-${CB_HASH}.service"`,
-		`mkdir -p "$CB_HOME/machines" "$CB_LOG_DIR" "$CB_HOME/services" "$CB_SERVICE_DIR"`,
-		`if ! command -v codex >/dev/null 2>&1; then echo "codex CLI not found in PATH. Install Codex CLI or run this command from a shell where 'command -v codex' works. PATH=$PATH" >&2; exit 1; fi`,
-		`if ! command -v claude >/dev/null 2>&1; then echo "Claude Code CLI not found in PATH. Install Claude Code or run this command from a shell where 'command -v claude' works. PATH=$PATH" >&2; exit 1; fi`,
-		`CB_CODEX_PATH="$(command -v codex)"`,
-		`CB_CLAUDE_PATH="$(command -v claude)"`,
-		`printf '%s\n' "$CB_CWD" > "$CB_HOME/services/${CB_HASH}.cwd"`,
-		`printf '%s\n' "$CB_NAME" > "$CB_HOME/services/${CB_HASH}.name"`,
-		`: > "$CB_HOME/services/${CB_HASH}.env"`,
-		`printf 'PATH=%s\n' "$(printf '%s' "$PATH" | sed "s/'/'\\\\''/g; 1s/^/'/; \$s/\$/'/")" >> "$CB_HOME/services/${CB_HASH}.env"`,
-		`printf 'BRIDGE_CODEX_PATH=%s\n' "$(printf '%s' "$CB_CODEX_PATH" | sed "s/'/'\\\\''/g; 1s/^/'/; \$s/\$/'/")" >> "$CB_HOME/services/${CB_HASH}.env"`,
-		`printf 'BRIDGE_CLAUDE_PATH=%s\n' "$(printf '%s' "$CB_CLAUDE_PATH" | sed "s/'/'\\\\''/g; 1s/^/'/; \$s/\$/'/")" >> "$CB_HOME/services/${CB_HASH}.env"`,
-		`for CB_ENV_NAME in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do eval "CB_ENV_VALUE=\${$CB_ENV_NAME:-}"; if [ -n "$CB_ENV_VALUE" ]; then printf '%s=%s\n' "$CB_ENV_NAME" "$(printf '%s' "$CB_ENV_VALUE" | sed "s/'/'\\\\''/g; 1s/^/'/; \$s/\$/'/")" >> "$CB_HOME/services/${CB_HASH}.env"; fi; done`,
-		fmt.Sprintf(`printf '%%s\n' %s > "$CB_START"`, strings.Join(startScript, " ")),
-		`chmod 700 "$CB_START"`,
-		`: > "$CB_LOG"`,
-		`CB_STARTED=0`,
-		fmt.Sprintf(`if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then systemctl --user stop "$CB_SERVICE_NAME" >/dev/null 2>&1 || true; printf '%%s\n' %s > "$CB_SERVICE_DIR/$CB_SERVICE_NAME"; if systemctl --user daemon-reload && systemctl --user enable "$CB_SERVICE_NAME" && systemctl --user restart "$CB_SERVICE_NAME"; then sleep 2; if systemctl --user is-active --quiet "$CB_SERVICE_NAME"; then loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true; CB_WAIT=0; while [ "$CB_WAIT" -lt 10 ] && ! grep -q '\[bridge\] connected' "$CB_LOG" 2>/dev/null; do sleep 1; CB_WAIT=$((CB_WAIT + 1)); done; if grep -q '\[bridge\] connected' "$CB_LOG" 2>/dev/null; then echo "codex-bridge connected: $CB_SERVICE_NAME log=$CB_LOG"; else echo "codex-bridge service started but Hub connection is not confirmed. log=$CB_LOG" >&2; tail -n 40 "$CB_LOG" >&2 2>/dev/null || true; fi; CB_STARTED=1; else echo "codex-bridge user service did not stay active; falling back to nohup" >&2; systemctl --user status "$CB_SERVICE_NAME" --no-pager >&2 || true; if command -v journalctl >/dev/null 2>&1; then journalctl --user -u "$CB_SERVICE_NAME" -n 30 --no-pager >&2 || true; fi; systemctl --user stop "$CB_SERVICE_NAME" >/dev/null 2>&1 || true; fi; fi; fi`, strings.Join(serviceFile, " ")),
-		`if [ "$CB_STARTED" != "1" ]; then nohup "$CB_START" > "$CB_LOG" 2>&1 & CB_PID=$!; CB_WAIT=0; while [ "$CB_WAIT" -lt 10 ] && ! grep -q '\[bridge\] connected' "$CB_LOG" 2>/dev/null; do sleep 1; CB_WAIT=$((CB_WAIT + 1)); done; if grep -q '\[bridge\] connected' "$CB_LOG" 2>/dev/null; then echo "codex-bridge connected in background: pid=$CB_PID log=$CB_LOG"; else echo "codex-bridge started in background but Hub connection is not confirmed: pid=$CB_PID log=$CB_LOG" >&2; tail -n 40 "$CB_LOG" >&2 2>/dev/null || true; fi; fi`,
-	)
+	args := []string{"~/.local/bin/codex-bridge", "link", "--hub", shellQuote(hubURL)}
+	args = append(args, bridgeConnectArgs(hubURL, token, permissionProfile, opts)...)
+	return strings.Join(args, " ")
 }
 
-func bridgePermissionArgs(profile string) string {
-	switch profile {
-	case permissionProfileAutoExecute:
-		return " --runner codex --sandbox danger-full-access --approval-policy never"
-	default:
-		return " --runner codex-app-server --sandbox workspace-write --approval-policy untrusted"
+func (s *Server) bridgeSudoConnectCommand(hubURL, token, permissionProfile string, opts bridgeConnectOptions) string {
+	args := []string{"sudo", "-H", "env", `PATH="$PATH"`, "/root/.local/bin/codex-bridge", "link", "--hub", shellQuote(hubURL)}
+	args = append(args, bridgeConnectArgs(hubURL, token, permissionProfile, opts)...)
+	return strings.Join(args, " ")
+}
+
+func bridgeConnectArgs(hubURL, token, permissionProfile string, opts bridgeConnectOptions) []string {
+	var args []string
+	profile := normalizePermissionProfile(permissionProfile)
+	if profile == "" {
+		profile = permissionProfileReviewRequired
 	}
+	args = append(args, "--profile", shellQuote(profile))
+	if strings.TrimSpace(opts.MachineID) != "" {
+		args = append(args, "--machine-id", shellQuote(strings.TrimSpace(opts.MachineID)))
+	}
+	if strings.TrimSpace(opts.CWD) != "" {
+		args = append(args, "--cwd", shellQuote(strings.TrimSpace(opts.CWD)))
+	}
+	if opts.Agent != nil && strings.TrimSpace(opts.Agent.Name) != "" {
+		args = append(args, "--name", shellQuote(strings.TrimSpace(opts.Agent.Name)))
+	}
+	args = append(args, shellQuote(token))
+	return args
 }
 
 func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
@@ -725,14 +692,6 @@ func shellQuote(value string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
-}
-
-func shellExpandWord(value string) string {
-	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
-}
-
-func shellJoin(commands ...string) string {
-	return strings.Join(commands, "; ")
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request, uid string) {

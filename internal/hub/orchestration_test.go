@@ -131,6 +131,65 @@ func TestCommandStatusDoesNotUpdateOrchestrationRunStatus(t *testing.T) {
 	}
 }
 
+func TestCompletedOrchestrationStreamIsRejected(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := s.signer.Sign(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/ws/orchestrations?runId="+run.ID, nil)
+	req.AddCookie(&http.Cookie{Name: accessCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("completed orchestration stream status = %d, want %d, body = %s", rr.Code, http.StatusConflict, rr.Body.String())
+	}
+}
+
+func TestCompactOrchestrationContextIncludesTurnEndConclusion(t *testing.T) {
+	t.Parallel()
+
+	run := store.OrchestrationRun{
+		ID:     "orc_context",
+		Mode:   "collaboration",
+		Status: store.OrchestrationCompleted,
+		CWD:    "/repo",
+	}
+	contextSummary := compactOrchestrationContext(run, []store.OrchestrationEvent{
+		{
+			RunID:     run.ID,
+			Kind:      "command.end",
+			CLI:       "codex",
+			Status:    "completed",
+			Data:      map[string]any{"command": "go test ./...", "output": "ok"},
+			CreatedAt: 10,
+		},
+		{
+			RunID:     run.ID,
+			Kind:      "turn.end",
+			Role:      "reviewer",
+			CLI:       "codex",
+			Content:   "最终结论：构建通过。\n\n已验证：`go test ./...`。\n\n剩余风险：无。",
+			Status:    "success",
+			CreatedAt: 11,
+		},
+	})
+
+	if !strings.Contains(contextSummary, "Recent agent outputs") || !strings.Contains(contextSummary, "最终结论：构建通过") {
+		t.Fatalf("context summary missing turn.end conclusion:\n%s", contextSummary)
+	}
+	if !strings.Contains(contextSummary, "Tool outcomes and commands") || !strings.Contains(contextSummary, "go test ./...") {
+		t.Fatalf("context summary missing command context:\n%s", contextSummary)
+	}
+}
+
 func TestEmptyPagesReadFailureEventsAreSuppressed(t *testing.T) {
 	t.Parallel()
 
@@ -277,6 +336,30 @@ func TestContinueOrchestrationSendsCompactedContext(t *testing.T) {
 	}
 }
 
+func TestContinueOrchestrationRejectsAgentSwitch(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+	other, err := st.UpsertAgent(ctx, "other", "machine-2", "host-2", "instance-2", []string{t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := continueOrchestration(t, s, userID, run.ID, map[string]any{
+		"agentId":  other.ID,
+		"prompt":   "second task",
+		"maxTurns": 2,
+	}, http.StatusBadRequest)
+	if body["code"] != "BAD_AGENT" || !strings.Contains(body["message"].(string), "same CLI endpoint") {
+		t.Fatalf("agent switch error body = %#v", body)
+	}
+}
+
 func TestCreateOrchestrationRejectsReviewRequiredWithoutCodexApprovalCapability(t *testing.T) {
 	t.Parallel()
 
@@ -342,6 +425,39 @@ func TestCreateOrchestrationAllowsAutoExecuteWithoutBrowserApprovalCapability(t 
 	}
 }
 
+func TestCreateOrchestrationRejectsCCBBackendWithoutDirectCLIRequirements(t *testing.T) {
+	t.Parallel()
+
+	s, _, userID, agentID := newOrchestrationTestServer(t)
+	conn := &BridgeConn{
+		agentID: agentID,
+		capabilities: &protocol.BridgeCapabilities{
+			Runner:         "codex",
+			Sandbox:        "workspace-write",
+			ApprovalPolicy: "untrusted",
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"ccb": {Available: true, Execution: "ccb ask"},
+			},
+			Metadata: map[string]string{"orchestrationRunner": "ccb"},
+		},
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 2),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	body := createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId":  agentID,
+		"prompt":   "run through local ccb",
+		"maxTurns": 2,
+	}, http.StatusConflict)
+	if body["code"] != "ORCHESTRATION_CAPABILITY_UNAVAILABLE" || !strings.Contains(body["message"].(string), "Claude") || !strings.Contains(body["message"].(string), "Codex") {
+		t.Fatalf("capability error body = %#v", body)
+	}
+}
+
 func TestCreateOrchestrationPersistsUserMessageFileMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -393,6 +509,80 @@ func TestCreateOrchestrationPersistsUserMessageFileMetadata(t *testing.T) {
 	}
 	if file["size"] != float64(18) {
 		t.Fatalf("file size = %#v", file["size"])
+	}
+}
+
+func TestContinueOrchestrationPreservesExistingRunFiles(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run, err := st.CreateOrchestrationRun(ctx, store.CreateOrchestrationRunParams{
+		UserID:   userID,
+		AgentID:  agentID,
+		Title:    "termination",
+		Mode:     "collaboration",
+		Prompt:   "prove termination",
+		MaxTurns: 2,
+		Files: []store.OrchestrationFile{
+			{Name: "Model.thy", MimeType: "text/plain", Size: 11},
+			{Name: "Termination.thy", MimeType: "text/plain", Size: 23},
+			{Name: "ROOT", MimeType: "text/plain", Size: 4},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := &BridgeConn{
+		agentID: agentID,
+		capabilities: &protocol.BridgeCapabilities{
+			Sandbox:        "danger-full-access",
+			ApprovalPolicy: "never",
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: true},
+				"codex":  {Available: true},
+			},
+		},
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 4),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	body := continueOrchestration(t, s, userID, run.ID, map[string]any{
+		"prompt":   "summarize the remaining sorry placeholders",
+		"maxTurns": 2,
+	}, http.StatusOK)
+	loaded := body["run"].(map[string]any)
+	rawFiles, ok := loaded["files"].([]any)
+	if !ok || len(rawFiles) != 3 {
+		t.Fatalf("continued run files = %#v", loaded["files"])
+	}
+	for _, want := range []string{"Model.thy", "Termination.thy", "ROOT"} {
+		var found bool
+		for _, raw := range rawFiles {
+			file := raw.(map[string]any)
+			if file["name"] == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("continued run files missing %q: %#v", want, rawFiles)
+		}
+	}
+	persisted, err := st.OrchestrationRunByID(ctx, run.ID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.Files) != 3 {
+		t.Fatalf("persisted files = %#v", persisted.Files)
 	}
 }
 

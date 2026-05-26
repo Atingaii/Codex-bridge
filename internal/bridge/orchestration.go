@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -16,6 +19,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +62,27 @@ type orchestrationHandoffFields struct {
 	Verified string
 	Next     string
 	Risks    string
+}
+
+type workspaceSnapshot struct {
+	Root      string
+	Files     map[string]workspaceFileState
+	Available bool
+	Truncated bool
+	Err       string
+}
+
+type workspaceFileState struct {
+	Size    int64
+	ModTime int64
+}
+
+type workspaceChangeReport struct {
+	Root      string
+	Changed   []string
+	Available bool
+	Truncated bool
+	Err       string
 }
 
 var safeOrchestrationFileName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -176,12 +201,18 @@ func (r orchestrationApprovalRequester) RequestApproval(ctx context.Context, req
 	m.mu.Unlock()
 
 	m.send(protocol.MustEnvelope(protocol.TypeApprovalRequest, "", req))
-	select {
-	case res := <-ch:
-		return res, nil
-	case <-ctx.Done():
-		m.removeApproval(req.RequestID)
-		return protocol.ApprovalResponsePayload{}, ctx.Err()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case res := <-ch:
+			return res, nil
+		case <-ticker.C:
+			m.send(protocol.MustEnvelope(protocol.TypeApprovalRequest, "", req))
+		case <-ctx.Done():
+			m.removeApproval(req.RequestID)
+			return protocol.ApprovalResponsePayload{}, ctx.Err()
+		}
 	}
 }
 
@@ -228,7 +259,9 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		})
 		return
 	}
+	originalPrompt := payload.Prompt
 	payload.Prompt = preparedPrompt
+	workspaceBefore := snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
 	mode := payload.Mode
 	if mode != "collaboration" && mode != "debate" {
 		mode = "collaboration"
@@ -273,14 +306,18 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
 		if err != nil {
 			record.Err = err.Error()
+			if summary := erroredTurnFallbackSummary(payload.Prompt, turn >= maxTurns, history, record); summary != "" {
+				appendConclusionToTurnRecord(&record, summary)
+			}
 			history = append(history, record)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-				Kind:   "turn.end",
-				TurnID: turnID,
-				Role:   role,
-				CLI:    cli,
-				Status: "error",
-				Error:  err.Error(),
+				Kind:    "turn.end",
+				TurnID:  turnID,
+				Role:    role,
+				CLI:     cli,
+				Content: record.Content,
+				Status:  "error",
+				Error:   err.Error(),
 			})
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -290,19 +327,19 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 				})
 				return
 			}
+			if blocker, ok := repeatedBlockingHandoff(history); ok {
+				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+					Kind:    "run.error",
+					Status:  store.OrchestrationFailed,
+					Error:   "repeated blocker: " + blocker,
+					Content: "Orchestration stopped because the same blocker repeated without concrete progress.",
+				})
+				return
+			}
 			continue
 		}
-		if summary := finalTurnFallbackSummary(payload.Prompt, turn, maxTurns, history, record); summary != "" {
-			delta := summary
-			if strings.TrimSpace(content) != "" {
-				delta = "\n\n" + summary
-				record.Content = strings.TrimSpace(content + "\n\n" + summary)
-			} else {
-				record.Content = summary
-			}
-			record.Msg = extractMsg(record.Content)
-			record.Handoff = extractHandoff(record.Content)
-			record.HandoffFields = parseHandoffFields(record.Handoff)
+		if summary := turnConclusionFallbackSummary(payload.Prompt, turn, maxTurns, history, record); summary != "" {
+			delta := appendConclusionToTurnRecord(&record, summary)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 				Kind:    "turn.delta",
 				TurnID:  turnID,
@@ -313,12 +350,22 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		}
 		history = append(history, record)
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-			Kind:   "turn.end",
-			TurnID: turnID,
-			Role:   role,
-			CLI:    cli,
-			Status: "success",
+			Kind:    "turn.end",
+			TurnID:  turnID,
+			Role:    role,
+			CLI:     cli,
+			Content: record.Content,
+			Status:  "success",
 		})
+		if blocker, ok := repeatedBlockingHandoff(history); ok {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:    "run.error",
+				Status:  store.OrchestrationFailed,
+				Error:   "repeated blocker: " + blocker,
+				Content: "Orchestration stopped because the same blocker repeated without concrete progress.",
+			})
+			return
+		}
 		if turn >= 2 && resolvedHandoffReady(record.Content) {
 			break
 		}
@@ -350,14 +397,18 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		record.Verifier = true
 		if err != nil {
 			record.Err = err.Error()
+			if summary := erroredTurnFallbackSummary(payload.Prompt, true, history, record); summary != "" {
+				appendConclusionToTurnRecord(&record, summary)
+			}
 			history = append(history, record)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-				Kind:   "turn.end",
-				TurnID: turnID,
-				Role:   role,
-				CLI:    cli,
-				Status: "error",
-				Error:  err.Error(),
+				Kind:    "turn.end",
+				TurnID:  turnID,
+				Role:    role,
+				CLI:     cli,
+				Content: record.Content,
+				Status:  "error",
+				Error:   err.Error(),
 			})
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -367,16 +418,71 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 				})
 				return
 			}
+			if blocker, ok := repeatedBlockingHandoff(history); ok {
+				if !m.shouldDeferRepeatedBlockerForWorkspaceRemediation(payload, originalPrompt, history, workspaceBefore) {
+					m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+						Kind:    "run.error",
+						Status:  store.OrchestrationFailed,
+						Error:   "repeated blocker: " + blocker,
+						Content: "Orchestration stopped because the same blocker repeated without concrete progress.",
+					})
+					return
+				}
+			}
 		} else {
+			if summary := verifierConclusionFallbackSummary(payload.Prompt, history, record); summary != "" {
+				delta := appendConclusionToTurnRecord(&record, summary)
+				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+					Kind:    "turn.delta",
+					TurnID:  turnID,
+					Role:    role,
+					CLI:     cli,
+					Content: delta,
+				})
+			}
 			history = append(history, record)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-				Kind:   "turn.end",
-				TurnID: turnID,
-				Role:   role,
-				CLI:    cli,
-				Status: "success",
+				Kind:    "turn.end",
+				TurnID:  turnID,
+				Role:    role,
+				CLI:     cli,
+				Content: record.Content,
+				Status:  "success",
 			})
+			if blocker, ok := repeatedBlockingHandoff(history); ok {
+				if !m.shouldDeferRepeatedBlockerForWorkspaceRemediation(payload, originalPrompt, history, workspaceBefore) {
+					m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+						Kind:    "run.error",
+						Status:  store.OrchestrationFailed,
+						Error:   "repeated blocker: " + blocker,
+						Content: "Orchestration stopped because the same blocker repeated without concrete progress.",
+					})
+					return
+				}
+			}
 		}
+	}
+
+	workspaceAfter := snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
+	workspaceChanges := diffWorkspaceSnapshots(workspaceBefore, workspaceAfter)
+	if shouldRunWorkspaceChangeRemediation(originalPrompt, history, workspaceChanges) {
+		reason := missingWorkspaceChangeReason(workspaceChanges, history)
+		var stop bool
+		history, stop = m.runWorkspaceChangeRemediation(ctx, payload, mode, history, reason)
+		if stop {
+			return
+		}
+		workspaceAfter = snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
+		workspaceChanges = diffWorkspaceSnapshots(workspaceBefore, workspaceAfter)
+	}
+	if reason, ok := unresolvedFinalRun(originalPrompt, history, workspaceChanges); ok {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "run.error",
+			Status:  store.OrchestrationFailed,
+			Error:   reason,
+			Content: "Orchestration ended without satisfying the latest user task.",
+		})
+		return
 	}
 
 	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -384,6 +490,2398 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		Status:  store.OrchestrationCompleted,
 		Content: "Orchestration completed.",
 	})
+}
+
+func (m *OrchestrationManager) shouldDeferRepeatedBlockerForWorkspaceRemediation(payload protocol.OrchestrationStartPayload, userPrompt string, history []orchestrationTurn, before workspaceSnapshot) bool {
+	after := snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
+	return shouldRunWorkspaceChangeRemediation(userPrompt, history, diffWorkspaceSnapshots(before, after))
+}
+
+func (m *OrchestrationManager) runWorkspaceChangeRemediation(ctx context.Context, payload protocol.OrchestrationStartPayload, mode string, history []orchestrationTurn, reason string) ([]orchestrationTurn, bool) {
+	if err := ctx.Err(); err != nil {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:   "run.cancelled",
+			Status: store.OrchestrationCanceled,
+			Error:  "canceled",
+		})
+		return history, true
+	}
+	role, cli := remediationRoleCLI(mode, history)
+	turnID := fmt.Sprintf("%s-remediation", payload.RunID)
+	if payload.PromptSeq > 0 {
+		turnID = fmt.Sprintf("%s-p%03d-remediation", payload.RunID, payload.PromptSeq)
+	}
+	prompt := composeWorkspaceChangeRemediationPrompt(mode, payload.Prompt, payload.Context, payload.Resume, role, cli, history, reason)
+	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+		Kind:    "turn.start",
+		TurnID:  turnID,
+		Role:    role,
+		CLI:     cli,
+		Content: "workspace-change remediation via " + cli,
+	})
+	content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
+	record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
+	if err != nil {
+		record.Err = err.Error()
+		if summary := erroredTurnFallbackSummary(payload.Prompt, true, history, record); summary != "" {
+			appendConclusionToTurnRecord(&record, summary)
+		}
+		history = append(history, record)
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.end",
+			TurnID:  turnID,
+			Role:    role,
+			CLI:     cli,
+			Content: record.Content,
+			Status:  "error",
+			Error:   err.Error(),
+		})
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:   "run.cancelled",
+				Status: store.OrchestrationCanceled,
+				Error:  "canceled",
+			})
+			return history, true
+		}
+		return history, false
+	}
+	if summary := verifierConclusionFallbackSummary(payload.Prompt, history, record); summary != "" {
+		delta := appendConclusionToTurnRecord(&record, summary)
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.delta",
+			TurnID:  turnID,
+			Role:    role,
+			CLI:     cli,
+			Content: delta,
+		})
+	}
+	history = append(history, record)
+	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+		Kind:    "turn.end",
+		TurnID:  turnID,
+		Role:    role,
+		CLI:     cli,
+		Content: record.Content,
+		Status:  "success",
+	})
+	if blocker, ok := repeatedBlockingHandoff(history); ok {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "run.error",
+			Status:  store.OrchestrationFailed,
+			Error:   "repeated blocker: " + blocker,
+			Content: "Orchestration stopped because the same blocker repeated without concrete progress.",
+		})
+		return history, true
+	}
+	return history, false
+}
+
+func (m *OrchestrationManager) runCCB(ctx context.Context, payload protocol.OrchestrationStartPayload) {
+	preparedPrompt, _, err := PrepareOrchestrationPromptFiles(m.cfg, payload.RunID, payload.Prompt, payload.Files)
+	if err != nil {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:   "run.error",
+			Status: store.OrchestrationFailed,
+			Error:  err.Error(),
+		})
+		return
+	}
+	payload.Prompt = preparedPrompt
+	target := m.ccbTarget()
+	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+		Kind:    "run.start",
+		Status:  store.OrchestrationRunning,
+		CLI:     "ccb",
+		Content: fmt.Sprintf("Starting local CCB job for %s.", target),
+		Data: map[string]any{
+			"target": target,
+		},
+	})
+	turnID := payload.RunID + "-ccb"
+	if payload.PromptSeq > 0 {
+		turnID = fmt.Sprintf("%s-p%03d-ccb", payload.RunID, payload.PromptSeq)
+	}
+	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+		Kind:    "turn.start",
+		TurnID:  turnID,
+		Role:    "ccb",
+		CLI:     "ccb",
+		Content: "dispatching task to local CCB",
+		Data: map[string]any{
+			"target": target,
+		},
+	})
+	if err := m.ensureCCBConfig(payload); err != nil {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "run.error",
+			TurnID:  turnID,
+			Role:    "ccb",
+			CLI:     "ccb",
+			Status:  store.OrchestrationFailed,
+			Error:   err.Error(),
+			Content: "failed to prepare local CCB config",
+		})
+		return
+	}
+	startOutput, err := m.startCCBRuntime(ctx, payload)
+	if startOutput != "" {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.delta",
+			TurnID:  turnID,
+			Role:    "ccb",
+			CLI:     "ccb",
+			Content: startOutput,
+		})
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:   "run.cancelled",
+				Status: store.OrchestrationCanceled,
+				Error:  "canceled",
+			})
+			return
+		}
+		m.emitCCBAgentConsoleSnapshots(ctx, payload, turnID, 80)
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "run.error",
+			TurnID:  turnID,
+			Role:    "ccb",
+			CLI:     "ccb",
+			Status:  store.OrchestrationFailed,
+			Error:   err.Error(),
+			Content: strings.TrimSpace(startOutput),
+		})
+		return
+	}
+	ccbSocketPath := parseCCBSocketPath(startOutput)
+
+	jobID, submitOutput, err := m.submitCCBJob(ctx, payload)
+	if submitOutput != "" {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.delta",
+			TurnID:  turnID,
+			Role:    "ccb",
+			CLI:     "ccb",
+			Content: submitOutput,
+		})
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:   "run.cancelled",
+				Status: store.OrchestrationCanceled,
+				Error:  "canceled",
+			})
+			return
+		}
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "run.error",
+			TurnID:  turnID,
+			Role:    "ccb",
+			CLI:     "ccb",
+			Status:  store.OrchestrationFailed,
+			Error:   err.Error(),
+			Content: strings.TrimSpace(submitOutput),
+		})
+		return
+	}
+	if jobID == "" {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "run.error",
+			TurnID:  turnID,
+			Role:    "ccb",
+			CLI:     "ccb",
+			Status:  store.OrchestrationFailed,
+			Error:   "ccb did not return a job id",
+			Content: strings.TrimSpace(submitOutput),
+		})
+		return
+	}
+	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+		Kind:    "command.end",
+		TurnID:  turnID,
+		Role:    "ccb",
+		CLI:     "ccb",
+		Status:  "completed",
+		Content: "ccb job accepted: " + jobID,
+		Data: map[string]any{
+			"id":      jobID,
+			"command": "ccb ask",
+			"target":  target,
+			"output":  strings.TrimSpace(submitOutput),
+		},
+	})
+
+	result, watchOutput, streamState, err := m.watchCCBJobWithEvents(ctx, payload, turnID, jobID, ccbSocketPath)
+	if watchOutput != "" && !ccbWatchOutputWasStreamed(watchOutput) {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.delta",
+			TurnID:  turnID,
+			Role:    "ccb",
+			CLI:     "ccb",
+			Content: watchOutput,
+		})
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:   "run.cancelled",
+				Status: store.OrchestrationCanceled,
+				Error:  "canceled",
+			})
+			return
+		}
+		m.emitCCBAgentConsoleSnapshots(ctx, payload, turnID, 80)
+		errContent := strings.TrimSpace(watchOutput)
+		if errContent == "" {
+			errContent = ccbEmptyFinalReplySummary(result, streamState, target)
+		}
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "run.error",
+			TurnID:  turnID,
+			Role:    "ccb",
+			CLI:     "ccb",
+			Status:  store.OrchestrationFailed,
+			Error:   err.Error(),
+			Content: errContent,
+			Data: map[string]any{
+				"jobId": jobID,
+			},
+		})
+		return
+	}
+	reply, synthesizedEmptyReply := ccbFinalReply(result, watchOutput, streamState, target)
+	result.Reply = reply
+	m.emitCCBAgentConsoleSnapshots(ctx, payload, turnID, 80)
+	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+		Kind:    "turn.end",
+		TurnID:  turnID,
+		Role:    "ccb",
+		CLI:     "ccb",
+		Status:  result.Status,
+		Content: result.Reply,
+		Data: map[string]any{
+			"jobId":  jobID,
+			"target": target,
+		},
+	})
+	if strings.EqualFold(result.Status, "completed") {
+		if synthesizedEmptyReply {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:    "run.error",
+				Status:  store.OrchestrationFailed,
+				CLI:     "ccb",
+				Error:   "ccb completed without a final user-visible reply",
+				Content: result.Reply,
+				Data: map[string]any{
+					"jobId": jobID,
+				},
+			})
+			return
+		}
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "run.end",
+			Status:  store.OrchestrationCompleted,
+			CLI:     "ccb",
+			Content: "CCB job completed.",
+			Data: map[string]any{
+				"jobId": jobID,
+			},
+		})
+		return
+	}
+	if strings.EqualFold(result.Status, "cancelled") || strings.EqualFold(result.Status, "canceled") {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:   "run.cancelled",
+			Status: store.OrchestrationCanceled,
+			CLI:    "ccb",
+			Error:  "ccb job canceled",
+			Data: map[string]any{
+				"jobId": jobID,
+			},
+		})
+		return
+	}
+	errText := "ccb job ended with status " + result.Status
+	if result.Status == "" {
+		errText = "ccb job ended without a terminal status"
+	}
+	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+		Kind:    "run.error",
+		Status:  store.OrchestrationFailed,
+		CLI:     "ccb",
+		Error:   errText,
+		Content: result.Reply,
+		Data: map[string]any{
+			"jobId": jobID,
+		},
+	})
+}
+
+type ccbJobResult struct {
+	Status string
+	Reply  string
+}
+
+type ccbWatchStreamEvent struct {
+	Line    string
+	Content string
+	Data    map[string]any
+}
+
+type ccbWatchStreamState struct {
+	agentContent      map[string]string
+	events            []ccbWatchStreamEvent
+	jobAgents         map[string]string
+	jobSessionPaths   map[string]string
+	sessionLines      map[string]int
+	toolStarts        map[string]time.Time
+	terminalApprovals map[string]string
+}
+
+type ccbTraceReplyEvent struct {
+	Role    string
+	CLI     string
+	Content string
+	Data    map[string]any
+}
+
+func (m *OrchestrationManager) startCCBRuntime(ctx context.Context, payload protocol.OrchestrationStartPayload) (string, error) {
+	args := []string{}
+	if !bridgeBypassApprovalsAndSandbox(m.cfg) {
+		args = append(args, "-s")
+	}
+	return m.runCCBCommand(ctx, payload, "", args...)
+}
+
+func (m *OrchestrationManager) submitCCBJob(ctx context.Context, payload protocol.OrchestrationStartPayload) (string, string, error) {
+	args := []string{"ask", "--compact", m.ccbTarget()}
+	out, err := m.runCCBCommand(ctx, payload, m.ccbPrompt(payload), args...)
+	if err != nil {
+		return "", out, err
+	}
+	jobID := parseCCBJobID(out)
+	return jobID, out, nil
+}
+
+func ccbFinalReply(result ccbJobResult, watchOutput string, state *ccbWatchStreamState, target string) (string, bool) {
+	if reply := strings.TrimSpace(result.Reply); reply != "" {
+		return reply, false
+	}
+	if reply := ccbReadableWatchOutput(watchOutput); reply != "" {
+		return reply, false
+	}
+	return ccbEmptyFinalReplySummary(result, state, target), true
+}
+
+func ccbReadableWatchOutput(output string) string {
+	var lines []string
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || isCCBWatchMetadataLine(line) || isCCBOperationalLine(line) {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func isCCBOperationalLine(line string) bool {
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, "[CCB_") ||
+		strings.HasPrefix(line, "accepted job=") ||
+		strings.HasPrefix(line, "start_status:") ||
+		strings.HasPrefix(line, "project:") ||
+		strings.HasPrefix(line, "agents:") ||
+		strings.HasPrefix(line, "socket_path:") ||
+		strings.HasPrefix(line, "status:") ||
+		strings.HasPrefix(line, "reply:")
+}
+
+func ccbEmptyFinalReplySummary(result ccbJobResult, state *ccbWatchStreamState, target string) string {
+	status := strings.TrimSpace(result.Status)
+	if status == "" {
+		status = "unknown"
+	}
+	var lines []string
+	lines = append(lines, "CCB ended without a final user-visible reply.")
+	lines = append(lines, "Status: "+status+".")
+	if target = strings.TrimSpace(target); target != "" {
+		lines = append(lines, "Initial target: "+target+".")
+	}
+	lines = append(lines, ccbObservedAgentSummaryLines(state)...)
+	lines = append(lines, "Raw CCB events and agent console snapshots are available above for audit. If this task expected a delegated result, check the local CCB callback state and Claude login.")
+	return strings.Join(lines, "\n")
+}
+
+func ccbObservedAgentSummaryLines(state *ccbWatchStreamState) []string {
+	if state == nil {
+		return nil
+	}
+	type agentState struct {
+		accepted  bool
+		started   bool
+		completed bool
+		failed    bool
+		text      bool
+		callback  bool
+		childJobs []string
+	}
+	agents := map[string]*agentState{}
+	get := func(agent string) *agentState {
+		agent = strings.ToLower(strings.TrimSpace(agent))
+		if agent == "" {
+			agent = "ccb"
+		}
+		if agents[agent] == nil {
+			agents[agent] = &agentState{}
+		}
+		return agents[agent]
+	}
+	for _, event := range state.events {
+		data := event.Data
+		if data == nil {
+			continue
+		}
+		agent := ccbString(data["agent"])
+		if agent == "" {
+			agent = ccbString(data["target"])
+		}
+		current := get(agent)
+		switch ccbString(data["eventType"]) {
+		case "job_accepted", "job_queued":
+			current.accepted = true
+		case "job_started":
+			current.started = true
+		case "completion_terminal", "job_completed":
+			current.completed = true
+		case "job_failed", "job_incomplete", "job_cancelled":
+			current.failed = true
+		case "job_delegated_callback", "callback_edge_created":
+			current.callback = true
+			if payload, _ := data["payload"].(map[string]any); payload != nil {
+				for _, key := range []string{"callback_child_job_id", "child_job_id", "continuation_job_id"} {
+					if child := ccbString(payload[key]); child != "" {
+						current.childJobs = appendUniqueString(current.childJobs, child)
+					}
+				}
+			}
+		}
+		if ccbString(data["contentKind"]) == "agent_text" {
+			current.text = true
+		}
+	}
+	names := make([]string, 0, len(agents))
+	for name := range agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var lines []string
+	for _, name := range names {
+		state := agents[name]
+		var parts []string
+		if state.accepted {
+			parts = append(parts, "accepted")
+		}
+		if state.started {
+			parts = append(parts, "started")
+		}
+		if state.text {
+			parts = append(parts, "streamed text")
+		}
+		if state.completed {
+			parts = append(parts, "completed")
+		}
+		if state.failed {
+			parts = append(parts, "failed/incomplete")
+		}
+		if state.callback {
+			callback := "delegated callback"
+			if len(state.childJobs) > 0 {
+				callback += " (" + strings.Join(state.childJobs, ", ") + ")"
+			}
+			parts = append(parts, callback)
+		}
+		if len(parts) > 0 {
+			lines = append(lines, fmt.Sprintf("Observed %s: %s.", name, strings.Join(parts, ", ")))
+		}
+	}
+	return lines
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+type ccbAgentRuntimeInfo struct {
+	Agent      string
+	PaneID     string
+	State      string
+	Health     string
+	SocketPath string
+}
+
+type ccbTerminalPrompt struct {
+	Type    string
+	Input   string
+	Command string
+	Reason  string
+}
+
+func (m *OrchestrationManager) emitCCBAgentConsoleSnapshots(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID string, tail int) {
+	if tail <= 0 {
+		tail = 80
+	}
+	for _, agent := range []string{"codex", "claude"} {
+		info, lines, err := m.ccbAgentConsoleSnapshot(ctx, payload, agent, tail)
+		if err != nil || len(lines) == 0 {
+			continue
+		}
+		content := fmt.Sprintf("CCB %s console snapshot:\n%s", agent, strings.Join(lines, "\n"))
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.delta",
+			TurnID:  turnID,
+			Role:    agent,
+			CLI:     ccbAgentCLI(agent),
+			Content: content,
+			Data: map[string]any{
+				"source":        "ccb",
+				"contentKind":   "agent_console",
+				"agent":         agent,
+				"paneId":        info.PaneID,
+				"state":         info.State,
+				"health":        info.Health,
+				"tail":          len(lines),
+				"lastUpdatedAt": time.Now().UTC().Format(time.RFC3339),
+			},
+		})
+	}
+}
+
+func (m *OrchestrationManager) ccbAgentConsoleSnapshot(ctx context.Context, payload protocol.OrchestrationStartPayload, agent string, tail int) (ccbAgentRuntimeInfo, []string, error) {
+	info, err := m.ccbAgentRuntimeInfo(payload, agent)
+	if err != nil {
+		return info, nil, err
+	}
+	if info.SocketPath == "" || info.PaneID == "" {
+		return info, nil, errors.New("ccb agent tmux pane unavailable")
+	}
+	if ctx == nil || ctx.Err() != nil {
+		ctx = context.Background()
+	}
+	snapshotCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	args := []string{"-S", info.SocketPath, "capture-pane", "-p", "-t", info.PaneID, "-S", fmt.Sprintf("-%d", tail)}
+	cmd := exec.CommandContext(snapshotCtx, "tmux", args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return info, nil, err
+	}
+	lines := sanitizeCCBConsoleLines(out.String(), tail)
+	return info, lines, nil
+}
+
+func (m *OrchestrationManager) ccbAgentRuntimeInfo(payload protocol.OrchestrationStartPayload, agent string) (ccbAgentRuntimeInfo, error) {
+	root := expandHome(m.cwd(payload))
+	if root == "" {
+		root = "."
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	runtimePath := filepath.Join(root, ".ccb", "agents", safeFileName(agent), "runtime.json")
+	raw, err := os.ReadFile(runtimePath)
+	if err != nil {
+		return ccbAgentRuntimeInfo{Agent: agent}, err
+	}
+	var payloadMap map[string]any
+	if err := json.Unmarshal(raw, &payloadMap); err != nil {
+		return ccbAgentRuntimeInfo{Agent: agent}, err
+	}
+	return ccbAgentRuntimeInfo{
+		Agent:      firstNonEmptyCCBString(payloadMap, "agent_name", "provider"),
+		PaneID:     firstNonEmptyCCBString(payloadMap, "pane_id", "active_pane_id"),
+		State:      firstNonEmptyCCBString(payloadMap, "state", "lifecycle_state"),
+		Health:     firstNonEmptyCCBString(payloadMap, "health", "pane_state"),
+		SocketPath: firstNonEmptyCCBString(payloadMap, "tmux_socket_path"),
+	}, nil
+}
+
+func (m *OrchestrationManager) handleCCBTerminalApprovals(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID string, state *ccbWatchStreamState) (bool, error) {
+	if state == nil {
+		return false, nil
+	}
+	if state.terminalApprovals == nil {
+		state.terminalApprovals = make(map[string]string)
+	}
+	forwarded := false
+	for _, agent := range []string{"codex", "claude"} {
+		info, lines, err := m.ccbAgentConsoleSnapshot(ctx, payload, agent, 40)
+		if err != nil || len(lines) == 0 || info.SocketPath == "" || info.PaneID == "" {
+			continue
+		}
+		prompt, ok := detectCCBTerminalPrompt(lines)
+		if !ok {
+			continue
+		}
+		key := ccbTerminalApprovalKey(info, prompt, lines)
+		if state.terminalApprovals[key] != "" {
+			continue
+		}
+		state.terminalApprovals[key] = "pending"
+		requester := orchestrationApprovalRequester{
+			manager: m,
+			runID:   payload.RunID,
+			turnID:  turnID,
+			role:    agent,
+			cli:     ccbAgentCLI(agent),
+			cwd:     m.cwd(payload),
+		}
+		params, _ := json.Marshal(map[string]any{
+			"agent":  agent,
+			"paneId": info.PaneID,
+			"input":  prompt.Input,
+			"type":   prompt.Type,
+		})
+		res, err := requester.RequestApproval(ctx, protocol.ApprovalRequestPayload{
+			RequestID: safeRequestID("apr_ccb_"+payload.RunID+"_"+agent+"_"+prompt.Type, key),
+			Kind:      "ccb.terminal_prompt",
+			Command:   prompt.Command,
+			Reason:    prompt.Reason,
+			Params:    params,
+		})
+		if err != nil {
+			return forwarded, err
+		}
+		decision := strings.ToLower(strings.TrimSpace(res.Decision))
+		state.terminalApprovals[key] = decision
+		if decision != "accept" {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:    "turn.delta",
+				TurnID:  turnID,
+				Role:    agent,
+				CLI:     ccbAgentCLI(agent),
+				Content: "CCB terminal prompt was not approved in the browser.",
+				Data: map[string]any{
+					"source":      "ccb",
+					"contentKind": "terminal_approval",
+					"agent":       agent,
+					"decision":    decision,
+				},
+			})
+			continue
+		}
+		if err := sendCCBTerminalInput(ctx, info.SocketPath, info.PaneID, prompt.Input); err != nil {
+			return forwarded, err
+		}
+		forwarded = true
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.delta",
+			TurnID:  turnID,
+			Role:    agent,
+			CLI:     ccbAgentCLI(agent),
+			Content: fmt.Sprintf("Browser approved CCB %s terminal prompt; forwarded %s.", agent, prompt.Command),
+			Data: map[string]any{
+				"source":      "ccb",
+				"contentKind": "terminal_approval",
+				"agent":       agent,
+				"paneId":      info.PaneID,
+				"decision":    decision,
+				"input":       prompt.Input,
+			},
+		})
+	}
+	return forwarded, nil
+}
+
+func (m *OrchestrationManager) ccbAgentConsoleHasTerminalPrompt(ctx context.Context, payload protocol.OrchestrationStartPayload) bool {
+	for _, agent := range []string{"codex", "claude"} {
+		_, lines, err := m.ccbAgentConsoleSnapshot(ctx, payload, agent, 40)
+		if err != nil || len(lines) == 0 {
+			continue
+		}
+		if _, ok := detectCCBTerminalPrompt(lines); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func detectCCBTerminalPrompt(lines []string) (ccbTerminalPrompt, bool) {
+	joined := strings.ToLower(strings.Join(lines, "\n"))
+	reason := ccbTerminalPromptReason(lines)
+	if strings.Contains(joined, "do you trust the contents of this directory") &&
+		(strings.Contains(joined, "yes, continue") || strings.Contains(joined, "press enter to continue")) {
+		return ccbTerminalPrompt{
+			Type:    "workspace_trust",
+			Input:   "Enter",
+			Command: "press Enter to trust and continue",
+			Reason:  reason,
+		}, true
+	}
+	if strings.Contains(joined, "press enter to continue") {
+		return ccbTerminalPrompt{
+			Type:    "continue",
+			Input:   "Enter",
+			Command: "press Enter to continue",
+			Reason:  reason,
+		}, true
+	}
+	return ccbTerminalPrompt{}, false
+}
+
+func ccbTerminalPromptReason(lines []string) string {
+	var kept []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if len(kept) > 12 {
+		kept = kept[len(kept)-12:]
+	}
+	const max = 2000
+	reason := strings.Join(kept, "\n")
+	if len(reason) > max {
+		reason = reason[len(reason)-max:]
+	}
+	return reason
+}
+
+func ccbTerminalApprovalKey(info ccbAgentRuntimeInfo, prompt ccbTerminalPrompt, lines []string) string {
+	tail := ccbTerminalPromptReason(lines)
+	if len(tail) > 300 {
+		tail = tail[len(tail)-300:]
+	}
+	return strings.Join([]string{strings.ToLower(strings.TrimSpace(info.Agent)), info.SocketPath, info.PaneID, prompt.Type, prompt.Input, tail}, "\x00")
+}
+
+func safeRequestID(prefix, key string) string {
+	prefix = safeOrchestrationFileName.ReplaceAllString(prefix, "_")
+	sum := sha1.Sum([]byte(key))
+	return strings.Trim(prefix, "_") + "_" + hex.EncodeToString(sum[:])[:16]
+}
+
+func sendCCBTerminalInput(ctx context.Context, socketPath, paneID, input string) error {
+	socketPath = strings.TrimSpace(socketPath)
+	paneID = strings.TrimSpace(paneID)
+	input = strings.TrimSpace(input)
+	if socketPath == "" || paneID == "" {
+		return errors.New("ccb terminal pane is unavailable")
+	}
+	if input == "" {
+		input = "Enter"
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(sendCtx, "tmux", ccbTerminalInputArgs(socketPath, paneID, input)...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(out.String())
+		if msg != "" {
+			return fmt.Errorf("send ccb terminal input: %w: %s", err, msg)
+		}
+		return fmt.Errorf("send ccb terminal input: %w", err)
+	}
+	return nil
+}
+
+func ccbTerminalInputArgs(socketPath, paneID, input string) []string {
+	return []string{"-S", socketPath, "send-keys", "-t", paneID, input}
+}
+
+func sanitizeCCBConsoleLines(output string, tail int) []string {
+	output = stripANSI(output)
+	rawLines := strings.Split(output, "\n")
+	lines := make([]string, 0, len(rawLines))
+	for _, raw := range rawLines {
+		line := strings.TrimRight(raw, " \t\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		line = redactSensitiveText(line)
+		if len(line) > 500 {
+			line = line[:500] + "..."
+		}
+		lines = append(lines, line)
+	}
+	if tail > 0 && len(lines) > tail {
+		lines = lines[len(lines)-tail:]
+	}
+	return lines
+}
+
+func stripANSI(value string) string {
+	return ansiControlPattern.ReplaceAllString(value, "")
+}
+
+func redactSensitiveText(value string) string {
+	out := bearerTokenPattern.ReplaceAllString(value, "Bearer [REDACTED]")
+	for _, pattern := range sensitiveValuePatterns {
+		out = pattern.ReplaceAllString(out, "$1[REDACTED]")
+	}
+	return out
+}
+
+func (m *OrchestrationManager) watchCCBJob(ctx context.Context, payload protocol.OrchestrationStartPayload, jobID string) (ccbJobResult, string, error) {
+	turnID := payload.RunID + "-ccb"
+	if payload.PromptSeq > 0 {
+		turnID = fmt.Sprintf("%s-p%03d-ccb", payload.RunID, payload.PromptSeq)
+	}
+	result, out, _, err := m.watchCCBJobWithEvents(ctx, payload, turnID, jobID, "")
+	return result, out, err
+}
+
+func (m *OrchestrationManager) watchCCBJobWithEvents(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, jobID, socketPath string) (ccbJobResult, string, *ccbWatchStreamState, error) {
+	timeout := m.ccbTimeout()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	streamState := &ccbWatchStreamState{}
+	emitEvent := func(event ccbWatchStreamEvent) {
+		streamState.events = append(streamState.events, event)
+		cli := "ccb"
+		role := "ccb"
+		if agent, _ := event.Data["agent"].(string); agent != "" {
+			role = agent
+			cli = ccbAgentCLI(agent)
+		}
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.delta",
+			TurnID:  turnID,
+			Role:    role,
+			CLI:     cli,
+			Content: event.Content,
+			Data:    event.Data,
+		})
+		ccbRecordStreamState(streamState, event.Data)
+	}
+	if resolvedSocketPath := m.resolveCCBSocketPath(payload, socketPath); resolvedSocketPath != "" {
+		result, out, err := m.watchCCBJobViaSocket(ctx, payload, turnID, jobID, resolvedSocketPath, streamState, emitEvent)
+		if err == nil {
+			m.emitCCBTraceEvents(ctx, payload, turnID, jobID, resolvedSocketPath, streamState, emitEvent, &result)
+			return result, out, streamState, nil
+		}
+		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return result, out, streamState, fmt.Errorf("ccb job %s timed out after %s", jobID, timeout)
+			}
+			return result, out, streamState, err
+		}
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.delta",
+			TurnID:  turnID,
+			Role:    "ccb",
+			CLI:     "ccb",
+			Content: "CCB structured watch unavailable; falling back to CLI watch: " + err.Error(),
+			Data: map[string]any{
+				"source":      "ccb",
+				"contentKind": "watch_fallback",
+				"socketPath":  resolvedSocketPath,
+				"jobId":       jobID,
+			},
+		})
+	}
+	out, err := m.runCCBCommandStreaming(ctx, payload, "", func(event ccbWatchStreamEvent) {
+		emitEvent(event)
+	}, streamState, "pend", "--watch", jobID)
+	result := parseCCBWatchResult(out)
+	if result.Status == "" && m.ccbAgentConsoleHasTerminalPrompt(ctx, payload) {
+		if _, approvalErr := m.handleCCBTerminalApprovals(ctx, payload, turnID, streamState); approvalErr != nil {
+			return result, out, streamState, approvalErr
+		}
+		out, err = m.runCCBCommandStreaming(ctx, payload, "", func(event ccbWatchStreamEvent) {
+			emitEvent(event)
+		}, streamState, "pend", "--watch", jobID)
+		result = parseCCBWatchResult(out)
+	}
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return result, out, streamState, fmt.Errorf("ccb job %s timed out after %s", jobID, timeout)
+		}
+		return result, out, streamState, err
+	}
+	traceOutput, traceErr := m.fetchCCBTrace(ctx, payload, jobID)
+	if traceErr == nil && traceOutput != "" {
+		for _, event := range ccbTraceReplyEvents(traceOutput) {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:    "turn.delta",
+				TurnID:  turnID,
+				Role:    event.Role,
+				CLI:     event.CLI,
+				Content: event.Content,
+				Data:    event.Data,
+			})
+		}
+	}
+	return result, out, streamState, nil
+}
+
+type ccbSocketWatchJob struct {
+	Cursor          int
+	Terminal        bool
+	PendingCallback bool
+}
+
+type ccbWatchBatch struct {
+	JobID              string
+	AgentName          string
+	TargetName         string
+	Cursor             int
+	Terminal           bool
+	Status             string
+	Reply              string
+	CompletionReason   string
+	VisibleReplySource string
+	Events             []map[string]any
+}
+
+func (m *OrchestrationManager) watchCCBJobViaSocket(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, jobID, socketPath string, streamState *ccbWatchStreamState, emitEvent func(ccbWatchStreamEvent)) (ccbJobResult, string, error) {
+	jobs := map[string]*ccbSocketWatchJob{jobID: {}}
+	rootBatch := ccbWatchBatch{JobID: jobID}
+	pollInterval := 100 * time.Millisecond
+	consecutiveErrors := 0
+	for {
+		progressed := false
+		for _, currentJobID := range sortedCCBJobIDs(jobs) {
+			job := jobs[currentJobID]
+			if job.Terminal && !(currentJobID == jobID && job.PendingCallback && strings.TrimSpace(rootBatch.Reply) == "") {
+				continue
+			}
+			batch, err := ccbSocketWatch(ctx, socketPath, currentJobID, job.Cursor)
+			if err != nil {
+				if ccbSocketWatchRetriableError(err) && ctx.Err() == nil && consecutiveErrors < 50 {
+					consecutiveErrors++
+					progressed = false
+					break
+				}
+				return ccbJobResult{Status: rootBatch.Status, Reply: rootBatch.Reply}, "", err
+			}
+			consecutiveErrors = 0
+			if batch.JobID == "" {
+				batch.JobID = currentJobID
+			}
+			if batch.Cursor > job.Cursor {
+				job.Cursor = batch.Cursor
+				progressed = true
+			}
+			if currentJobID == jobID && batch.Reply != rootBatch.Reply {
+				progressed = true
+			}
+			for _, record := range batch.Events {
+				for _, relatedJobID := range ccbRelatedJobIDs(record) {
+					if _, ok := jobs[relatedJobID]; !ok {
+						jobs[relatedJobID] = &ccbSocketWatchJob{}
+						progressed = true
+					}
+				}
+				if currentJobID == jobID && strings.TrimSpace(batch.Reply) == "" {
+					if reply := ccbTerminalReplyFromRecord(record); reply != "" {
+						batch.Reply = reply
+						progressed = true
+					}
+				}
+				if event, ok := ccbStructuredWatchStreamEvent(record, streamState); ok {
+					emitEvent(event)
+				}
+			}
+			if currentJobID == jobID {
+				rootBatch = batch
+			}
+			m.emitCCBProviderSessionEvents(payload, turnID, streamState, currentJobID, batch.AgentName)
+			if _, err := m.handleCCBTerminalApprovals(ctx, payload, turnID, streamState); err != nil {
+				return ccbJobResult{Status: rootBatch.Status, Reply: rootBatch.Reply}, "", err
+			}
+			if batch.Terminal {
+				if !job.Terminal {
+					progressed = true
+				}
+				job.Terminal = true
+				job.PendingCallback = currentJobID == jobID && ccbBatchCallbackPending(batch)
+			}
+		}
+		if ccbSocketWatchComplete(jobs, jobID, rootBatch) {
+			return ccbJobResult{Status: rootBatch.Status, Reply: rootBatch.Reply}, "", nil
+		}
+		if err := ctx.Err(); err != nil {
+			return ccbJobResult{Status: rootBatch.Status, Reply: rootBatch.Reply}, "", err
+		}
+		if !progressed {
+			if _, err := m.handleCCBTerminalApprovals(ctx, payload, turnID, streamState); err != nil {
+				return ccbJobResult{Status: rootBatch.Status, Reply: rootBatch.Reply}, "", err
+			}
+			timer := time.NewTimer(pollInterval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ccbJobResult{Status: rootBatch.Status, Reply: rootBatch.Reply}, "", ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+}
+
+func ccbSocketWatchRetriableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "unterminated string") ||
+		strings.Contains(msg, "unexpected end of json input") ||
+		strings.Contains(msg, "invalid character") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "resource temporarily unavailable") {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func ccbSocketWatch(ctx context.Context, socketPath, jobID string, cursor int) (ccbWatchBatch, error) {
+	payload, err := ccbSocketRequest(ctx, socketPath, "watch", map[string]any{
+		"target": jobID,
+		"cursor": cursor,
+	})
+	if err != nil {
+		return ccbWatchBatch{}, err
+	}
+	return ccbWatchBatchFromPayload(payload), nil
+}
+
+func ccbSocketTrace(ctx context.Context, socketPath, jobID string) (map[string]any, error) {
+	return ccbSocketRequest(ctx, socketPath, "trace", map[string]any{"target": jobID})
+}
+
+func ccbSocketRequest(ctx context.Context, socketPath, op string, request map[string]any) (map[string]any, error) {
+	if strings.TrimSpace(socketPath) == "" {
+		return nil, errors.New("ccb socket path is empty")
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(reqCtx, "unix", socketPath)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if deadline, ok := reqCtx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	body, err := json.Marshal(map[string]any{
+		"api_version": 2,
+		"op":          op,
+		"request":     request,
+	})
+	if err != nil {
+		return nil, err
+	}
+	body = append(body, '\n')
+	if _, err := conn.Write(body); err != nil {
+		return nil, err
+	}
+	line, err := bufio.NewReader(conn).ReadBytes('\n')
+	if err != nil {
+		return nil, err
+	}
+	var response map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(line), &response); err != nil {
+		return nil, err
+	}
+	if !ccbBool(response["ok"]) {
+		if msg := ccbString(response["error"]); msg != "" {
+			return nil, errors.New(msg)
+		}
+		return nil, errors.New("ccbd request failed")
+	}
+	delete(response, "api_version")
+	delete(response, "ok")
+	return response, nil
+}
+
+func ccbWatchBatchFromPayload(payload map[string]any) ccbWatchBatch {
+	return ccbWatchBatch{
+		JobID:              ccbString(payload["job_id"]),
+		AgentName:          ccbString(payload["agent_name"]),
+		TargetName:         ccbString(payload["target_name"]),
+		Cursor:             ccbInt(payload["cursor"]),
+		Terminal:           ccbBool(payload["terminal"]),
+		Status:             ccbString(payload["status"]),
+		Reply:              ccbString(payload["reply"]),
+		CompletionReason:   ccbString(payload["completion_reason"]),
+		VisibleReplySource: ccbString(payload["visible_reply_source"]),
+		Events:             ccbMapSlice(payload["events"]),
+	}
+}
+
+func ccbBatchCallbackPending(batch ccbWatchBatch) bool {
+	return strings.EqualFold(batch.CompletionReason, "callback_pending") ||
+		strings.EqualFold(batch.VisibleReplySource, "callback_delegated_pending")
+}
+
+func ccbTerminalReplyFromRecord(record map[string]any) string {
+	eventType := ccbString(record["type"])
+	if eventType != "completion_terminal" && eventType != "job_completed" {
+		return ""
+	}
+	payload, _ := record["payload"].(map[string]any)
+	if payload == nil {
+		return ""
+	}
+	return strings.TrimSpace(firstNonEmptyCCBString(payload,
+		"reply",
+		"last_agent_message",
+		"final_answer",
+		"result_text",
+		"text",
+	))
+}
+
+func sortedCCBJobIDs(jobs map[string]*ccbSocketWatchJob) []string {
+	ids := make([]string, 0, len(jobs))
+	for id := range jobs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func ccbAllSocketWatchJobsTerminal(jobs map[string]*ccbSocketWatchJob) bool {
+	for _, job := range jobs {
+		if job == nil || !job.Terminal {
+			return false
+		}
+	}
+	return true
+}
+
+func ccbSocketWatchComplete(jobs map[string]*ccbSocketWatchJob, rootJobID string, rootBatch ccbWatchBatch) bool {
+	root := jobs[rootJobID]
+	if root == nil || !root.Terminal {
+		return false
+	}
+	if strings.TrimSpace(rootBatch.Reply) != "" {
+		return true
+	}
+	if root.PendingCallback {
+		return ccbHasRelatedSocketWatchJob(jobs, rootJobID) && ccbAllSocketWatchJobsTerminal(jobs)
+	}
+	return true
+}
+
+func ccbHasRelatedSocketWatchJob(jobs map[string]*ccbSocketWatchJob, rootJobID string) bool {
+	for jobID := range jobs {
+		if jobID != rootJobID {
+			return true
+		}
+	}
+	return false
+}
+
+func ccbRecordStreamState(state *ccbWatchStreamState, data map[string]any) {
+	if state == nil || data == nil {
+		return
+	}
+	jobID := ccbString(data["jobId"])
+	if jobID == "" {
+		return
+	}
+	agent := strings.ToLower(strings.TrimSpace(ccbString(data["agent"])))
+	if agent != "" {
+		if state.jobAgents == nil {
+			state.jobAgents = make(map[string]string)
+		}
+		state.jobAgents[jobID] = agent
+	}
+	if sessionPath := ccbSessionPathFromEventData(data); sessionPath != "" {
+		if state.jobSessionPaths == nil {
+			state.jobSessionPaths = make(map[string]string)
+		}
+		state.jobSessionPaths[jobID] = expandHome(sessionPath)
+	}
+}
+
+func ccbSessionPathFromEventData(data map[string]any) string {
+	payload, _ := data["payload"].(map[string]any)
+	if payload == nil {
+		return ""
+	}
+	itemPayload, _ := payload["payload"].(map[string]any)
+	if sessionPath := firstNonEmptyCCBString(itemPayload, "session_path"); sessionPath != "" {
+		return sessionPath
+	}
+	return firstNonEmptyCCBString(payload, "session_path")
+}
+
+func (m *OrchestrationManager) emitCCBProviderSessionEvents(payload protocol.OrchestrationStartPayload, turnID string, state *ccbWatchStreamState, jobID, agentName string) {
+	if state == nil {
+		return
+	}
+	if state.sessionLines == nil {
+		state.sessionLines = make(map[string]int)
+	}
+	path := ccbSessionPathForJobEvent(state, jobID)
+	if path == "" {
+		return
+	}
+	agent := strings.ToLower(strings.TrimSpace(agentName))
+	if agent == "" {
+		agent = strings.ToLower(strings.TrimSpace(ccbAgentForJobEvent(state, jobID)))
+	}
+	if agent == "" {
+		agent = "ccb"
+	}
+	nextLine, events := ccbReadProviderSessionEvents(path, state.sessionLines[path])
+	if nextLine <= state.sessionLines[path] {
+		return
+	}
+	state.sessionLines[path] = nextLine
+	if state.toolStarts == nil {
+		state.toolStarts = make(map[string]time.Time)
+	}
+	for _, tool := range events {
+		if tool == nil {
+			continue
+		}
+		tool.ID = ccbProviderToolID(jobID, agent, tool.ID)
+		stampToolTiming(tool, state.toolStarts)
+		if tool.Command != "" {
+			tool.Command = redactSensitiveText(stripANSI(tool.Command))
+		}
+		if tool.Output != "" {
+			tool.Output = ccbTrimProviderToolOutput(redactSensitiveText(stripANSI(tool.Output)))
+		}
+		m.emitTool(payload.RunID, turnID, agent, ccbAgentCLI(agent), tool)
+	}
+}
+
+func ccbSessionPathForJobEvent(state *ccbWatchStreamState, jobID string) string {
+	if state == nil {
+		return ""
+	}
+	if path := strings.TrimSpace(state.jobSessionPaths[jobID]); path != "" {
+		return expandHome(path)
+	}
+	for i := len(state.events) - 1; i >= 0; i-- {
+		data := state.events[i].Data
+		if data == nil || ccbString(data["jobId"]) != jobID {
+			continue
+		}
+		if sessionPath := ccbSessionPathFromEventData(data); sessionPath != "" {
+			return expandHome(sessionPath)
+		}
+	}
+	return ""
+}
+
+func ccbAgentForJobEvent(state *ccbWatchStreamState, jobID string) string {
+	if state == nil {
+		return ""
+	}
+	if agent := strings.TrimSpace(state.jobAgents[jobID]); agent != "" {
+		return agent
+	}
+	for i := len(state.events) - 1; i >= 0; i-- {
+		data := state.events[i].Data
+		if data == nil || ccbString(data["jobId"]) != jobID {
+			continue
+		}
+		if agent := ccbString(data["agent"]); agent != "" {
+			return agent
+		}
+	}
+	return ""
+}
+
+func ccbReadProviderSessionEvents(path string, startLine int) (int, []*RunnerToolEvent) {
+	file, err := os.Open(path)
+	if err != nil {
+		return startLine, nil
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	lineNo := 0
+	var events []*RunnerToolEvent
+	for scanner.Scan() {
+		lineNo++
+		if lineNo <= startLine {
+			continue
+		}
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		if event := ccbProviderSessionToolEvent(line); event != nil {
+			events = append(events, event)
+		}
+	}
+	if lineNo < startLine {
+		return startLine, events
+	}
+	return lineNo, events
+}
+
+func ccbProviderSessionToolEvent(line []byte) *RunnerToolEvent {
+	var msg map[string]any
+	if err := json.Unmarshal(line, &msg); err != nil {
+		return nil
+	}
+	payload, _ := msg["payload"].(map[string]any)
+	if payload == nil {
+		return nil
+	}
+	switch ccbString(payload["type"]) {
+	case "function_call":
+		return ccbFunctionCallToolEvent(msg, payload)
+	case "function_call_output":
+		return ccbFunctionCallOutputToolEvent(msg, payload)
+	default:
+		return nil
+	}
+}
+
+func ccbFunctionCallToolEvent(msg, payload map[string]any) *RunnerToolEvent {
+	name := ccbString(payload["name"])
+	callID := ccbString(payload["call_id"])
+	argsText := ccbString(payload["arguments"])
+	command := ccbProviderToolCommand(name, argsText)
+	if command == "" && callID == "" {
+		return nil
+	}
+	return &RunnerToolEvent{
+		ID:        callID,
+		Status:    "in_progress",
+		Command:   command,
+		StartedAt: ccbParseTimestamp(ccbString(msg["timestamp"])),
+	}
+}
+
+func ccbFunctionCallOutputToolEvent(msg, payload map[string]any) *RunnerToolEvent {
+	callID := ccbString(payload["call_id"])
+	output := ccbString(payload["output"])
+	if callID == "" && output == "" {
+		return nil
+	}
+	status := "completed"
+	if ccbProviderToolOutputFailed(output) {
+		status = "failed"
+	}
+	return &RunnerToolEvent{
+		ID:          callID,
+		Status:      status,
+		Output:      ccbProviderToolReadableOutput(output),
+		CompletedAt: ccbParseTimestamp(ccbString(msg["timestamp"])),
+	}
+}
+
+func ccbProviderToolCommand(name, argsText string) string {
+	name = strings.TrimSpace(name)
+	if argsText == "" {
+		return name
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(argsText), &args); err != nil {
+		return strings.TrimSpace(name + " " + argsText)
+	}
+	if name == "exec_command" {
+		if cmd := ccbString(args["cmd"]); cmd != "" {
+			return cmd
+		}
+	}
+	if name == "write_stdin" {
+		sessionID := ccbString(args["session_id"])
+		if sessionID == "" {
+			sessionID = fmt.Sprint(args["session_id"])
+		}
+		if sessionID != "" && sessionID != "<nil>" {
+			return "poll running command session " + sessionID
+		}
+	}
+	if pretty, err := json.Marshal(args); err == nil {
+		return strings.TrimSpace(name + " " + string(pretty))
+	}
+	return strings.TrimSpace(name + " " + argsText)
+}
+
+func ccbProviderToolReadableOutput(output string) string {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return ""
+	}
+	var lines []string
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimRight(raw, " \t\r")
+		if strings.HasPrefix(line, "Chunk ID:") ||
+			strings.HasPrefix(line, "Wall time:") ||
+			strings.HasPrefix(line, "Original token count:") ||
+			strings.HasPrefix(line, "Output:") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func ccbProviderToolOutputFailed(output string) bool {
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "Process exited with code ") {
+			return !strings.HasSuffix(line, " 0")
+		}
+	}
+	return false
+}
+
+func ccbProviderToolID(jobID, agent, callID string) string {
+	if strings.TrimSpace(callID) == "" {
+		callID = "unknown"
+	}
+	parts := []string{"ccb", strings.TrimSpace(jobID), strings.TrimSpace(agent), strings.TrimSpace(callID)}
+	return strings.Join(parts, ":")
+}
+
+func ccbTrimProviderToolOutput(output string) string {
+	const max = 12000
+	output = strings.TrimSpace(output)
+	if len(output) <= max {
+		return output
+	}
+	return output[:max] + "\n... output truncated ..."
+}
+
+func ccbParseTimestamp(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+func (m *OrchestrationManager) emitCCBTraceEvents(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, jobID, socketPath string, streamState *ccbWatchStreamState, emitEvent func(ccbWatchStreamEvent), result *ccbJobResult) {
+	traceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tracePayload, err := ccbSocketTrace(traceCtx, socketPath, jobID)
+	if err == nil {
+		if result != nil && strings.TrimSpace(result.Reply) == "" {
+			result.Reply = ccbTraceFinalReply(tracePayload)
+		}
+		for _, event := range ccbTraceReplyEventsFromPayload(tracePayload, streamState) {
+			emitEvent(ccbWatchStreamEvent{Content: event.Content, Data: event.Data})
+		}
+		return
+	}
+	traceOutput, traceErr := m.fetchCCBTrace(ctx, payload, jobID)
+	if traceErr == nil && traceOutput != "" {
+		for _, event := range ccbTraceReplyEvents(traceOutput) {
+			emitEvent(ccbWatchStreamEvent{Content: event.Content, Data: event.Data})
+		}
+	}
+}
+
+func (m *OrchestrationManager) fetchCCBTrace(ctx context.Context, payload protocol.OrchestrationStartPayload, jobID string) (string, error) {
+	traceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return m.runCCBCommand(traceCtx, payload, "", "trace", jobID)
+}
+
+func (m *OrchestrationManager) runCCBCommand(ctx context.Context, payload protocol.OrchestrationStartPayload, stdin string, args ...string) (string, error) {
+	return m.runCCBCommandStreaming(ctx, payload, stdin, nil, nil, args...)
+}
+
+func (m *OrchestrationManager) runCCBCommandStreaming(ctx context.Context, payload protocol.OrchestrationStartPayload, stdin string, onLine func(ccbWatchStreamEvent), streamState *ccbWatchStreamState, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, m.ccbPath(), args...)
+	if cwd := m.cwd(payload); cwd != "" {
+		cmd.Dir = cwd
+	}
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	cmd.Env = append(orchestrationCCBEnv(os.Environ(), m.cfg),
+		"CCB_NO_ATTACH=1",
+		fmt.Sprintf("CCB_WATCH_TIMEOUT_S=%d", int(m.ccbTimeout().Seconds())),
+	)
+	var out bytes.Buffer
+	if onLine == nil {
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		err := cmd.Run()
+		return strings.TrimSpace(out.String()), err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	var wg sync.WaitGroup
+	var scanMu sync.Mutex
+	scan := func(r io.Reader) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			scanMu.Lock()
+			if out.Len() > 0 {
+				out.WriteByte('\n')
+			}
+			out.WriteString(line)
+			scanMu.Unlock()
+			if event, ok := ccbWatchStreamLineEvent(line, streamState); ok {
+				onLine(event)
+			}
+		}
+	}
+	wg.Add(2)
+	go scan(stdout)
+	go scan(stderr)
+	wg.Wait()
+	err = cmd.Wait()
+	return strings.TrimSpace(out.String()), err
+}
+
+func orchestrationCCBEnv(base []string, cfg *config.Config) []string {
+	env := append([]string{}, base...)
+	if cfg == nil {
+		return env
+	}
+	path := envValue(env, "PATH")
+	path = prependPathDirs(path,
+		executableDir(cfg.Bridge.CodexPath),
+		executableDir(cfg.Bridge.ClaudePath),
+		executableDir(cfg.Bridge.CCBPath),
+	)
+	env = setEnvValue(env, "PATH", path)
+	if cfg.Bridge.CodexPath != "" {
+		env = setEnvValue(env, "BRIDGE_CODEX_PATH", cfg.Bridge.CodexPath)
+	}
+	if cfg.Bridge.ClaudePath != "" {
+		env = setEnvValue(env, "BRIDGE_CLAUDE_PATH", cfg.Bridge.ClaudePath)
+	}
+	if cfg.Bridge.CCBPath != "" {
+		env = setEnvValue(env, "BRIDGE_CCB_PATH", cfg.Bridge.CCBPath)
+	}
+	return env
+}
+
+func executableDir(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || !strings.ContainsRune(path, filepath.Separator) {
+		return ""
+	}
+	return filepath.Dir(expandHome(path))
+}
+
+func prependPathDirs(path string, dirs ...string) string {
+	parts := splitPathList(path)
+	seen := make(map[string]bool, len(parts)+len(dirs))
+	for _, part := range parts {
+		if part != "" {
+			seen[part] = true
+		}
+	}
+	prefix := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		prefix = append(prefix, dir)
+	}
+	return strings.Join(append(prefix, parts...), string(os.PathListSeparator))
+}
+
+func splitPathList(path string) []string {
+	if path == "" {
+		return nil
+	}
+	return strings.Split(path, string(os.PathListSeparator))
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			return strings.TrimPrefix(env[i], prefix)
+		}
+	}
+	return ""
+}
+
+func setEnvValue(env []string, key, value string) []string {
+	prefix := key + "="
+	entry := prefix + value
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			env[i] = entry
+			return env
+		}
+	}
+	return append(env, entry)
+}
+
+func (m *OrchestrationManager) ensureCCBConfig(payload protocol.OrchestrationStartPayload) error {
+	cwd := m.cwd(payload)
+	if cwd == "" {
+		cwd = "."
+	}
+	root := expandHome(cwd)
+	configPath := filepath.Join(root, ".ccb", "ccb.config")
+	if _, err := os.Stat(configPath); err == nil {
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			return err
+		}
+		return validateBridgeCCBConfig(configPath, string(raw))
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return err
+	}
+	const defaultConfig = "codex:codex, claude:claude\n"
+	return os.WriteFile(configPath, []byte(defaultConfig), 0o644)
+}
+
+func validateBridgeCCBConfig(path, text string) error {
+	agents := make(map[string]string)
+	currentAgent := ""
+	for _, rawLine := range strings.Split(text, "\n") {
+		line := stripCCBConfigComment(rawLine)
+		if line == "" {
+			continue
+		}
+		if match := ccbTOMLAgentPattern.FindStringSubmatch(line); len(match) == 2 {
+			currentAgent = strings.ToLower(strings.TrimSpace(match[1]))
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			currentAgent = ""
+			continue
+		}
+		if match := ccbTOMLProviderPattern.FindStringSubmatch(line); len(match) == 2 {
+			if currentAgent != "" {
+				agents[currentAgent] = strings.ToLower(strings.TrimSpace(match[1]))
+			}
+			continue
+		}
+		if strings.Contains(line, "=") {
+			continue
+		}
+		for _, match := range ccbCompactAgentPattern.FindAllStringSubmatch(line, -1) {
+			if len(match) == 3 {
+				agents[strings.ToLower(strings.TrimSpace(match[1]))] = strings.ToLower(strings.TrimSpace(match[2]))
+			}
+		}
+	}
+	if len(agents) == 2 && agents["codex"] == "codex" && agents["claude"] == "claude" {
+		return nil
+	}
+	return fmt.Errorf("%s must declare only the CCB agents `codex:codex, claude:claude` for Codex Bridge orchestration; adjust it or remove it so Bridge can create the minimal config", path)
+}
+
+func stripCCBConfigComment(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	if before, _, ok := strings.Cut(line, "#"); ok {
+		line = before
+	}
+	if before, _, ok := strings.Cut(line, "//"); ok {
+		line = before
+	}
+	return strings.TrimSpace(line)
+}
+
+func (m *OrchestrationManager) ccbPrompt(payload protocol.OrchestrationStartPayload) string {
+	var b strings.Builder
+	if strings.TrimSpace(payload.Context) != "" {
+		b.WriteString("Previous conversation context:\n")
+		b.WriteString(strings.TrimSpace(payload.Context))
+		b.WriteString("\n\n")
+	}
+	if payload.Resume {
+		b.WriteString("This is a continuation of the same user-visible task. Use the context above when relevant.\n\n")
+	}
+	b.WriteString(strings.TrimSpace(payload.Prompt))
+	b.WriteString("\n\n")
+	b.WriteString("Use only the local CCB Codex and Claude Code agents for any coordination. Do not involve Gemini, OpenCode, Droid, or other CLI providers.\n")
+	b.WriteString("Return the final user-visible conclusion to Codex Bridge when the local CCB team finishes. Include blockers, risks, verification, and next actions only when relevant.")
+	return b.String()
+}
+
+func (m *OrchestrationManager) ccbPath() string {
+	return bridgeCCBPath(m.cfg)
+}
+
+func (m *OrchestrationManager) ccbTarget() string {
+	target := strings.TrimSpace(m.cfg.Bridge.CCBTarget)
+	if target == "" {
+		return "codex"
+	}
+	return target
+}
+
+func (m *OrchestrationManager) ccbTimeout() time.Duration {
+	if m.cfg.Bridge.CCBTimeout.Duration > 0 {
+		return m.cfg.Bridge.CCBTimeout.Duration
+	}
+	return time.Hour
+}
+
+var ccbJobIDPattern = regexp.MustCompile(`\bjob_[A-Za-z0-9_-]+\b`)
+var ccbCompactAgentPattern = regexp.MustCompile(`(?:^|[;,\s(])([A-Za-z0-9_-]+)\s*:\s*([A-Za-z0-9_-]+)(?:\([^)]*\))?`)
+var ccbTOMLAgentPattern = regexp.MustCompile(`^\s*\[agents\.([A-Za-z0-9_-]+)\]\s*$`)
+var ccbTOMLProviderPattern = regexp.MustCompile(`^\s*provider\s*=\s*["']?([A-Za-z0-9_-]+)["']?\s*$`)
+var ansiControlPattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\a]*(?:\a|\x1b\\)`)
+var bearerTokenPattern = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]+`)
+var sensitiveValuePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\b((?:api[_-]?key|token|secret|password|session|authorization)\s*[:=]\s*)["']?[^"'\s]+`),
+	regexp.MustCompile(`(?i)\b((?:OPENAI_API_KEY|ANTHROPIC_API_KEY|CLAUDE_API_KEY|GEMINI_API_KEY|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)=)["']?[^"'\s]+`),
+}
+
+func parseCCBJobID(output string) string {
+	if match := ccbJobIDPattern.FindString(output); match != "" {
+		return match
+	}
+	return ""
+}
+
+func parseCCBSocketPath(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(key), "socket_path") {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func (m *OrchestrationManager) resolveCCBSocketPath(payload protocol.OrchestrationStartPayload, explicit string) string {
+	if path := strings.TrimSpace(explicit); path != "" {
+		return expandHome(path)
+	}
+	cwd := m.cwd(payload)
+	if cwd == "" {
+		cwd = "."
+	}
+	root := expandHome(cwd)
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	candidates := []string{
+		filepath.Join(root, ".ccb", "ccbd", "ccbd.sock"),
+	}
+	if relocated := ccbRelocatedRuntimeRoot(root); relocated != "" {
+		candidates = append([]string{filepath.Join(relocated, "ccbd", "ccbd.sock")}, candidates...)
+	}
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+			return candidate
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return ""
+}
+
+func ccbRelocatedRuntimeRoot(projectRoot string) string {
+	refPath := filepath.Join(projectRoot, ".ccb", "runtime-root-ref.json")
+	raw, err := os.ReadFile(refPath)
+	if err != nil {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	if ccbString(payload["record_type"]) != "ccb_runtime_root_ref" {
+		return ""
+	}
+	return ccbString(payload["runtime_state_root"])
+}
+
+func ccbStructuredWatchStreamEvent(record map[string]any, state *ccbWatchStreamState) (ccbWatchStreamEvent, bool) {
+	eventType := ccbString(record["type"])
+	if eventType == "" {
+		return ccbWatchStreamEvent{}, false
+	}
+	data := map[string]any{
+		"source":    "ccb",
+		"eventId":   ccbString(record["event_id"]),
+		"jobId":     ccbString(record["job_id"]),
+		"agent":     ccbString(record["target_name"]),
+		"target":    ccbString(record["target_name"]),
+		"eventType": eventType,
+		"timestamp": ccbString(record["timestamp"]),
+	}
+	if data["agent"] == "" {
+		data["agent"] = ccbString(record["agent_name"])
+	}
+	if data["target"] == "" {
+		data["target"] = data["agent"]
+	}
+	payload, _ := record["payload"].(map[string]any)
+	if payload != nil {
+		data["payload"] = payload
+	}
+	if content := ccbCompletionItemContent(data, state); content != "" {
+		data["contentKind"] = "agent_text"
+		data["rawContent"] = content
+		return ccbWatchStreamEvent{Content: content, Data: data}, true
+	}
+	if content := ccbStructuredEventContent(eventType, payload, data); content != "" {
+		return ccbWatchStreamEvent{Content: content, Data: data}, true
+	}
+	return ccbWatchStreamEvent{}, false
+}
+
+func ccbStructuredEventContent(eventType string, payload, data map[string]any) string {
+	switch eventType {
+	case "job_started":
+		if agent := ccbString(data["agent"]); agent != "" {
+			return "CCB " + agent + ": started"
+		}
+	case "job_accepted", "job_queued":
+		if status := firstNonEmptyCCBString(payload, "status"); status != "" {
+			if agent := ccbString(data["agent"]); agent != "" {
+				return "CCB " + agent + ": " + status
+			}
+			return "CCB status: " + status
+		}
+	case "job_delegated_callback":
+		child := firstNonEmptyCCBString(payload, "callback_child_job_id")
+		if child != "" {
+			return "CCB callback waiting for " + child
+		}
+		return "CCB callback waiting for delegated task"
+	case "callback_edge_created":
+		child := firstNonEmptyCCBString(payload, "child_job_id")
+		if child == "" {
+			child = ccbString(data["jobId"])
+		}
+		parent := firstNonEmptyCCBString(payload, "parent_job_id")
+		if child != "" && parent != "" {
+			return fmt.Sprintf("CCB callback linked: %s -> %s", parent, child)
+		}
+	case "callback_continuation_submitted":
+		continuation := firstNonEmptyCCBString(payload, "continuation_job_id")
+		if continuation != "" {
+			return "CCB callback continuation submitted: " + continuation
+		}
+	case "completion_terminal", "job_completed", "job_failed", "job_incomplete", "job_cancelled":
+		if status := firstNonEmptyCCBString(payload, "status"); status != "" {
+			if agent := ccbString(data["agent"]); agent != "" {
+				return "CCB " + agent + ": " + status
+			}
+			return "CCB status: " + status
+		}
+	}
+	return ""
+}
+
+func ccbRelatedJobIDs(record map[string]any) []string {
+	seen := map[string]bool{}
+	var ids []string
+	add := func(value any) {
+		text := ccbString(value)
+		if !strings.HasPrefix(text, "job_") || seen[text] {
+			return
+		}
+		seen[text] = true
+		ids = append(ids, text)
+	}
+	add(record["job_id"])
+	if payload, _ := record["payload"].(map[string]any); payload != nil {
+		for _, key := range []string{"callback_child_job_id", "child_job_id", "parent_job_id", "continuation_job_id", "reply_delivery_job_id", "job_id"} {
+			add(payload[key])
+		}
+	}
+	return ids
+}
+
+func parseCCBWatchResult(output string) ccbJobResult {
+	var result ccbJobResult
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "status:") {
+			result.Status = strings.TrimSpace(strings.TrimPrefix(line, "status:"))
+			continue
+		}
+		if strings.HasPrefix(line, "reply:") {
+			parts := []string{strings.TrimSpace(strings.TrimPrefix(line, "reply:"))}
+			for _, extra := range lines[i+1:] {
+				extra = strings.TrimSpace(extra)
+				if extra == "" {
+					if len(parts) > 0 && parts[len(parts)-1] != "" {
+						parts = append(parts, "")
+					}
+					continue
+				}
+				if isCCBWatchMetadataLine(extra) {
+					break
+				}
+				parts = append(parts, extra)
+			}
+			result.Reply = strings.TrimSpace(strings.Join(parts, "\n"))
+		}
+	}
+	if result.Reply == "" {
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := strings.TrimSpace(lines[i])
+			if line != "" && !strings.Contains(line, ":") && !strings.HasPrefix(line, "[") {
+				result.Reply = line
+				break
+			}
+		}
+	}
+	return result
+}
+
+func ccbWatchStreamLineEvent(line string, state *ccbWatchStreamState) (ccbWatchStreamEvent, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ccbWatchStreamEvent{}, false
+	}
+	key, value, ok := strings.Cut(line, ":")
+	if !ok {
+		return ccbWatchStreamEvent{
+			Line:    line,
+			Content: line,
+			Data: map[string]any{
+				"source": "ccb",
+				"line":   line,
+			},
+		}, true
+	}
+	key = strings.ToLower(strings.TrimSpace(key))
+	value = strings.TrimSpace(value)
+	data := map[string]any{
+		"source": "ccb",
+		"line":   line,
+		"key":    key,
+		"value":  value,
+	}
+	switch key {
+	case "event":
+		eventData := parseCCBEventLine(value)
+		if content := ccbCompletionItemContent(eventData, state); content != "" {
+			for k, v := range eventData {
+				data[k] = v
+			}
+			data["contentKind"] = "agent_text"
+			data["rawContent"] = content
+			return ccbWatchStreamEvent{
+				Line:    line,
+				Content: content,
+				Data:    data,
+			}, true
+		}
+		for k, v := range eventData {
+			data[k] = v
+		}
+		return ccbWatchStreamEvent{
+			Line:    line,
+			Content: ccbEventLineContent(eventData, line),
+			Data:    data,
+		}, true
+	case "watch_status":
+		return ccbWatchStreamEvent{Line: line, Content: "CCB watch: " + value, Data: data}, true
+	case "status":
+		return ccbWatchStreamEvent{Line: line, Content: "CCB status: " + value, Data: data}, true
+	case "reply":
+		return ccbWatchStreamEvent{Line: line, Content: strings.TrimSpace(value), Data: data}, value != ""
+	case "observer_notice":
+		return ccbWatchStreamEvent{Line: line, Content: value, Data: data}, value != ""
+	default:
+		if strings.HasPrefix(key, "observer_") || isCCBWatchMetadataLine(line) {
+			return ccbWatchStreamEvent{}, false
+		}
+		return ccbWatchStreamEvent{Line: line, Content: line, Data: data}, true
+	}
+}
+
+func ccbWatchOutputWasStreamed(output string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		if _, ok := ccbWatchStreamLineEvent(line, nil); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func parseCCBEventLine(value string) map[string]any {
+	fields := strings.Fields(value)
+	out := map[string]any{}
+	if len(fields) > 0 {
+		out["eventId"] = fields[0]
+	}
+	if len(fields) > 1 {
+		out["jobId"] = fields[1]
+	}
+	if len(fields) > 2 {
+		out["target"] = fields[2]
+	}
+	if len(fields) > 3 {
+		out["eventType"] = fields[3]
+	}
+	if len(fields) > 4 {
+		rest := strings.Join(fields[4:], " ")
+		if strings.HasPrefix(rest, "{") {
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(rest), &payload); err == nil {
+				out["payload"] = payload
+				return out
+			}
+		}
+		out["timestamp"] = fields[4]
+		if len(fields) > 5 {
+			rawPayload := strings.Join(fields[5:], " ")
+			if strings.HasPrefix(rawPayload, "{") {
+				var payload map[string]any
+				if err := json.Unmarshal([]byte(rawPayload), &payload); err == nil {
+					out["payload"] = payload
+				}
+			}
+		}
+	}
+	return out
+}
+
+func ccbCompletionItemContent(data map[string]any, state *ccbWatchStreamState) string {
+	if data["eventType"] != "completion_item" {
+		return ""
+	}
+	payload, _ := data["payload"].(map[string]any)
+	if payload == nil {
+		return ""
+	}
+	agent := ccbString(data["target"])
+	if agent == "" {
+		agent = ccbString(payload["agent_name"])
+	}
+	if agent != "" {
+		data["agent"] = agent
+	}
+	itemPayload, _ := payload["payload"].(map[string]any)
+	if itemPayload == nil {
+		return ""
+	}
+	kind := ccbString(payload["kind"])
+	data["completionKind"] = kind
+	text := ccbCompletionItemText(kind, itemPayload)
+	if text == "" {
+		return ""
+	}
+	if state == nil {
+		return text
+	}
+	if state.agentContent == nil {
+		state.agentContent = make(map[string]string)
+	}
+	key := agent
+	if key == "" {
+		key = ccbString(data["jobId"])
+	}
+	switch kind {
+	case "assistant_chunk", "assistant_final", "result", "turn_boundary", "turn_aborted",
+		"cancel_info", "error", "pane_dead", "session_snapshot", "session_mutation":
+		current := state.agentContent[key]
+		delta := appendAgentMessageContentString(&current, text)
+		state.agentContent[key] = current
+		return delta
+	default:
+		return text
+	}
+}
+
+func ccbCompletionItemText(kind string, payload map[string]any) string {
+	switch kind {
+	case "assistant_chunk":
+		return firstNonEmptyCCBString(payload, "delta", "text", "content", "reply", "fallback_text", "merged_text")
+	case "assistant_final", "result":
+		return firstNonEmptyCCBString(payload, "last_agent_message", "final_answer", "result_text", "reply", "text", "merged_text", "fallback_text")
+	case "turn_boundary", "turn_aborted", "cancel_info", "error", "pane_dead":
+		return firstNonEmptyCCBString(payload, "last_agent_message", "final_answer", "result_text", "reply", "text", "error_message", "merged_text", "fallback_text")
+	case "session_snapshot", "session_mutation":
+		return firstNonEmptyCCBString(payload, "reply", "content", "text", "merged_text", "fallback_text")
+	default:
+		return firstNonEmptyCCBString(payload, "last_agent_message", "final_answer", "result_text", "reply", "text", "content", "merged_text", "fallback_text")
+	}
+}
+
+func firstNonEmptyCCBString(m map[string]any, keys ...string) string {
+	if m == nil {
+		return ""
+	}
+	for _, key := range keys {
+		if value := ccbString(m[key]); strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func ccbString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case json.Number:
+		return v.String()
+	default:
+		return ""
+	}
+}
+
+func ccbBool(value any) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "true")
+	default:
+		return false
+	}
+}
+
+func ccbInt(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		i, _ := v.Int64()
+		return int(i)
+	case string:
+		var i int
+		_, _ = fmt.Sscanf(strings.TrimSpace(v), "%d", &i)
+		return i
+	default:
+		return 0
+	}
+}
+
+func ccbMapSlice(value any) []map[string]any {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if m, ok := item.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func ccbAgentCLI(agent string) string {
+	switch strings.ToLower(strings.TrimSpace(agent)) {
+	case "codex":
+		return "codex"
+	case "claude":
+		return "claude"
+	default:
+		return "ccb"
+	}
+}
+
+func ccbTraceReplyEvents(output string) []ccbTraceReplyEvent {
+	var events []ccbTraceReplyEvent
+	for _, rawLine := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if !strings.HasPrefix(line, "reply: ") {
+			continue
+		}
+		fields := parseCCBTraceFields(strings.TrimSpace(strings.TrimPrefix(line, "reply: ")))
+		agent := fields["agent"]
+		content := fields["reply"]
+		if content == "" {
+			content = fields["preview"]
+		}
+		content = strings.TrimSpace(content)
+		if agent == "" || content == "" {
+			continue
+		}
+		events = append(events, ccbTraceReplyEvent{
+			Role:    agent,
+			CLI:     ccbAgentCLI(agent),
+			Content: content,
+			Data: map[string]any{
+				"source":         "ccb",
+				"contentKind":    "agent_reply",
+				"agent":          agent,
+				"replyId":        fields["id"],
+				"messageId":      fields["message"],
+				"attemptId":      fields["attempt"],
+				"terminalStatus": fields["terminal"],
+				"reason":         fields["reason"],
+				"finishedAt":     fields["finished"],
+			},
+		})
+	}
+	return events
+}
+
+func ccbTraceReplyEventsFromPayload(payload map[string]any, state *ccbWatchStreamState) []ccbTraceReplyEvent {
+	replies := ccbMapSlice(payload["replies"])
+	events := make([]ccbTraceReplyEvent, 0, len(replies))
+	for _, reply := range replies {
+		agent := ccbString(reply["agent_name"])
+		content := ccbString(reply["reply"])
+		if content == "" {
+			content = ccbString(reply["reply_preview"])
+		}
+		content = strings.TrimSpace(content)
+		if agent == "" || content == "" {
+			continue
+		}
+		data := map[string]any{
+			"source":         "ccb",
+			"contentKind":    "agent_reply",
+			"agent":          agent,
+			"replyId":        ccbString(reply["reply_id"]),
+			"messageId":      ccbString(reply["message_id"]),
+			"attemptId":      ccbString(reply["attempt_id"]),
+			"terminalStatus": ccbString(reply["terminal_status"]),
+			"reason":         ccbString(reply["reason"]),
+			"finishedAt":     ccbString(reply["finished_at"]),
+		}
+		if delta := ccbTraceReplyDelta(agent, content, state); delta != "" {
+			events = append(events, ccbTraceReplyEvent{
+				Role:    agent,
+				CLI:     ccbAgentCLI(agent),
+				Content: delta,
+				Data:    data,
+			})
+		}
+	}
+	return events
+}
+
+func ccbTraceReplyDelta(agent, content string, state *ccbWatchStreamState) string {
+	if state == nil {
+		return content
+	}
+	if state.agentContent == nil {
+		state.agentContent = make(map[string]string)
+	}
+	current := state.agentContent[agent]
+	delta := appendAgentMessageContentString(&current, content)
+	state.agentContent[agent] = current
+	return delta
+}
+
+func ccbTraceFinalReply(payload map[string]any) string {
+	if value := ccbString(payload["reply"]); strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	replies := ccbMapSlice(payload["replies"])
+	for i := len(replies) - 1; i >= 0; i-- {
+		if value := ccbString(replies[i]["reply"]); strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func parseCCBTraceFields(value string) map[string]string {
+	out := make(map[string]string)
+	for _, key := range []string{"id", "message", "attempt", "agent", "terminal", "size", "notice", "kind", "reason", "finished"} {
+		if val, ok := ccbTraceField(value, key); ok {
+			out[key] = val
+		}
+	}
+	if val, ok := ccbTraceField(value, "preview"); ok {
+		out["preview"] = val
+	}
+	return out
+}
+
+func ccbTraceField(value, key string) (string, bool) {
+	prefix := key + "="
+	start := strings.Index(value, prefix)
+	if start < 0 {
+		return "", false
+	}
+	start += len(prefix)
+	end := len(value)
+	for _, nextKey := range []string{" id=", " message=", " attempt=", " agent=", " terminal=", " size=", " notice=", " kind=", " reason=", " finished=", " preview="} {
+		if strings.TrimSpace(nextKey) == prefix {
+			continue
+		}
+		if idx := strings.Index(value[start:], nextKey); idx >= 0 && start+idx < end {
+			end = start + idx
+		}
+	}
+	return strings.TrimSpace(value[start:end]), true
+}
+
+func ccbEventLineContent(data map[string]any, fallback string) string {
+	target, _ := data["target"].(string)
+	eventType, _ := data["eventType"].(string)
+	if eventType == "" {
+		return fallback
+	}
+	label := strings.ReplaceAll(eventType, "_", " ")
+	if target != "" {
+		return fmt.Sprintf("CCB %s: %s", target, label)
+	}
+	return "CCB: " + label
+}
+
+func isCCBWatchMetadataLine(line string) bool {
+	key, _, ok := strings.Cut(strings.TrimSpace(line), ":")
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "watch_status", "observer_view", "observer_authority", "observer_terminal", "observer_notice",
+		"job_id", "agent_name", "target_name", "project_id", "mode", "resolved_kind",
+		"expected_count", "received_count", "terminal_count", "notice_count", "waited_s",
+		"reply_id", "message_id", "attempt_id", "provider", "provider_instance", "event":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *OrchestrationManager) runCLI(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, prompt string) (string, []RunnerToolEvent, error) {
@@ -691,6 +3189,23 @@ func verifierRoleCLI(mode string, history []orchestrationTurn) (string, string) 
 		return "implementer", "claude"
 	}
 	return "verifier", "codex"
+}
+
+func remediationRoleCLI(mode string, history []orchestrationTurn) (string, string) {
+	lastCLI := ""
+	if len(history) > 0 {
+		lastCLI = history[len(history)-1].CLI
+	}
+	if strings.EqualFold(lastCLI, "codex") {
+		if mode == "debate" {
+			return "proposer", "claude"
+		}
+		return "implementer", "claude"
+	}
+	if mode == "debate" {
+		return "proposer", "codex"
+	}
+	return "implementer", "codex"
 }
 
 type claudeApprovalSocketRequest struct {
@@ -1160,6 +3675,7 @@ func nextRoleCLI(mode string, turn int) (string, string) {
 }
 
 func newOrchestrationTurnRecord(turnID, role, cli, content string, tools []RunnerToolEvent) orchestrationTurn {
+	content = cleanOrchestrationTurnContent(content)
 	handoff := extractHandoff(content)
 	return orchestrationTurn{
 		TurnID:        turnID,
@@ -1178,11 +3694,14 @@ func resolvedHandoffReady(content string) bool {
 	if !strings.Contains(handoff, "status=resolved") {
 		return false
 	}
+	if hasUnresolvedAcceptanceSignal(content, "") {
+		return false
+	}
 	return hasUserVisibleConclusion(content)
 }
 
 func hasUserVisibleConclusion(content string) bool {
-	visible := strings.TrimSpace(strings.Replace(content, extractHandoff(content), "", 1))
+	visible := humanVisibleContent(content)
 	if visible == "" {
 		return false
 	}
@@ -1199,24 +3718,156 @@ func hasUserVisibleConclusion(content string) bool {
 	return false
 }
 
-func finalTurnFallbackSummary(userPrompt string, turn, maxTurns int, history []orchestrationTurn, current orchestrationTurn) string {
-	if turn != maxTurns || !finalResponseNeedsFallback(current.Content) {
+func turnConclusionFallbackSummary(userPrompt string, turn, maxTurns int, history []orchestrationTurn, current orchestrationTurn) string {
+	if !turnResponseNeedsFallback(current.Content) {
 		return ""
 	}
+	final := turn >= maxTurns || strings.EqualFold(current.HandoffFields.Status, "resolved")
+	return buildTurnConclusionSummary(userPrompt, final, history, current, current.Err != "")
+}
+
+func verifierConclusionFallbackSummary(userPrompt string, history []orchestrationTurn, current orchestrationTurn) string {
+	if !turnResponseNeedsFallback(current.Content) {
+		return ""
+	}
+	return buildTurnConclusionSummary(userPrompt, true, history, current, current.Err != "")
+}
+
+func erroredTurnFallbackSummary(userPrompt string, final bool, history []orchestrationTurn, current orchestrationTurn) string {
+	if !turnResponseNeedsFallback(current.Content) {
+		return ""
+	}
+	return buildTurnConclusionSummary(userPrompt, final, history, current, true)
+}
+
+func finalTurnFallbackSummary(userPrompt string, turn, maxTurns int, history []orchestrationTurn, current orchestrationTurn) string {
+	if turn != maxTurns {
+		return ""
+	}
+	return turnConclusionFallbackSummary(userPrompt, turn, maxTurns, history, current)
+}
+
+func appendConclusionToTurnRecord(record *orchestrationTurn, summary string) string {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return ""
+	}
+	base := cleanOrchestrationTurnContent(record.Content)
+	if turnResponseNeedsFallback(base) && !hasMachineContractLines(base) {
+		base = ""
+	}
+	record.Content = summary
+	if base != "" {
+		record.Content = base + "\n\n" + summary
+	}
+	record.Msg = extractMsg(record.Content)
+	record.Handoff = extractHandoff(record.Content)
+	record.HandoffFields = parseHandoffFields(record.Handoff)
+	if base != "" {
+		return "\n\n" + summary
+	}
+	return summary
+}
+
+func cleanOrchestrationTurnContent(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	if idx := conclusionTrimIndex(content); idx > 0 {
+		return strings.TrimSpace(content[idx:])
+	}
+	return content
+}
+
+func conclusionTrimIndex(content string) int {
+	if idx := lastMarkerIndexFold(content, []string{
+		"最终结论", "最终总结", "final conclusion", "final summary",
+	}); idx >= 0 && shouldTrimConclusionPrefix(content[:idx]) {
+		return idx
+	}
+	if idx := lastMarkerIndexFold(content, []string{
+		"审查结论", "本轮结论", "结论：", "结论:", "conclusion:", "summary:",
+	}); idx >= 0 && shouldTrimConclusionPrefix(content[:idx]) {
+		return idx
+	}
+	return -1
+}
+
+func lastMarkerIndexFold(content string, markers []string) int {
+	lower := strings.ToLower(content)
+	best := -1
+	for _, marker := range markers {
+		if idx := strings.LastIndex(lower, strings.ToLower(marker)); idx > best {
+			best = idx
+		}
+	}
+	return best
+}
+
+func shouldTrimConclusionPrefix(prefix string) bool {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return false
+	}
+	lower := strings.ToLower(prefix)
+	progressSignals := []string{
+		"我会", "我先", "我将", "接下来", "正在", "不展开新的",
+		"i will", "i'll", "i am going to", "next i",
+	}
+	count := 0
+	for _, signal := range progressSignals {
+		count += strings.Count(lower, signal)
+	}
+	return count >= 2 || strings.HasPrefix(lower, "我会") || strings.HasPrefix(lower, "我先") || len([]rune(prefix)) > 240
+}
+
+func hasMachineContractLines(content string) bool {
+	lower := strings.ToLower(content)
+	return strings.Contains(lower, "msg:") || strings.Contains(lower, "handoff:")
+}
+
+func buildTurnConclusionSummary(userPrompt string, final bool, history []orchestrationTurn, current orchestrationTurn, failed bool) string {
 	zh := !explicitEnglishResponseRequested(userPrompt)
 	prior := latestMeaningfulConclusion(history)
 	verified := completedVerificationSummaries([]orchestrationTurn{current}, zh, 3)
 	if len(verified) == 0 {
 		verified = completedVerificationSummaries(history, zh, 3)
 	}
-	failed := failedCommandCount(append(history, current))
+	failedCommands := failedCommandCount(append(history, current))
+	blocker := compactBlockerSummary(current)
+	if blocker == "" {
+		blocker, _ = latestBlocker(history)
+	}
+	if acceptanceBlocker := acceptanceBlockerSummary(userPrompt, append(history, current)); acceptanceBlocker != "" {
+		blocker = acceptanceBlocker
+		failed = true
+	}
 
 	var b strings.Builder
 	if zh {
-		b.WriteString("最终结论：本次编排已完成。")
+		if failed {
+			if final {
+				b.WriteString("最终结论：本次编排未完成。")
+			} else {
+				b.WriteString("本轮结论：本轮未完成，当前阻塞点已记录。")
+			}
+		} else if final {
+			b.WriteString("最终结论：本次编排已完成。")
+		} else {
+			b.WriteString("本轮结论：本轮编排已完成，并已记录当前可确认的结果。")
+		}
 		if prior != "" {
 			b.WriteString("\n\n结果概览：")
 			b.WriteString(prior)
+		}
+		if current.Err != "" {
+			b.WriteString("\n\n错误：")
+			b.WriteString(trimForPrompt(oneLine(current.Err), 500))
+		}
+		if blocker != "" {
+			b.WriteString("\n\n阻塞点：")
+			b.WriteString(blocker)
 		}
 		if len(verified) > 0 {
 			b.WriteString("\n\n已验证：")
@@ -1227,18 +3878,38 @@ func finalTurnFallbackSummary(userPrompt string, turn, maxTurns int, history []o
 		} else {
 			b.WriteString("\n\n已验证：没有可提炼的命令摘要；可展开命令详情审计原始事件。")
 		}
-		if failed > 0 {
+		if failedCommands > 0 {
 			b.WriteString("\n\n剩余风险：命令详情里仍有失败命令，需要结合具体输出判断。")
+		} else if failed && blocker != "" {
+			b.WriteString("\n\n剩余风险：上述阻塞点尚未解除，不能把当前状态视为已满足用户要求。")
 		} else {
 			b.WriteString("\n\n剩余风险：未发现新的阻塞问题；如需审计细节，可展开命令详情查看原始事件。")
 		}
 		return b.String()
 	}
 
-	b.WriteString("Final conclusion: this orchestration completed.")
+	if failed {
+		if final {
+			b.WriteString("Final conclusion: this orchestration did not complete.")
+		} else {
+			b.WriteString("Turn conclusion: this turn did not complete; the current blocker was recorded.")
+		}
+	} else if final {
+		b.WriteString("Final conclusion: this orchestration completed.")
+	} else {
+		b.WriteString("Turn conclusion: this orchestration turn completed and the current confirmed state was recorded.")
+	}
 	if prior != "" {
 		b.WriteString("\n\nResult overview: ")
 		b.WriteString(prior)
+	}
+	if current.Err != "" {
+		b.WriteString("\n\nError: ")
+		b.WriteString(trimForPrompt(oneLine(current.Err), 500))
+	}
+	if blocker != "" {
+		b.WriteString("\n\nBlocker: ")
+		b.WriteString(blocker)
 	}
 	if len(verified) > 0 {
 		b.WriteString("\n\nVerified:")
@@ -1249,12 +3920,28 @@ func finalTurnFallbackSummary(userPrompt string, turn, maxTurns int, history []o
 	} else {
 		b.WriteString("\n\nVerified: no concise command summary was available; expand command details to audit raw events.")
 	}
-	if failed > 0 {
+	if failedCommands > 0 {
 		b.WriteString("\n\nRemaining risk: some command events failed; check command details for raw output.")
+	} else if failed && blocker != "" {
+		b.WriteString("\n\nRemaining risk: the blocker above is still unresolved, so the current state must not be treated as satisfying the user request.")
 	} else {
 		b.WriteString("\n\nRemaining risk: no new blocking issue was reported. Expand command details to audit raw events.")
 	}
 	return b.String()
+}
+
+func humanVisibleContent(content string) string {
+	lines := strings.Split(content, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "msg:") || strings.HasPrefix(lower, "handoff:") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
 func explicitEnglishResponseRequested(value string) bool {
@@ -1276,11 +3963,15 @@ func explicitEnglishResponseRequested(value string) bool {
 }
 
 func finalResponseNeedsFallback(content string) bool {
-	content = strings.TrimSpace(content)
-	if content == "" {
+	return turnResponseNeedsFallback(content)
+}
+
+func turnResponseNeedsFallback(content string) bool {
+	visible := humanVisibleContent(content)
+	if visible == "" {
 		return true
 	}
-	lower := strings.ToLower(content)
+	lower := strings.ToLower(visible)
 	progressStarts := []string{
 		"我会", "我将", "接下来", "正在", "i will", "i'll", "i am going to", "next i",
 	}
@@ -1302,12 +3993,12 @@ func finalResponseNeedsFallback(content string) bool {
 	if count >= 2 {
 		return false
 	}
-	return count < 2 && len([]rune(content)) < 320
+	return count < 2 && len([]rune(visible)) < 320
 }
 
 func latestMeaningfulConclusion(history []orchestrationTurn) string {
 	for i := len(history) - 1; i >= 0; i-- {
-		content := strings.TrimSpace(history[i].Content)
+		content := summarizeTurnForContinuity(history[i], 700)
 		if content == "" {
 			continue
 		}
@@ -1320,6 +4011,67 @@ func latestMeaningfulConclusion(history []orchestrationTurn) string {
 		}
 	}
 	return ""
+}
+
+func summarizeTurnForContinuity(item orchestrationTurn, max int) string {
+	if item.Handoff != "" || item.HandoffFields != (orchestrationHandoffFields{}) {
+		if summary := formatHandoffFields(item.HandoffFields); summary != "" {
+			return trimForPrompt(summary, max)
+		}
+		return trimForPrompt(item.Handoff, max)
+	}
+	if blocker := compactBlockerSummary(item); blocker != "" {
+		return trimForPrompt("Blocker: "+blocker, max)
+	}
+	content := humanVisibleContent(item.Content)
+	if content == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	var selected []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || isLowValueFallbackLine(line) {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "阻塞") || strings.Contains(lower, "风险") ||
+			strings.Contains(lower, "未完成") || strings.Contains(lower, "未消除") ||
+			strings.Contains(lower, "blocker") || strings.Contains(lower, "risk") ||
+			strings.Contains(lower, "not complete") || strings.Contains(lower, "failed") {
+			selected = append(selected, line)
+			continue
+		}
+		if len(selected) < 2 {
+			selected = append(selected, line)
+		}
+		if len(selected) >= 4 {
+			break
+		}
+	}
+	if len(selected) == 0 {
+		return trimForPrompt(oneLine(content), max)
+	}
+	return trimForPrompt(oneLine(strings.Join(selected, " ")), max)
+}
+
+func isLowValueFallbackLine(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if lower == "" {
+		return true
+	}
+	lowValue := []string{
+		"结果概览", "已验证：没有可提炼", "可展开命令详情", "如需审计细节",
+		"本轮编排已完成，并已记录当前可确认的结果",
+		"this orchestration turn completed and the current confirmed state was recorded",
+		"result overview", "expand command details", "no concise command summary",
+	}
+	for _, signal := range lowValue {
+		if strings.Contains(lower, strings.ToLower(signal)) {
+			return true
+		}
+	}
+	return false
 }
 
 func completedCommandSummaries(turns []orchestrationTurn, max int) []string {
@@ -1538,6 +4290,7 @@ func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume 
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Maintain continuity with the compacted context, while treating the latest user task as authoritative.\n\n")
 	}
+	b.WriteString("Latest user task is authoritative. Track the user's core acceptance criterion explicitly, and do not declare success unless that criterion is met.\n")
 	if mode == "debate" {
 		if role == "proposer" {
 			b.WriteString("Strategy: evidence-focused debate. Keep claims testable, cite files or command results, and avoid repeating the full transcript.\n")
@@ -1549,10 +4302,10 @@ func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume 
 	} else {
 		if role == "implementer" {
 			b.WriteString("Strategy: builder-reviewer collaboration. Optimize for shared workspace progress with short, auditable handoffs.\n")
-			b.WriteString("Role: implementer. Make concrete progress on the task, edit files when appropriate, and leave only the key state the reviewer needs.\n")
+			b.WriteString("Role: implementer. Make concrete progress on the user's core acceptance criterion, edit files when appropriate, and leave only the key state the reviewer needs.\n")
 		} else {
 			b.WriteString("Strategy: builder-reviewer collaboration. Optimize for shared workspace progress with short, auditable handoffs.\n")
-			b.WriteString("Role: reviewer. Independently inspect the implementer's result, fix obvious issues, and verify with focused commands when appropriate.\n")
+			b.WriteString("Role: reviewer. Independently inspect the implementer's result, fix obvious issues, and verify with focused commands when appropriate. Explicitly audit whether the previous turn advanced the user's core acceptance criterion; do not treat a narrow validation such as compiling as resolved when the user asked for a stronger outcome.\n")
 		}
 	}
 	b.WriteString(fmt.Sprintf("Turn: %d of %d. CLI: %s.\n\n", turn, maxTurns, cli))
@@ -1588,6 +4341,7 @@ func composeFinalVerifierPrompt(mode, userPrompt, contextSummary string, resume 
 	var b strings.Builder
 	b.WriteString("You are the lightweight final verifier for a local CLI orchestration run.\n")
 	b.WriteString("Inspect only the reported changes, failed commands, and unresolved risks. Avoid broad new work; make a small fix only if it is clearly required to complete verification.\n\n")
+	b.WriteString("Verify the actual acceptance criterion from the latest user task against concrete files or command output. If the user named a concrete completion condition, inspect the relevant evidence and do not mark resolved while that condition remains unmet.\n\n")
 	b.WriteString(fmt.Sprintf("From: %s/%s\n", role, cli))
 	b.WriteString("To: user\n")
 	b.WriteString(fmt.Sprintf("Mode: %s\n\n", mode))
@@ -1623,6 +4377,43 @@ func composeFinalVerifierPrompt(mode, userPrompt, contextSummary string, resume 
 	return b.String()
 }
 
+func composeWorkspaceChangeRemediationPrompt(mode, userPrompt, contextSummary string, resume bool, role, cli string, history []orchestrationTurn, reason string) string {
+	var b strings.Builder
+	b.WriteString("You are the remediation implementer for a local CLI orchestration run.\n")
+	b.WriteString("The prior turns did not produce concrete workspace file changes for a change-oriented user task. Do not only inspect or re-verify. Make the smallest real workspace file change that advances the user's latest acceptance criterion, then verify it. If a real file change is impossible, report status=blocked with the exact blocker.\n\n")
+	b.WriteString(fmt.Sprintf("From: %s/%s\n", role, cli))
+	b.WriteString("To: user\n")
+	b.WriteString(fmt.Sprintf("Mode: %s\n\n", mode))
+	b.WriteString(orchestrationLanguageRule)
+	b.WriteString("\n\n")
+	if resume {
+		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Prefer the latest user task over older details.\n\n")
+	}
+	if strings.TrimSpace(contextSummary) != "" {
+		b.WriteString("Compacted context from earlier tasks in this conversation:\n")
+		b.WriteString(trimForPrompt(contextSummary, 14000))
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Remediation trigger:\n")
+	b.WriteString(trimForPrompt(reason, 1000))
+	b.WriteString("\n\n")
+	if len(history) > 0 {
+		b.WriteString("Compact prior-turn handoffs:\n")
+		for _, item := range history {
+			b.WriteString(formatCompactPriorTurn(item))
+		}
+		b.WriteByte('\n')
+	}
+	b.WriteString("Original user task:\n")
+	b.WriteString(userPrompt)
+	b.WriteString("\n\n")
+	b.WriteString("End your visible response with these compact lines, and set changed to the concrete files you actually changed:\n")
+	b.WriteString(orchestrationMsgContract)
+	b.WriteByte('\n')
+	b.WriteString(orchestrationHandoffContract)
+	return b.String()
+}
+
 func trimForPrompt(value string, max int) string {
 	value = strings.TrimSpace(value)
 	if len(value) <= max {
@@ -1645,7 +4436,7 @@ func formatCompactPriorTurn(item orchestrationTurn) string {
 		summary = item.Handoff
 	}
 	if summary == "" {
-		summary = compactTurnContent(item.Content, 700)
+		summary = summarizeTurnForContinuity(item, 700)
 	}
 	if summary == "" {
 		summary = "no visible answer"
@@ -1654,6 +4445,10 @@ func formatCompactPriorTurn(item orchestrationTurn) string {
 	if commands := completedCommandSummaries([]orchestrationTurn{item}, 2); len(commands) > 0 {
 		b.WriteString("; verified: ")
 		b.WriteString(strings.Join(commands, " | "))
+	}
+	if failures := failedCommandSummaries([]orchestrationTurn{item}, 2); len(failures) > 0 {
+		b.WriteString("; failed: ")
+		b.WriteString(strings.Join(failures, " | "))
 	}
 	if item.Err != "" {
 		b.WriteString("; error: ")
@@ -1723,6 +4518,576 @@ func compactTurnContent(content string, max int) string {
 		return trimForPrompt(oneLine(content), max)
 	}
 	return trimForPrompt(oneLine(strings.Join(selected, " ")), max)
+}
+
+func compactBlockerSummary(item orchestrationTurn) string {
+	var parts []string
+	if item.Err != "" {
+		parts = append(parts, "error="+trimForPrompt(oneLine(item.Err), 180))
+	}
+	if meaningfulHandoffValue(item.HandoffFields.Next) {
+		parts = append(parts, "next="+trimForPrompt(oneLine(item.HandoffFields.Next), 220))
+	}
+	if meaningfulHandoffValue(item.HandoffFields.Risks) {
+		parts = append(parts, "risks="+trimForPrompt(oneLine(item.HandoffFields.Risks), 260))
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, "; ")
+	}
+	if strings.EqualFold(strings.TrimSpace(item.HandoffFields.Status), "blocked") && item.Handoff != "" {
+		return trimForPrompt(oneLine(item.Handoff), 500)
+	}
+	for _, command := range failedCommandSummaries([]orchestrationTurn{item}, 2) {
+		parts = append(parts, command)
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, " | ")
+	}
+	return ""
+}
+
+func latestBlocker(history []orchestrationTurn) (string, bool) {
+	for i := len(history) - 1; i >= 0; i-- {
+		if blocker := compactBlockerSummary(history[i]); blocker != "" {
+			return blocker, true
+		}
+	}
+	return "", false
+}
+
+func repeatedBlockingHandoff(history []orchestrationTurn) (string, bool) {
+	const threshold = 3
+	seen := 0
+	last := ""
+	for i := len(history) - 1; i >= 0; i-- {
+		item := history[i]
+		if !turnReportsBlocking(item) {
+			break
+		}
+		blocker := normalizeBlockerKey(item)
+		if blocker == "" {
+			break
+		}
+		if last == "" {
+			last = blocker
+		}
+		if blocker != last {
+			break
+		}
+		seen++
+		if seen >= threshold {
+			return compactBlockerSummary(item), true
+		}
+	}
+	return "", false
+}
+
+func snapshotWorkspace(root string, ignoredPaths ...string) workspaceSnapshot {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = "."
+	}
+	root = expandHome(root)
+	abs, err := filepath.Abs(root)
+	if err == nil {
+		root = abs
+	}
+	root = filepath.Clean(root)
+	snapshot := workspaceSnapshot{
+		Root:      root,
+		Files:     map[string]workspaceFileState{},
+		Available: true,
+	}
+	ignored := normalizeWorkspaceSnapshotIgnoredPaths(root, ignoredPaths)
+	const maxSnapshotFiles = 20000
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		name := entry.Name()
+		rel, relOK := workspaceSnapshotRel(root, path)
+		if relOK {
+			if shouldIgnoreWorkspaceSnapshotPath(rel, ignored) {
+				if entry.IsDir() && path != root {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		if entry.IsDir() {
+			if path != root && shouldSkipWorkspaceSnapshotDir(name) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Type()&fs.ModeType != 0 {
+			return nil
+		}
+		if !relOK {
+			return nil
+		}
+		if shouldSkipWorkspaceSnapshotFile(rel) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+		snapshot.Files[filepath.ToSlash(rel)] = workspaceFileState{
+			Size:    info.Size(),
+			ModTime: info.ModTime().UnixNano(),
+		}
+		if len(snapshot.Files) > maxSnapshotFiles {
+			snapshot.Truncated = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		snapshot.Available = false
+		snapshot.Err = err.Error()
+	}
+	return snapshot
+}
+
+func workspaceSnapshotIgnoredPaths(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	var paths []string
+	if cfg.Hub.DBPath != "" {
+		db := expandHome(cfg.Hub.DBPath)
+		paths = append(paths, db, db+"-wal", db+"-shm")
+	}
+	if cfg.Bridge.MachineIDFile != "" {
+		paths = append(paths, expandHome(cfg.Bridge.MachineIDFile))
+	}
+	return paths
+}
+
+func normalizeWorkspaceSnapshotIgnoredPaths(root string, paths []string) map[string]bool {
+	ignored := map[string]bool{}
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		path = expandHome(path)
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		path = filepath.Clean(path)
+		if rel, err := filepath.Rel(root, path); err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+			ignored[filepath.ToSlash(rel)] = true
+		}
+	}
+	return ignored
+}
+
+func workspaceSnapshotRel(root, path string) (string, bool) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+func shouldIgnoreWorkspaceSnapshotPath(rel string, ignored map[string]bool) bool {
+	return ignored[filepath.ToSlash(rel)]
+}
+
+func shouldSkipWorkspaceSnapshotDir(name string) bool {
+	switch name {
+	case ".git", ".hg", ".svn", ".codex-bridge", "node_modules", ".next", "dist", "build", "target", ".lake", ".elan":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldSkipWorkspaceSnapshotFile(rel string) bool {
+	base := filepath.Base(rel)
+	if strings.HasSuffix(base, "~") || strings.HasSuffix(base, ".tmp") || strings.HasSuffix(base, ".swp") {
+		return true
+	}
+	return false
+}
+
+func diffWorkspaceSnapshots(before, after workspaceSnapshot) workspaceChangeReport {
+	report := workspaceChangeReport{
+		Root:      after.Root,
+		Available: before.Available && after.Available,
+		Truncated: before.Truncated || after.Truncated,
+	}
+	if !before.Available {
+		report.Err = before.Err
+	}
+	if !after.Available {
+		if report.Err != "" {
+			report.Err += "; "
+		}
+		report.Err += after.Err
+	}
+	if !report.Available {
+		return report
+	}
+	changed := map[string]bool{}
+	for path, afterState := range after.Files {
+		beforeState, ok := before.Files[path]
+		if !ok || beforeState != afterState {
+			changed[path] = true
+		}
+	}
+	for path := range before.Files {
+		if _, ok := after.Files[path]; !ok {
+			changed[path] = true
+		}
+	}
+	report.Changed = make([]string, 0, len(changed))
+	for path := range changed {
+		report.Changed = append(report.Changed, path)
+	}
+	sort.Strings(report.Changed)
+	return report
+}
+
+func unresolvedFinalRun(userPrompt string, history []orchestrationTurn, changes workspaceChangeReport) (string, bool) {
+	if len(history) == 0 {
+		return "no turn result was produced", true
+	}
+	if reason, ok := acceptanceFailureSignal(userPrompt, history); ok {
+		return reason, true
+	}
+	if userTaskRequiresWorkspaceChange(userPrompt) && !hasWorkspaceChangeEvidence(history, changes) {
+		return missingWorkspaceChangeReason(changes, history), true
+	}
+	last := history[len(history)-1]
+	if last.Err != "" {
+		return "last turn errored: " + trimForPrompt(oneLine(last.Err), 300), true
+	}
+	status := strings.ToLower(strings.TrimSpace(last.HandoffFields.Status))
+	if status == "resolved" {
+		if !resolvedHandoffReady(last.Content) {
+			return "resolved handoff is missing a user-visible conclusion", true
+		}
+		return "", false
+	}
+	if status == "blocked" {
+		if blocker := compactBlockerSummary(last); blocker != "" {
+			return blocker, true
+		}
+		return "last turn reported blocked", true
+	}
+	if status == "needs_next" {
+		if blocker := compactBlockerSummary(last); blocker != "" {
+			return blocker, true
+		}
+		return "last turn still needs next action", true
+	}
+	if failedCommandCount(history) > 0 {
+		if failure, ok := latestBlocker(history); ok {
+			return failure, true
+		}
+		return "one or more commands failed", true
+	}
+	if hasRiskyHandoff(last) {
+		if blocker := compactBlockerSummary(last); blocker != "" {
+			return blocker, true
+		}
+		return "last turn reported unresolved risk", true
+	}
+	return "", false
+}
+
+func shouldRunWorkspaceChangeRemediation(userPrompt string, history []orchestrationTurn, changes workspaceChangeReport) bool {
+	if len(history) == 0 {
+		return false
+	}
+	return userTaskRequiresWorkspaceChange(userPrompt) && !hasWorkspaceChangeEvidence(history, changes)
+}
+
+func userTaskRequiresWorkspaceChange(prompt string) bool {
+	lower := strings.ToLower(prompt)
+	signals := []string{
+		"修改", "改造", "改正", "修复", "实现", "生成", "创建", "新建", "添加", "删除", "移除", "替换",
+		"写入", "保存", "消除", "补全", "落地", "做出改变", "文件做出改变",
+		"modify", "change", "fix", "repair", "implement", "generate", "create", "add", "delete",
+		"remove", "replace", "write", "save", "edit", "update", "fill in",
+	}
+	for _, signal := range signals {
+		if strings.Contains(lower, strings.ToLower(signal)) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasWorkspaceChangeEvidence(history []orchestrationTurn, changes workspaceChangeReport) bool {
+	if len(changes.Changed) > 0 {
+		return true
+	}
+	if changes.Available {
+		return false
+	}
+	for _, item := range history {
+		if meaningfulHandoffValue(item.HandoffFields.Changed) {
+			return true
+		}
+		for _, command := range commandStates([]orchestrationTurn{item}) {
+			if commandFailed(command) || !strings.EqualFold(command.Status, "completed") {
+				continue
+			}
+			if commandLooksLikeWorkspaceWrite(command.Command) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func commandLooksLikeWorkspaceWrite(command string) bool {
+	command = strings.TrimSpace(strings.ToLower(command))
+	if command == "" {
+		return false
+	}
+	signals := []string{
+		"apply_patch", "cat >", "cat <<", "tee ", "python", "perl -", "ruby -", "node -e",
+		"touch ", "mkdir ", "cp ", "mv ", "rm ", "sed -i", "writefile", "write_file",
+		"create file", "edit file",
+	}
+	for _, signal := range signals {
+		if strings.Contains(command, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func missingWorkspaceChangeReason(changes workspaceChangeReport, history []orchestrationTurn) string {
+	withBlocker := func(reason string) string {
+		if blocker, ok := latestBlocker(history); ok && blocker != "" {
+			return reason + "; latest blocker: " + blocker
+		}
+		return reason
+	}
+	if !changes.Available {
+		if changes.Err != "" {
+			return withBlocker("workspace change check failed: " + trimForPrompt(oneLine(changes.Err), 300))
+		}
+		return withBlocker("workspace change check failed")
+	}
+	if changes.Truncated {
+		return withBlocker("no concrete file change was recorded for a change-oriented task; workspace snapshot was truncated")
+	}
+	return withBlocker("no concrete file change was recorded for a change-oriented task")
+}
+
+func acceptanceFailureSignal(userPrompt string, history []orchestrationTurn) (string, bool) {
+	if len(history) == 0 {
+		return "", false
+	}
+	if reason := acceptanceFailureInTurn(userPrompt, history[len(history)-1]); reason != "" {
+		return reason, true
+	}
+	return "", false
+}
+
+func acceptanceFailureInTurn(userPrompt string, item orchestrationTurn) string {
+	text := strings.Join([]string{
+		item.Content,
+		item.Handoff,
+		item.HandoffFields.Next,
+		item.HandoffFields.Risks,
+	}, "\n")
+	for _, command := range commandStates([]orchestrationTurn{item}) {
+		text += "\n" + command.Command + "\n" + command.Output
+	}
+	lower := strings.ToLower(text)
+	if lower == "" {
+		return ""
+	}
+	if hasUnresolvedAcceptanceSignal(text, userPrompt) {
+		return "acceptance check failed: " + trimForPrompt(oneLine(unresolvedAcceptanceContext(text, userPrompt)), 500)
+	}
+	failureSignals := []string{
+		"acceptance check failed",
+		"acceptance criterion failed",
+		"acceptance criterion is not satisfied",
+		"user request is not satisfied",
+		"does not satisfy the user request",
+		"cannot be considered complete",
+		"must not be treated as complete",
+		"should not be marked complete",
+		"验收失败",
+		"验收标准未满足",
+		"没有满足用户要求",
+		"未满足用户要求",
+		"不能把当前状态视为完成",
+		"不能视为完成",
+		"不能算完成",
+		"不应标记完成",
+		"不应该标记完成",
+		"没有实质进展",
+	}
+	for _, signal := range failureSignals {
+		if strings.Contains(lower, strings.ToLower(signal)) {
+			return "acceptance check failed: " + trimForPrompt(oneLine(signalContext(text, signal)), 500)
+		}
+	}
+	return ""
+}
+
+func acceptanceBlockerSummary(userPrompt string, history []orchestrationTurn) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		if reason := acceptanceFailureInTurn(userPrompt, history[i]); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+func hasUnresolvedAcceptanceSignal(text, userPrompt string) bool {
+	lower := strings.ToLower(text)
+	if lower == "" {
+		return false
+	}
+	if hasResolvedSorrySignal(lower) && !hasExplicitUnresolvedSorryRisk(lower) {
+		return false
+	}
+	promptLower := strings.ToLower(userPrompt)
+	promptRequiresSorryRemoval := containsAny(promptLower, []string{
+		"消除", "去掉", "移除", "删除", "补全", "填上", "主定理", "完全证明", "完整证明",
+		"remove", "eliminate", "fill", "replace", "complete proof", "main theorem",
+	}) && containsAny(promptLower, []string{"sorry", "quick_and_dirty", "termination modify_lin", "modify_lin", "主定理"})
+	if containsAny(lower, []string{
+		"main theorem", "主定理", "termination modify_lin", "modify_lin",
+	}) && containsAny(lower, []string{
+		"sorry", "未消除", "没有消除", "还保留", "placeholder", "占位",
+	}) {
+		return true
+	}
+	if containsAny(lower, []string{
+		"只是通过编译",
+		"只能说通过编译",
+		"没有实质上的进展",
+		"not a completed proof",
+	}) {
+		return true
+	}
+	if promptRequiresSorryRemoval && hasExplicitUnresolvedSorryRisk(lower) {
+		return true
+	}
+	return false
+}
+
+func hasExplicitUnresolvedSorryRisk(lower string) bool {
+	return containsAny(lower, []string{
+		"sorry placeholder", "sorry placeholders", "still contains sorry", "contains sorry",
+		"quick_and_dirty", "可编译的证明框架", "证明框架可编译", "不是完整证明",
+		"不是完全无 sorry", "not without sorry", "not fully without sorry", "not a completed proof",
+	})
+}
+
+func hasResolvedSorrySignal(lower string) bool {
+	if containsAny(lower, []string{
+		"without sorry", "without any sorry", "no sorry placeholders", "no remaining sorry",
+		"无 sorry", "无sorry", "没有 sorry", "without quick_and_dirty", "quick_and_dirty = false",
+	}) {
+		return true
+	}
+	return regexp.MustCompile(`\bno\s+sorry\b`).MatchString(lower)
+}
+
+func unresolvedAcceptanceContext(text, userPrompt string) string {
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		if hasUnresolvedAcceptanceSignal(line, userPrompt) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return "unresolved acceptance criterion remains"
+}
+
+func containsAny(value string, signals []string) bool {
+	for _, signal := range signals {
+		if strings.Contains(value, strings.ToLower(signal)) {
+			return true
+		}
+	}
+	return false
+}
+
+func signalContext(text, signal string) string {
+	lines := strings.Split(text, "\n")
+	signal = strings.ToLower(signal)
+	for _, line := range lines {
+		if strings.Contains(strings.ToLower(line), signal) {
+			return strings.TrimSpace(line)
+		}
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return signal
+	}
+	return text
+}
+
+func turnReportsBlocking(item orchestrationTurn) bool {
+	status := strings.ToLower(strings.TrimSpace(item.HandoffFields.Status))
+	if status == "blocked" {
+		return true
+	}
+	if item.Err != "" && compactBlockerSummary(item) != "" {
+		return true
+	}
+	if failedCommandCount([]orchestrationTurn{item}) > 0 && meaningfulHandoffValue(item.HandoffFields.Risks) {
+		return true
+	}
+	return false
+}
+
+func normalizeBlockerKey(item orchestrationTurn) string {
+	values := []string{
+		item.HandoffFields.Next,
+		item.HandoffFields.Risks,
+		item.Err,
+	}
+	var parts []string
+	for _, value := range values {
+		value = strings.ToLower(oneLine(value))
+		value = normalizeBlockerText(value)
+		if value != "" {
+			parts = append(parts, value)
+		}
+	}
+	if len(parts) == 0 {
+		for _, command := range failedCommandSummaries([]orchestrationTurn{item}, 1) {
+			parts = append(parts, normalizeBlockerText(strings.ToLower(command)))
+		}
+	}
+	return strings.Join(parts, "|")
+}
+
+func normalizeBlockerText(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastSpace := false
+	for _, r := range value {
+		keep := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '/' || r == '_' || r == '-' || (r >= '\u4e00' && r <= '\u9fff')
+		if keep {
+			b.WriteRune(r)
+			lastSpace = false
+			continue
+		}
+		if !lastSpace {
+			b.WriteByte(' ')
+			lastSpace = true
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func extractHandoff(content string) string {

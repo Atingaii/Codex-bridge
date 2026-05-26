@@ -39,24 +39,28 @@ type HubConfig struct {
 }
 
 type BridgeConfig struct {
-	HubURL            string   `yaml:"hub_url"`
-	Token             string   `yaml:"token"`
-	TokenFile         string   `yaml:"token_file"`
-	Name              string   `yaml:"name"`
-	MachineIDFile     string   `yaml:"machine_id_file"`
-	CWD               string   `yaml:"cwd"`
-	Runner            string   `yaml:"runner"`
-	CodexPath         string   `yaml:"codex_path"`
-	ClaudePath        string   `yaml:"claude_path"`
-	ClaudeModel       string   `yaml:"claude_model"`
-	ClaudeEffort      string   `yaml:"claude_effort"`
-	Model             string   `yaml:"model"`
-	Sandbox           string   `yaml:"sandbox"`
-	ApprovalPolicy    string   `yaml:"approval_policy"`
-	ReconnectMin      Duration `yaml:"reconnect_min"`
-	ReconnectMax      Duration `yaml:"reconnect_max"`
-	HeartbeatInterval Duration `yaml:"heartbeat_interval"`
-	MaxSessions       int      `yaml:"max_sessions"`
+	HubURL              string   `yaml:"hub_url"`
+	Token               string   `yaml:"token"`
+	TokenFile           string   `yaml:"token_file"`
+	Name                string   `yaml:"name"`
+	MachineIDFile       string   `yaml:"machine_id_file"`
+	CWD                 string   `yaml:"cwd"`
+	Runner              string   `yaml:"runner"`
+	OrchestrationRunner string   `yaml:"orchestration_runner"`
+	CodexPath           string   `yaml:"codex_path"`
+	ClaudePath          string   `yaml:"claude_path"`
+	CCBPath             string   `yaml:"ccb_path"`
+	CCBTarget           string   `yaml:"ccb_target"`
+	CCBTimeout          Duration `yaml:"ccb_timeout"`
+	ClaudeModel         string   `yaml:"claude_model"`
+	ClaudeEffort        string   `yaml:"claude_effort"`
+	Model               string   `yaml:"model"`
+	Sandbox             string   `yaml:"sandbox"`
+	ApprovalPolicy      string   `yaml:"approval_policy"`
+	ReconnectMin        Duration `yaml:"reconnect_min"`
+	ReconnectMax        Duration `yaml:"reconnect_max"`
+	HeartbeatInterval   Duration `yaml:"heartbeat_interval"`
+	MaxSessions         int      `yaml:"max_sessions"`
 }
 
 type AuthConfig struct {
@@ -99,21 +103,25 @@ func Default() Config {
 			MaxAssistantMessageBytes: 4 * 1024 * 1024,
 		},
 		Bridge: BridgeConfig{
-			HubURL:            "https://sparkapi.tech",
-			Name:              "local-codex",
-			MachineIDFile:     "~/.codex-bridge/machine_id",
-			CWD:               ".",
-			Runner:            "echo",
-			CodexPath:         "codex",
-			ClaudePath:        "claude",
-			ClaudeModel:       "",
-			ClaudeEffort:      "",
-			Sandbox:           "workspace-write",
-			ApprovalPolicy:    "never",
-			ReconnectMin:      Duration{Duration: 5_000_000_000},
-			ReconnectMax:      Duration{Duration: 30_000_000_000},
-			HeartbeatInterval: Duration{Duration: 15_000_000_000},
-			MaxSessions:       8,
+			HubURL:              "https://sparkapi.tech",
+			Name:                "local-codex",
+			MachineIDFile:       "~/.codex-bridge/machine_id",
+			CWD:                 ".",
+			Runner:              "echo",
+			OrchestrationRunner: "",
+			CodexPath:           "codex",
+			ClaudePath:          "claude",
+			CCBPath:             "ccb",
+			CCBTarget:           "codex",
+			CCBTimeout:          Duration{Duration: 60 * 60 * 1_000_000_000},
+			ClaudeModel:         "",
+			ClaudeEffort:        "",
+			Sandbox:             "workspace-write",
+			ApprovalPolicy:      "never",
+			ReconnectMin:        Duration{Duration: 5_000_000_000},
+			ReconnectMax:        Duration{Duration: 30_000_000_000},
+			HeartbeatInterval:   Duration{Duration: 15_000_000_000},
+			MaxSessions:         8,
 		},
 		Auth: AuthConfig{
 			JWTSecret:         "dev-only-change-me-32-byte-minimum-secret",

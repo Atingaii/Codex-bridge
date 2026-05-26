@@ -68,6 +68,25 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestStaticHandlerSPAFallbackRoutes(t *testing.T) {
+	s := &Server{}
+
+	for _, path := range []string{"/conversation-snapshot", "/share/shr_example"} {
+		rr := httptest.NewRecorder()
+		s.staticHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s route status = %d", path, rr.Code)
+		}
+		body := rr.Body.String()
+		for _, needle := range []string{"Codex Bridge", `<div id="root"></div>`, `type="module"`} {
+			if !strings.Contains(body, needle) {
+				t.Fatalf("%s route did not return SPA index, missing %q", path, needle)
+			}
+		}
+	}
+}
+
 func TestValidatePromptAttachments(t *testing.T) {
 	cfg := config.Default()
 	cfg.Hub.MaxAttachmentBytes = 10

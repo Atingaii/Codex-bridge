@@ -38,9 +38,11 @@ one CLI per turn in auto-execute mode, and uses `codex app-server` for Codex
 turns when browser approval is required. Prompts use compact `Msg:` and
 `Handoff:` lines between turns, and the Bridge stores parsed handoff fields as
 turn state so the next CLI receives structured context instead of the full
-transcript. In collaboration mode Claude acts as builder and Codex as reviewer;
-in debate mode Claude proposes and Codex criticizes with evidence. The handoff
-contract is documented in
+transcript. Failed command summaries are carried forward, and repeated blockers
+stop with the existing `run.error` event before the turn budget is exhausted. In
+collaboration mode Claude acts as builder and Codex as reviewer; in debate mode
+Claude proposes and Codex criticizes with evidence. The handoff contract is
+documented in
 [docs/features/orchestration-strategy-optimization.md](features/orchestration-strategy-optimization.md).
 
 Review-required Claude orchestration uses Claude Code's
@@ -57,6 +59,12 @@ approval callbacks are mapped to run-scoped `approval_request` frames with
 `payload.runId`, and browser decisions return as `approval_response` frames to
 the owning Bridge.
 
+CCB is not an active orchestration backend for new Hub-managed runs. Historical
+CCB helper code and event rendering remain in place, but current orchestration
+starts use the selected Bridge connection to run the direct Claude Code and
+Codex CLI turn loop described above. See
+[docs/features/manual-orchestration-rounds.md](features/manual-orchestration-rounds.md).
+
 Bridge registration includes `protocol.RegisterPayload.Capabilities`. Hub keeps
 the latest online capabilities in `internal/hub/pool.go` and returns them from
 `GET /api/agents`, allowing the frontend to show whether Codex and Claude
@@ -64,6 +72,12 @@ orchestration execution and browser approval are available. Hub blocks
 orchestration when the selected endpoint cannot execute both CLIs, and blocks
 review-required orchestration when the endpoint cannot provide the required
 approvals instead of falling back to `codex exec --json`.
+
+Conversation share links are Hub-only public reads. Authenticated users create
+share records for chat sessions or orchestration runs; anonymous viewers fetch
+sanitized persisted transcripts through `GET /api/public/shares/<share>`. The
+Bridge is not contacted for public reads, and the frontend `/share/<share>`
+route renders before login bootstrap.
 
 ## Decisions
 
@@ -75,6 +89,7 @@ approvals instead of falling back to `codex exec --json`.
 | ADR-004 | SQLite only on Hub | Single-user persistence without extra services |
 | ADR-005 | Embedded native frontend | No Node build, smaller deployment surface |
 | ADR-006 | Orchestration continue reuses `runID` | Follow-up tasks keep context through event compaction |
+| ADR-007 | Public conversation share links | Anonymous readers can view sanitized transcripts without workspace access |
 
 ## Protocol
 
@@ -111,7 +126,9 @@ Chat continuity:
 Orchestration continuity:
 
 1. New tasks create an `orchestration_runs` row.
-2. Follow-up tasks call `/api/orchestrations/{runID}/prompts`.
+2. Follow-up tasks call `/api/orchestrations/{runID}/prompts` and stay on the
+   run's original `agentId`; switching CLI endpoint requires an explicit new
+   run.
 3. Hub compacts prior `orchestration_events` into context.
 4. Bridge receives the same `runID` with `Resume=true`.
 5. The frontend stores the last selected run id locally and restores it on
@@ -137,5 +154,6 @@ SQLite tables:
 - `enroll_tokens`
 - `orchestration_runs`
 - `orchestration_events`
+- `conversation_shares`
 
 Hub stores browser auth and chat history. Bridge stores only its generated `machine_id` and reads Codex/OpenAI credentials from its local environment.

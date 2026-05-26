@@ -10,6 +10,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | CLI entry and subcommands | `main.go` |
 | Config structs/load | `internal/config/config.go`, `internal/config/load.go`, `internal/config/duration.go` |
 | Hub routes, auth, static serving | `internal/hub/server.go` |
+| Public conversation shares | `internal/hub/share.go` |
 | Browser chat WebSocket | `internal/hub/ws_browser.go` |
 | Bridge reverse WebSocket | `internal/hub/ws_bridge.go`, `internal/bridge/client.go` |
 | Browser/Bridge connection pools | `internal/hub/pool.go` |
@@ -31,6 +32,18 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 3. Add store methods if persistence is needed.
 4. Add frontend caller in `frontend/src/app/App.tsx` when UI-visible.
 5. Add or update a feature doc and tests.
+
+### Change Conversation Share Links
+
+1. `internal/store/store.go:ConversationShare` owns share persistence and
+   revocation.
+2. `internal/hub/share.go` owns protected share creation, revocation, and
+   public read sanitization.
+3. `internal/hub/server.go:NewServer` registers `/api/*/share`,
+   `/api/shares/{shareID}`, and `/api/public/shares/{shareID}`.
+4. `frontend/src/app/App.tsx:PublicSharePage` renders `/share/{shareID}`
+   before login bootstrap.
+5. Update [docs/features/conversation-share-links.md](features/conversation-share-links.md).
 
 ### Change CLI Endpoint Management
 
@@ -132,8 +145,10 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 4. `internal/bridge/orchestration.go:parseHandoffFields` and
    `composeFinalVerifierPrompt` control structured handoff context and the
    conditional final verifier turn.
-5. Keep event kinds compatible with `frontend/src/app/App.tsx:visibleOrchestrationEvents`.
-6. Update
+5. `internal/bridge/orchestration.go:repeatedBlockingHandoff` controls when a
+   repeated blocker stops the run with `run.error`.
+6. Keep event kinds compatible with `frontend/src/app/App.tsx:visibleOrchestrationEvents`.
+7. Update
    [docs/features/orchestration-strategy-optimization.md](features/orchestration-strategy-optimization.md).
 
 ### Change SQLite Schema

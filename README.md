@@ -65,8 +65,10 @@ Codex app-server runner so Codex command/file approval requests appear in the
 browser for chat and orchestration. Auto execute keeps the previous
 trusted-machine mode with `danger-full-access` and no prompts. Claude Code
 orchestration also uses browser-side approval in review-required mode through
-Claude Code's permission prompt MCP hook. The orchestration page shows each
-connected endpoint's Codex/Claude approval capabilities before a run starts.
+Claude Code's permission prompt MCP hook. Hub-managed orchestration uses the
+selected Bridge connection for the whole run, alternates direct Claude Code and
+Codex CLI turns, carries compact turn summaries forward, and shows each
+endpoint's approval capabilities before a run starts.
 Existing endpoints can be expanded under Settings -> Agents & Runtime to
 generate a repair command. That command downloads the current Bridge binary and
 reconnects the same endpoint with its existing machine id, name, and known

@@ -165,6 +165,15 @@ Each turn record keeps parsed handoff data:
 - Prompt construction uses these fields first, plus short command summaries, so
   the next CLI receives only the necessary continuity payload. It falls back to
   compact visible text only when no structured line is available.
+- Failed command summaries are preserved in compact prior-turn state, and
+  recursive fallback boilerplate is stripped before the next turn sees it.
+- Review prompts explicitly ask whether the previous turn advanced the latest
+  user task's acceptance criterion, so a compile-only result is not treated as
+  resolved when the user asked for a stronger outcome.
+
+If the same normalized blocker repeats for three consecutive turns, the Bridge
+emits the existing `run.error` event and stops the orchestration instead of
+continuing to alternate CLIs through the remaining turn budget.
 
 ### Conditional Final Verifier
 

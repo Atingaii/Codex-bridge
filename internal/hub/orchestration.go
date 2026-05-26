@@ -134,6 +134,10 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 	if startReq.AgentID == "" {
 		startReq.AgentID = run.AgentID
 	}
+	if startReq.AgentID != run.AgentID {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_AGENT", "orchestration follow-up must use the same CLI endpoint as the original run")
+		return
+	}
 	if startReq.Mode == "" {
 		startReq.Mode = run.Mode
 	}
@@ -161,9 +165,9 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	normalized.AgentID = agentID
-	files := orchestrationFileMeta(normalized.Files)
+	files := mergeOrchestrationFiles(run.Files, orchestrationFileMeta(normalized.Files))
 
-	events, err := s.store.ListOrchestrationEvents(r.Context(), run.ID, 1000)
+	events, err := s.store.ListOrchestrationEvents(r.Context(), run.ID, 10000)
 	if err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration context")
 		return
@@ -346,7 +350,7 @@ func (s *Server) handleOrchestrationEvents(w http.ResponseWriter, r *http.Reques
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration run")
 		return
 	}
-	events, err := s.store.ListOrchestrationEvents(r.Context(), runID, 1000)
+	events, err := s.store.ListOrchestrationEvents(r.Context(), runID, 10000)
 	if err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to list orchestration events")
 		return
@@ -394,6 +398,10 @@ func orchestrationCancelableStatus(status string) bool {
 	return status == store.OrchestrationQueued || status == store.OrchestrationRunning
 }
 
+func orchestrationActiveStatus(status string) bool {
+	return status == store.OrchestrationQueued || status == store.OrchestrationRunning || status == store.OrchestrationCanceling
+}
+
 func orchestrationTerminalStatus(status string) bool {
 	return status == store.OrchestrationCompleted || status == store.OrchestrationFailed || status == store.OrchestrationCanceled
 }
@@ -421,6 +429,9 @@ func compactOrchestrationContext(run store.OrchestrationRun, events []store.Orch
 		case event.Kind == "user.message":
 			userMessages = append(userMessages, trimForContext(event.Content, 900))
 		case event.Kind == "turn.end":
+			if strings.TrimSpace(event.Content) != "" {
+				turnNotes = append(turnNotes, formatOrchestrationActor(event)+": "+trimForContext(event.Content, 900))
+			}
 			if event.Status != "" || event.Error != "" {
 				outcomes = append(outcomes, formatOrchestrationActor(event)+": "+trimForContext(joinNonEmpty(event.Status, event.Error), 300))
 			}
@@ -590,12 +601,17 @@ func (s *Server) handleOrchestrationWS(w http.ResponseWriter, r *http.Request, u
 		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "missing runId")
 		return
 	}
-	if _, err := s.store.OrchestrationRunByID(r.Context(), runID, uid); err != nil {
+	run, err := s.store.OrchestrationRunByID(r.Context(), runID, uid)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "orchestration run not found")
 			return
 		}
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration run")
+		return
+	}
+	if !orchestrationActiveStatus(run.Status) {
+		serverutil.WriteError(w, http.StatusConflict, "RUN_NOT_ACTIVE", "orchestration event stream is only available for active runs")
 		return
 	}
 	upgrader := websocket.Upgrader{CheckOrigin: s.checkOrigin}
@@ -751,6 +767,31 @@ func orchestrationFileMeta(files []protocol.AttachmentPayload) []store.Orchestra
 		})
 	}
 	return metas
+}
+
+func mergeOrchestrationFiles(groups ...[]store.OrchestrationFile) []store.OrchestrationFile {
+	seen := make(map[string]struct{})
+	out := make([]store.OrchestrationFile, 0)
+	for _, group := range groups {
+		for _, file := range group {
+			name := strings.TrimSpace(file.Name)
+			if name == "" {
+				continue
+			}
+			mimeType := strings.TrimSpace(file.MimeType)
+			size := file.Size
+			if size < 0 {
+				size = 0
+			}
+			key := fmt.Sprintf("%s\x1f%s\x1f%d", name, mimeType, size)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, store.OrchestrationFile{Name: name, MimeType: mimeType, Size: size})
+		}
+	}
+	return out
 }
 
 func orchestrationUserMessageData(files []protocol.AttachmentPayload) map[string]any {

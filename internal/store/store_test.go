@@ -301,6 +301,133 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	}
 }
 
+func TestListOrchestrationEventsReturnsLatestWindowInAscendingOrder(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	user, err := st.UpsertUser(ctx, "admin", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgent(ctx, "bridge", "machine-window", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := st.CreateOrchestrationRun(ctx, CreateOrchestrationRunParams{
+		UserID:   user.ID,
+		AgentID:  agent.ID,
+		Title:    "Window",
+		Mode:     "collaboration",
+		Prompt:   "check latest",
+		MaxTurns: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "turn.delta", Content: "event"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := st.ListOrchestrationEvents(ctx, run.ID, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[0].Seq != 3 || events[1].Seq != 4 || events[2].Seq != 5 {
+		t.Fatalf("unexpected latest window: %+v", events)
+	}
+}
+
+func TestStoreConversationShareFlow(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	user, err := st.UpsertUser(ctx, "admin", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := st.UpsertUser(ctx, "other", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgent(ctx, "bridge", "machine-share", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := st.CreateSession(ctx, user.ID, agent.ID, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	share, err := st.CreateOrUpdateConversationShare(ctx, user.ID, ShareKindChat, session.ID, "  Chat title  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if share.Kind != ShareKindChat || share.TargetID != session.ID || share.Title != "Chat title" || share.CreatedAt == 0 || share.UpdatedAt == 0 {
+		t.Fatalf("unexpected chat share: %+v", share)
+	}
+	loaded, err := st.ActiveConversationShareByID(ctx, share.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ID != share.ID || loaded.UserID != user.ID {
+		t.Fatalf("loaded share = %+v, want %+v", loaded, share)
+	}
+	reused, err := st.CreateOrUpdateConversationShare(ctx, user.ID, ShareKindChat, session.ID, "Renamed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.ID != share.ID || reused.Title != "Renamed" {
+		t.Fatalf("share was not reused with updated title: %+v", reused)
+	}
+	if err := st.RevokeConversationShare(ctx, share.ID, other.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected wrong-owner revoke to be not found, got %v", err)
+	}
+	if _, err := st.ActiveConversationShareByID(ctx, share.ID); err != nil {
+		t.Fatalf("wrong-owner revoke hid share: %v", err)
+	}
+	if err := st.RevokeConversationShare(ctx, share.ID, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ActiveConversationShareByID(ctx, share.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected revoked share to be hidden, got %v", err)
+	}
+	recreated, err := st.CreateOrUpdateConversationShare(ctx, user.ID, ShareKindChat, session.ID, "Chat title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recreated.ID == share.ID {
+		t.Fatalf("revoked share was reused: old=%s new=%s", share.ID, recreated.ID)
+	}
+
+	run, err := st.CreateOrchestrationRun(ctx, CreateOrchestrationRunParams{
+		UserID:   user.ID,
+		AgentID:  agent.ID,
+		Title:    "Orchestration",
+		Mode:     "collaboration",
+		Prompt:   "prove it",
+		MaxTurns: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestrationShare, err := st.CreateOrUpdateConversationShare(ctx, user.ID, ShareKindOrchestration, run.ID, run.Title)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if orchestrationShare.Kind != ShareKindOrchestration || orchestrationShare.TargetID != run.ID {
+		t.Fatalf("unexpected orchestration share: %+v", orchestrationShare)
+	}
+	if _, err := st.CreateOrUpdateConversationShare(ctx, user.ID, "bad", run.ID, run.Title); err == nil {
+		t.Fatal("expected invalid share kind to fail")
+	}
+
+	loadedSession, err := st.SessionByIDAnyUser(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedSession.ID != session.ID || loadedSession.UserID != user.ID {
+		t.Fatalf("session any-user lookup = %+v", loadedSession)
+	}
+}
+
 func TestConsumeEnrollToken(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)

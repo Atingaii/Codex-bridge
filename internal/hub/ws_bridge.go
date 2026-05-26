@@ -140,7 +140,7 @@ func (s *Server) scheduleAgentRunFailure(agentID, instance string, delay time.Du
 			return
 		}
 		for _, run := range runs {
-			events, err := s.store.ListOrchestrationEvents(ctx, run.ID, 2000)
+			events, err := s.store.ListOrchestrationEvents(ctx, run.ID, 10000)
 			if err != nil {
 				slog.Error("[hub] list failed orchestration events failed", "run_id", run.ID, "error", err)
 				continue

@@ -4893,48 +4893,96 @@ func acceptanceFailureSignal(userPrompt string, history []orchestrationTurn) (st
 }
 
 func acceptanceFailureInTurn(userPrompt string, item orchestrationTurn) string {
-	text := strings.Join([]string{
+	prose := strings.Join([]string{
 		item.Content,
 		item.Handoff,
 		item.HandoffFields.Next,
 		item.HandoffFields.Risks,
 	}, "\n")
+	context, score := acceptanceFailureContextScore(prose, userPrompt)
+	var commandText strings.Builder
 	for _, command := range commandStates([]orchestrationTurn{item}) {
-		text += "\n" + command.Command + "\n" + command.Output
+		commandText.WriteString("\n")
+		commandText.WriteString(command.Command)
+		commandText.WriteString("\n")
+		commandText.WriteString(command.Output)
 	}
-	lower := strings.ToLower(text)
-	if lower == "" {
-		return ""
+	if commandContext, commandScore := acceptanceFailureContextScore(commandText.String(), userPrompt); commandScore > score {
+		context, score = commandContext, commandScore
 	}
-	if hasUnresolvedAcceptanceSignal(text, userPrompt) {
-		return "acceptance check failed: " + trimForPrompt(oneLine(unresolvedAcceptanceContext(text, userPrompt)), 500)
-	}
-	failureSignals := []string{
-		"acceptance check failed",
-		"acceptance criterion failed",
-		"acceptance criterion is not satisfied",
-		"user request is not satisfied",
-		"does not satisfy the user request",
-		"cannot be considered complete",
-		"must not be treated as complete",
-		"should not be marked complete",
-		"验收失败",
-		"验收标准未满足",
-		"没有满足用户要求",
-		"未满足用户要求",
-		"不能把当前状态视为完成",
-		"不能视为完成",
-		"不能算完成",
-		"不应标记完成",
-		"不应该标记完成",
-		"没有实质进展",
-	}
-	for _, signal := range failureSignals {
-		if strings.Contains(lower, strings.ToLower(signal)) {
-			return "acceptance check failed: " + trimForPrompt(oneLine(signalContext(text, signal)), 500)
-		}
+	if context != "" {
+		return "acceptance check failed: " + trimForPrompt(oneLine(context), 500)
 	}
 	return ""
+}
+
+func acceptanceFailureContext(text, userPrompt string) string {
+	context, _ := acceptanceFailureContextScore(text, userPrompt)
+	return context
+}
+
+func acceptanceFailureContextScore(text, userPrompt string) (string, int) {
+	text = strings.TrimSpace(text)
+	lower := strings.ToLower(text)
+	if lower == "" {
+		return "", 0
+	}
+	if context := fuelTerminationGapContext(text); context != "" {
+		return context, 100
+	}
+	for _, signal := range acceptanceFailureSignals {
+		if strings.Contains(lower, strings.ToLower(signal)) {
+			return signalContext(text, signal), acceptanceFailureSignalScore(signal)
+		}
+	}
+	if hasUnresolvedAcceptanceSignal(text, userPrompt) {
+		return unresolvedAcceptanceContext(text, userPrompt), 80
+	}
+	return "", 0
+}
+
+var acceptanceFailureSignals = []string{
+	"acceptance check failed",
+	"acceptance criterion failed",
+	"acceptance criterion is not satisfied",
+	"user request is not satisfied",
+	"does not satisfy the user request",
+	"cannot be considered complete",
+	"cannot be marked complete",
+	"must not be treated as complete",
+	"should not be marked complete",
+	"验收失败",
+	"验收标准未满足",
+	"没有满足用户要求",
+	"未满足用户要求",
+	"不能把当前状态视为完成",
+	"不能视为完成",
+	"不能算完成",
+	"不能判为完成",
+	"不能判定为完成",
+	"不应标记完成",
+	"不应该标记完成",
+	"不能把验收标为 resolved",
+	"不能标为 resolved",
+	"不能把验收标为完成",
+	"没有实质进展",
+}
+
+func acceptanceFailureSignalScore(signal string) int {
+	lower := strings.ToLower(signal)
+	if strings.Contains(lower, "acceptance criterion is not satisfied") ||
+		strings.Contains(lower, "acceptance criterion failed") {
+		return 90
+	}
+	if strings.Contains(lower, "验收标准未满足") ||
+		strings.Contains(lower, "没有满足用户要求") ||
+		strings.Contains(lower, "未满足用户要求") {
+		return 70
+	}
+	if strings.Contains(lower, "不能") || strings.Contains(lower, "resolved") {
+		return 65
+	}
+	return 60
 }
 
 func acceptanceBlockerSummary(userPrompt string, history []orchestrationTurn) string {
@@ -5005,7 +5053,67 @@ func unresolvedAcceptanceContext(text, userPrompt string) string {
 			return strings.TrimSpace(line)
 		}
 	}
+	if context := fuelTerminationGapContext(text); context != "" {
+		return context
+	}
+	for _, line := range lines {
+		if lineLooksLikeAcceptanceExplanation(line) {
+			return strings.TrimSpace(line)
+		}
+	}
 	return "unresolved acceptance criterion remains"
+}
+
+func fuelTerminationGapContext(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lower := strings.ToLower(line)
+		if !containsAny(lower, []string{"modify_lin", "default_fuel", "fuel", "燃料", "termination", "distance"}) {
+			continue
+		}
+		if containsAny(lower, []string{
+			"没有证明", "未证明", "没有证", "下降", "等价", "足够模拟", "固定", "绕过",
+			"not prove", "not proved", "without proving", "equivalence", "decrease", "sufficient",
+		}) {
+			return fuelTerminationContextLines(lines, i)
+		}
+	}
+	return ""
+}
+
+func fuelTerminationContextLines(lines []string, index int) string {
+	selected := []string{strings.TrimSpace(lines[index])}
+	if index+1 < len(lines) {
+		next := strings.TrimSpace(lines[index+1])
+		if lineLooksLikeFuelTerminationDetail(next) {
+			selected = append(selected, next)
+		}
+	}
+	if len(selected) == 1 && index > 0 {
+		prev := strings.TrimSpace(lines[index-1])
+		if lineLooksLikeFuelTerminationDetail(prev) {
+			selected = append([]string{prev}, selected...)
+		}
+	}
+	return strings.TrimSpace(strings.Join(selected, " "))
+}
+
+func lineLooksLikeFuelTerminationDetail(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if lower == "" {
+		return false
+	}
+	return containsAny(lower, []string{"modify_lin", "default_fuel", "fuel", "燃料", "termination", "distance", "递归", "证明"}) &&
+		containsAny(lower, []string{"没有证明", "未证明", "没有证", "下降", "等价", "足够模拟", "固定", "绕过", "not prove", "not proved", "without proving", "equivalence", "decrease", "sufficient"})
+}
+
+func lineLooksLikeAcceptanceExplanation(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if lower == "" {
+		return false
+	}
+	return containsAny(lower, []string{"验收", "acceptance", "modify_lin", "termination", "证明", "proof", "distance", "fuel", "燃料"}) &&
+		containsAny(lower, []string{"不能", "未", "没有", "not", "failed", "incomplete", "风险", "risk", "缺失", "missing"})
 }
 
 func containsAny(value string, signals []string) bool {

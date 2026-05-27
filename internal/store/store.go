@@ -515,6 +515,19 @@ func (s *Store) TouchAgent(ctx context.Context, id string) error {
 	return err
 }
 
+func (s *Store) TouchAgentWorkingDirs(ctx context.Context, id string, workingDirs []string) error {
+	workingDirsJSON, err := json.Marshal(cleanWorkingDirs(workingDirs))
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE agents
+		SET last_seen_at = ?, working_dirs_json = ?
+		WHERE id = ? AND deleted_at IS NULL
+	`, time.Now().Unix(), string(workingDirsJSON), id)
+	return err
+}
+
 func (s *Store) ListAgents(ctx context.Context) ([]Agent, error) {
 	rows, err := s.db.QueryContext(ctx, agentSelectSQL()+` WHERE deleted_at IS NULL ORDER BY last_seen_at DESC`)
 	if err != nil {

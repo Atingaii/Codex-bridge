@@ -185,8 +185,12 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 		case err := <-done:
 			return err
 		case <-ticker.C:
+			payload := protocol.HeartbeatPayload{
+				TS:          time.Now().Unix(),
+				WorkingDirs: DiscoverWorkingDirs(c.cfg),
+			}
 			select {
-			case writec <- protocol.MustEnvelope(protocol.TypeHeartbeat, "", map[string]any{"ts": time.Now().Unix()}):
+			case writec <- protocol.MustEnvelope(protocol.TypeHeartbeat, "", payload):
 			default:
 				return errors.New("bridge write queue full")
 			}

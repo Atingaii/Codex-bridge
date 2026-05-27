@@ -52,12 +52,15 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    sends `agent_shutdown` before disconnecting its active Bridge connection.
 3. `internal/hub/server.go:handleCreateAgentRepairToken` generates repair
    commands for existing endpoints.
-4. `internal/bridge/client.go:requestShutdown` handles remote endpoint
+4. `internal/bridge/client.go:connectOnce` sends live `workingDirs` in Bridge
+   heartbeat payloads, and `internal/hub/ws_bridge.go:handleBridgeEnvelope`
+   stores them through `internal/store/store.go:TouchAgentWorkingDirs`.
+5. `internal/bridge/client.go:requestShutdown` handles remote endpoint
    shutdown and local user-service cleanup.
-5. `internal/store/store.go:DeleteAgent` owns agent soft deletion.
-6. `frontend/src/app/App.tsx:SettingsModal` renders add/delete/detail/repair
+6. `internal/store/store.go:DeleteAgent` owns agent soft deletion.
+7. `frontend/src/app/App.tsx:SettingsModal` renders add/delete/detail/repair
    controls.
-7. Update the relevant feature doc and tests.
+8. Update the relevant feature doc and tests.
 
 ### Add A WebSocket Frame
 

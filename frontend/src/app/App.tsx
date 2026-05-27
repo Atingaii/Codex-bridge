@@ -725,6 +725,10 @@ function activeOrchestrationStatus(status?: string) {
   return status === 'queued' || status === 'running' || status === 'canceling';
 }
 
+function terminalOrchestrationStatus(status?: string) {
+  return status === 'completed' || status === 'failed' || status === 'canceled';
+}
+
 const activeOrchestrationRunStorageKey = 'codexBridge.activeOrchestrationRunId';
 const activeOrchestrationRunByAgentStorageKey = 'codexBridge.activeOrchestrationRunByAgent';
 
@@ -949,9 +953,11 @@ function orchestrationTurnLabel(info: OrchestrationTurnInfo, t: UIText) {
 }
 
 function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string, run?: OrchestrationRun | PublicOrchestrationRun | null, t?: UIText): OrchestrationVisibleEvent[] {
+  const terminalRun = terminalOrchestrationStatus(run?.status);
   const ordered = mergeOrchestrationDeltaEvents(
     mergeOrchestrationToolEvents(events.filter((event) => event.runId === runId).slice().sort(compareOrchestrationEvents))
       .filter((event) => !isEmptyPagesReadFailureEvent(event))
+      .map((event) => terminalRun ? finalizeTerminalCommandEvent(event, run?.status) : event)
   );
   const contentfulTurnEnds = new Set(
     ordered
@@ -1071,6 +1077,25 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
     }
   });
   return visible;
+}
+
+function finalizeTerminalCommandEvent(event: OrchestrationEvent, runStatus?: string): OrchestrationEvent {
+  if (!event.kind.startsWith('command.')) return event;
+  const data = event.data || {};
+  const status = typeof data.status === 'string' ? data.status : event.status || '';
+  const active = event.kind === 'command.start' || status === 'running' || status === 'in_progress';
+  if (!active || typeof data.completedAt === 'number') return event;
+  const terminalStatus = runStatus === 'canceled' ? 'canceled' : 'interrupted';
+  return {
+    ...event,
+    kind: 'command.end',
+    status: terminalStatus,
+    data: {
+      ...data,
+      status: terminalStatus,
+      completedAt: event.createdAt || Math.floor(Date.now() / 1000),
+    },
+  };
 }
 
 function finalOrchestrationConclusionFallback(
@@ -2215,6 +2240,19 @@ function Workspace({
     return nextAgents;
   }, []);
 
+  const refreshAgentsQuietly = useCallback(async () => {
+    const data = await api<{ agents: Agent[] }>('/api/agents');
+    const nextAgents = data.agents || [];
+    setAgents(nextAgents);
+    setSelectedAgentId((current) => {
+      const next = preferredAgentID(nextAgents, current);
+      selectedAgentIdRef.current = next;
+      if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
+      else localStorage.removeItem('codexBridge.selectedAgentId');
+      return next;
+    });
+  }, []);
+
   const loadSessions = useCallback(async () => {
     const data = await api<{ sessions: Session[] }>('/api/sessions');
     setSessions(data.sessions || []);
@@ -2493,6 +2531,21 @@ function Workspace({
     refreshAll().catch((err) => appendSystem(err.message));
     return () => closeWS();
   }, []);
+
+  useEffect(() => {
+    let stopped = false;
+    const syncAgents = () => {
+      if (stopped || document.visibilityState !== 'visible') return;
+      refreshAgentsQuietly().catch(() => undefined);
+    };
+    const interval = window.setInterval(syncAgents, 5000);
+    document.addEventListener('visibilitychange', syncAgents);
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', syncAgents);
+    };
+  }, [refreshAgentsQuietly]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -3129,6 +3182,19 @@ function OrchestrationWorkspace({
     return nextAgents;
   }, []);
 
+  const refreshAgentsQuietly = useCallback(async () => {
+    const data = await api<{ agents: Agent[] }>('/api/agents');
+    const nextAgents = data.agents || [];
+    setAgents(nextAgents);
+    setSelectedAgentId((current) => {
+      const next = preferredAgentID(nextAgents, current);
+      selectedAgentIdRef.current = next;
+      if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
+      else localStorage.removeItem('codexBridge.selectedAgentId');
+      return next;
+    });
+  }, []);
+
   const loadRuns = useCallback(async () => {
     const data = await api<{ runs: OrchestrationRun[] }>('/api/orchestrations');
     setRuns(data.runs || []);
@@ -3368,6 +3434,21 @@ function OrchestrationWorkspace({
     refreshOrchestration().catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
     return () => closeWS();
   }, []);
+
+  useEffect(() => {
+    let stopped = false;
+    const syncAgents = () => {
+      if (stopped || document.visibilityState !== 'visible') return;
+      refreshAgentsQuietly().catch(() => undefined);
+    };
+    const interval = window.setInterval(syncAgents, 5000);
+    document.addEventListener('visibilitychange', syncAgents);
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', syncAgents);
+    };
+  }, [refreshAgentsQuietly]);
 
   useEffect(() => {
     selectedAgentIdRef.current = selectedAgentId;

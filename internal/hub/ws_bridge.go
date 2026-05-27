@@ -161,6 +161,11 @@ func (s *Server) scheduleAgentRunFailure(agentID, instance string, delay time.Du
 func (s *Server) handleBridgeEnvelope(ctx context.Context, agentID string, env protocol.Envelope) {
 	switch env.Type {
 	case protocol.TypeHeartbeat:
+		payload, err := protocol.Decode[protocol.HeartbeatPayload](env)
+		if err == nil && payload.WorkingDirs != nil {
+			_ = s.store.TouchAgentWorkingDirs(ctx, agentID, payload.WorkingDirs)
+			return
+		}
 		_ = s.store.TouchAgent(ctx, agentID)
 	case protocol.TypeSessionOpened:
 		payload, err := protocol.Decode[protocol.SessionOpenedPayload](env)

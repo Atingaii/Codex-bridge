@@ -77,6 +77,11 @@ type RegisteredPayload struct {
 	AgentID string `json:"agentId"`
 }
 
+type HeartbeatPayload struct {
+	TS          int64    `json:"ts,omitempty"`
+	WorkingDirs []string `json:"workingDirs,omitempty"`
+}
+
 type AgentShutdownPayload struct {
 	Reason string `json:"reason,omitempty"`
 }

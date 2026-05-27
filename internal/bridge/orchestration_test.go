@@ -1031,6 +1031,35 @@ func TestResolvedHandoffWithContradictoryAcceptanceEvidenceFailsRun(t *testing.T
 	}
 }
 
+func TestAcceptanceFailurePrefersVerifierExplanationOverRawCommand(t *testing.T) {
+	exitCode := 1
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_verifier", "verifier", "codex", strings.Join([]string{
+			"结论：当前 /root/tencent/coq-lin-lattice 是可编译的 Coq 项目，且未发现占位符。",
+			"",
+			"但验收条件里关键的“补全缺失的证明”仍不能判为完成：当前 Coq 版本改成 modify_lin_fuel，并用固定 default_fuel 包装。",
+			"现有 Termination.v 证明的是燃料递归会结束及长度保持，没有证明原递归每步下降、没有证明 Distance 下降，也没有证明默认燃料足够模拟原 Isabelle 递归到停止态。",
+			"",
+			"Msg: to=user; intent=final; need=none",
+			"Handoff: status=resolved; changed=Model.v, Termination.v; verified=make; next=prove termination modify_lin equivalence; risks=modify_lin_fuel bypasses original termination proof",
+		}, "\n"), []RunnerToolEvent{
+			{ID: "cmd_1", Status: "failed", Command: `/bin/bash -lc 'rg -n "modify_lin|fun modify_lin|function modify_lin|Distance|termination|sorry" /root/tencent/coq-lin-lattice'`, Output: "acceptance check failed", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("把这三个做成coq的证明项目并补全缺失的证明", history, workspaceChangeReport{Available: true, Changed: []string{"Model.v", "Termination.v"}})
+	if !unresolved {
+		t.Fatal("verifier rejection should fail the run")
+	}
+	for _, want := range []string{"modify_lin_fuel", "default_fuel", "没有证明"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason should preserve verifier explanation %q: %q", want, reason)
+		}
+	}
+	if strings.Contains(reason, "/bin/bash") || strings.Contains(reason, "rg -n") {
+		t.Fatalf("reason should not prefer raw acceptance command: %q", reason)
+	}
+}
+
 func TestResolvedHandoffAllowsDomainSpecificCaveatWhenNoOpenRisk(t *testing.T) {
 	exitCode := 0
 	history := []orchestrationTurn{

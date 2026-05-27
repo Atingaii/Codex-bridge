@@ -668,6 +668,24 @@ func TestValidApprovalDecisionNormalizesExpectedValues(t *testing.T) {
 	}
 }
 
+func TestBridgeHeartbeatRefreshesWorkingDirs(t *testing.T) {
+	t.Parallel()
+
+	s, st, _, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	s.handleBridgeEnvelope(ctx, agentID, protocol.MustEnvelope(protocol.TypeHeartbeat, "", protocol.HeartbeatPayload{
+		TS:          time.Now().Unix(),
+		WorkingDirs: []string{"/root/tencent", "/root/tencent/bridge", "/root/tencent/bridge", " "},
+	}))
+	agent, err := st.AgentByID(ctx, agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agent.WorkingDirs) != 2 || agent.WorkingDirs[0] != "/root/tencent" || agent.WorkingDirs[1] != "/root/tencent/bridge" {
+		t.Fatalf("working dirs were not refreshed from heartbeat: %#v", agent.WorkingDirs)
+	}
+}
+
 func newOrchestrationTestServer(t *testing.T) (*Server, *store.Store, string, string) {
 	t.Helper()
 

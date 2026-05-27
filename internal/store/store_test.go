@@ -55,6 +55,16 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 	if len(agent.WorkingDirs) != 1 || agent.WorkingDirs[0] != "/next" {
 		t.Fatalf("updated agent working dirs = %#v", agent.WorkingDirs)
 	}
+	if err := st.TouchAgentWorkingDirs(ctx, agent.ID, []string{"/next", "/fresh", "/fresh", " "}); err != nil {
+		t.Fatal(err)
+	}
+	agent, err = st.AgentByID(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agent.WorkingDirs) != 2 || agent.WorkingDirs[0] != "/next" || agent.WorkingDirs[1] != "/fresh" {
+		t.Fatalf("heartbeat-refreshed working dirs = %#v", agent.WorkingDirs)
+	}
 	session, err := st.CreateSession(ctx, user.ID, agent.ID, "chat")
 	if err != nil {
 		t.Fatal(err)

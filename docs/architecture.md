@@ -113,6 +113,10 @@ Implemented frame types:
 - `orchestration_start`, `orchestration_event`, `orchestration_cancel`
 - `agent_shutdown`
 
+Bridge-originated `heartbeat` payloads may include `workingDirs`. Hub treats
+that as live endpoint metadata, updates `agents.working_dirs_json`, and still
+accepts older heartbeat payloads that only carry a timestamp.
+
 ## Continuity
 
 Chat continuity:

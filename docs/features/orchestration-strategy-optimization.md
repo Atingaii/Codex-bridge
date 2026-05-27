@@ -21,6 +21,24 @@ transcripts.
 - OpenAI Swarm models lightweight orchestration around agents, handoffs, and
   context variables:
   <https://github.com/openai/swarm>
+- Coq/Rocq documents assumptions as global postulates and provides
+  `Print Assumptions` to audit theorem dependencies:
+  <https://rocq-prover.org/doc/V8.19.2/refman/proof-engine/vernacular-commands.html#print-assumptions-reference>
+- Coq/Rocq documents `Axiom`, `Conjecture`, and `Parameter` as assumptions /
+  postulates:
+  <https://rocq-prover.org/doc/V8.19.1/refman/language/core/assumptions.html#assumptions>
+- Isabelle/Isar documents `sorry` as a fake proof and explains that facts from
+  fake proofs are not real proofs:
+  <https://isabelle.in.tum.de/dist/library/Doc/Isar_Ref/Proof.html>
+- Isabelle/Isar notes that definitions such as `function` and `termination`
+  require explicit proof justification:
+  <https://isabelle.in.tum.de/dist/library/Doc/Isar_Ref/Spec.html>
+- Lean documents `sorryAx`, `#print axioms`, and that `sorry` is not intended in
+  finished proofs:
+  <https://lean-lang.org/doc/reference/latest/Axioms/>
+- Lean's tactic reference documents `admit` as a synonym for `sorry` and shows
+  well-founded recursion / `termination_by` behavior:
+  <https://lean-lang.org/doc/reference/latest/Tactic-Proofs/Tactic-Reference/>
 
 ## Non-Goals
 
@@ -59,6 +77,35 @@ explicitly. In collaboration mode the reviewer must audit whether the previous
 turn advanced that criterion, not merely whether the project compiles. This
 prevents any task with a stronger acceptance condition from being marked
 resolved after only a narrow validation check.
+
+For formal proof tasks, both modes add a proof-specific sub-strategy. This is
+triggered by proof assistant names, uploaded proof files, or terms such as
+`theorem`, `termination`, `sorry`, `Admitted`, and `Axiom`. The two strategies
+remain distinct:
+
+| Mode | Proof-task behavior |
+| --- | --- |
+| `collaboration` | The implementer must keep a proof-obligation ledger: target theorem/definition, missing proof, semantic constraints, attempted proof path, and exact blocker. The reviewer must inspect for semantic weakening before accepting build success. |
+| `debate` | The proposer may present the strongest proof plan or patch, but the critic must first try to falsify it by looking for changed statements, fuel wrappers, admitted axioms, hidden placeholders, or proof obligations that were moved rather than discharged. |
+
+For Coq/Isabelle/Lean work, compiling is only a smoke check. A result must not
+be marked `status=resolved` if it weakens the original statement, replaces a
+recursive definition with a bounded/fuel version, changes the target theorem, or
+adds trust assumptions such as `Axiom`, `Admitted`, `sorry`,
+`quick_and_dirty`, or opaque placeholders. A bounded/fuel implementation is only
+acceptable when the same result proves the original recursive semantics,
+termination/decrease obligation, and fuel sufficiency/equivalence to the
+original specification.
+
+Formal proof handoffs should include an audit plan and result. Depending on the
+proof assistant and project, useful checks include `rg` scans for placeholders,
+Coq `Print Assumptions <target>` or dependency output that reports no
+assumptions, Lean `#print axioms <target>` with no `sorryAx` or unexpected
+axioms, Isabelle `thm_oracles <target>` plus scans for `sorry` /
+`quick_and_dirty`, and a build command such as `make`, `coqc`, `lake build`, or
+`isabelle build`. For termination work, the audit must identify the original
+recursive call or measure and the exact decrease / well-founded proof obligation
+rather than accepting a wrapper that merely bounds execution.
 
 The Bridge must avoid sending full raw previous outputs unless they are short.
 Each prior turn in the next prompt should be capped and should prefer parsed
@@ -140,6 +187,10 @@ fixed extra model call.
   consumed.
 - A final verifier turn runs only for file changes, failed commands/errors, or
   unresolved risks.
+- Formal proof prompts carry proof-specific guidance in both collaboration and
+  debate modes, including explicit rejection of compile-only, weakened, or
+  fuel-wrapper solutions unless equivalence and termination obligations are
+  proved.
 - Full test and build commands pass:
   `/usr/local/go/bin/go test ./...`, `cd frontend && npm run build`,
   `CGO_ENABLED=0 /usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .`,

@@ -785,6 +785,68 @@ func TestComposeOrchestrationPromptRequiresGoalProgressAudit(t *testing.T) {
 	}
 }
 
+func TestComposeOrchestrationPromptAddsFormalProofGuardrails(t *testing.T) {
+	prompt := composeOrchestrationPrompt(
+		"collaboration",
+		"把 Model.thy Termination.thy ROOT 做成 Coq 项目，补全 termination modify_lin 的证明，不能用占位符。",
+		"",
+		false,
+		"implementer",
+		"claude",
+		1,
+		4,
+		nil,
+	)
+	for _, want := range []string{
+		"Formal proof task guardrails",
+		"build success as a smoke check only",
+		"Do not weaken theorem statements",
+		"bounded/fuel wrapper or default fuel",
+		"prove equivalence to the original recursive semantics",
+		"Coq Print Assumptions <target>",
+		"Lean #print axioms <target>",
+		"Isabelle thm_oracles <target>",
+		"proof-obligation ledger",
+		"Implementer strategy",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("formal proof prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestComposeDebatePromptAddsFormalProofFalsificationStrategy(t *testing.T) {
+	prompt := composeOrchestrationPrompt(
+		"debate",
+		"补全 Coq theorem，不能用 Admitted 或 Axiom。",
+		"",
+		false,
+		"critic",
+		"codex",
+		2,
+		4,
+		nil,
+	)
+	for _, want := range []string{
+		"Formal proof task guardrails",
+		"Debate critic strategy",
+		"weakened statements",
+		"fuel/default_fuel shortcuts",
+		"hidden axioms/admissions",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("formal proof debate prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestFormalProofGuardrailsDoNotTriggerOnRootPathOnly(t *testing.T) {
+	prompt := composeOrchestrationPrompt("collaboration", "修复 /root/tencent/bridge 的前端刷新问题", "", false, "implementer", "claude", 1, 4, nil)
+	if strings.Contains(prompt, "Formal proof task guardrails") {
+		t.Fatalf("root path alone should not trigger proof guardrails:\n%s", prompt)
+	}
+}
+
 func TestFormatCompactPriorTurnDoesNotRecurseThroughFallbackConclusions(t *testing.T) {
 	turn := newOrchestrationTurnRecord("turn_1", "implementer", "claude", strings.Join([]string{
 		"本轮结论：本轮编排已完成，并已记录当前可确认的结果。",
@@ -1194,6 +1256,27 @@ func TestComposeFinalVerifierPromptUsesStructuredState(t *testing.T) {
 	}
 	if strings.Contains(prompt, "raw transcript") {
 		t.Fatalf("verifier prompt included raw transcript:\n%s", prompt)
+	}
+}
+
+func TestComposeFinalVerifierPromptAddsFormalProofGuardrails(t *testing.T) {
+	prompt := composeFinalVerifierPrompt("collaboration", "补全 Coq termination modify_lin 证明，不能用占位符", "", false, "verifier", "codex", []orchestrationTurn{{
+		Role:          "implementer",
+		CLI:           "claude",
+		HandoffFields: orchestrationHandoffFields{Status: "needs_next", Changed: "Model.v", Verified: "make", Risks: "default_fuel wrapper lacks equivalence proof"},
+	}})
+	for _, want := range []string{
+		"Formal proof final verifier guardrails",
+		"Verify the original proof obligation",
+		"bounded/fuel wrapper without equivalence and fuel-sufficiency proofs",
+		"Coq Print Assumptions <target>",
+		"Lean #print axioms <target>",
+		"Isabelle thm_oracles <target>",
+		"actual decrease/well-founded measure",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("formal proof verifier prompt missing %q:\n%s", want, prompt)
+		}
 	}
 }
 

@@ -4309,6 +4309,10 @@ func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume 
 		}
 	}
 	b.WriteString(fmt.Sprintf("Turn: %d of %d. CLI: %s.\n\n", turn, maxTurns, cli))
+	if proofTask := formalProofTaskGuidance(userPrompt, mode, role); proofTask != "" {
+		b.WriteString(proofTask)
+		b.WriteString("\n")
+	}
 	b.WriteString("Token budget rules: do not restate the full history, do not quote large files, and keep inter-agent notes compact. Prefer file paths, command names, and exact unresolved blockers.\n")
 	b.WriteString("End your visible response with two compact machine-scannable lines in exactly these shapes:\n")
 	b.WriteString(orchestrationMsgContract)
@@ -4350,6 +4354,10 @@ func composeFinalVerifierPrompt(mode, userPrompt, contextSummary string, resume 
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Prefer the latest user task over older details.\n\n")
 	}
+	if proofTask := formalProofVerifierGuidance(userPrompt); proofTask != "" {
+		b.WriteString(proofTask)
+		b.WriteString("\n")
+	}
 	b.WriteString("End your visible response with a concise final conclusion and the same compact lines:\n")
 	b.WriteString(orchestrationMsgContract)
 	b.WriteByte('\n')
@@ -4389,6 +4397,10 @@ func composeWorkspaceChangeRemediationPrompt(mode, userPrompt, contextSummary st
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Prefer the latest user task over older details.\n\n")
 	}
+	if proofTask := formalProofTaskGuidance(userPrompt, mode, role); proofTask != "" {
+		b.WriteString(proofTask)
+		b.WriteString("\n")
+	}
 	if strings.TrimSpace(contextSummary) != "" {
 		b.WriteString("Compacted context from earlier tasks in this conversation:\n")
 		b.WriteString(trimForPrompt(contextSummary, 14000))
@@ -4412,6 +4424,54 @@ func composeWorkspaceChangeRemediationPrompt(mode, userPrompt, contextSummary st
 	b.WriteByte('\n')
 	b.WriteString(orchestrationHandoffContract)
 	return b.String()
+}
+
+func formalProofTaskGuidance(userPrompt, mode, role string) string {
+	if !looksLikeFormalProofTask(userPrompt) {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Formal proof task guardrails:\n")
+	b.WriteString("- Treat build success as a smoke check only. The acceptance criterion is the requested proof obligation, not merely compiling.\n")
+	b.WriteString("- Do not weaken theorem statements, change the target definition's semantics, move the obligation elsewhere, or add trust assumptions such as Axiom, Admitted, admit, sorry, quick_and_dirty, TODO, or placeholders.\n")
+	b.WriteString("- If you introduce a bounded/fuel wrapper or default fuel for a recursive function, you must also prove equivalence to the original recursive semantics, the required termination/decrease measure, and that the default fuel is sufficient for every intended input. Otherwise report status=needs_next or blocked.\n")
+	b.WriteString("- Include a proof audit when relevant: placeholder scans with rg, Coq Print Assumptions <target>, Lean #print axioms <target>, Isabelle thm_oracles <target>, and the project build command.\n")
+	b.WriteString("- Keep a proof-obligation ledger in the handoff: target theorem/definition, missing obligation, semantic constraints, attempted proof path, exact blocker, and verification command.\n")
+	if mode == "debate" {
+		if role == "critic" {
+			b.WriteString("- Debate critic strategy: first try to falsify the proof by checking for weakened statements, fuel/default_fuel shortcuts, hidden axioms/admissions, or obligations that were made unprovable but hidden by wrappers.\n")
+		} else {
+			b.WriteString("- Debate proposer strategy: present the strongest proof plan or patch, but explicitly state why it preserves the original statement and does not rely on fuel shortcuts or added assumptions.\n")
+		}
+	} else if role == "reviewer" || role == "verifier" {
+		b.WriteString("- Reviewer strategy: inspect the diff and proof script for semantic weakening before accepting any successful build; reject compile-only evidence when the proof obligation remains open.\n")
+	} else {
+		b.WriteString("- Implementer strategy: prefer proving the original obligation directly or proving a well-founded decrease/equivalence lemma before changing definitions.\n")
+	}
+	return b.String()
+}
+
+func formalProofVerifierGuidance(userPrompt string) string {
+	if !looksLikeFormalProofTask(userPrompt) {
+		return ""
+	}
+	return strings.Join([]string{
+		"Formal proof final verifier guardrails:",
+		"- Verify the original proof obligation, not just that Coq/Isabelle/Lean accepts the project.",
+		"- Reject status=resolved if any target theorem/definition was weakened, any proof obligation was replaced by a bounded/fuel wrapper without equivalence and fuel-sufficiency proofs, or any Axiom/Admitted/admit/sorry/quick_and_dirty/TODO/placeholder remains.",
+		"- Prefer proof-assistant dependency checks when available: Coq Print Assumptions <target>, Lean #print axioms <target>, Isabelle thm_oracles <target>, plus placeholder scans and the project build command.",
+		"- For termination tasks, require evidence of the actual decrease/well-founded measure or a proof that the encoded recursion is equivalent to the original semantics for all intended inputs.",
+	}, "\n")
+}
+
+func looksLikeFormalProofTask(text string) bool {
+	lower := strings.ToLower(text)
+	return containsAny(lower, []string{
+		"coq", "isabelle", "lean", ".v", ".thy", ".lean", "_coqproject",
+		"theorem", "lemma", "proof", "termination", "well-founded", "well founded",
+		"sorry", "admitted", "admit", "axiom", "quick_and_dirty", "placeholder",
+		"定理", "引理", "证明", "终止", "递归", "补全缺失的证明", "占位符",
+	})
 }
 
 func trimForPrompt(value string, max int) string {

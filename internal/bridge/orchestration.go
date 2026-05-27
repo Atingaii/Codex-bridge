@@ -4354,7 +4354,7 @@ func composeFinalVerifierPrompt(mode, userPrompt, contextSummary string, resume 
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Prefer the latest user task over older details.\n\n")
 	}
-	if proofTask := formalProofVerifierGuidance(userPrompt); proofTask != "" {
+	if proofTask := formalProofVerifierGuidance(userPrompt, mode); proofTask != "" {
 		b.WriteString(proofTask)
 		b.WriteString("\n")
 	}
@@ -4438,10 +4438,11 @@ func formalProofTaskGuidance(userPrompt, mode, role string) string {
 	b.WriteString("- Include a proof audit when relevant: placeholder scans with rg, Coq Print Assumptions <target>, Lean #print axioms <target>, Isabelle thm_oracles <target>, and the project build command.\n")
 	b.WriteString("- Keep a proof-obligation ledger in the handoff: target theorem/definition, missing obligation, semantic constraints, attempted proof path, exact blocker, and verification command.\n")
 	if mode == "debate" {
+		b.WriteString("- Debate proof workflow: the proposer must leave a falsifiable proof claim or patch, and the critic must decide whether the original obligation is actually discharged; unresolved falsification blocks status=resolved.\n")
 		if role == "critic" {
-			b.WriteString("- Debate critic strategy: first try to falsify the proof by checking for weakened statements, fuel/default_fuel shortcuts, hidden axioms/admissions, or obligations that were made unprovable but hidden by wrappers.\n")
+			b.WriteString("- Debate critic strategy: first try to falsify the proof by checking for weakened statements, fuel/default_fuel shortcuts, hidden axioms/admissions, missing equivalence lemmas, or obligations that were made unprovable but hidden by wrappers.\n")
 		} else {
-			b.WriteString("- Debate proposer strategy: present the strongest proof plan or patch, but explicitly state why it preserves the original statement and does not rely on fuel shortcuts or added assumptions.\n")
+			b.WriteString("- Debate proposer strategy: present the strongest proof plan or patch, name the exact lemmas/audit commands that would validate it, and explicitly state why it preserves the original statement without fuel shortcuts or added assumptions.\n")
 		}
 	} else if role == "reviewer" || role == "verifier" {
 		b.WriteString("- Reviewer strategy: inspect the diff and proof script for semantic weakening before accepting any successful build; reject compile-only evidence when the proof obligation remains open.\n")
@@ -4451,17 +4452,21 @@ func formalProofTaskGuidance(userPrompt, mode, role string) string {
 	return b.String()
 }
 
-func formalProofVerifierGuidance(userPrompt string) string {
+func formalProofVerifierGuidance(userPrompt, mode string) string {
 	if !looksLikeFormalProofTask(userPrompt) {
 		return ""
 	}
-	return strings.Join([]string{
+	lines := []string{
 		"Formal proof final verifier guardrails:",
 		"- Verify the original proof obligation, not just that Coq/Isabelle/Lean accepts the project.",
 		"- Reject status=resolved if any target theorem/definition was weakened, any proof obligation was replaced by a bounded/fuel wrapper without equivalence and fuel-sufficiency proofs, or any Axiom/Admitted/admit/sorry/quick_and_dirty/TODO/placeholder remains.",
 		"- Prefer proof-assistant dependency checks when available: Coq Print Assumptions <target>, Lean #print axioms <target>, Isabelle thm_oracles <target>, plus placeholder scans and the project build command.",
 		"- For termination tasks, require evidence of the actual decrease/well-founded measure or a proof that the encoded recursion is equivalent to the original semantics for all intended inputs.",
-	}, "\n")
+	}
+	if mode == "debate" {
+		lines = append(lines, "- Debate verifier strategy: synthesize the adversarial result; concrete critic falsification of weakened semantics, fuel/default_fuel shortcuts, missing equivalence, or hidden assumptions overrides proposer confidence.")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func looksLikeFormalProofTask(text string) bool {

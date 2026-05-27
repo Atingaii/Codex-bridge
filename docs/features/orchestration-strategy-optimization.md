@@ -86,7 +86,7 @@ remain distinct:
 | Mode | Proof-task behavior |
 | --- | --- |
 | `collaboration` | The implementer must keep a proof-obligation ledger: target theorem/definition, missing proof, semantic constraints, attempted proof path, and exact blocker. The reviewer must inspect for semantic weakening before accepting build success. |
-| `debate` | The proposer may present the strongest proof plan or patch, but the critic must first try to falsify it by looking for changed statements, fuel wrappers, admitted axioms, hidden placeholders, or proof obligations that were moved rather than discharged. |
+| `debate` | The proposer may present the strongest proof plan or patch, but must leave a falsifiable proof claim and named audit checks. The critic must first try to falsify it by looking for changed statements, fuel wrappers, admitted axioms, hidden placeholders, missing equivalence lemmas, or proof obligations that were moved rather than discharged. |
 
 For Coq/Isabelle/Lean work, compiling is only a smoke check. A result must not
 be marked `status=resolved` if it weakens the original statement, replaces a
@@ -106,6 +106,13 @@ axioms, Isabelle `thm_oracles <target>` plus scans for `sorry` /
 `isabelle build`. For termination work, the audit must identify the original
 recursive call or measure and the exact decrease / well-founded proof obligation
 rather than accepting a wrapper that merely bounds execution.
+
+The debate path must converge through adversarial evidence, not role labels
+alone. A proposer handoff is only useful if the critic can falsify it with a
+specific check. A critic finding that the patch relies on `default_fuel`,
+weakens the theorem, lacks an equivalence lemma, or hides an admission overrides
+proposer confidence and prevents `status=resolved` until that finding is
+discharged.
 
 The Bridge must avoid sending full raw previous outputs unless they are short.
 Each prior turn in the next prompt should be capped and should prefer parsed

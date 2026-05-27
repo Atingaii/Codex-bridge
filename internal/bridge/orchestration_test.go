@@ -829,10 +829,12 @@ func TestComposeDebatePromptAddsFormalProofFalsificationStrategy(t *testing.T) {
 	)
 	for _, want := range []string{
 		"Formal proof task guardrails",
+		"Debate proof workflow",
 		"Debate critic strategy",
 		"weakened statements",
 		"fuel/default_fuel shortcuts",
 		"hidden axioms/admissions",
+		"missing equivalence lemmas",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("formal proof debate prompt missing %q:\n%s", want, prompt)
@@ -1276,6 +1278,25 @@ func TestComposeFinalVerifierPromptAddsFormalProofGuardrails(t *testing.T) {
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("formal proof verifier prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestComposeDebateFinalVerifierPromptAddsAdversarialProofAudit(t *testing.T) {
+	prompt := composeFinalVerifierPrompt("debate", "补全 Coq termination modify_lin 证明，不能用占位符", "", false, "verifier", "codex", []orchestrationTurn{{
+		Role:          "critic",
+		CLI:           "codex",
+		HandoffFields: orchestrationHandoffFields{Status: "needs_next", Verified: "make", Risks: "critic found default_fuel shortcut without equivalence proof"},
+	}})
+	for _, want := range []string{
+		"Formal proof final verifier guardrails",
+		"Debate verifier strategy",
+		"critic falsification",
+		"fuel/default_fuel shortcuts",
+		"missing equivalence",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("formal proof debate verifier prompt missing %q:\n%s", want, prompt)
 		}
 	}
 }

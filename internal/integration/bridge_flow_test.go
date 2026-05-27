@@ -932,108 +932,113 @@ func TestOrchestrationIsabellePromptStreamsUsefulCommandEvents(t *testing.T) {
 }
 
 func TestCoqTaskWebSmokeWithFakeBridge(t *testing.T) {
-	t.Parallel()
+	for _, mode := range []string{"collaboration", "debate"} {
+		mode := mode
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
-	tmp := t.TempDir()
-	port := freePort(t)
-	cfg := config.Default()
-	cfg.Gateway.Host = "127.0.0.1"
-	cfg.Gateway.Port = port
-	cfg.Gateway.ReadTimeout.Duration = 5 * time.Second
-	cfg.Gateway.WriteTimeout.Duration = 0
-	cfg.Hub.DBPath = tmp + "/bridge.db"
-	cfg.Hub.HeartbeatInterval.Duration = 200 * time.Millisecond
-	cfg.Auth.JWTSecret = "integration-test-secret-32-byte-minimum"
-	cfg.Auth.AccessTokenTTL.Duration = time.Hour
-	cfg.Bridge.HubURL = fmt.Sprintf("http://127.0.0.1:%d", port)
-	cfg.Bridge.Token = store.NewToken("enr")
+			tmp := t.TempDir()
+			port := freePort(t)
+			cfg := config.Default()
+			cfg.Gateway.Host = "127.0.0.1"
+			cfg.Gateway.Port = port
+			cfg.Gateway.ReadTimeout.Duration = 5 * time.Second
+			cfg.Gateway.WriteTimeout.Duration = 0
+			cfg.Hub.DBPath = tmp + "/bridge.db"
+			cfg.Hub.HeartbeatInterval.Duration = 200 * time.Millisecond
+			cfg.Auth.JWTSecret = "integration-test-secret-32-byte-minimum"
+			cfg.Auth.AccessTokenTTL.Duration = time.Hour
+			cfg.Bridge.HubURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+			cfg.Bridge.Token = store.NewToken("enr")
 
-	st, err := store.Open(cfg.Hub.DBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
-		t.Fatal(err)
-	}
-	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+			st, err := store.Open(cfg.Hub.DBPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			if err := st.Migrate(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
+				t.Fatal(err)
+			}
+			expires := time.Now().Add(time.Hour)
+			if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
+				t.Fatal(err)
+			}
 
-	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
-	go func() { _ = srv.Run(ctx) }()
-	waitHTTP(t, cfg.Bridge.HubURL+"/health")
-	fakeBridge := dialFakeBridgeWithOptions(t, cfg.Bridge.HubURL, cfg.Bridge.Token, fakeBridgeOptions{
-		WorkingDirs: []string{"/root/tencent", "/root/tencent/bridge"},
-	})
-	defer fakeBridge.Close()
+			srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
+			go func() { _ = srv.Run(ctx) }()
+			waitHTTP(t, cfg.Bridge.HubURL+"/health")
+			fakeBridge := dialFakeBridgeWithOptions(t, cfg.Bridge.HubURL, cfg.Bridge.Token, fakeBridgeOptions{
+				WorkingDirs: []string{"/root/tencent", "/root/tencent/bridge"},
+			})
+			defer fakeBridge.Close()
 
-	client := httpClient(t)
-	postJSON(t, client, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
-	waitAgents(t, client, cfg.Bridge.HubURL)
+			client := httpClient(t)
+			postJSON(t, client, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
+			waitAgents(t, client, cfg.Bridge.HubURL)
 
-	task := coqSmokeTaskPrompt()
-	body := postJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations", map[string]any{
-		"mode":     "collaboration",
-		"title":    "coq proof smoke",
-		"prompt":   task,
-		"cwd":      "/root/tencent",
-		"maxTurns": 4,
-		"files": []map[string]any{
-			{"name": "Model.thy", "mimeType": "application/octet-stream", "size": 17, "data": "dGhlb3J5IE1vZGVsCg=="},
-			{"name": "Termination.thy", "mimeType": "application/octet-stream", "size": 23, "data": "dGhlb3J5IFRlcm1pbmF0aW9uCg=="},
-			{"name": "ROOT", "mimeType": "application/octet-stream", "size": 28, "data": "c2Vzc2lvbiB0ZXJtaW5hdGlvbl9mcmFtZXdvcmsK"},
-		},
-	}, http.StatusCreated)
-	run := body["run"].(map[string]any)
-	runID := run["id"].(string)
-	assertRunHasFiles(t, run, []string{"Model.thy", "Termination.thy", "ROOT"})
+			task := coqSmokeTaskPrompt()
+			body := postJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations", map[string]any{
+				"mode":     mode,
+				"title":    "coq proof smoke",
+				"prompt":   task,
+				"cwd":      "/root/tencent",
+				"maxTurns": 4,
+				"files": []map[string]any{
+					{"name": "Model.thy", "mimeType": "application/octet-stream", "size": 17, "data": "dGhlb3J5IE1vZGVsCg=="},
+					{"name": "Termination.thy", "mimeType": "application/octet-stream", "size": 23, "data": "dGhlb3J5IFRlcm1pbmF0aW9uCg=="},
+					{"name": "ROOT", "mimeType": "application/octet-stream", "size": 28, "data": "c2Vzc2lvbiB0ZXJtaW5hdGlvbl9mcmFtZXdvcmsK"},
+				},
+			}, http.StatusCreated)
+			run := body["run"].(map[string]any)
+			runID := run["id"].(string)
+			assertRunHasFiles(t, run, []string{"Model.thy", "Termination.thy", "ROOT"})
 
-	env := waitBridgeEnvelope(t, fakeBridge, protocol.TypeOrchestrationStart, "")
-	start, err := protocol.Decode[protocol.OrchestrationStartPayload](env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if start.RunID != runID || start.Prompt != task || start.CWD != "/root/tencent" || start.MaxTurns != 4 {
-		t.Fatalf("orchestration_start = %#v", start)
-	}
-	if len(start.Files) != 3 {
-		t.Fatalf("start files = %#v", start.Files)
-	}
-	startFiles := make(map[string]protocol.AttachmentPayload, len(start.Files))
-	for _, file := range start.Files {
-		startFiles[file.Name] = file
-	}
-	for _, want := range []string{"Model.thy", "Termination.thy", "ROOT"} {
-		file, ok := startFiles[want]
-		if !ok || file.Data == "" {
-			t.Fatalf("start file %q missing or has no data: %#v", want, start.Files)
-		}
-	}
+			env := waitBridgeEnvelope(t, fakeBridge, protocol.TypeOrchestrationStart, "")
+			start, err := protocol.Decode[protocol.OrchestrationStartPayload](env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if start.RunID != runID || start.Mode != mode || start.Prompt != task || start.CWD != "/root/tencent" || start.MaxTurns != 4 {
+				t.Fatalf("orchestration_start = %#v", start)
+			}
+			if len(start.Files) != 3 {
+				t.Fatalf("start files = %#v", start.Files)
+			}
+			startFiles := make(map[string]protocol.AttachmentPayload, len(start.Files))
+			for _, file := range start.Files {
+				startFiles[file.Name] = file
+			}
+			for _, want := range []string{"Model.thy", "Termination.thy", "ROOT"} {
+				file, ok := startFiles[want]
+				if !ok || file.Data == "" {
+					t.Fatalf("start file %q missing or has no data: %#v", want, start.Files)
+				}
+			}
 
-	failure := "acceptance check failed: 当前 Coq 版本改成 modify_lin_fuel，并用固定 default_fuel 包装；没有证明原递归每步下降、Distance 下降或默认燃料足够模拟原 Isabelle 递归到停止态。"
-	if err := fakeBridge.WriteJSON(protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
-		RunID:  runID,
-		Kind:   "run.error",
-		Status: store.OrchestrationFailed,
-		Error:  failure,
-	})); err != nil {
-		t.Fatal(err)
-	}
-	waitOrchestrationStatus(t, client, cfg.Bridge.HubURL, runID, store.OrchestrationFailed)
-	eventsBody := getJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations/"+url.PathEscape(runID)+"/events", http.StatusOK)
-	events := eventsBody["events"].([]any)
-	for _, want := range []string{"modify_lin_fuel", "default_fuel", "没有证明"} {
-		if !eventsContainContent(events, want) {
-			t.Fatalf("web-visible events missing %q: %#v", want, events)
-		}
+			failure := "acceptance check failed: 当前 Coq 版本改成 modify_lin_fuel，并用固定 default_fuel 包装；没有证明原递归每步下降、Distance 下降或默认燃料足够模拟原 Isabelle 递归到停止态。"
+			if err := fakeBridge.WriteJSON(protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+				RunID:  runID,
+				Kind:   "run.error",
+				Status: store.OrchestrationFailed,
+				Error:  failure,
+			})); err != nil {
+				t.Fatal(err)
+			}
+			waitOrchestrationStatus(t, client, cfg.Bridge.HubURL, runID, store.OrchestrationFailed)
+			eventsBody := getJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations/"+url.PathEscape(runID)+"/events", http.StatusOK)
+			events := eventsBody["events"].([]any)
+			for _, want := range []string{"modify_lin_fuel", "default_fuel", "没有证明"} {
+				if !eventsContainContent(events, want) {
+					t.Fatalf("web-visible events missing %q: %#v", want, events)
+				}
+			}
+		})
 	}
 }
 

@@ -4967,10 +4967,12 @@ func acceptanceFailureInTurn(userPrompt string, item orchestrationTurn) string {
 	context, score := acceptanceFailureContextScore(prose, userPrompt)
 	var commandText strings.Builder
 	for _, command := range commandStates([]orchestrationTurn{item}) {
+		output := strings.TrimSpace(command.Output)
+		if output == "" {
+			continue
+		}
 		commandText.WriteString("\n")
-		commandText.WriteString(command.Command)
-		commandText.WriteString("\n")
-		commandText.WriteString(command.Output)
+		commandText.WriteString(output)
 	}
 	if commandContext, commandScore := acceptanceFailureContextScore(commandText.String(), userPrompt); commandScore > score {
 		context, score = commandContext, commandScore

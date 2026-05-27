@@ -1124,6 +1124,30 @@ func TestAcceptanceFailurePrefersVerifierExplanationOverRawCommand(t *testing.T)
 	}
 }
 
+func TestResolvedProofRunAllowsForbiddenTokenScanCommand(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_verifier", "reviewer", "codex", strings.Join([]string{
+			"结论：当前项目使用 Coq 可检查的 structural recursion/measure 结构；没有 bounded/default fuel，没有 runtime distance guard，没有占位符或未声明公理。",
+			"",
+			"Msg: to=user; intent=final; need=none",
+			"Handoff: status=resolved; changed=none; verified=make/rg/coqtop/python-audit; next=none; risks=none",
+		}, "\n"), []RunnerToolEvent{
+			{
+				ID:       "scan",
+				Status:   "completed",
+				Command:  `/bin/bash -lc "rg -n \"modify_lin_fuel|default_fuel|fuel|Distance candidate|guard|\\b(Axiom|Admitted|admit|Parameter|Conjecture|Abort|sorry|TODO|placeholder|quick_and_dirty)\\b\" /root/tencent/coq-lin-lattice-complete -S || true"`,
+				Output:   "",
+				ExitCode: &exitCode,
+			},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("补全 modify_lin 证明，不能用占位符", history, workspaceChangeReport{Available: true, Changed: []string{"Model.v", "Termination.v"}})
+	if unresolved {
+		t.Fatalf("forbidden-token scan command text with empty output should not fail resolved run: %q", reason)
+	}
+}
+
 func TestResolvedHandoffAllowsDomainSpecificCaveatWhenNoOpenRisk(t *testing.T) {
 	exitCode := 0
 	history := []orchestrationTurn{

@@ -283,11 +283,12 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 		`, OrchestrationFailed, reason, now, now, runs[i].ID, OrchestrationQueued, OrchestrationRunning); err != nil {
 			return nil, err
 		}
+		eventContent := orchestrationDisconnectRunErrorContent(tx, runs[i].ID, reason)
 		event := OrchestrationEvent{
 			ID:        NewID("evt"),
 			RunID:     runs[i].ID,
 			Kind:      "run.error",
-			Content:   reason,
+			Content:   eventContent,
 			Status:    OrchestrationFailed,
 			Error:     reason,
 			CreatedAt: now,
@@ -310,6 +311,96 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 		return nil, err
 	}
 	return runs, nil
+}
+
+func orchestrationDisconnectRunErrorContent(tx *sql.Tx, runID, reason string) string {
+	lines := []string{
+		"运行中断：Bridge 连接在任务仍在运行时断开。",
+		"原因：" + reason,
+		"这表示远端 CLI/Bridge 链路中断，不是证明任务已经通过或失败的验收结论。",
+	}
+	if summaries := recentOrchestrationProgressSummaries(tx, runID, 4); len(summaries) > 0 {
+		lines = append(lines, "", "断开前最近进展：")
+		lines = append(lines, summaries...)
+	}
+	lines = append(lines, "", "后续动作：待该机器重新在线后，使用同一上传样例重新发起或继续该任务；前端应以这条链路诊断作为当前测试结果。")
+	return strings.Join(lines, "\n")
+}
+
+func recentOrchestrationProgressSummaries(tx *sql.Tx, runID string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	rows, err := tx.Query(`
+		SELECT kind, COALESCE(role,''), COALESCE(cli,''), COALESCE(content,''), COALESCE(status,''), COALESCE(error,'')
+		FROM orchestration_events
+		WHERE run_id = ?
+		ORDER BY seq DESC
+		LIMIT ?
+	`, runID, limit*3)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var kind, role, cli, content, status, errText string
+		if err := rows.Scan(&kind, &role, &cli, &content, &status, &errText); err != nil {
+			return out
+		}
+		summary := compactOrchestrationProgressLine(kind, role, cli, content, status, errText)
+		if summary == "" {
+			continue
+		}
+		out = append(out, "- "+summary)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func compactOrchestrationProgressLine(kind, role, cli, content, status, errText string) string {
+	parts := []string{strings.TrimSpace(kind)}
+	actor := strings.TrimSpace(strings.Join(nonEmptyStrings(role, cli), "/"))
+	if actor != "" {
+		parts = append(parts, actor)
+	}
+	if status = strings.TrimSpace(status); status != "" {
+		parts = append(parts, status)
+	}
+	if content = strings.TrimSpace(content); content != "" {
+		parts = append(parts, trimOneLine(content, 220))
+	} else if errText = strings.TrimSpace(errText); errText != "" {
+		parts = append(parts, trimOneLine(errText, 220))
+	}
+	if len(parts) == 1 {
+		return ""
+	}
+	return strings.Join(parts, " | ")
+}
+
+func nonEmptyStrings(values ...string) []string {
+	var out []string
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func trimOneLine(value string, max int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if max <= 0 || len([]rune(value)) <= max {
+		return value
+	}
+	runes := []rune(value)
+	if max <= 1 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-1]) + "…"
 }
 
 type User struct {

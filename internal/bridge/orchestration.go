@@ -2442,7 +2442,10 @@ func (m *OrchestrationManager) ccbPrompt(payload protocol.OrchestrationStartPayl
 		b.WriteString("\n")
 	}
 	if looksLikeCoqUploadProofBenchmark(payload.Prompt) {
-		b.WriteString("\nBefore returning a completed final answer for this Coq upload benchmark, explicitly report these evidence dimensions: Model.thy/Termination.thy/ROOT input mapping, new Coq project folder path, make/coqc result, source-only placeholder scan result, Coq Print Assumptions showing Closed under the global context, and termination modify_lin original obligation audit. Scan source for Axiom, Parameter, Conjecture, Admitted, admit, Abort, sorry, TODO, placeholder, quick_and_dirty, Guard Checking, and bypass_check. If modify_lin_fuel/default_fuel or any bounded fuel wrapper exists, mark the task unresolved unless equivalence, decrease/well-foundedness, and fuel sufficiency are proved in the same result.\n")
+		b.WriteString("\nBefore returning a completed final answer for this Coq upload benchmark, explicitly report these evidence dimensions: Model.thy/Termination.thy/ROOT input mapping, new Coq project folder path, _CoqProject/Makefile project shape, make/coqc result, source-only placeholder scan result, Coq Print Assumptions showing Closed under the global context, and termination modify_lin original obligation audit. Translate the Isabelle termination target into a named Coq theorem/lemma that states the original recursive termination/equivalence obligation, not only a runnable function or a tautology about a fuel interpreter. The target theorem must mention modify_lin plus the chosen well-founded relation, semantic equivalence, or branch-decrease invariant, and the final answer must name that theorem. Scan source for Axiom, Parameter, Variable, Hypothesis, Conjecture, Admitted, admit, Abort, sorry, TODO, placeholder, quick_and_dirty, Guard Checking, bypass_check, modify_lin_fuel, default_fuel, fuel_wrapper, and fixed_fuel. If modify_lin_fuel/default_fuel or any bounded fuel wrapper exists, mark the task unresolved unless equivalence, decrease/well-foundedness, and fuel sufficiency are proved in the same result.\n")
+	}
+	if looksLikeIsabelleUploadProofBenchmark(payload.Prompt) {
+		b.WriteString("\nBefore returning a completed final answer for this Isabelle upload benchmark, explicitly report these evidence dimensions: Model.thy/Termination.thy/ROOT input mapping, new Isabelle project folder path, ROOT directory layout mapping, isabelle build result, source-only scan for sorry/quick_and_dirty/oops/sketch/admit/placeholders, Isabelle thm_oracles or oracle-free audit for the target facts, and the original termination modify_lin obligation audit. First extract the generated termination subgoals in a scratch area outside the final project or in a temporary theory that is removed from ROOT before the final build. Scratch probes must not use sorry/quick_and_dirty/oops/sketch/admit as fake proof steps; get subgoals by running an incomplete proof attempt and capturing Isabelle's failure output. Before using guessed simp facts such as *_def rules, confirm them with find_theorems name:<pattern> or thm <fact>, and record undefined-fact failures in the obligation ledger. Then try a small set of named measures/relations and record which recursive branches fail to decrease. The final project must not contain Repro.thy, *_original.thy, scratch theories, copied failed attempts, or edited ROOT entries that import diagnostic-only files. Do not mark complete if ROOT enables quick_and_dirty, if any sorry remains in source, if a proof block ends with oops/sketch, if a source scan would hit diagnostic leftovers, if a long build is left running in the background, or if termination modify_lin was replaced by a weaker theorem or compile-only framework.\n")
 	}
 	b.WriteString("End the final answer with the compact lines:\n")
 	b.WriteString(orchestrationMsgContract)
@@ -4231,7 +4234,7 @@ func finalRunAssessmentDimensions(userPrompt string, history []orchestrationTurn
 		finalCommandAssessmentDimension(history),
 	}
 	if looksLikeFormalProofTask(userPrompt) {
-		dimensions = append(dimensions, formalProofAssessmentDimensions(userPrompt, history)...)
+		dimensions = append(dimensions, formalProofAssessmentDimensions(userPrompt, history, changes)...)
 	}
 	dimensions = append(dimensions, finalRiskAssessmentDimension(userPrompt, history))
 	return dimensions
@@ -4364,8 +4367,8 @@ func finalRiskAssessmentDimension(userPrompt string, history []orchestrationTurn
 	}
 }
 
-func formalProofAssessmentDimensions(userPrompt string, history []orchestrationTurn) []assessmentDimension {
-	evidence := collectProofAssessmentEvidence(history, workspaceChangeReport{})
+func formalProofAssessmentDimensions(userPrompt string, history []orchestrationTurn, changes workspaceChangeReport) []assessmentDimension {
+	evidence := collectProofAssessmentEvidence(history, changes)
 	var dimensions []assessmentDimension
 	dimensions = append(dimensions,
 		boolAssessmentDimension("证明构建", "Proof build", evidence.proofBuild, "记录到 proof-assistant 构建或编译证据。", "缺少 proof-assistant 构建或编译证据。"),
@@ -4374,9 +4377,13 @@ func formalProofAssessmentDimensions(userPrompt string, history []orchestrationT
 	if containsAny(strings.ToLower(userPrompt), []string{"coq", ".v"}) {
 		dimensions = append(dimensions, boolAssessmentDimension("假设审计", "Assumption audit", evidence.assumptionAudit, "记录到 Coq Print Assumptions 或 global context 审计证据。", "缺少 Coq Print Assumptions/global context 审计证据。"))
 	}
+	if looksLikeIsabelleProofTask(userPrompt) {
+		dimensions = append(dimensions, boolAssessmentDimension("Isabelle oracle 审计", "Isabelle oracle audit", evidence.assumptionAudit, "记录到 Isabelle thm_oracles 或 oracle-free 审计证据。", "缺少 Isabelle thm_oracles/oracle-free 审计证据。"))
+	}
 	if looksLikeCoqUploadProofBenchmark(userPrompt) {
 		dimensions = append(dimensions,
 			boolAssessmentDimension("上传文件映射", "Uploaded input mapping", evidence.coqInputs, "记录到 Model.thy、Termination.thy、ROOT 均已纳入检查。", "缺少 Model.thy、Termination.thy、ROOT 全部被使用的证据。"),
+			boolAssessmentDimension("新建项目目录", "New project folder", evidence.projectPath, "记录到工作目录下的新建 Coq 项目路径。", "缺少工作目录下新建 Coq 项目文件夹证据。"),
 			boolAssessmentDimension("原始证明义务", "Original proof obligation", evidence.originalObligation, "记录到 termination modify_lin 原始终止性/等价义务审计。", "缺少 termination modify_lin 原始终止性/等价义务审计。"),
 		)
 		if evidence.fuelShortcut {
@@ -4384,6 +4391,13 @@ func formalProofAssessmentDimensions(userPrompt string, history []orchestrationT
 		} else {
 			dimensions = append(dimensions, boolAssessmentDimension("燃料包装审计", "Fuel-wrapper audit", true, "未记录 modify_lin_fuel/default_fuel 绕过迹象。", ""))
 		}
+	}
+	if looksLikeIsabelleUploadProofBenchmark(userPrompt) {
+		dimensions = append(dimensions,
+			boolAssessmentDimension("上传文件映射", "Uploaded input mapping", evidence.coqInputs, "记录到 Model.thy、Termination.thy、ROOT 均已纳入检查。", "缺少 Model.thy、Termination.thy、ROOT 全部被使用的证据。"),
+			boolAssessmentDimension("新建项目目录", "New project folder", evidence.projectPath, "记录到工作目录下的新建 Isabelle 项目路径。", "缺少工作目录下新建 Isabelle 项目文件夹证据。"),
+			boolAssessmentDimension("原始证明义务", "Original proof obligation", evidence.originalObligation, "记录到 termination modify_lin 原始终止性/下降义务审计。", "缺少 termination modify_lin 原始终止性/下降义务审计。"),
+		)
 	}
 	return dimensions
 }
@@ -4959,6 +4973,13 @@ func formalProofTaskGuidance(userPrompt, mode, role string) string {
 	b.WriteString("- If you introduce a bounded/fuel wrapper or default fuel for a recursive function, you must also prove equivalence to the original recursive semantics, the required termination/decrease measure, and that the default fuel is sufficient for every intended input. Otherwise report status=needs_next or blocked.\n")
 	b.WriteString("- Include a proof audit when relevant: placeholder scans with rg, Coq Print Assumptions <target> showing Closed under the global context, Lean #print axioms <target>, Isabelle thm_oracles <target>, and the project build command.\n")
 	b.WriteString("- Keep a proof-obligation ledger in the handoff: target theorem/definition, missing obligation, semantic constraints, attempted proof path, exact blocker, and verification command.\n")
+	b.WriteString("- Exploration budget: after at most three failed proof strategies or one long proof-assistant build/proof attempt, stop blind search and hand off a compact obligation ledger with the failed goals, attempted measures/relations, and the next most promising lemma. Do not spend the entire turn repeating similar measure guesses.\n")
+	if coqGuidance := coqProofTaskGuidance(userPrompt); coqGuidance != "" {
+		b.WriteString(coqGuidance)
+	}
+	if isabelleGuidance := isabelleProofTaskGuidance(userPrompt); isabelleGuidance != "" {
+		b.WriteString(isabelleGuidance)
+	}
 	if mode == "debate" {
 		b.WriteString("- Debate proof workflow: the proposer must leave a falsifiable proof claim or patch, and the critic must decide whether the original obligation is actually discharged; unresolved falsification blocks status=resolved.\n")
 		if role == "critic" {
@@ -4969,7 +4990,7 @@ func formalProofTaskGuidance(userPrompt, mode, role string) string {
 	} else if role == "reviewer" || role == "verifier" {
 		b.WriteString("- Reviewer strategy: inspect the diff and proof script for semantic weakening before accepting any successful build; reject compile-only evidence when the proof obligation remains open.\n")
 	} else {
-		b.WriteString("- Implementer strategy: prefer proving the original obligation directly or proving a well-founded decrease/equivalence lemma before changing definitions.\n")
+		b.WriteString("- Implementer strategy: prefer proving the original obligation directly or proving a well-founded decrease/equivalence lemma before changing definitions. For hard formal tasks, first establish a minimal reproducible obligation, then switch to lemma planning/reviewer handoff instead of continuing unbounded trial-and-error.\n")
 	}
 	return b.String()
 }
@@ -4981,20 +5002,50 @@ func formalProofVerifierGuidance(userPrompt, mode string) string {
 	lines := []string{
 		"Formal proof final verifier guardrails:",
 		"- Verify the original proof obligation, not just that Coq/Isabelle/Lean accepts the project.",
-		"- Reject status=resolved if any target theorem/definition was weakened, any proof obligation was replaced by a bounded/fuel wrapper without equivalence and fuel-sufficiency proofs, or any Axiom/Parameter/Conjecture/Admitted/admit/Abort/sorry/quick_and_dirty/Guard Checking/bypass_check/TODO/placeholder remains.",
+		"- Reject status=resolved if any target theorem/definition was weakened, any proof obligation was replaced by a bounded/fuel wrapper without equivalence and fuel-sufficiency proofs, or any Axiom/Parameter/Conjecture/Admitted/admit/Abort/sorry/oops/sketch/quick_and_dirty/Guard Checking/bypass_check/TODO/placeholder remains.",
 		"- Prefer proof-assistant dependency checks when available: Coq Print Assumptions <target> with Closed under the global context, Lean #print axioms <target>, Isabelle thm_oracles <target>, plus placeholder scans and the project build command.",
 		"- For termination tasks, require evidence of the actual decrease/well-founded measure or a proof that the encoded recursion is equivalent to the original semantics for all intended inputs.",
 		"- End with a multi-dimensional result assessment that is visible to the browser: uploaded inputs accounted for, new project/workspace path, build result, placeholder scan, proof-assistant assumption/oracle check, original obligation/equivalence or termination audit, and remaining risks.",
 	}
 	if looksLikeCoqUploadProofBenchmark(userPrompt) {
 		lines = append(lines,
-			"- This task matches the Coq upload benchmark with Model.thy, Termination.thy, and ROOT. Your visible final conclusion must explicitly assess: Model.thy/Termination.thy/ROOT were used, a new Coq project folder was written under the requested cwd, make/coqc passed, source-only placeholder scan found no forbidden tokens, Coq Print Assumptions showed Closed under the global context, and termination modify_lin was solved without modify_lin_fuel/default_fuel or with proved equivalence, decrease, and fuel sufficiency.",
+			"- This task matches the Coq upload benchmark with Model.thy, Termination.thy, and ROOT. Your visible final conclusion must explicitly assess: Model.thy/Termination.thy/ROOT were used, a new Coq project folder was written under the requested cwd, make/coqc passed, source-only placeholder scan found no forbidden tokens, Coq Print Assumptions showed Closed under the global context, and a named theorem states the original termination modify_lin obligation. Reject compile-only projects, tautological proofs, or modify_lin_fuel/default_fuel unless equivalence, decrease, and fuel sufficiency are proved.",
+		)
+	}
+	if looksLikeIsabelleUploadProofBenchmark(userPrompt) {
+		lines = append(lines,
+			"- This task matches the Isabelle upload benchmark with Model.thy, Termination.thy, and ROOT. Your visible final conclusion must explicitly assess: Model.thy/Termination.thy/ROOT were used, a new Isabelle project folder was written under the requested cwd, isabelle build passed with no detached/background build left unresolved, source-only scan found no sorry/quick_and_dirty/oops/sketch/admit/placeholders and no diagnostic leftovers such as Repro.thy or *_original.thy, Isabelle thm_oracles or oracle-free audit was run for the target facts, and termination modify_lin was actually proved rather than replaced by a compile-only framework.",
 		)
 	}
 	if mode == "debate" {
 		lines = append(lines, "- Debate verifier strategy: synthesize the adversarial result; concrete critic falsification of weakened semantics, fuel/default_fuel shortcuts, missing equivalence, or hidden assumptions overrides proposer confidence.")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func coqProofTaskGuidance(userPrompt string) string {
+	if !looksLikeCoqProofTask(userPrompt) {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("- Coq/Rocq workflow: create a self-contained project with _CoqProject/Makefile when converting uploaded sources, keep original semantic names mapped in comments or theorem names, and run make or coqc from the project root.\n")
+	b.WriteString("- Coq/Rocq modeling rule: make the target theorem explicit before coding the proof. For an Isabelle termination benchmark, name the Coq theorem that corresponds to original termination modify_lin, define the intended well-founded relation or semantic equivalence, and keep a traceable mapping from Isabelle constructors/functions to Coq definitions. The theorem must mention modify_lin and the relevant relation/equivalence/decrease invariant; a tautology, length-only lemma, or theorem about a bounded evaluator is not sufficient.\n")
+	b.WriteString("- Coq/Rocq audit: scan only project source for Axiom, Parameter, Variable, Hypothesis, Conjecture, Admitted, admit, Abort, sorry, TODO, placeholder, quick_and_dirty, Guard Checking, bypass_check, modify_lin_fuel, default_fuel, fixed_fuel, fuel_wrapper, and fuel wrappers; then run Print Assumptions on the target theorem(s) and require Closed under the global context.\n")
+	b.WriteString("- Coq/Rocq termination rule: structural recursion, Program Fixpoint, Function, Equations, or well-founded recursion is acceptable only when the visible theorem proves the original modify_lin termination/equivalence obligation; fixed fuel wrappers are unresolved unless equivalence, decrease, and fuel sufficiency are proved.\n")
+	return b.String()
+}
+
+func isabelleProofTaskGuidance(userPrompt string) string {
+	if !looksLikeIsabelleProofTask(userPrompt) {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("- Isabelle workflow: keep the uploaded ROOT/Model.thy/Termination.thy semantics intact unless the user explicitly asks for a new session; when ROOT names subdirectories such as directories \"HWQ-U\", either recreate that layout or minimally adjust ROOT to the visible project layout before proving, and document the mapping. Write any new proof project under the requested cwd and run isabelle build -D <project> or isabelle build -d <parent> <session> with a long timeout when needed. Do not start long Isabelle builds as detached/background jobs unless you also wait for completion and capture the final output in the same turn.\n")
+	b.WriteString("- Isabelle scratch discipline: use a scratch directory or temporary theory outside the final ROOT session for extracting generated subgoals. Scratch probes must not use sorry/quick_and_dirty/oops/sketch/admit as fake proof steps; obtain subgoals by running an incomplete candidate proof and capturing Isabelle's failure output. If you create Repro.thy, *_original.thy, scratch theories, or diagnostic ROOT imports, remove them from the final project and restore ROOT before the final source scan/build. The final source scan must cover only deliverable ROOT/.thy files and must not report leftovers from failed attempts.\n")
+	b.WriteString("- Isabelle audit: scan source-only deliverable files for sorry, quick_and_dirty, oops, sketch, admit, TODO, placeholder, disabled checks, Repro.thy, *_original.thy, and scratch leftovers; inspect ROOT for quick_and_dirty and diagnostic imports; run thm_oracles or an equivalent oracle audit on the target theorem(s) and report the result.\n")
+	b.WriteString("- Isabelle termination workflow: first extract the generated termination subgoals in scratch, then restore the final project and try Isabelle's lexicographic_order once, followed by at most two concrete relation/measure/measures attempts; before using guessed simp facts such as *_def rules, confirm them with find_theorems name:<pattern> or thm <fact>. After the bounded attempts, summarize the exact recursive calls, undefined facts, and failed decrease goals instead of continuing blind search.\n")
+	b.WriteString("- Isabelle termination rule: for termination modify_lin, prove the original function termination obligation with a concrete measure/relation and branch decrease lemmas; a compile-only framework, weakened theorem, removed recursion, changed function semantics, or remaining sorry is unresolved.\n")
+	return b.String()
 }
 
 func looksLikeFormalProofTask(text string) bool {
@@ -5007,6 +5058,17 @@ func looksLikeFormalProofTask(text string) bool {
 	})
 }
 
+func looksLikeCoqProofTask(text string) bool {
+	lower := strings.ToLower(text)
+	return containsAny(lower, []string{"coq", "rocq", ".v", "_coqproject", "coqc", "print assumptions"})
+}
+
+func looksLikeIsabelleProofTask(text string) bool {
+	lower := strings.ToLower(text)
+	return containsAny(lower, []string{"isabelle", ".thy", "thm_oracles", "quick_and_dirty"}) ||
+		(strings.Contains(lower, "termination.thy") && strings.Contains(lower, "root") && strings.Contains(lower, "model.thy") && containsAny(lower, []string{"termination", "modify_lin", "sorry"}))
+}
+
 func looksLikeCoqUploadProofBenchmark(text string) bool {
 	lower := strings.ToLower(text)
 	return strings.Contains(lower, "coq") &&
@@ -5014,6 +5076,14 @@ func looksLikeCoqUploadProofBenchmark(text string) bool {
 		strings.Contains(lower, "termination.thy") &&
 		strings.Contains(lower, "root") &&
 		containsAny(lower, []string{"补全缺失的证明", "占位符", "placeholder", "modify_lin", "termination"})
+}
+
+func looksLikeIsabelleUploadProofBenchmark(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "model.thy") &&
+		strings.Contains(lower, "termination.thy") &&
+		strings.Contains(lower, "root") &&
+		containsAny(lower, []string{"isabelle", "termination modify_lin", "modify_lin", "sorry", "主定理", "终止"})
 }
 
 func trimForPrompt(value string, max int) string {
@@ -5497,6 +5567,9 @@ func formalProofAssessmentGap(userPrompt string, history []orchestrationTurn, ch
 	if looksLikeCoqUploadProofBenchmark(userPrompt) {
 		return coqUploadProofAssessmentGap(history, changes)
 	}
+	if looksLikeIsabelleUploadProofBenchmark(userPrompt) {
+		return isabelleUploadProofAssessmentGap(history, changes)
+	}
 	if !requiresStrictFormalProofAssessment(userPrompt) {
 		evidence := collectProofAssessmentEvidence(history, changes)
 		if evidence.fuelShortcut && !evidence.fuelJustified {
@@ -5537,8 +5610,47 @@ func coqUploadProofAssessmentGap(history []orchestrationTurn, changes workspaceC
 	if !evidence.originalObligation {
 		missing = append(missing, "original termination/modify_lin obligation audit evidence is missing")
 	}
+	if evidence.semanticWeakening {
+		return "formal proof assessment failed: target definition/theorem appears semantically weakened or lacks equivalence to the original recursive modify_lin obligation", true
+	}
+	if evidence.trivialObligation {
+		return "formal proof assessment failed: tautological/reflexivity theorem does not discharge the original termination/modify_lin obligation", true
+	}
 	if evidence.fuelShortcut && !evidence.fuelJustified {
 		return "formal proof assessment failed: modify_lin_fuel/default_fuel or fuel shortcut is present without explicit equivalence, decrease, and fuel-sufficiency evidence", true
+	}
+	if len(missing) > 0 {
+		return "formal proof assessment incomplete: " + strings.Join(missing, "; "), true
+	}
+	return "", false
+}
+
+func isabelleUploadProofAssessmentGap(history []orchestrationTurn, changes workspaceChangeReport) (string, bool) {
+	evidence := collectProofAssessmentEvidence(history, changes)
+	var missing []string
+	if !evidence.coqInputs {
+		missing = append(missing, "uploaded Model.thy/Termination.thy/ROOT were not accounted for")
+	}
+	if !evidence.projectPath {
+		missing = append(missing, "new Isabelle project folder under the requested cwd is not evidenced")
+	}
+	if !evidence.proofBuild {
+		missing = append(missing, "Isabelle build evidence is missing")
+	}
+	if !evidence.placeholderScan {
+		missing = append(missing, "source scan for sorry/quick_and_dirty/oops/sketch/admit/placeholders is missing")
+	}
+	if !evidence.assumptionAudit {
+		missing = append(missing, "Isabelle thm_oracles/oracle-free audit evidence is missing")
+	}
+	if !evidence.originalObligation {
+		missing = append(missing, "original termination/modify_lin obligation audit evidence is missing")
+	}
+	if evidence.semanticWeakening {
+		return "formal proof assessment failed: target theorem/function appears weakened or replaced instead of proving original termination modify_lin", true
+	}
+	if evidence.trivialObligation {
+		return "formal proof assessment failed: tautological/reflexivity theorem does not discharge the original termination/modify_lin obligation", true
 	}
 	if len(missing) > 0 {
 		return "formal proof assessment incomplete: " + strings.Join(missing, "; "), true
@@ -5568,6 +5680,12 @@ func genericFormalProofAssessmentGap(userPrompt string, history []orchestrationT
 	if evidence.fuelShortcut && !evidence.fuelJustified {
 		return "formal proof assessment failed: bounded/fuel wrapper is present without explicit equivalence, decrease, and sufficiency evidence", true
 	}
+	if evidence.semanticWeakening {
+		return "formal proof assessment failed: target theorem/function appears weakened or lacks required equivalence evidence", true
+	}
+	if evidence.trivialObligation {
+		return "formal proof assessment failed: tautological/reflexivity theorem does not discharge the requested proof obligation", true
+	}
 	if len(missing) > 0 {
 		return "formal proof assessment incomplete: " + strings.Join(missing, "; "), true
 	}
@@ -5582,6 +5700,8 @@ type proofAssessmentEvidence struct {
 	placeholderScan    bool
 	assumptionAudit    bool
 	originalObligation bool
+	semanticWeakening  bool
+	trivialObligation  bool
 	fuelShortcut       bool
 	fuelJustified      bool
 }
@@ -5597,9 +5717,11 @@ func collectProofAssessmentEvidence(history []orchestrationTurn, changes workspa
 		projectPath:        proofProjectPathEvidence(combined, changes),
 		proofBuild:         proofBuildEvidence(combined),
 		coqBuild:           coqBuildEvidence(combined),
-		placeholderScan:    placeholderScanEvidence(commandLower, outputLower, text),
-		assumptionAudit:    proofAssumptionAuditEvidence(combined),
+		placeholderScan:    placeholderScanEvidenceForHistory(history, text),
+		assumptionAudit:    proofAssumptionAuditEvidence(history, combined),
 		originalObligation: originalProofObligationEvidence(combined),
+		semanticWeakening:  semanticWeakeningEvidence(combined),
+		trivialObligation:  trivialProofObligationEvidence(combined),
 		fuelShortcut:       fuelShortcutEvidence(outputLower, text),
 		fuelJustified:      fuelJustificationEvidence(combined),
 	}
@@ -5637,12 +5759,39 @@ func proofAssessmentCommandText(history []orchestrationTurn) (string, string) {
 }
 
 func proofProjectPathEvidence(text string, changes workspaceChangeReport) bool {
-	if len(changes.Changed) > 0 {
+	if projectPathInWorkspaceChanges(changes) {
 		return true
 	}
 	return containsAny(text, []string{
-		"new coq project", "coq project", "新建文件夹", "新建 coq", "项目目录", "project=", "/root/tencent/coq-", "coq-lin-lattice",
+		"new coq project", "new coq project folder", "coq project folder", "coq project", "新建文件夹", "新建 coq", "新建 coq 项目", "项目目录", "项目文件夹", "项目路径", "project=", "/root/tencent/coq-", "/home/zy/study/coq-", "coq-lin-lattice",
+		"new isabelle project", "new isabelle project folder", "isabelle project folder", "isabelle project", "新建 isabelle", "新建 isabelle 项目", "isabelle 项目", "/home/zy/study/isabelle", "termination_framework", "isabelle_modified_project",
 	})
+}
+
+func projectPathInWorkspaceChanges(changes workspaceChangeReport) bool {
+	for _, changed := range changes.Changed {
+		rel := filepath.ToSlash(strings.TrimSpace(changed))
+		if rel == "" || strings.HasPrefix(rel, ".codex-bridge/") || strings.HasPrefix(rel, "./") {
+			continue
+		}
+		parts := strings.Split(rel, "/")
+		if len(parts) < 2 || parts[0] == "" || strings.HasPrefix(parts[0], ".") {
+			continue
+		}
+		if proofProjectFileName(parts[len(parts)-1]) {
+			return true
+		}
+	}
+	return false
+}
+
+func proofProjectFileName(name string) bool {
+	switch strings.ToLower(name) {
+	case "model.v", "termination.v", "makefile", "_coqproject", "root", "model.thy", "termination.thy":
+		return true
+	default:
+		return strings.HasSuffix(strings.ToLower(name), ".thy") || strings.HasSuffix(strings.ToLower(name), ".v")
+	}
 }
 
 func proofBuildEvidence(text string) bool {
@@ -5659,19 +5808,56 @@ func coqBuildEvidence(text string) bool {
 }
 
 func placeholderScanEvidence(commandText, outputText, proseText string) bool {
+	commandText = strings.ToLower(commandText)
+	outputText = strings.ToLower(outputText)
+	proseText = strings.ToLower(proseText)
+	if placeholderScanFoundForbiddenOutput(outputText) {
+		return false
+	}
 	if containsAny(proseText, []string{
 		"no placeholders", "no forbidden tokens", "没有占位符", "未发现占位符", "无占位符",
-		"未发现 admitted", "未发现 axiom", "未发现 sorry", "no admitted", "no axiom", "no sorry",
+		"未发现 admitted", "未发现 axiom", "未发现 sorry", "未发现 quick_and_dirty", "no admitted", "no axiom", "no sorry", "no quick_and_dirty",
 		"source-only placeholder scan",
 	}) {
 		return true
 	}
-	if containsAny(commandText, []string{"rg ", "grep ", "ripgrep"}) &&
-		containsAny(commandText, forbiddenProofShortcutSignals()) &&
-		!placeholderScanFoundForbiddenOutput(outputText) {
+	if isProofShortcutScanCommand(commandText) && strings.TrimSpace(outputText) == "" {
 		return true
 	}
 	return false
+}
+
+func placeholderScanEvidenceForHistory(history []orchestrationTurn, proseText string) bool {
+	sawScan := false
+	emptyScan := false
+	for _, command := range commandStates(history) {
+		commandText := strings.ToLower(command.Command)
+		if !isProofShortcutScanCommand(commandText) {
+			continue
+		}
+		sawScan = true
+		outputText := strings.ToLower(command.Output)
+		if placeholderScanFoundForbiddenOutput(outputText) {
+			return false
+		}
+		if strings.TrimSpace(outputText) == "" || scanOutputSaysNoMatches(outputText) {
+			emptyScan = true
+		}
+	}
+	if sawScan {
+		return emptyScan
+	}
+	return placeholderScanEvidence("", "", proseText)
+}
+
+func isProofShortcutScanCommand(commandText string) bool {
+	return containsAny(commandText, []string{"rg ", "grep ", "ripgrep"}) &&
+		containsAny(commandText, forbiddenProofShortcutSignals())
+}
+
+func scanOutputSaysNoMatches(outputText string) bool {
+	lower := strings.ToLower(strings.TrimSpace(outputText))
+	return lower == "" || containsAny(lower, []string{"no matches", "no output", "not found", "无输出"})
 }
 
 func placeholderScanFoundForbiddenOutput(outputText string) bool {
@@ -5696,12 +5882,16 @@ func placeholderScanFoundForbiddenOutput(outputText string) bool {
 
 func forbiddenProofShortcutSignals() []string {
 	return []string{
-		"admitted", "admit", "axiom", "parameter", "conjecture", "abort", "sorry", "todo", "placeholder",
-		"quick_and_dirty", "guard checking", "guardchecking", "bypass_check", "bypass check",
+		"admitted", "admit", "axiom", "parameter", "variable", "hypothesis", "conjecture", "abort", "sorry", "todo", "placeholder",
+		"quick_and_dirty", "oops", "sketch", "guard checking", "guardchecking", "bypass_check", "bypass check",
+		"repro.thy", "_original.thy", "scratch.thy", "scratch_", "diagnostic-only", "diagnostic only",
 	}
 }
 
-func proofAssumptionAuditEvidence(text string) bool {
+func proofAssumptionAuditEvidence(history []orchestrationTurn, text string) bool {
+	if sawAssumptionAuditCommand(history) {
+		return successfulAssumptionAuditCommand(history)
+	}
 	for _, line := range strings.Split(text, "\n") {
 		lower := strings.ToLower(strings.TrimSpace(line))
 		if lower == "" || lineNegatesAssumptionAudit(lower) {
@@ -5710,12 +5900,55 @@ func proofAssumptionAuditEvidence(text string) bool {
 		if containsAny(lower, []string{
 			"print assumptions", "closed under the global context", "closed under global context",
 			"#print axioms", "no axioms", "no unexpected axioms", "thm_oracles", "no oracle", "no oracles",
-			"无额外公理", "没有额外公理", "无 oracle", "无 oracles",
+			"oracle-free", "oracle free", "no isabelle oracles", "oracles: none", "oracles = []",
+			"无额外公理", "没有额外公理", "无 oracle", "无 oracles", "无 oracle 依赖", "无 oracles 依赖",
 		}) {
 			return true
 		}
 	}
 	return false
+}
+
+func sawAssumptionAuditCommand(history []orchestrationTurn) bool {
+	for _, command := range commandStates(history) {
+		if commandLooksLikeAssumptionAudit(command.Command) {
+			return true
+		}
+	}
+	return false
+}
+
+func successfulAssumptionAuditCommand(history []orchestrationTurn) bool {
+	for _, command := range commandStates(history) {
+		if !commandLooksLikeAssumptionAudit(command.Command) {
+			continue
+		}
+		if commandFailed(command) || commandOutputLooksErroneous(command.Output) {
+			continue
+		}
+		output := strings.ToLower(command.Output)
+		if containsAny(output, []string{
+			"closed under the global context", "closed under global context",
+			"no axioms", "no unexpected axioms", "no oracle", "no oracles", "oracle-free", "oracle free",
+			"oracles: none", "oracles = []", "无额外公理", "没有额外公理", "无 oracle", "无 oracles",
+		}) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandLooksLikeAssumptionAudit(command string) bool {
+	lower := strings.ToLower(command)
+	return containsAny(lower, []string{"print assumptions", "#print axioms", "thm_oracles", "print axioms"})
+}
+
+func commandOutputLooksErroneous(output string) bool {
+	lower := strings.ToLower(output)
+	return containsAny(lower, []string{
+		"error:", "toplevel input", "reference ", " was not found", "cannot find a physical path",
+		"syntax error", "failed", "exception", "错误", "失败",
+	})
 }
 
 func lineNegatesAssumptionAudit(lower string) bool {
@@ -5731,6 +5964,9 @@ func lineNegatesAssumptionAudit(lower string) bool {
 }
 
 func originalProofObligationEvidence(text string) bool {
+	if semanticWeakeningEvidence(text) || trivialProofObligationEvidence(text) {
+		return false
+	}
 	if containsAny(text, []string{
 		"original proof obligation", "original recursive semantics", "original semantics",
 		"termination modify_lin", "modify_lin termination", "well-founded", "well founded",
@@ -5740,6 +5976,29 @@ func originalProofObligationEvidence(text string) bool {
 		return true
 	}
 	return false
+}
+
+func semanticWeakeningEvidence(text string) bool {
+	lower := strings.ToLower(text)
+	return containsAny(lower, []string{
+		"semantically weakens", "semantic weakening", "weakened theorem", "weakened statement",
+		"changed function semantics", "lacks equivalence", "without equivalence", "missing equivalence",
+		"does not prove equivalence", "not equivalent", "not the original recursive semantics",
+		"not original recursive semantics", "helper-only", "compile-only", "not just structural helper totality",
+		"改成了结构递归 helper", "改成了结构化 helper", "一次性结构递归", "不是原始", "不是原始递归语义",
+		"缺少与原", "缺少等价", "没有证明它与原", "没有证明原递归", "语义弱化", "不能直接算作完成",
+		"不能判定完成", "不满足用户要求",
+	})
+}
+
+func trivialProofObligationEvidence(text string) bool {
+	lower := strings.ToLower(text)
+	return containsAny(lower, []string{
+		"exists r, modify_lin", "exists r, modify_loop", "exists r,",
+		"eexists. reflexivity", "exists (modify_lin", "reflexivity theorem",
+		"tautology", "tautological", "length-only lemma",
+		"反身性定理", "平凡定理", "重言式", "只证明 exists", "只证明存在",
+	})
 }
 
 func fuelShortcutEvidence(outputText, proseText string) bool {
@@ -5901,7 +6160,7 @@ func hasUnresolvedAcceptanceSignal(text, userPrompt string) bool {
 	if containsAny(lower, []string{
 		"main theorem", "主定理", "termination modify_lin", "modify_lin",
 	}) && containsAny(lower, []string{
-		"sorry", "未消除", "没有消除", "还保留", "placeholder", "占位",
+		"sorry", "oops", "sketch", "admit", "未消除", "没有消除", "还保留", "placeholder", "占位",
 	}) {
 		if lineNegatesFuelShortcut(lower) || containsAny(lower, []string{"no placeholders", "no forbidden tokens", "没有占位符", "无占位符", "source-only placeholder scan"}) {
 			return false
@@ -5925,7 +6184,7 @@ func hasUnresolvedAcceptanceSignal(text, userPrompt string) bool {
 func hasExplicitUnresolvedSorryRisk(lower string) bool {
 	return containsAny(lower, []string{
 		"sorry placeholder", "sorry placeholders", "still contains sorry", "contains sorry",
-		"quick_and_dirty", "可编译的证明框架", "证明框架可编译", "不是完整证明",
+		"still contains oops", "contains oops", "quick_and_dirty", "可编译的证明框架", "证明框架可编译", "不是完整证明",
 		"不是完全无 sorry", "not without sorry", "not fully without sorry", "not a completed proof",
 	})
 }
@@ -5968,10 +6227,7 @@ func fuelTerminationGapContext(text string) string {
 		if lineNegatesFuelShortcut(lower) {
 			continue
 		}
-		if containsAny(lower, []string{
-			"没有证明", "未证明", "没有证", "下降", "等价", "足够模拟", "固定", "绕过",
-			"not prove", "not proved", "without proving", "equivalence", "decrease", "sufficient",
-		}) {
+		if lineHasExplicitProofGap(lower) || lineHasFuelBypassGap(lower) {
 			return fuelTerminationContextLines(lines, i)
 		}
 	}
@@ -6004,7 +6260,20 @@ func lineLooksLikeFuelTerminationDetail(line string) bool {
 		return false
 	}
 	return containsAny(lower, []string{"modify_lin", "default_fuel", "fuel", "燃料", "termination", "distance", "递归", "证明"}) &&
-		containsAny(lower, []string{"没有证明", "未证明", "没有证", "下降", "等价", "足够模拟", "固定", "绕过", "not prove", "not proved", "without proving", "equivalence", "decrease", "sufficient"})
+		(lineHasExplicitProofGap(lower) || lineHasFuelBypassGap(lower))
+}
+
+func lineHasExplicitProofGap(lower string) bool {
+	return containsAny(lower, []string{
+		"没有证明", "未证明", "没有证", "缺少证明", "缺少等价", "缺少下降", "缺少足够", "未提供证明",
+		"not prove", "not proved", "without proving", "lacks proof", "missing proof", "missing equivalence",
+		"missing decrease", "missing sufficiency", "not sufficient", "insufficient",
+	})
+}
+
+func lineHasFuelBypassGap(lower string) bool {
+	return containsAny(lower, []string{"default_fuel", "modify_lin_fuel", "bounded fuel", "fuel wrapper", "固定 fuel", "固定燃料", "燃料包装", "绕过"}) &&
+		containsAny(lower, []string{"固定", "wrapper", "包装", "绕过", "without", "lacks", "missing", "equivalence", "decrease", "sufficient", "sufficiency", "等价", "下降", "足够模拟", "足够性", "未证明", "没有证明", "缺少"})
 }
 
 func lineNegatesFuelShortcut(lower string) bool {

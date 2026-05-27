@@ -108,6 +108,62 @@ axioms, Isabelle `thm_oracles <target>` plus scans for `sorry` /
 recursive call or measure and the exact decrease / well-founded proof obligation
 rather than accepting a wrapper that merely bounds execution.
 
+The proof-strategy prompts follow the standard proof-assistant workflows rather
+than ad hoc completion claims. Isabelle/HOL total functions must discharge
+termination: the worker may try `lexicographic_order`, but after that it should
+use an explicit `relation` / `measure` or `measures` proof and record the
+well-foundedness and recursive-call decrease subgoals. Coq/Rocq proof claims are
+not accepted from compilation alone; the verifier must run `Print Assumptions`
+on the target theorem and require `Closed under the global context`, and source
+scans must also catch `Variable` / `Hypothesis` trust shortcuts when they are
+used as fake proof assumptions.
+
+Proof exploration is intentionally bounded. After three failed proof strategies
+or one long proof-assistant build/proof attempt, the worker should stop blind
+search and hand off a compact obligation ledger instead of trying another
+similar measure guess. That ledger names the failed goals, attempted
+measures/relations, semantic constraints, and the next lemma that would need to
+be proved. This lets the next role review or switch strategy while the browser
+still receives a timely, user-visible assessment.
+
+Isabelle upload tasks get an Isabelle-specific prompt block in addition to the
+generic proof guardrails. The Bridge tells the worker to keep the uploaded
+`ROOT`, `Model.thy`, and `Termination.thy` semantics intact, create a visible
+new project folder under the requested working directory rather than treating the
+hidden `.codex-bridge` upload staging directory as the deliverable, and preserve
+or explicitly remap `ROOT` directory declarations such as `directories "HWQ-U"`
+so the first build reaches the real proof obligation instead of failing on a
+missing copied layout. The worker then runs `isabelle build` with a long timeout,
+scans source files and `ROOT` for
+`sorry`, `quick_and_dirty`, `oops`, `sketch`, `admit`, and placeholders, run
+`thm_oracles` or an equivalent oracle-free audit, and treat `termination
+modify_lin` as the original obligation. Generated-subgoal probes and failed
+measure attempts must stay in scratch space or be removed before the final
+build; even scratch probes must not use `sorry`, `quick_and_dirty`, `oops`,
+`sketch`, or `admit` as fake proof steps. Subgoals should be obtained by running
+an incomplete candidate proof and capturing Isabelle's failure output. Before a
+worker uses guessed simplification facts such as `_def` rules, it must confirm
+them with `find_theorems name:<pattern>` or `thm <fact>` and include undefined
+fact failures in the obligation ledger. Deliverable projects may not keep
+`Repro.thy`, `*_original.thy`, scratch theories, or diagnostic-only `ROOT`
+imports. A compile-only framework, weakened theorem, changed function semantics,
+remaining fake proof, diagnostic leftover, or detached background build whose
+final output is not captured in the same turn cannot satisfy the task.
+
+Coq/Rocq conversion tasks get a separate Coq-specific prompt block. The Bridge
+requires a self-contained `_CoqProject`/`Makefile` style project in a visible new
+folder under the requested working directory, not just files left in the hidden
+upload staging directory. It also requires a source-only scan for Coq trust
+bypasses including `Axiom`, `Parameter`, `Variable`, `Hypothesis`,
+`Conjecture`, `Admitted`, `Guard Checking`, `bypass_check`, and fuel wrappers,
+and `Print Assumptions` output showing `Closed under the global context`. The
+target theorem must name the translated `modify_lin` obligation and mention the
+chosen well-founded relation, semantic equivalence, or branch-decrease
+invariant; tautologies, length-only lemmas, and bounded-evaluator statements do
+not count as the original proof obligation. Fixed-fuel translations remain
+unresolved unless the result also proves equivalence, decrease, and fuel
+sufficiency.
+
 The debate path must converge through adversarial evidence, not role labels
 alone. A proposer handoff is only useful if the critic can falsify it with a
 specific check. A critic finding that the patch relies on `default_fuel`,
@@ -171,6 +227,14 @@ relevant checks. After that single remediation turn, the Bridge recomputes the
 workspace diff and the multi-dimensional assessment; only a still-failing result
 is emitted as `run.error`.
 
+If the selected Bridge disconnects while an orchestration is queued or running,
+the Hub also emits the existing `run.error` event kind with browser-visible
+diagnostic content. That content must distinguish a transport/CLI interruption
+from a proof acceptance result and include a short summary of recent progress
+from stored orchestration events when available. This keeps the web UI from
+showing only a generic offline error when the user is using the page as the
+smoke-test surface.
+
 For the Coq upload benchmark using `Model.thy`, `Termination.thy`, and `ROOT`,
 a resolved handoff is insufficient unless the final record contains evidence for
 all required proof dimensions: the uploaded files were accounted for, a new Coq
@@ -202,7 +266,8 @@ browser sees `run.error` with the failed dimensions instead of a generic
 - Existing `turn.start`, `turn.delta`, `command.start`, `command.end`,
   `turn.end`, and `run.end` events remain the only emitted successful-path event
   kinds. Repeated blockers use the existing `run.error` event kind. The verifier
-  is represented as another normal turn with a verifier turn id.
+  is represented as another normal turn with a verifier turn id. Bridge
+  disconnect diagnostics also use the existing `run.error` event kind.
 - Terminal `run.end` and `run.error` content carries the browser-visible result
   assessment; no new event kind or protocol payload field is introduced.
 
@@ -253,8 +318,14 @@ browser sees `run.error` with the failed dimensions instead of a generic
   fuel-wrapper solutions unless equivalence and termination obligations are
   proved.
 - The Coq upload smoke task cannot complete unless the visible assessment covers
-  uploaded input mapping, new project folder, Coq build, placeholder scan,
-  `Print Assumptions` / `Closed under the global context` audit, and the original
+  uploaded input mapping, new project folder outside hidden upload staging, Coq
+  build, placeholder scan, `Print Assumptions` / `Closed under the global
+  context` audit, and the original `termination modify_lin` obligation.
+- The Isabelle upload smoke task cannot complete unless the visible assessment
+  covers uploaded input mapping, new Isabelle project folder outside hidden
+  upload staging, `isabelle build`, source-only fake-proof scan, `thm_oracles` /
+  oracle-free audit, no diagnostic leftovers in the final `ROOT` / `.thy`
+  files, no detached background build left unresolved, and the original
   `termination modify_lin` obligation.
 - The local CCB path cannot report a generic completed result for proof tasks;
   its final browser-visible `run.end` / `run.error` content must be the same

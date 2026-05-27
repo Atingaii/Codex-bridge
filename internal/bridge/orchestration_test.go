@@ -809,10 +809,67 @@ func TestComposeOrchestrationPromptAddsFormalProofGuardrails(t *testing.T) {
 		"Lean #print axioms <target>",
 		"Isabelle thm_oracles <target>",
 		"proof-obligation ledger",
+		"Exploration budget",
+		"three failed proof strategies",
+		"Do not spend the entire turn repeating similar measure guesses",
+		"Coq/Rocq workflow",
+		"Coq/Rocq modeling rule",
+		"tautology",
+		"length-only lemma",
+		"Coq/Rocq audit",
+		"Variable, Hypothesis",
+		"modify_lin_fuel",
+		"default_fuel",
+		"Coq/Rocq termination rule",
 		"Implementer strategy",
+		"minimal reproducible obligation",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("formal proof prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestComposeOrchestrationPromptAddsIsabelleProofGuardrails(t *testing.T) {
+	prompt := composeOrchestrationPrompt(
+		"collaboration",
+		"已上传 Model.thy、Termination.thy、ROOT。请在 Isabelle 中补全 termination modify_lin 证明，不能用 sorry 或 quick_and_dirty。",
+		"",
+		false,
+		"implementer",
+		"claude",
+		1,
+		4,
+		nil,
+	)
+	for _, want := range []string{
+		"Formal proof task guardrails",
+		"Isabelle workflow",
+		"directories \"HWQ-U\"",
+		"isabelle build -D <project>",
+		"detached/background jobs",
+		"Isabelle scratch discipline",
+		"scratch directory",
+		"Scratch probes must not use sorry/quick_and_dirty/oops/sketch/admit",
+		"incomplete candidate proof",
+		"Repro.thy",
+		"*_original.thy",
+		"restore ROOT",
+		"Isabelle audit",
+		"thm_oracles",
+		"quick_and_dirty",
+		"Isabelle termination workflow",
+		"generated subgoals",
+		"lexicographic_order once",
+		"at most two concrete relation/measure/measures attempts",
+		"find_theorems name:<pattern>",
+		"undefined facts",
+		"Isabelle termination rule",
+		"termination modify_lin",
+		"compile-only framework",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("Isabelle proof prompt missing %q:\n%s", want, prompt)
 		}
 	}
 }
@@ -1151,15 +1208,47 @@ func TestResolvedProofRunAllowsForbiddenTokenScanCommand(t *testing.T) {
 }
 
 func TestPlaceholderScanChecksCoqTrustBypasses(t *testing.T) {
-	command := `rg -n "\b(Axiom|Parameter|Conjecture|Admitted|admit|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check)\b" coq-proj -S`
+	command := `rg -n "\b(Axiom|Parameter|Variable|Hypothesis|Conjecture|Admitted|admit|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check)\b" coq-proj -S`
 	if !placeholderScanEvidence(command, "", "") {
 		t.Fatal("expected source scan covering Coq trust bypasses with empty output to count as evidence")
 	}
-	if !placeholderScanFoundForbiddenOutput("Model.v:12:Unset Guard Checking.\nTermination.v:4:Parameter trusted : Prop.\n") {
-		t.Fatal("expected guard checking and Parameter output to be forbidden proof shortcuts")
+	if !placeholderScanFoundForbiddenOutput("Model.v:12:Unset Guard Checking.\nTermination.v:4:Hypothesis trusted : Prop.\n") {
+		t.Fatal("expected guard checking and Hypothesis output to be forbidden proof shortcuts")
 	}
 	if !placeholderScanFoundForbiddenOutput("Model.v:20:Definition bypass_check := true.\n") {
 		t.Fatal("expected bypass_check output to be a forbidden proof shortcut")
+	}
+}
+
+func TestPlaceholderScanOutputOverridesNoPlaceholderClaim(t *testing.T) {
+	command := `rg -n "sorry|quick_and_dirty|oops|sketch|admit|TODO|placeholder" isabelle-proj -g "*.thy" -g ROOT -S`
+	output := "Termination.thy:12:  oops\n"
+	if placeholderScanEvidence(command, output, "source-only placeholder scan：无输出。") {
+		t.Fatal("forbidden scan output must override a no-placeholder prose claim")
+	}
+}
+
+func TestPlaceholderScanRejectsIsabelleDiagnosticLeftovers(t *testing.T) {
+	command := `rg -n "sorry|quick_and_dirty|oops|sketch|admit|TODO|placeholder|Repro\\.thy|_original\\.thy|scratch" isabelle-proj -g "*.thy" -g ROOT -S`
+	output := "ROOT:6:    Repro\nHWQ-U/Termination_original.thy:4:termination modify_lin\n"
+	if placeholderScanEvidence(command, output, "source-only placeholder scan：无输出。") {
+		t.Fatal("diagnostic leftover files/imports must not satisfy placeholder scan evidence")
+	}
+	if !placeholderScanFoundForbiddenOutput(output) {
+		t.Fatal("expected Repro.thy and *_original.thy scan output to be forbidden")
+	}
+}
+
+func TestPlaceholderScanIgnoresEarlierNonScanBuildOutput(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_verifier", "reviewer", "codex", "source-only placeholder scan：rg 无输出。", []RunnerToolEvent{
+			{ID: "build1", Status: "failed", Command: "isabelle build -D isabelle-proj", Output: "Termination.thy: sorry", ExitCode: &exitCode},
+			{ID: "scan", Status: "completed", Command: `rg -n "sorry|quick_and_dirty|oops|sketch|admit|TODO|placeholder" isabelle-proj -g "*.thy" -g ROOT -S`, Output: "", ExitCode: &exitCode},
+		}),
+	}
+	if !placeholderScanEvidenceForHistory(history, "") {
+		t.Fatal("a later empty source scan should satisfy scan evidence despite earlier non-scan build output")
 	}
 }
 
@@ -1209,6 +1298,172 @@ func TestResolvedCoqUploadRunWithFullAssessmentPasses(t *testing.T) {
 	reason, unresolved := unresolvedFinalRun("把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT", history, workspaceChangeReport{Available: true, Changed: []string{"coq-lin-lattice-visible-smoke/Model.v", "coq-lin-lattice-visible-smoke/Termination.v", "coq-lin-lattice-visible-smoke/Makefile"}})
 	if unresolved {
 		t.Fatalf("full Coq upload assessment should pass: %q", reason)
+	}
+}
+
+func TestCoqUploadRunDoesNotTreatStagedUploadsAsProjectFolder(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_verifier", "reviewer", "codex", strings.Join([]string{
+			"最终结论：通过。Model.thy、Termination.thy、ROOT 均已转换；make 通过；source-only placeholder scan 无输出；Coq Print Assumptions 显示 Closed under the global context；original proof obligation termination modify_lin 使用 well-founded measure 证明。",
+			"",
+			"Msg: to=user; intent=final; need=none",
+			"Handoff: status=resolved; changed=.codex-bridge/orchestrations/orc_x/01-ROOT; verified=make/rg/coqtop; next=none; risks=none",
+		}, "\n"), []RunnerToolEvent{
+			{ID: "build", Status: "completed", Command: "make -C /home/zy/study/.codex-bridge/orchestrations/orc_x", Output: "COQC Model.v\nCOQC Termination.v\n", ExitCode: &exitCode},
+			{ID: "scan", Status: "completed", Command: `rg -n "\b(Axiom|Admitted|admit|Parameter|Conjecture|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check)\b" /home/zy/study/.codex-bridge/orchestrations/orc_x -S`, Output: "", ExitCode: &exitCode},
+			{ID: "assumptions", Status: "completed", Command: "coqtop -batch -l AssumptionAudit.v", Output: "Print Assumptions modify_lin_termination.\nClosed under the global context\n", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT", history, workspaceChangeReport{Available: true, Changed: []string{".codex-bridge/orchestrations/orc_x/01-ROOT", ".codex-bridge/orchestrations/orc_x/02-Model.thy", ".codex-bridge/orchestrations/orc_x/03-Termination.thy"}})
+	if !unresolved {
+		t.Fatal("staged upload files under .codex-bridge must not satisfy new project folder evidence")
+	}
+	if !strings.Contains(reason, "new Coq project folder") {
+		t.Fatalf("reason should mention missing new project folder: %q", reason)
+	}
+}
+
+func TestCoqUploadRunRejectsSemanticWeakeningDespiteAudits(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_reviewer", "reviewer", "codex", strings.Join([]string{
+			"结论：当前 /root/tencent/coq-lin-lattice-proof-20260527 不能判定完成。",
+			"Model.thy、Termination.thy、ROOT 均已转换到新 Coq 项目目录；make 通过；source-only placeholder scan 无输出；Print Assumptions 显示 Closed under the global context。",
+			"但当前 Coq 版本把原始自递归 modify_lin 改成了结构递归 helper modify_loop，不是原始递归语义，缺少与原 Isabelle 递归语义的等价证明，也没有证明每个原始递归分支按 Distance 下降。",
+			"",
+			"Msg: to=user; intent=final; need=none",
+			"Handoff: status=resolved; changed=coq-lin-lattice-proof-20260527/Termination.v; verified=make/rg/coqtop; next=prove original-step decrease/equivalence; risks=current Coq modify_lin semantically weakens original recursive definition",
+		}, "\n"), []RunnerToolEvent{
+			{ID: "build", Status: "completed", Command: "make -C /root/tencent/coq-lin-lattice-proof-20260527", Output: "COQC Model.v\nCOQC Termination.v\n", ExitCode: &exitCode},
+			{ID: "scan", Status: "completed", Command: `rg -n "\b(Axiom|Admitted|admit|Parameter|Conjecture|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check)\b" /root/tencent/coq-lin-lattice-proof-20260527 -S`, Output: "", ExitCode: &exitCode},
+			{ID: "assumptions", Status: "completed", Command: "coqtop -Q /root/tencent/coq-lin-lattice-proof-20260527 LinLattice <<'EOF'\nPrint Assumptions modify_lin_total.\nEOF", Output: "Closed under the global context\n", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT", history, workspaceChangeReport{Available: true, Changed: []string{"coq-lin-lattice-proof-20260527/Model.v", "coq-lin-lattice-proof-20260527/Termination.v", "coq-lin-lattice-proof-20260527/Makefile"}})
+	if !unresolved {
+		t.Fatal("semantic weakening must fail even when build, scan, and Print Assumptions pass")
+	}
+	if !strings.Contains(reason, "semantically weakened") &&
+		!strings.Contains(reason, "lacks equivalence") &&
+		!strings.Contains(reason, "不是原始递归语义") &&
+		!strings.Contains(reason, "缺少与原") {
+		t.Fatalf("reason should mention semantic weakening/equivalence: %q", reason)
+	}
+}
+
+func TestCoqUploadRunRejectsTautologicalModifyLinTheorem(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_reviewer", "reviewer", "codex", strings.Join([]string{
+			"最终结论：通过。Model.thy、Termination.thy、ROOT 均已转换到 /root/tencent/coq-lin-lattice-visible-smoke 这个新建 Coq 项目目录。",
+			"- Coq build：make 通过。",
+			"- source-only placeholder scan：无输出。",
+			"- Coq Print Assumptions：Closed under the global context。",
+			"- original proof obligation：termination modify_lin 由定理 forall L H bt_val, exists R, modify_lin L H bt_val = R 证明，Proof 使用 exists (modify_lin L H bt_val); reflexivity。",
+			"",
+			"Msg: to=user; intent=final; need=none",
+			"Handoff: status=resolved; changed=Model.v, Termination.v, Makefile; verified=make/rg/coqtop; next=none; risks=none",
+		}, "\n"), []RunnerToolEvent{
+			{ID: "build", Status: "completed", Command: "make -C /root/tencent/coq-lin-lattice-visible-smoke", Output: "COQC Model.v\nCOQC Termination.v\n", ExitCode: &exitCode},
+			{ID: "scan", Status: "completed", Command: `rg -n "\b(Axiom|Admitted|admit|Parameter|Conjecture|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check)\b" /root/tencent/coq-lin-lattice-visible-smoke -S`, Output: "", ExitCode: &exitCode},
+			{ID: "assumptions", Status: "completed", Command: "coqtop -batch -l AssumptionAudit.v", Output: "Print Assumptions modify_lin_total.\nClosed under the global context\n", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT", history, workspaceChangeReport{Available: true, Changed: []string{"coq-lin-lattice-visible-smoke/Model.v", "coq-lin-lattice-visible-smoke/Termination.v", "coq-lin-lattice-visible-smoke/Makefile"}})
+	if !unresolved {
+		t.Fatal("tautological exists/reflexivity theorem must not satisfy original proof obligation")
+	}
+	if !strings.Contains(reason, "tautological") && !strings.Contains(reason, "reflexivity") {
+		t.Fatalf("reason should mention tautological/reflexivity theorem: %q", reason)
+	}
+}
+
+func TestCoqAssumptionAuditRejectsErroredCoqtopOutput(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_reviewer", "reviewer", "codex", "Coq Print Assumptions 显示 Closed under the global context。", []RunnerToolEvent{
+			{ID: "assumptions", Status: "completed", Command: "coqtop -Q . LinLattice <<'EOF'\nPrint Assumptions modify_lin_total.\nEOF", Output: "Error: Cannot find a physical path bound to logical path Termination with prefix LinLattice.\nError: The reference modify_lin_total was not found in the current environment.\n", ExitCode: &exitCode},
+		}),
+	}
+	evidence := collectProofAssessmentEvidence(history, workspaceChangeReport{})
+	if evidence.assumptionAudit {
+		t.Fatal("errored coqtop output must not satisfy Print Assumptions audit evidence")
+	}
+}
+
+func TestResolvedIsabelleUploadRunRequiresAssessmentDimensions(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_verifier", "reviewer", "codex", strings.Join([]string{
+			"最终结论：项目已经创建并且 isabelle build 通过。",
+			"",
+			"Msg: to=user; intent=final; need=none",
+			"Handoff: status=resolved; changed=Model.thy, Termination.thy, ROOT; verified=isabelle build -D .; next=none; risks=none",
+		}, "\n"), []RunnerToolEvent{
+			{ID: "build", Status: "completed", Command: "isabelle build -D /root/tencent/isabelle-proof-smoke", Output: "Build completed", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("已上传 Model.thy、Termination.thy、ROOT。请补全 Isabelle 中 termination modify_lin 的证明，不能用 sorry/quick_and_dirty。", history, workspaceChangeReport{Available: true, Changed: []string{"isabelle-proof-smoke/Model.thy", "isabelle-proof-smoke/Termination.thy", "isabelle-proof-smoke/ROOT"}})
+	if !unresolved {
+		t.Fatal("Isabelle upload task should require visible multi-dimensional proof assessment")
+	}
+	for _, want := range []string{"formal proof assessment incomplete", "source scan", "thm_oracles", "termination/modify_lin"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason missing %q: %q", want, reason)
+		}
+	}
+}
+
+func TestResolvedIsabelleUploadRunWithFullAssessmentPasses(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_verifier", "reviewer", "codex", strings.Join([]string{
+			"最终结论：通过。Model.thy、Termination.thy、ROOT 均已纳入 /root/tencent/isabelle-proof-smoke 这个新建 Isabelle 项目目录。",
+			"",
+			"验收维度：",
+			"- Isabelle build：isabelle build -D /root/tencent/isabelle-proof-smoke 通过。",
+			"- source-only placeholder scan：rg 对 Model.thy、Termination.thy、ROOT 扫描 sorry/quick_and_dirty/oops/sketch/admit/TODO/placeholder，无输出。",
+			"- Isabelle thm_oracles：modify_lin 相关目标 no oracles。",
+			"- original proof obligation：termination modify_lin 使用 well-founded measure 和 branch decrease lemmas 证明原始递归终止义务。",
+			"",
+			"Msg: to=user; intent=final; need=none",
+			"Handoff: status=resolved; changed=Model.thy, Termination.thy, ROOT; verified=isabelle build/rg/thm_oracles; next=none; risks=none",
+		}, "\n"), []RunnerToolEvent{
+			{ID: "build", Status: "completed", Command: "isabelle build -D /root/tencent/isabelle-proof-smoke", Output: "Build completed", ExitCode: &exitCode},
+			{ID: "scan", Status: "completed", Command: `rg -n "sorry|quick_and_dirty|oops|sketch|admit|TODO|placeholder" /root/tencent/isabelle-proof-smoke -g "*.thy" -g ROOT -S`, Output: "", ExitCode: &exitCode},
+			{ID: "oracles", Status: "completed", Command: "isabelle process -T Pure -e 'thm_oracles modify_lin_termination'", Output: "no oracles", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("已上传 Model.thy、Termination.thy、ROOT。请补全 Isabelle 中 termination modify_lin 的证明，不能用 sorry/quick_and_dirty。", history, workspaceChangeReport{Available: true, Changed: []string{"isabelle-proof-smoke/Model.thy", "isabelle-proof-smoke/Termination.thy", "isabelle-proof-smoke/ROOT"}})
+	if unresolved {
+		t.Fatalf("full Isabelle upload assessment should pass: %q", reason)
+	}
+}
+
+func TestFormalProofAssessmentSummaryShowsUploadProjectFolderDimension(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_verifier", "reviewer", "codex", strings.Join([]string{
+			"最终结论：通过。Model.thy、Termination.thy、ROOT 均已纳入 /home/zy/study/isabelle-proof-smoke 这个新建 Isabelle 项目目录。",
+			"- Isabelle build：isabelle build -D /home/zy/study/isabelle-proof-smoke 通过。",
+			"- source-only placeholder scan：rg 扫描 sorry/quick_and_dirty/oops/sketch/admit/TODO/placeholder，无输出。",
+			"- Isabelle thm_oracles：modify_lin 相关目标 no oracles。",
+			"- original proof obligation：termination modify_lin 使用 well-founded measure 和 branch decrease lemmas 证明。",
+			"",
+			"Msg: to=user; intent=final; need=none",
+			"Handoff: status=resolved; changed=Model.thy, Termination.thy, ROOT; verified=isabelle build/rg/thm_oracles; next=none; risks=none",
+		}, "\n"), []RunnerToolEvent{
+			{ID: "build", Status: "completed", Command: "isabelle build -D /home/zy/study/isabelle-proof-smoke", Output: "Build completed", ExitCode: &exitCode},
+			{ID: "scan", Status: "completed", Command: `rg -n "sorry|quick_and_dirty|oops|sketch|admit|TODO|placeholder" /home/zy/study/isabelle-proof-smoke -g "*.thy" -g ROOT -S`, Output: "", ExitCode: &exitCode},
+			{ID: "oracles", Status: "completed", Command: "isabelle process -T Pure -e 'thm_oracles modify_lin_termination'", Output: "no oracles", ExitCode: &exitCode},
+		}),
+	}
+	summary := finalRunAssessmentSummary("已上传 Model.thy、Termination.thy、ROOT。请补全 Isabelle 中 termination modify_lin 的证明，不能用 sorry/quick_and_dirty。", history, workspaceChangeReport{Available: true, Changed: []string{"isabelle-proof-smoke/Model.thy", "isabelle-proof-smoke/Termination.thy", "isabelle-proof-smoke/ROOT"}}, "")
+	for _, want := range []string{"新建项目目录", "工作目录下的新建 Isabelle 项目路径", "Isabelle oracle 审计"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
 	}
 }
 
@@ -1503,6 +1758,26 @@ func TestComposeFinalVerifierPromptRequiresCoqUploadAssessment(t *testing.T) {
 	}
 }
 
+func TestComposeFinalVerifierPromptRequiresIsabelleUploadAssessment(t *testing.T) {
+	prompt := composeFinalVerifierPrompt("collaboration", "已上传 Model.thy、Termination.thy、ROOT。请补全 Isabelle 中 termination modify_lin 的证明，不能用 sorry/quick_and_dirty。", "", false, "verifier", "codex", nil)
+	for _, want := range []string{
+		"Isabelle upload benchmark",
+		"Model.thy/Termination.thy/ROOT were used",
+		"new Isabelle project folder",
+		"isabelle build passed",
+		"source-only scan found no sorry/quick_and_dirty",
+		"diagnostic leftovers",
+		"thm_oracles",
+		"termination modify_lin",
+		"background",
+		"compile-only framework",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("Isabelle upload verifier prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestCCBPromptAddsFormalProofAssessmentGuardrails(t *testing.T) {
 	cfg := config.Default()
 	manager := NewOrchestrationManager(&cfg)
@@ -1517,8 +1792,12 @@ func TestCCBPromptAddsFormalProofAssessmentGuardrails(t *testing.T) {
 		"Model.thy/Termination.thy/ROOT input mapping",
 		"source-only placeholder scan",
 		"Closed under the global context",
+		"_CoqProject/Makefile project shape",
+		"tautology",
+		"Variable, Hypothesis",
 		"Guard Checking",
 		"bypass_check",
+		"fixed_fuel",
 		"termination modify_lin original obligation audit",
 		"modify_lin_fuel/default_fuel",
 		orchestrationMsgContract,
@@ -1661,6 +1940,41 @@ func TestUnresolvedFinalRunRejectsCompileOnlyIsabelleProofFramework(t *testing.T
 	for _, want := range []string{"acceptance check failed", "sorry"} {
 		if !strings.Contains(strings.ToLower(reason), strings.ToLower(want)) {
 			t.Fatalf("reason missing %q: %s", want, reason)
+		}
+	}
+}
+
+func TestUnresolvedFinalRunRejectsIsabelleOopsBypass(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{{
+		TurnID:  "turn_verifier",
+		Role:    "reviewer",
+		CLI:     "codex",
+		Content: "最终结论：项目可以 build，但 termination modify_lin 的证明块以 oops 结束，因此原始终止证明没有完成。",
+		Handoff: "Handoff: status=resolved; changed=Termination.thy; verified=isabelle build -D .; next=prove termination modify_lin without oops; risks=Termination.thy contains oops, not a completed proof",
+		HandoffFields: orchestrationHandoffFields{
+			Status:   "resolved",
+			Changed:  "Termination.thy",
+			Verified: "isabelle build -D .",
+			Next:     "prove termination modify_lin without oops",
+			Risks:    "Termination.thy contains oops, not a completed proof",
+		},
+		Tools: []RunnerToolEvent{
+			{ID: "build", Status: "completed", Command: "isabelle build -D .", Output: "Build completed", ExitCode: &exitCode},
+			{ID: "scan", Status: "completed", Command: `rg -n "sorry|quick_and_dirty|oops|sketch|admit|TODO|placeholder" . -g "*.thy" -g ROOT -S`, Output: "Termination.thy:12:  oops\n", ExitCode: &exitCode},
+		},
+	}}
+	reason, unresolved := unresolvedFinalRun(
+		"已上传 Model.thy、Termination.thy、ROOT。请补全 Isabelle 中 termination modify_lin 的证明，不能用 sorry/quick_and_dirty/oops。",
+		history,
+		workspaceChangeReport{Available: true, Changed: []string{"isabelle-proof-smoke/Termination.thy"}},
+	)
+	if !unresolved {
+		t.Fatal("Isabelle oops bypass should remain unresolved")
+	}
+	for _, want := range []string{"acceptance check failed", "oops"} {
+		if !strings.Contains(strings.ToLower(reason), strings.ToLower(want)) {
+			t.Fatalf("reason missing %q: %q", want, reason)
 		}
 	}
 }

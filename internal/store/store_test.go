@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -173,6 +174,15 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 	if err := st.UpdateOrchestrationRunStatus(ctx, orchestration.ID, OrchestrationRunning, ""); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{
+		RunID:   orchestration.ID,
+		Kind:    "turn.delta",
+		Role:    "implementer",
+		CLI:     "claude",
+		Content: "已创建可见项目目录并定位 ROOT 的 HWQ-U 布局。",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	markedOrchestrations, err := st.MarkActiveOrchestrationRunsForAgentFailed(ctx, agent.ID, "offline orchestration")
 	if err != nil {
 		t.Fatal(err)
@@ -191,8 +201,13 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(orchestrationEvents) != 1 || orchestrationEvents[0].Kind != "run.error" || orchestrationEvents[0].Error != "offline orchestration" {
+	if len(orchestrationEvents) != 2 || orchestrationEvents[1].Kind != "run.error" || orchestrationEvents[1].Error != "offline orchestration" {
 		t.Fatalf("offline orchestration events = %#v", orchestrationEvents)
+	}
+	if !strings.Contains(orchestrationEvents[1].Content, "Bridge 连接") ||
+		!strings.Contains(orchestrationEvents[1].Content, "不是证明任务已经通过或失败的验收结论") ||
+		!strings.Contains(orchestrationEvents[1].Content, "已创建可见项目目录") {
+		t.Fatalf("offline orchestration run.error content missing diagnostic context: %q", orchestrationEvents[1].Content)
 	}
 	if err := st.DeleteAgent(ctx, agent.ID); err != nil {
 		t.Fatal(err)

@@ -152,6 +152,26 @@ commands, the Bridge adds one lightweight final verifier turn. It is skipped for
 clean resolved runs with verification, so successful no-change runs do not pay a
 fixed extra model call.
 
+After the final verifier and before emitting `run.end`, the Bridge performs a
+post-test result assessment from recorded turns, tool events, handoffs, and the
+workspace diff. The terminal event content is not the generic
+`Orchestration completed.` string; it is a browser-visible checklist that names
+the task acceptance criterion, workspace changes, command verification, proof
+audits when applicable, and remaining risks. If any required dimension is
+missing, the Bridge emits `run.error` with the same visible checklist so the
+browser shows why the run is not a real success.
+
+For the Coq upload benchmark using `Model.thy`, `Termination.thy`, and `ROOT`,
+a resolved handoff is insufficient unless the final record contains evidence for
+all required proof dimensions: the uploaded files were accounted for, a new Coq
+project folder under the requested working directory was written, `make` or
+`coqc` passed, source-only placeholder scans found no forbidden proof shortcuts,
+Coq `Print Assumptions` or `Closed under the global context` checked the target,
+and the original `termination modify_lin` obligation was audited. Any
+`modify_lin_fuel`, `default_fuel`, or similar bounded-fuel replacement remains a
+blocker unless the same result proves equivalence to the original recursive
+semantics, the decrease / well-founded measure, and fuel sufficiency.
+
 ## Data And Protocol Impact
 
 - No SQLite schema changes.
@@ -163,6 +183,8 @@ fixed extra model call.
   `turn.end`, and `run.end` events remain the only emitted successful-path event
   kinds. Repeated blockers use the existing `run.error` event kind. The verifier
   is represented as another normal turn with a verifier turn id.
+- Terminal `run.end` and `run.error` content carries the browser-visible result
+  assessment; no new event kind or protocol payload field is introduced.
 
 ## Implementation Steps
 
@@ -175,7 +197,11 @@ fixed extra model call.
    fallback summaries for failed turns.
 6. Add tests for compact handoff prompts, collaboration guidance, debate
    guidance, completion detection, and repeated blockers.
-7. Run full Go tests, frontend build, Go build, and doc lint.
+7. Add post-test assessment generation and proof-task evidence checks before
+   terminal run events.
+8. Ensure the frontend treats the terminal assessment as the final visible
+   conclusion, without adding a weaker fallback summary.
+9. Run full Go tests, frontend build, Go build, and doc lint.
 
 ## Exit Gates
 
@@ -194,10 +220,16 @@ fixed extra model call.
   consumed.
 - A final verifier turn runs only for file changes, failed commands/errors, or
   unresolved risks.
+- The browser timeline shows a terminal multi-dimensional result assessment for
+  completed or failed runs.
 - Formal proof prompts carry proof-specific guidance in both collaboration and
   debate modes, including explicit rejection of compile-only, weakened, or
   fuel-wrapper solutions unless equivalence and termination obligations are
   proved.
+- The Coq upload smoke task cannot complete unless the visible assessment covers
+  uploaded input mapping, new project folder, Coq build, placeholder scan,
+  `Print Assumptions` / global context audit, and the original
+  `termination modify_lin` obligation.
 - Full test and build commands pass:
   `/usr/local/go/bin/go test ./...`, `cd frontend && npm run build`,
   `CGO_ENABLED=0 /usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .`,

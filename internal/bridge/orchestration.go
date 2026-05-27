@@ -476,11 +476,12 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		workspaceChanges = diffWorkspaceSnapshots(workspaceBefore, workspaceAfter)
 	}
 	if reason, ok := unresolvedFinalRun(originalPrompt, history, workspaceChanges); ok {
+		assessment := finalRunAssessmentSummary(originalPrompt, history, workspaceChanges, reason)
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:    "run.error",
 			Status:  store.OrchestrationFailed,
 			Error:   reason,
-			Content: "Orchestration ended without satisfying the latest user task.",
+			Content: assessment,
 		})
 		return
 	}
@@ -488,7 +489,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 		Kind:    "run.end",
 		Status:  store.OrchestrationCompleted,
-		Content: "Orchestration completed.",
+		Content: finalRunAssessmentSummary(originalPrompt, history, workspaceChanges, ""),
 	})
 }
 
@@ -3930,6 +3931,271 @@ func buildTurnConclusionSummary(userPrompt string, final bool, history []orchest
 	return b.String()
 }
 
+func finalRunAssessmentSummary(userPrompt string, history []orchestrationTurn, changes workspaceChangeReport, unresolvedReason string) string {
+	zh := !explicitEnglishResponseRequested(userPrompt)
+	dimensions := finalRunAssessmentDimensions(userPrompt, history, changes)
+	if strings.TrimSpace(unresolvedReason) != "" {
+		dimensions = append(dimensions, assessmentDimension{
+			NameZH:   "最终验收",
+			NameEN:   "Final acceptance",
+			StatusZH: "未通过",
+			StatusEN: "failed",
+			DetailZH: trimForPrompt(oneLine(unresolvedReason), 360),
+			DetailEN: trimForPrompt(oneLine(unresolvedReason), 360),
+		})
+	}
+	if zh {
+		var b strings.Builder
+		if strings.TrimSpace(unresolvedReason) != "" {
+			b.WriteString("最终测试结果：未通过，不能视为满足用户要求。")
+		} else {
+			b.WriteString("最终测试结果：通过，当前记录显示用户要求已满足。")
+		}
+		b.WriteString("\n\n验收维度：")
+		for _, item := range dimensions {
+			b.WriteString("\n- ")
+			b.WriteString(item.NameZH)
+			b.WriteString("：")
+			b.WriteString(item.StatusZH)
+			if item.DetailZH != "" {
+				b.WriteString("。")
+				b.WriteString(item.DetailZH)
+			}
+		}
+		if strings.TrimSpace(unresolvedReason) != "" {
+			b.WriteString("\n\n后续动作：继续修复上面的未通过维度后再重新运行全量验证。")
+		} else {
+			b.WriteString("\n\n后续动作：无需继续编排；如需审计细节，可展开页面里的命令详情。")
+		}
+		return b.String()
+	}
+
+	var b strings.Builder
+	if strings.TrimSpace(unresolvedReason) != "" {
+		b.WriteString("Final test result: failed; the current record must not be treated as satisfying the user request.")
+	} else {
+		b.WriteString("Final test result: passed; the current record shows the user request was satisfied.")
+	}
+	b.WriteString("\n\nAssessment dimensions:")
+	for _, item := range dimensions {
+		b.WriteString("\n- ")
+		b.WriteString(item.NameEN)
+		b.WriteString(": ")
+		b.WriteString(item.StatusEN)
+		if item.DetailEN != "" {
+			b.WriteString(". ")
+			b.WriteString(item.DetailEN)
+		}
+	}
+	if strings.TrimSpace(unresolvedReason) != "" {
+		b.WriteString("\n\nNext action: fix the failed dimensions above, then rerun full verification.")
+	} else {
+		b.WriteString("\n\nNext action: no further orchestration is required; expand command details for audit evidence.")
+	}
+	return b.String()
+}
+
+type assessmentDimension struct {
+	NameZH   string
+	NameEN   string
+	StatusZH string
+	StatusEN string
+	DetailZH string
+	DetailEN string
+}
+
+func finalRunAssessmentDimensions(userPrompt string, history []orchestrationTurn, changes workspaceChangeReport) []assessmentDimension {
+	dimensions := []assessmentDimension{
+		{
+			NameZH:   "任务理解",
+			NameEN:   "Task acceptance criterion",
+			StatusZH: "已检查",
+			StatusEN: "checked",
+			DetailZH: trimForPrompt(oneLine(assessmentTaskCriterion(userPrompt)), 260),
+			DetailEN: trimForPrompt(oneLine(assessmentTaskCriterion(userPrompt)), 260),
+		},
+		finalWorkspaceAssessmentDimension(userPrompt, history, changes),
+		finalCommandAssessmentDimension(history),
+	}
+	if looksLikeFormalProofTask(userPrompt) {
+		dimensions = append(dimensions, formalProofAssessmentDimensions(userPrompt, history)...)
+	}
+	dimensions = append(dimensions, finalRiskAssessmentDimension(userPrompt, history))
+	return dimensions
+}
+
+func assessmentTaskCriterion(userPrompt string) string {
+	prompt := strings.TrimSpace(userPrompt)
+	if prompt == "" {
+		return "latest user task"
+	}
+	return prompt
+}
+
+func finalWorkspaceAssessmentDimension(userPrompt string, history []orchestrationTurn, changes workspaceChangeReport) assessmentDimension {
+	if !userTaskRequiresWorkspaceChange(userPrompt) {
+		return assessmentDimension{
+			NameZH:   "工作区变更",
+			NameEN:   "Workspace changes",
+			StatusZH: "不适用",
+			StatusEN: "not applicable",
+			DetailZH: "该任务没有明确要求写入或修改文件。",
+			DetailEN: "The task did not explicitly require writing or editing files.",
+		}
+	}
+	if hasWorkspaceChangeEvidence(history, changes) {
+		detail := workspaceChangeDetail(history, changes)
+		return assessmentDimension{
+			NameZH:   "工作区变更",
+			NameEN:   "Workspace changes",
+			StatusZH: "通过",
+			StatusEN: "passed",
+			DetailZH: detail,
+			DetailEN: detail,
+		}
+	}
+	reason := missingWorkspaceChangeReason(changes, history)
+	return assessmentDimension{
+		NameZH:   "工作区变更",
+		NameEN:   "Workspace changes",
+		StatusZH: "未通过",
+		StatusEN: "failed",
+		DetailZH: reason,
+		DetailEN: reason,
+	}
+}
+
+func workspaceChangeDetail(history []orchestrationTurn, changes workspaceChangeReport) string {
+	if len(changes.Changed) > 0 {
+		return "记录到文件变更：" + trimForPrompt(strings.Join(changes.Changed, ", "), 260)
+	}
+	for _, item := range history {
+		if meaningfulHandoffValue(item.HandoffFields.Changed) {
+			return "Handoff 记录的变更：" + trimForPrompt(oneLine(item.HandoffFields.Changed), 260)
+		}
+	}
+	return "记录到写入型命令。"
+}
+
+func finalCommandAssessmentDimension(history []orchestrationTurn) assessmentDimension {
+	completed := 0
+	failed := 0
+	for _, command := range commandStates(history) {
+		if strings.EqualFold(command.Status, "completed") {
+			completed++
+		}
+		if commandFailed(command) {
+			failed++
+		}
+	}
+	if failed > 0 {
+		detail := fmt.Sprintf("记录到 %d 个失败命令、%d 个完成命令。", failed, completed)
+		return assessmentDimension{
+			NameZH:   "命令验证",
+			NameEN:   "Command verification",
+			StatusZH: "未通过",
+			StatusEN: "failed",
+			DetailZH: detail,
+			DetailEN: detail,
+		}
+	}
+	detail := fmt.Sprintf("记录到 %d 个完成命令，未记录失败命令。", completed)
+	if completed == 0 {
+		detail = "未记录可审计的完成命令。"
+	}
+	return assessmentDimension{
+		NameZH:   "命令验证",
+		NameEN:   "Command verification",
+		StatusZH: "通过",
+		StatusEN: "passed",
+		DetailZH: detail,
+		DetailEN: detail,
+	}
+}
+
+func finalRiskAssessmentDimension(userPrompt string, history []orchestrationTurn) assessmentDimension {
+	if reason, ok := acceptanceFailureSignal(userPrompt, history); ok {
+		return assessmentDimension{
+			NameZH:   "剩余风险",
+			NameEN:   "Remaining risk",
+			StatusZH: "未通过",
+			StatusEN: "failed",
+			DetailZH: reason,
+			DetailEN: reason,
+		}
+	}
+	if len(history) > 0 {
+		last := history[len(history)-1]
+		if last.Err != "" || hasRiskyHandoff(last) {
+			detail := compactBlockerSummary(last)
+			if detail == "" {
+				detail = "最后一轮仍记录错误或风险。"
+			}
+			return assessmentDimension{
+				NameZH:   "剩余风险",
+				NameEN:   "Remaining risk",
+				StatusZH: "未通过",
+				StatusEN: "failed",
+				DetailZH: detail,
+				DetailEN: detail,
+			}
+		}
+	}
+	return assessmentDimension{
+		NameZH:   "剩余风险",
+		NameEN:   "Remaining risk",
+		StatusZH: "通过",
+		StatusEN: "passed",
+		DetailZH: "最后一轮未记录未解决风险。",
+		DetailEN: "The last turn did not report unresolved risks.",
+	}
+}
+
+func formalProofAssessmentDimensions(userPrompt string, history []orchestrationTurn) []assessmentDimension {
+	evidence := collectProofAssessmentEvidence(history, workspaceChangeReport{})
+	var dimensions []assessmentDimension
+	dimensions = append(dimensions,
+		boolAssessmentDimension("证明构建", "Proof build", evidence.proofBuild, "记录到 proof-assistant 构建或编译证据。", "缺少 proof-assistant 构建或编译证据。"),
+		boolAssessmentDimension("占位符扫描", "Placeholder scan", evidence.placeholderScan, "记录到源代码占位符/假证明扫描证据。", "缺少源代码占位符/假证明扫描证据。"),
+	)
+	if containsAny(strings.ToLower(userPrompt), []string{"coq", ".v"}) {
+		dimensions = append(dimensions, boolAssessmentDimension("假设审计", "Assumption audit", evidence.assumptionAudit, "记录到 Coq Print Assumptions 或 global context 审计证据。", "缺少 Coq Print Assumptions/global context 审计证据。"))
+	}
+	if looksLikeCoqUploadProofBenchmark(userPrompt) {
+		dimensions = append(dimensions,
+			boolAssessmentDimension("上传文件映射", "Uploaded input mapping", evidence.coqInputs, "记录到 Model.thy、Termination.thy、ROOT 均已纳入检查。", "缺少 Model.thy、Termination.thy、ROOT 全部被使用的证据。"),
+			boolAssessmentDimension("原始证明义务", "Original proof obligation", evidence.originalObligation, "记录到 termination modify_lin 原始终止性/等价义务审计。", "缺少 termination modify_lin 原始终止性/等价义务审计。"),
+		)
+		if evidence.fuelShortcut {
+			dimensions = append(dimensions, boolAssessmentDimension("燃料包装审计", "Fuel-wrapper audit", evidence.fuelJustified, "记录到 fuel/default_fuel 等价、下降和足够性证明证据。", "出现 fuel/default_fuel 迹象但缺少等价、下降和足够性证明证据。"))
+		} else {
+			dimensions = append(dimensions, boolAssessmentDimension("燃料包装审计", "Fuel-wrapper audit", true, "未记录 modify_lin_fuel/default_fuel 绕过迹象。", ""))
+		}
+	}
+	return dimensions
+}
+
+func boolAssessmentDimension(nameZH, nameEN string, ok bool, passDetail, failDetail string) assessmentDimension {
+	if ok {
+		return assessmentDimension{
+			NameZH:   nameZH,
+			NameEN:   nameEN,
+			StatusZH: "通过",
+			StatusEN: "passed",
+			DetailZH: passDetail,
+			DetailEN: passDetail,
+		}
+	}
+	return assessmentDimension{
+		NameZH:   nameZH,
+		NameEN:   nameEN,
+		StatusZH: "未通过",
+		StatusEN: "failed",
+		DetailZH: failDetail,
+		DetailEN: failDetail,
+	}
+}
+
 func humanVisibleContent(content string) string {
 	lines := strings.Split(content, "\n")
 	kept := make([]string, 0, len(lines))
@@ -4462,6 +4728,12 @@ func formalProofVerifierGuidance(userPrompt, mode string) string {
 		"- Reject status=resolved if any target theorem/definition was weakened, any proof obligation was replaced by a bounded/fuel wrapper without equivalence and fuel-sufficiency proofs, or any Axiom/Admitted/admit/sorry/quick_and_dirty/TODO/placeholder remains.",
 		"- Prefer proof-assistant dependency checks when available: Coq Print Assumptions <target>, Lean #print axioms <target>, Isabelle thm_oracles <target>, plus placeholder scans and the project build command.",
 		"- For termination tasks, require evidence of the actual decrease/well-founded measure or a proof that the encoded recursion is equivalent to the original semantics for all intended inputs.",
+		"- End with a multi-dimensional result assessment that is visible to the browser: uploaded inputs accounted for, new project/workspace path, build result, placeholder scan, proof-assistant assumption/oracle check, original obligation/equivalence or termination audit, and remaining risks.",
+	}
+	if looksLikeCoqUploadProofBenchmark(userPrompt) {
+		lines = append(lines,
+			"- This task matches the Coq upload benchmark with Model.thy, Termination.thy, and ROOT. Your visible final conclusion must explicitly assess: Model.thy/Termination.thy/ROOT were used, a new Coq project folder was written under the requested cwd, make/coqc passed, source-only placeholder scan found no forbidden tokens, Coq Print Assumptions (or Closed under the global context) found no extra assumptions, and termination modify_lin was solved without modify_lin_fuel/default_fuel or with proved equivalence, decrease, and fuel sufficiency.",
+		)
 	}
 	if mode == "debate" {
 		lines = append(lines, "- Debate verifier strategy: synthesize the adversarial result; concrete critic falsification of weakened semantics, fuel/default_fuel shortcuts, missing equivalence, or hidden assumptions overrides proposer confidence.")
@@ -4477,6 +4749,15 @@ func looksLikeFormalProofTask(text string) bool {
 		"sorry", "admitted", "admit", "axiom", "quick_and_dirty", "placeholder",
 		"定理", "引理", "证明", "终止", "递归", "补全缺失的证明", "占位符",
 	})
+}
+
+func looksLikeCoqUploadProofBenchmark(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "coq") &&
+		strings.Contains(lower, "model.thy") &&
+		strings.Contains(lower, "termination.thy") &&
+		strings.Contains(lower, "root") &&
+		containsAny(lower, []string{"补全缺失的证明", "占位符", "placeholder", "modify_lin", "termination"})
 }
 
 func trimForPrompt(value string, max int) string {
@@ -4826,6 +5107,9 @@ func unresolvedFinalRun(userPrompt string, history []orchestrationTurn, changes 
 	if userTaskRequiresWorkspaceChange(userPrompt) && !hasWorkspaceChangeEvidence(history, changes) {
 		return missingWorkspaceChangeReason(changes, history), true
 	}
+	if reason, ok := formalProofAssessmentGap(userPrompt, history, changes); ok {
+		return reason, true
+	}
 	last := history[len(history)-1]
 	if last.Err != "" {
 		return "last turn errored: " + trimForPrompt(oneLine(last.Err), 300), true
@@ -4945,6 +5229,262 @@ func missingWorkspaceChangeReason(changes workspaceChangeReport, history []orche
 		return withBlocker("no concrete file change was recorded for a change-oriented task; workspace snapshot was truncated")
 	}
 	return withBlocker("no concrete file change was recorded for a change-oriented task")
+}
+
+func formalProofAssessmentGap(userPrompt string, history []orchestrationTurn, changes workspaceChangeReport) (string, bool) {
+	if !looksLikeFormalProofTask(userPrompt) {
+		return "", false
+	}
+	if reason, ok := acceptanceFailureSignal(userPrompt, history); ok {
+		return reason, true
+	}
+	if looksLikeCoqUploadProofBenchmark(userPrompt) {
+		return coqUploadProofAssessmentGap(history, changes)
+	}
+	if !requiresStrictFormalProofAssessment(userPrompt) {
+		evidence := collectProofAssessmentEvidence(history, changes)
+		if evidence.fuelShortcut && !evidence.fuelJustified {
+			return "formal proof assessment failed: bounded/fuel wrapper is present without explicit equivalence, decrease, and sufficiency evidence", true
+		}
+		return "", false
+	}
+	return genericFormalProofAssessmentGap(userPrompt, history)
+}
+
+func requiresStrictFormalProofAssessment(userPrompt string) bool {
+	lower := strings.ToLower(userPrompt)
+	return containsAny(lower, []string{
+		"不能用", "不使用", "不要用", "无占位", "占位符", "补全缺失的证明", "完整证明", "正式 proof", "正式证明",
+		"no placeholder", "without placeholder", "without any placeholder", "no admitted", "without admitted",
+		"no axiom", "without axiom", "no sorry", "without sorry", "complete proof",
+	})
+}
+
+func coqUploadProofAssessmentGap(history []orchestrationTurn, changes workspaceChangeReport) (string, bool) {
+	evidence := collectProofAssessmentEvidence(history, changes)
+	var missing []string
+	if !evidence.coqInputs {
+		missing = append(missing, "uploaded Model.thy/Termination.thy/ROOT were not accounted for")
+	}
+	if !evidence.projectPath {
+		missing = append(missing, "new Coq project folder under the requested cwd is not evidenced")
+	}
+	if !evidence.coqBuild {
+		missing = append(missing, "Coq build evidence is missing")
+	}
+	if !evidence.placeholderScan {
+		missing = append(missing, "source placeholder scan evidence is missing")
+	}
+	if !evidence.assumptionAudit {
+		missing = append(missing, "Coq Print Assumptions/global-context audit evidence is missing")
+	}
+	if !evidence.originalObligation {
+		missing = append(missing, "original termination/modify_lin obligation audit evidence is missing")
+	}
+	if evidence.fuelShortcut && !evidence.fuelJustified {
+		return "formal proof assessment failed: modify_lin_fuel/default_fuel or fuel shortcut is present without explicit equivalence, decrease, and fuel-sufficiency evidence", true
+	}
+	if len(missing) > 0 {
+		return "formal proof assessment incomplete: " + strings.Join(missing, "; "), true
+	}
+	return "", false
+}
+
+func genericFormalProofAssessmentGap(userPrompt string, history []orchestrationTurn) (string, bool) {
+	evidence := collectProofAssessmentEvidence(history, workspaceChangeReport{})
+	var missing []string
+	lowerPrompt := strings.ToLower(userPrompt)
+	if !evidence.proofBuild {
+		missing = append(missing, "proof-assistant build evidence is missing")
+	}
+	if containsAny(lowerPrompt, []string{"占位符", "placeholder", "sorry", "admitted", "admit", "axiom", "quick_and_dirty"}) && !evidence.placeholderScan {
+		missing = append(missing, "placeholder/assumption scan evidence is missing")
+	}
+	if containsAny(lowerPrompt, []string{"coq", ".v"}) && !evidence.assumptionAudit {
+		missing = append(missing, "Coq Print Assumptions/global-context audit evidence is missing")
+	}
+	if containsAny(lowerPrompt, []string{"lean", ".lean"}) && !evidence.assumptionAudit {
+		missing = append(missing, "Lean #print axioms audit evidence is missing")
+	}
+	if containsAny(lowerPrompt, []string{"isabelle", ".thy"}) && !evidence.assumptionAudit && containsAny(lowerPrompt, []string{"oracle", "quick_and_dirty", "sorry", "占位符", "placeholder"}) {
+		missing = append(missing, "Isabelle thm_oracles or placeholder audit evidence is missing")
+	}
+	if evidence.fuelShortcut && !evidence.fuelJustified {
+		return "formal proof assessment failed: bounded/fuel wrapper is present without explicit equivalence, decrease, and sufficiency evidence", true
+	}
+	if len(missing) > 0 {
+		return "formal proof assessment incomplete: " + strings.Join(missing, "; "), true
+	}
+	return "", false
+}
+
+type proofAssessmentEvidence struct {
+	coqInputs          bool
+	projectPath        bool
+	proofBuild         bool
+	coqBuild           bool
+	placeholderScan    bool
+	assumptionAudit    bool
+	originalObligation bool
+	fuelShortcut       bool
+	fuelJustified      bool
+}
+
+func collectProofAssessmentEvidence(history []orchestrationTurn, changes workspaceChangeReport) proofAssessmentEvidence {
+	text := strings.ToLower(proofAssessmentText(history))
+	commandText, outputText := proofAssessmentCommandText(history)
+	commandLower := strings.ToLower(commandText)
+	outputLower := strings.ToLower(outputText)
+	combined := strings.Join([]string{text, commandLower, outputLower, strings.ToLower(strings.Join(changes.Changed, "\n"))}, "\n")
+	return proofAssessmentEvidence{
+		coqInputs:       containsAll(combined, []string{"model.thy", "termination.thy", "root"}),
+		projectPath:     proofProjectPathEvidence(combined, changes),
+		proofBuild:      proofBuildEvidence(combined),
+		coqBuild:        coqBuildEvidence(combined),
+		placeholderScan: placeholderScanEvidence(commandLower, outputLower, text),
+		assumptionAudit: proofAssumptionAuditEvidence(combined),
+		originalObligation: originalProofObligationEvidence(combined),
+		fuelShortcut:    fuelShortcutEvidence(outputLower, text),
+		fuelJustified:   fuelJustificationEvidence(combined),
+	}
+}
+
+func proofAssessmentText(history []orchestrationTurn) string {
+	var b strings.Builder
+	for _, item := range history {
+		b.WriteString(item.Content)
+		b.WriteByte('\n')
+		b.WriteString(item.Handoff)
+		b.WriteByte('\n')
+		b.WriteString(item.HandoffFields.Changed)
+		b.WriteByte('\n')
+		b.WriteString(item.HandoffFields.Verified)
+		b.WriteByte('\n')
+		b.WriteString(item.HandoffFields.Next)
+		b.WriteByte('\n')
+		b.WriteString(item.HandoffFields.Risks)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func proofAssessmentCommandText(history []orchestrationTurn) (string, string) {
+	var commands strings.Builder
+	var outputs strings.Builder
+	for _, command := range commandStates(history) {
+		commands.WriteString(command.Command)
+		commands.WriteByte('\n')
+		outputs.WriteString(command.Output)
+		outputs.WriteByte('\n')
+	}
+	return commands.String(), outputs.String()
+}
+
+func proofProjectPathEvidence(text string, changes workspaceChangeReport) bool {
+	if len(changes.Changed) > 0 {
+		return true
+	}
+	return containsAny(text, []string{
+		"new coq project", "coq project", "新建文件夹", "新建 coq", "项目目录", "project=", "/root/tencent/coq-", "coq-lin-lattice",
+	})
+}
+
+func proofBuildEvidence(text string) bool {
+	return containsAny(text, []string{
+		"make", "coqc", "coq_makefile", "dune build", "lake build", "lean --make", "isabelle build",
+		"build completed", "compiled", "构建通过", "编译通过",
+	})
+}
+
+func coqBuildEvidence(text string) bool {
+	return containsAny(text, []string{
+		"coq build", "coqc", "coq_makefile", "make", "rocq make", "rocq compile", "构建通过", "编译通过",
+	})
+}
+
+func placeholderScanEvidence(commandText, outputText, proseText string) bool {
+	if containsAny(proseText, []string{
+		"no placeholders", "no forbidden tokens", "没有占位符", "未发现占位符", "无占位符",
+		"未发现 admitted", "未发现 axiom", "未发现 sorry", "no admitted", "no axiom", "no sorry",
+		"source-only placeholder scan",
+	}) {
+		return true
+	}
+	if containsAny(commandText, []string{"rg ", "grep ", "ripgrep"}) &&
+		containsAny(commandText, []string{"admitted", "admit", "axiom", "parameter", "conjecture", "abort", "sorry", "todo", "placeholder", "quick_and_dirty"}) &&
+		!placeholderScanFoundForbiddenOutput(outputText) {
+		return true
+	}
+	return false
+}
+
+func placeholderScanFoundForbiddenOutput(outputText string) bool {
+	if strings.TrimSpace(outputText) == "" {
+		return false
+	}
+	lines := strings.Split(outputText, "\n")
+	for _, line := range lines {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if lower == "" {
+			continue
+		}
+		if strings.Contains(lower, "no matches") || strings.Contains(lower, "no output") || strings.Contains(lower, "not found") {
+			continue
+		}
+		if containsAny(lower, []string{"admitted", "admit", "axiom", "parameter", "conjecture", "abort", "sorry", "todo", "placeholder", "quick_and_dirty"}) {
+			return true
+		}
+	}
+	return false
+}
+
+func proofAssumptionAuditEvidence(text string) bool {
+	return containsAny(text, []string{
+		"print assumptions", "closed under the global context", "closed under global context",
+		"#print axioms", "no axioms", "no unexpected axioms", "thm_oracles", "no oracle", "no oracles",
+		"无额外公理", "没有额外公理", "无 oracle", "无 oracles",
+	})
+}
+
+func originalProofObligationEvidence(text string) bool {
+	if containsAny(text, []string{
+		"original proof obligation", "original recursive semantics", "original semantics",
+		"termination modify_lin", "modify_lin termination", "well-founded", "well founded",
+		"decrease", "decreases", "measure", "distance", "structural recursion",
+		"原始证明义务", "原始递归语义", "终止性", "下降", "良基", "度量", "等价",
+	}) {
+		return true
+	}
+	return false
+}
+
+func fuelShortcutEvidence(outputText, proseText string) bool {
+	combined := strings.Join([]string{outputText, proseText}, "\n")
+	var affirmative []string
+	for _, line := range strings.Split(combined, "\n") {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if lower == "" || lineNegatesFuelShortcut(lower) {
+			continue
+		}
+		affirmative = append(affirmative, lower)
+	}
+	combined = strings.Join(affirmative, "\n")
+	return containsAny(combined, []string{"modify_lin_fuel", "default_fuel", "bounded fuel", "fuel wrapper", "固定 fuel", "燃料包装"})
+}
+
+func fuelJustificationEvidence(text string) bool {
+	return containsAny(text, []string{"equivalence", "fuel sufficiency", "sufficient fuel", "decrease", "well-founded", "well founded", "等价", "燃料足够", "足够模拟", "下降", "良基"}) &&
+		!containsAny(text, []string{"without equivalence", "lacks equivalence", "缺少等价", "没有证明", "未证明", "not proved", "not prove"})
+}
+
+func containsAll(value string, signals []string) bool {
+	value = strings.ToLower(value)
+	for _, signal := range signals {
+		if !strings.Contains(value, strings.ToLower(signal)) {
+			return false
+		}
+	}
+	return true
 }
 
 func acceptanceFailureSignal(userPrompt string, history []orchestrationTurn) (string, bool) {
@@ -5079,6 +5619,9 @@ func hasUnresolvedAcceptanceSignal(text, userPrompt string) bool {
 	}) && containsAny(lower, []string{
 		"sorry", "未消除", "没有消除", "还保留", "placeholder", "占位",
 	}) {
+		if lineNegatesFuelShortcut(lower) || containsAny(lower, []string{"no placeholders", "no forbidden tokens", "没有占位符", "无占位符", "source-only placeholder scan"}) {
+			return false
+		}
 		return true
 	}
 	if containsAny(lower, []string{
@@ -5138,6 +5681,9 @@ func fuelTerminationGapContext(text string) string {
 		if !containsAny(lower, []string{"modify_lin", "default_fuel", "fuel", "燃料", "termination", "distance"}) {
 			continue
 		}
+		if lineNegatesFuelShortcut(lower) {
+			continue
+		}
 		if containsAny(lower, []string{
 			"没有证明", "未证明", "没有证", "下降", "等价", "足够模拟", "固定", "绕过",
 			"not prove", "not proved", "without proving", "equivalence", "decrease", "sufficient",
@@ -5170,8 +5716,21 @@ func lineLooksLikeFuelTerminationDetail(line string) bool {
 	if lower == "" {
 		return false
 	}
+	if lineNegatesFuelShortcut(lower) {
+		return false
+	}
 	return containsAny(lower, []string{"modify_lin", "default_fuel", "fuel", "燃料", "termination", "distance", "递归", "证明"}) &&
 		containsAny(lower, []string{"没有证明", "未证明", "没有证", "下降", "等价", "足够模拟", "固定", "绕过", "not prove", "not proved", "without proving", "equivalence", "decrease", "sufficient"})
+}
+
+func lineNegatesFuelShortcut(lower string) bool {
+	return containsAny(lower, []string{
+		"没有 modify_lin_fuel", "没有 default_fuel", "没有 fuel wrapper", "没有 bounded/default fuel",
+		"没有 modify_lin_fuel/default_fuel", "没有 modify_lin_fuel/default_fuel/fuel",
+		"无 modify_lin_fuel", "无 default_fuel", "无 fuel wrapper",
+		"no modify_lin_fuel", "no default_fuel", "no fuel wrapper", "without modify_lin_fuel", "without default_fuel",
+		"without fuel wrapper", "no bounded/default fuel", "没有 runtime distance guard",
+	})
 }
 
 func lineLooksLikeAcceptanceExplanation(line string) bool {

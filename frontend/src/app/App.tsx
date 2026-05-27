@@ -1110,6 +1110,7 @@ function finalOrchestrationConclusionFallback(
   const last = runEvents[runEvents.length - 1];
   const completed = last.kind === 'run.end' && last.status === 'completed';
   if (!completed) return null;
+  if (isReadableFinalConclusion(last.content)) return null;
   if (hasFreshFinalConclusion(runEvents)) return null;
 
   const failedCommands = runEvents.filter((event) => event.kind.startsWith('command.') && commandEventFailed(event)).length;
@@ -1267,7 +1268,7 @@ function isReadableFinalConclusion(content?: string) {
   if (!value) return false;
   if (isRawCCBObserverDump(value)) return false;
   if (hasUnresolvedAcceptanceSignal(value)) return false;
-  if (value.includes('最终结论') || value.includes('最终总结') || value.includes('final conclusion') || value.includes('final summary')) {
+  if (value.includes('最终结论') || value.includes('最终总结') || value.includes('最终测试结果') || value.includes('final conclusion') || value.includes('final summary') || value.includes('final test result')) {
     return true;
   }
   const hasConclusion = value.includes('结论') || value.includes('总结') || value.includes('conclusion') || value.includes('summary');

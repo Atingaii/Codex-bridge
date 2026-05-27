@@ -2454,7 +2454,11 @@ EOF
 printf '%s\n' '{"type":"item.completed","item":{"id":"cmd_1","type":"command_execution","command":"mkdir -p isabelle_bridge_demo","status":"completed","exit_code":0,"aggregated_output":""}}'
 printf '%s\n' '{"type":"item.started","item":{"id":"cmd_2","type":"command_execution","command":"isabelle build -D isabelle_bridge_demo","status":"running"}}'
 printf '%s\n' '{"type":"item.completed","item":{"id":"cmd_2","type":"command_execution","command":"isabelle build -D isabelle_bridge_demo","status":"completed","exit_code":0,"aggregated_output":"Finished BridgeDemo\n0:00:01 elapsed time\n"}}'
-printf '%s\n' '{"type":"item.agent_message.delta","delta":"Created isabelle_bridge_demo/BridgeDemo.thy and verified with isabelle build."}'
+printf '%s\n' '{"type":"item.started","item":{"id":"cmd_3","type":"command_execution","command":"rg -n \"sorry|quick_and_dirty|placeholder\" isabelle_bridge_demo","status":"running"}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"cmd_3","type":"command_execution","command":"rg -n \"sorry|quick_and_dirty|placeholder\" isabelle_bridge_demo","status":"completed","exit_code":0,"aggregated_output":""}}'
+printf '%s\n' '{"type":"item.started","item":{"id":"cmd_4","type":"command_execution","command":"isabelle process -T BridgeDemo -e \"thm_oracles append_nil_right rev_snoc map_append_demo filter_append_demo\" -d isabelle_bridge_demo","status":"running"}}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"cmd_4","type":"command_execution","command":"isabelle process -T BridgeDemo -e \"thm_oracles append_nil_right rev_snoc map_append_demo filter_append_demo\" -d isabelle_bridge_demo","status":"completed","exit_code":0,"aggregated_output":"no oracles\n"}}'
+printf '%s\n' '{"type":"item.agent_message.delta","delta":"Final conclusion: Created isabelle_bridge_demo/BridgeDemo.thy and verified with isabelle build. Placeholder scan found no sorry/quick_and_dirty/placeholder tokens, and Isabelle thm_oracles reported no oracles.\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=isabelle_bridge_demo/BridgeDemo.thy; verified=isabelle build -D isabelle_bridge_demo; rg placeholder scan; isabelle thm_oracles; next=none; risks=none"}'
 printf '%s\n' '{"type":"turn.completed","usage":{"output_tokens":12}}'
 `
 }

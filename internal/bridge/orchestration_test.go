@@ -1148,6 +1148,73 @@ func TestResolvedProofRunAllowsForbiddenTokenScanCommand(t *testing.T) {
 	}
 }
 
+func TestResolvedCoqUploadRunRequiresAssessmentDimensions(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_verifier", "reviewer", "codex", strings.Join([]string{
+			"最终结论：项目已经创建并且 make 通过。",
+			"",
+			"Msg: to=user; intent=final; need=none",
+			"Handoff: status=resolved; changed=Model.v, Termination.v, Makefile; verified=make; next=none; risks=none",
+		}, "\n"), []RunnerToolEvent{
+			{ID: "build", Status: "completed", Command: "make -C /root/tencent/coq-lin-lattice", Output: "COQC Model.v\nCOQC Termination.v\n", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT", history, workspaceChangeReport{Available: true, Changed: []string{"coq-lin-lattice/Model.v", "coq-lin-lattice/Termination.v", "coq-lin-lattice/Makefile"}})
+	if !unresolved {
+		t.Fatal("Coq upload task should require visible multi-dimensional proof assessment")
+	}
+	for _, want := range []string{"formal proof assessment incomplete", "placeholder scan", "Print Assumptions", "termination/modify_lin"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason missing %q: %q", want, reason)
+		}
+	}
+}
+
+func TestResolvedCoqUploadRunWithFullAssessmentPasses(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_verifier", "reviewer", "codex", strings.Join([]string{
+			"最终结论：通过。Model.thy、Termination.thy、ROOT 均已转换并纳入 /root/tencent/coq-lin-lattice-visible-smoke 这个新建 Coq 项目目录。",
+			"",
+			"验收维度：",
+			"- Coq build：make -B clean all 通过。",
+			"- source-only placeholder scan：rg 对 Model.v、Termination.v、Makefile 扫描 Admitted/admit/Axiom/Parameter/Conjecture/Abort/sorry/TODO/placeholder/quick_and_dirty，无输出。",
+			"- Coq Print Assumptions：目标定理 Closed under the global context，没有额外假设。",
+			"- original proof obligation：termination modify_lin 使用 structural recursion/well-founded measure 证明原始递归语义的下降义务；没有 modify_lin_fuel/default_fuel/fuel wrapper。",
+			"",
+			"Msg: to=user; intent=final; need=none",
+			"Handoff: status=resolved; changed=Model.v, Termination.v, Makefile; verified=make/rg/coqtop; next=none; risks=none",
+		}, "\n"), []RunnerToolEvent{
+			{ID: "build", Status: "completed", Command: "make -B -C /root/tencent/coq-lin-lattice-visible-smoke clean all", Output: "COQC Model.v\nCOQC Termination.v\n", ExitCode: &exitCode},
+			{ID: "scan", Status: "completed", Command: `rg -n "\b(Axiom|Admitted|admit|Parameter|Conjecture|Abort|sorry|TODO|placeholder|quick_and_dirty)\b" /root/tencent/coq-lin-lattice-visible-smoke -S`, Output: "", ExitCode: &exitCode},
+			{ID: "assumptions", Status: "completed", Command: "coqtop -batch -l AssumptionAudit.v", Output: "Print Assumptions modify_lin_termination.\nClosed under the global context\n", ExitCode: &exitCode},
+		}),
+	}
+	reason, unresolved := unresolvedFinalRun("把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT", history, workspaceChangeReport{Available: true, Changed: []string{"coq-lin-lattice-visible-smoke/Model.v", "coq-lin-lattice-visible-smoke/Termination.v", "coq-lin-lattice-visible-smoke/Makefile"}})
+	if unresolved {
+		t.Fatalf("full Coq upload assessment should pass: %q", reason)
+	}
+}
+
+func TestFinalRunAssessmentSummaryIsUserVisible(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_1", "reviewer", "codex", "最终结论：已完成。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=result.txt; verified=go test ./...; next=none; risks=none", []RunnerToolEvent{
+			{ID: "test", Status: "completed", Command: "go test ./...", Output: "ok", ExitCode: &exitCode},
+		}),
+	}
+	summary := finalRunAssessmentSummary("请实现并修改文件", history, workspaceChangeReport{Available: true, Changed: []string{"result.txt"}}, "")
+	for _, want := range []string{"最终测试结果：通过", "验收维度", "工作区变更", "命令验证", "剩余风险"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("assessment summary missing %q:\n%s", want, summary)
+		}
+	}
+	if summary == "Orchestration completed." {
+		t.Fatal("assessment summary must not collapse to hidden default run.end text")
+	}
+}
+
 func TestResolvedHandoffAllowsDomainSpecificCaveatWhenNoOpenRisk(t *testing.T) {
 	exitCode := 0
 	history := []orchestrationTurn{
@@ -1299,9 +1366,30 @@ func TestComposeFinalVerifierPromptAddsFormalProofGuardrails(t *testing.T) {
 		"Lean #print axioms <target>",
 		"Isabelle thm_oracles <target>",
 		"actual decrease/well-founded measure",
+		"multi-dimensional result assessment",
+		"uploaded inputs accounted for",
+		"original obligation/equivalence or termination audit",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("formal proof verifier prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestComposeFinalVerifierPromptRequiresCoqUploadAssessment(t *testing.T) {
+	prompt := composeFinalVerifierPrompt("collaboration", "把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT", "", false, "verifier", "codex", nil)
+	for _, want := range []string{
+		"Coq upload benchmark",
+		"Model.thy/Termination.thy/ROOT were used",
+		"new Coq project folder",
+		"make/coqc passed",
+		"source-only placeholder scan",
+		"Coq Print Assumptions",
+		"termination modify_lin",
+		"modify_lin_fuel/default_fuel",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("Coq upload verifier prompt missing %q:\n%s", want, prompt)
 		}
 	}
 }

@@ -707,7 +707,9 @@ func (m *OrchestrationManager) runCCB(ctx context.Context, payload protocol.Orch
 		})
 		return
 	}
+	originalPrompt := payload.Prompt
 	payload.Prompt = preparedPrompt
+	workspaceBefore := snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
 	target := m.ccbTarget()
 	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 		Kind:    "run.start",
@@ -875,6 +877,7 @@ func (m *OrchestrationManager) runCCB(ctx context.Context, payload protocol.Orch
 	reply, synthesizedEmptyReply := ccbFinalReply(result, watchOutput, streamState, target)
 	result.Reply = reply
 	m.emitCCBAgentConsoleSnapshots(ctx, payload, turnID, 80)
+	tools := ccbAssessmentTools(streamState, jobID)
 	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 		Kind:    "turn.end",
 		TurnID:  turnID,
@@ -901,11 +904,27 @@ func (m *OrchestrationManager) runCCB(ctx context.Context, payload protocol.Orch
 			})
 			return
 		}
+		history := ccbAssessmentHistory(turnID, result.Reply, streamState, tools)
+		workspaceAfter := snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
+		workspaceChanges := diffWorkspaceSnapshots(workspaceBefore, workspaceAfter)
+		if reason, ok := unresolvedFinalRun(originalPrompt, history, workspaceChanges); ok {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:    "run.error",
+				Status:  store.OrchestrationFailed,
+				CLI:     "ccb",
+				Error:   reason,
+				Content: finalRunAssessmentSummary(originalPrompt, history, workspaceChanges, reason),
+				Data: map[string]any{
+					"jobId": jobID,
+				},
+			})
+			return
+		}
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:    "run.end",
 			Status:  store.OrchestrationCompleted,
 			CLI:     "ccb",
-			Content: "CCB job completed.",
+			Content: finalRunAssessmentSummary(originalPrompt, history, workspaceChanges, ""),
 			Data: map[string]any{
 				"jobId": jobID,
 			},
@@ -1129,6 +1148,64 @@ func ccbObservedAgentSummaryLines(state *ccbWatchStreamState) []string {
 		}
 	}
 	return lines
+}
+
+func ccbAssessmentTools(state *ccbWatchStreamState, rootJobID string) []RunnerToolEvent {
+	if state == nil {
+		return nil
+	}
+	var tools []RunnerToolEvent
+	seenSessions := map[string]bool{}
+	for _, path := range state.jobSessionPaths {
+		path = strings.TrimSpace(path)
+		if path == "" || seenSessions[path] {
+			continue
+		}
+		seenSessions[path] = true
+		_, sessionTools := ccbReadProviderSessionEvents(path, 0)
+		for _, tool := range sessionTools {
+			if tool != nil {
+				tools = append(tools, *tool)
+			}
+		}
+	}
+	if len(tools) == 0 && strings.TrimSpace(rootJobID) != "" {
+		tools = append(tools, RunnerToolEvent{
+			ID:      "ccb:" + rootJobID,
+			Status:  "completed",
+			Command: "ccb ask",
+		})
+	}
+	return tools
+}
+
+func ccbAssessmentHistory(turnID, reply string, state *ccbWatchStreamState, tools []RunnerToolEvent) []orchestrationTurn {
+	reply = strings.TrimSpace(reply)
+	var agentText []string
+	if state != nil {
+		for _, event := range state.events {
+			if event.Data == nil || ccbString(event.Data["contentKind"]) != "agent_text" {
+				continue
+			}
+			content := strings.TrimSpace(event.Content)
+			if content != "" && content != reply {
+				agentText = append(agentText, content)
+			}
+		}
+	}
+	content := reply
+	if len(agentText) > 0 {
+		prefix := trimForPrompt(strings.Join(agentText, "\n\n"), 6000)
+		if content != "" {
+			content = prefix + "\n\nCCB final reply:\n" + content
+		} else {
+			content = prefix
+		}
+	}
+	if extractHandoff(content) == "" {
+		content = strings.TrimSpace(content + "\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=see CCB workspace diff; verified=see CCB command events; next=none; risks=none")
+	}
+	return []orchestrationTurn{newOrchestrationTurnRecord(turnID, "ccb", "ccb", content, tools)}
 }
 
 func appendUniqueString(values []string, value string) []string {
@@ -2353,7 +2430,24 @@ func (m *OrchestrationManager) ccbPrompt(payload protocol.OrchestrationStartPayl
 	b.WriteString(strings.TrimSpace(payload.Prompt))
 	b.WriteString("\n\n")
 	b.WriteString("Use only the local CCB Codex and Claude Code agents for any coordination. Do not involve Gemini, OpenCode, Droid, or other CLI providers.\n")
-	b.WriteString("Return the final user-visible conclusion to Codex Bridge when the local CCB team finishes. Include blockers, risks, verification, and next actions only when relevant.")
+	b.WriteString("Codex Bridge will independently assess the final CCB result against the user's real acceptance criterion. Return a final user-visible conclusion that includes concrete files changed, commands run, blockers, risks, verification, and next actions only when relevant.\n")
+	if proofTask := formalProofTaskGuidance(payload.Prompt, payload.Mode, "implementer"); proofTask != "" {
+		b.WriteString("\n")
+		b.WriteString(proofTask)
+		b.WriteString("\n")
+	}
+	if proofVerifier := formalProofVerifierGuidance(payload.Prompt, payload.Mode); proofVerifier != "" {
+		b.WriteString("\n")
+		b.WriteString(proofVerifier)
+		b.WriteString("\n")
+	}
+	if looksLikeCoqUploadProofBenchmark(payload.Prompt) {
+		b.WriteString("\nBefore returning a completed final answer for this Coq upload benchmark, explicitly report these evidence dimensions: Model.thy/Termination.thy/ROOT input mapping, new Coq project folder path, make/coqc result, source-only placeholder scan result, Coq Print Assumptions showing Closed under the global context, and termination modify_lin original obligation audit. Scan source for Axiom, Parameter, Conjecture, Admitted, admit, Abort, sorry, TODO, placeholder, quick_and_dirty, Guard Checking, and bypass_check. If modify_lin_fuel/default_fuel or any bounded fuel wrapper exists, mark the task unresolved unless equivalence, decrease/well-foundedness, and fuel sufficiency are proved in the same result.\n")
+	}
+	b.WriteString("End the final answer with the compact lines:\n")
+	b.WriteString(orchestrationMsgContract)
+	b.WriteByte('\n')
+	b.WriteString(orchestrationHandoffContract)
 	return b.String()
 }
 
@@ -4861,9 +4955,9 @@ func formalProofTaskGuidance(userPrompt, mode, role string) string {
 	var b strings.Builder
 	b.WriteString("Formal proof task guardrails:\n")
 	b.WriteString("- Treat build success as a smoke check only. The acceptance criterion is the requested proof obligation, not merely compiling.\n")
-	b.WriteString("- Do not weaken theorem statements, change the target definition's semantics, move the obligation elsewhere, or add trust assumptions such as Axiom, Admitted, admit, sorry, quick_and_dirty, TODO, or placeholders.\n")
+	b.WriteString("- Do not weaken theorem statements, change the target definition's semantics, move the obligation elsewhere, or add trust assumptions such as Axiom, Parameter, Conjecture, Admitted, admit, Abort, sorry, quick_and_dirty, Guard Checking changes, bypass_check, TODO, or placeholders.\n")
 	b.WriteString("- If you introduce a bounded/fuel wrapper or default fuel for a recursive function, you must also prove equivalence to the original recursive semantics, the required termination/decrease measure, and that the default fuel is sufficient for every intended input. Otherwise report status=needs_next or blocked.\n")
-	b.WriteString("- Include a proof audit when relevant: placeholder scans with rg, Coq Print Assumptions <target>, Lean #print axioms <target>, Isabelle thm_oracles <target>, and the project build command.\n")
+	b.WriteString("- Include a proof audit when relevant: placeholder scans with rg, Coq Print Assumptions <target> showing Closed under the global context, Lean #print axioms <target>, Isabelle thm_oracles <target>, and the project build command.\n")
 	b.WriteString("- Keep a proof-obligation ledger in the handoff: target theorem/definition, missing obligation, semantic constraints, attempted proof path, exact blocker, and verification command.\n")
 	if mode == "debate" {
 		b.WriteString("- Debate proof workflow: the proposer must leave a falsifiable proof claim or patch, and the critic must decide whether the original obligation is actually discharged; unresolved falsification blocks status=resolved.\n")
@@ -4887,14 +4981,14 @@ func formalProofVerifierGuidance(userPrompt, mode string) string {
 	lines := []string{
 		"Formal proof final verifier guardrails:",
 		"- Verify the original proof obligation, not just that Coq/Isabelle/Lean accepts the project.",
-		"- Reject status=resolved if any target theorem/definition was weakened, any proof obligation was replaced by a bounded/fuel wrapper without equivalence and fuel-sufficiency proofs, or any Axiom/Admitted/admit/sorry/quick_and_dirty/TODO/placeholder remains.",
-		"- Prefer proof-assistant dependency checks when available: Coq Print Assumptions <target>, Lean #print axioms <target>, Isabelle thm_oracles <target>, plus placeholder scans and the project build command.",
+		"- Reject status=resolved if any target theorem/definition was weakened, any proof obligation was replaced by a bounded/fuel wrapper without equivalence and fuel-sufficiency proofs, or any Axiom/Parameter/Conjecture/Admitted/admit/Abort/sorry/quick_and_dirty/Guard Checking/bypass_check/TODO/placeholder remains.",
+		"- Prefer proof-assistant dependency checks when available: Coq Print Assumptions <target> with Closed under the global context, Lean #print axioms <target>, Isabelle thm_oracles <target>, plus placeholder scans and the project build command.",
 		"- For termination tasks, require evidence of the actual decrease/well-founded measure or a proof that the encoded recursion is equivalent to the original semantics for all intended inputs.",
 		"- End with a multi-dimensional result assessment that is visible to the browser: uploaded inputs accounted for, new project/workspace path, build result, placeholder scan, proof-assistant assumption/oracle check, original obligation/equivalence or termination audit, and remaining risks.",
 	}
 	if looksLikeCoqUploadProofBenchmark(userPrompt) {
 		lines = append(lines,
-			"- This task matches the Coq upload benchmark with Model.thy, Termination.thy, and ROOT. Your visible final conclusion must explicitly assess: Model.thy/Termination.thy/ROOT were used, a new Coq project folder was written under the requested cwd, make/coqc passed, source-only placeholder scan found no forbidden tokens, Coq Print Assumptions (or Closed under the global context) found no extra assumptions, and termination modify_lin was solved without modify_lin_fuel/default_fuel or with proved equivalence, decrease, and fuel sufficiency.",
+			"- This task matches the Coq upload benchmark with Model.thy, Termination.thy, and ROOT. Your visible final conclusion must explicitly assess: Model.thy/Termination.thy/ROOT were used, a new Coq project folder was written under the requested cwd, make/coqc passed, source-only placeholder scan found no forbidden tokens, Coq Print Assumptions showed Closed under the global context, and termination modify_lin was solved without modify_lin_fuel/default_fuel or with proved equivalence, decrease, and fuel sufficiency.",
 		)
 	}
 	if mode == "debate" {
@@ -4908,7 +5002,7 @@ func looksLikeFormalProofTask(text string) bool {
 	return containsAny(lower, []string{
 		"coq", "isabelle", "lean", ".v", ".thy", ".lean", "_coqproject",
 		"theorem", "lemma", "proof", "termination", "well-founded", "well founded",
-		"sorry", "admitted", "admit", "axiom", "quick_and_dirty", "placeholder",
+		"sorry", "admitted", "admit", "axiom", "parameter", "conjecture", "quick_and_dirty", "bypass_check", "placeholder",
 		"定理", "引理", "证明", "终止", "递归", "补全缺失的证明", "占位符",
 	})
 }
@@ -5499,15 +5593,15 @@ func collectProofAssessmentEvidence(history []orchestrationTurn, changes workspa
 	outputLower := strings.ToLower(outputText)
 	combined := strings.Join([]string{text, commandLower, outputLower, strings.ToLower(strings.Join(changes.Changed, "\n"))}, "\n")
 	return proofAssessmentEvidence{
-		coqInputs:       containsAll(combined, []string{"model.thy", "termination.thy", "root"}),
-		projectPath:     proofProjectPathEvidence(combined, changes),
-		proofBuild:      proofBuildEvidence(combined),
-		coqBuild:        coqBuildEvidence(combined),
-		placeholderScan: placeholderScanEvidence(commandLower, outputLower, text),
-		assumptionAudit: proofAssumptionAuditEvidence(combined),
+		coqInputs:          containsAll(combined, []string{"model.thy", "termination.thy", "root"}),
+		projectPath:        proofProjectPathEvidence(combined, changes),
+		proofBuild:         proofBuildEvidence(combined),
+		coqBuild:           coqBuildEvidence(combined),
+		placeholderScan:    placeholderScanEvidence(commandLower, outputLower, text),
+		assumptionAudit:    proofAssumptionAuditEvidence(combined),
 		originalObligation: originalProofObligationEvidence(combined),
-		fuelShortcut:    fuelShortcutEvidence(outputLower, text),
-		fuelJustified:   fuelJustificationEvidence(combined),
+		fuelShortcut:       fuelShortcutEvidence(outputLower, text),
+		fuelJustified:      fuelJustificationEvidence(combined),
 	}
 }
 
@@ -5573,7 +5667,7 @@ func placeholderScanEvidence(commandText, outputText, proseText string) bool {
 		return true
 	}
 	if containsAny(commandText, []string{"rg ", "grep ", "ripgrep"}) &&
-		containsAny(commandText, []string{"admitted", "admit", "axiom", "parameter", "conjecture", "abort", "sorry", "todo", "placeholder", "quick_and_dirty"}) &&
+		containsAny(commandText, forbiddenProofShortcutSignals()) &&
 		!placeholderScanFoundForbiddenOutput(outputText) {
 		return true
 	}
@@ -5593,18 +5687,46 @@ func placeholderScanFoundForbiddenOutput(outputText string) bool {
 		if strings.Contains(lower, "no matches") || strings.Contains(lower, "no output") || strings.Contains(lower, "not found") {
 			continue
 		}
-		if containsAny(lower, []string{"admitted", "admit", "axiom", "parameter", "conjecture", "abort", "sorry", "todo", "placeholder", "quick_and_dirty"}) {
+		if containsAny(lower, forbiddenProofShortcutSignals()) {
 			return true
 		}
 	}
 	return false
 }
 
+func forbiddenProofShortcutSignals() []string {
+	return []string{
+		"admitted", "admit", "axiom", "parameter", "conjecture", "abort", "sorry", "todo", "placeholder",
+		"quick_and_dirty", "guard checking", "guardchecking", "bypass_check", "bypass check",
+	}
+}
+
 func proofAssumptionAuditEvidence(text string) bool {
-	return containsAny(text, []string{
-		"print assumptions", "closed under the global context", "closed under global context",
-		"#print axioms", "no axioms", "no unexpected axioms", "thm_oracles", "no oracle", "no oracles",
-		"无额外公理", "没有额外公理", "无 oracle", "无 oracles",
+	for _, line := range strings.Split(text, "\n") {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if lower == "" || lineNegatesAssumptionAudit(lower) {
+			continue
+		}
+		if containsAny(lower, []string{
+			"print assumptions", "closed under the global context", "closed under global context",
+			"#print axioms", "no axioms", "no unexpected axioms", "thm_oracles", "no oracle", "no oracles",
+			"无额外公理", "没有额外公理", "无 oracle", "无 oracles",
+		}) {
+			return true
+		}
+	}
+	return false
+}
+
+func lineNegatesAssumptionAudit(lower string) bool {
+	return containsAny(lower, []string{
+		"没有执行 print assumptions", "未执行 print assumptions", "未运行 print assumptions",
+		"缺少 print assumptions", "没有 print assumptions 审计", "缺少 coq print assumptions",
+		"print assumptions missing", "missing print assumptions", "without print assumptions",
+		"did not run print assumptions", "not run print assumptions", "print assumptions not run",
+		"not executed print assumptions", "print assumptions was not executed",
+		"缺少 global context", "global-context audit evidence is missing", "global context audit evidence is missing",
+		"assumption audit evidence is missing", "missing assumption audit", "without assumption audit",
 	})
 }
 

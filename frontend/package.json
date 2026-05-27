@@ -4,6 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
+    "test": "node visible-events-check.mjs",
     "android:build": "vite build && cap sync android",
     "android:open": "cap open android",
     "build": "vite build",

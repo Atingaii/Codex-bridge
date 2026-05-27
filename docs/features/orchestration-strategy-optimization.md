@@ -91,16 +91,17 @@ remain distinct:
 For Coq/Isabelle/Lean work, compiling is only a smoke check. A result must not
 be marked `status=resolved` if it weakens the original statement, replaces a
 recursive definition with a bounded/fuel version, changes the target theorem, or
-adds trust assumptions such as `Axiom`, `Admitted`, `sorry`,
-`quick_and_dirty`, or opaque placeholders. A bounded/fuel implementation is only
+adds trust assumptions such as `Axiom`, `Parameter`, `Conjecture`, `Admitted`,
+`sorry`, `quick_and_dirty`, `Guard Checking` changes, `bypass_check`, or opaque
+placeholders. A bounded/fuel implementation is only
 acceptable when the same result proves the original recursive semantics,
 termination/decrease obligation, and fuel sufficiency/equivalence to the
 original specification.
 
 Formal proof handoffs should include an audit plan and result. Depending on the
-proof assistant and project, useful checks include `rg` scans for placeholders,
-Coq `Print Assumptions <target>` or dependency output that reports no
-assumptions, Lean `#print axioms <target>` with no `sorryAx` or unexpected
+proof assistant and project, useful checks include `rg` scans for proof
+shortcuts, Coq `Print Assumptions <target>` output that reports `Closed under
+the global context`, Lean `#print axioms <target>` with no `sorryAx` or unexpected
 axioms, Isabelle `thm_oracles <target>` plus scans for `sorry` /
 `quick_and_dirty`, and a build command such as `make`, `coqc`, `lake build`, or
 `isabelle build`. For termination work, the audit must identify the original
@@ -175,11 +176,21 @@ a resolved handoff is insufficient unless the final record contains evidence for
 all required proof dimensions: the uploaded files were accounted for, a new Coq
 project folder under the requested working directory was written, `make` or
 `coqc` passed, source-only placeholder scans found no forbidden proof shortcuts,
-Coq `Print Assumptions` or `Closed under the global context` checked the target,
+Coq `Print Assumptions` reported `Closed under the global context` for the target,
 and the original `termination modify_lin` obligation was audited. Any
 `modify_lin_fuel`, `default_fuel`, or similar bounded-fuel replacement remains a
 blocker unless the same result proves equivalence to the original recursive
 semantics, the decrease / well-founded measure, and fuel sufficiency.
+
+The same acceptance gate applies when the selected Bridge uses the local CCB
+orchestration runner. CCB can coordinate its own Codex and Claude agents, but
+Codex Bridge is still responsible for the browser-visible terminal result. The
+Bridge wraps the CCB prompt with the same proof guardrails, then converts the CCB
+reply, streamed agent text, and provider tool events into the same assessment
+model used by the built-in round-robin runner. A completed CCB job therefore
+emits `run.end` only when the multi-dimensional assessment passes; otherwise the
+browser sees `run.error` with the failed dimensions instead of a generic
+`CCB job completed.` message.
 
 ## Data And Protocol Impact
 
@@ -212,7 +223,9 @@ semantics, the decrease / well-founded measure, and fuel sufficiency.
    conclusion, without adding a weaker fallback summary.
 9. Add a bounded final-assessment remediation turn before terminal failure when
    missing dimensions are fixable.
-10. Run full Go tests, frontend build, Go build, and doc lint.
+10. Apply the same prompt guardrails and terminal assessment to local CCB
+    orchestration runs.
+11. Run full Go tests, frontend build, Go build, and doc lint.
 
 ## Exit Gates
 
@@ -241,8 +254,11 @@ semantics, the decrease / well-founded measure, and fuel sufficiency.
   proved.
 - The Coq upload smoke task cannot complete unless the visible assessment covers
   uploaded input mapping, new project folder, Coq build, placeholder scan,
-  `Print Assumptions` / global context audit, and the original
+  `Print Assumptions` / `Closed under the global context` audit, and the original
   `termination modify_lin` obligation.
+- The local CCB path cannot report a generic completed result for proof tasks;
+  its final browser-visible `run.end` / `run.error` content must be the same
+  multi-dimensional assessment used by non-CCB orchestration.
 - Full test and build commands pass:
   `/usr/local/go/bin/go test ./...`, `cd frontend && npm run build`,
   `CGO_ENABLED=0 /usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .`,

@@ -1603,11 +1603,18 @@ function statusVisibleEvent(event: OrchestrationEvent, index: number): Orchestra
     role: event.role,
     cli: event.cli,
     turnId: event.turnId,
-    content: stringsTrim(event.error || event.content || event.status || event.kind),
+    content: orchestrationStatusContent(event),
     status: event.status,
     error: event.error,
     createdAt: event.createdAt,
   };
+}
+
+function orchestrationStatusContent(event: OrchestrationEvent) {
+  const content = stringsTrim(event.content);
+  const error = stringsTrim(event.error);
+  if ((event.kind === 'run.end' || event.kind === 'run.error') && content) return content;
+  return error || content || stringsTrim(event.status) || event.kind;
 }
 
 function applyOrchestrationEventToRun(run: OrchestrationRun, event: OrchestrationEvent): OrchestrationRun {
@@ -4002,7 +4009,7 @@ function OrchestrationEventItem({ item, t }: { item: OrchestrationVisibleEvent, 
   const isRun = item.kind.startsWith('run.');
   const avatar = orchestrationAvatar(item, t);
   const title = isUser ? t.user : isRun ? t.run : item.type === 'command' ? t.commands : `${item.role || t.agent}${item.cli ? ` · ${avatar.label}` : ''}`;
-  const rawContent = item.error || item.content || '';
+  const rawContent = item.content || item.error || '';
   const content = isUser ? rawContent : stripMachineContractLines(rawContent);
   const status = isUser ? '' : item.status;
 

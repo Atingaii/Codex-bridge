@@ -801,9 +801,11 @@ func TestComposeOrchestrationPromptAddsFormalProofGuardrails(t *testing.T) {
 		"Formal proof task guardrails",
 		"build success as a smoke check only",
 		"Do not weaken theorem statements",
+		"Parameter, Conjecture",
+		"Guard Checking changes",
 		"bounded/fuel wrapper or default fuel",
 		"prove equivalence to the original recursive semantics",
-		"Coq Print Assumptions <target>",
+		"Coq Print Assumptions <target> showing Closed under the global context",
 		"Lean #print axioms <target>",
 		"Isabelle thm_oracles <target>",
 		"proof-obligation ledger",
@@ -1148,6 +1150,19 @@ func TestResolvedProofRunAllowsForbiddenTokenScanCommand(t *testing.T) {
 	}
 }
 
+func TestPlaceholderScanChecksCoqTrustBypasses(t *testing.T) {
+	command := `rg -n "\b(Axiom|Parameter|Conjecture|Admitted|admit|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check)\b" coq-proj -S`
+	if !placeholderScanEvidence(command, "", "") {
+		t.Fatal("expected source scan covering Coq trust bypasses with empty output to count as evidence")
+	}
+	if !placeholderScanFoundForbiddenOutput("Model.v:12:Unset Guard Checking.\nTermination.v:4:Parameter trusted : Prop.\n") {
+		t.Fatal("expected guard checking and Parameter output to be forbidden proof shortcuts")
+	}
+	if !placeholderScanFoundForbiddenOutput("Model.v:20:Definition bypass_check := true.\n") {
+		t.Fatal("expected bypass_check output to be a forbidden proof shortcut")
+	}
+}
+
 func TestResolvedCoqUploadRunRequiresAssessmentDimensions(t *testing.T) {
 	exitCode := 0
 	history := []orchestrationTurn{
@@ -1179,7 +1194,7 @@ func TestResolvedCoqUploadRunWithFullAssessmentPasses(t *testing.T) {
 			"",
 			"验收维度：",
 			"- Coq build：make -B clean all 通过。",
-			"- source-only placeholder scan：rg 对 Model.v、Termination.v、Makefile 扫描 Admitted/admit/Axiom/Parameter/Conjecture/Abort/sorry/TODO/placeholder/quick_and_dirty，无输出。",
+			"- source-only placeholder scan：rg 对 Model.v、Termination.v、Makefile 扫描 Admitted/admit/Axiom/Parameter/Conjecture/Abort/sorry/TODO/placeholder/quick_and_dirty/Guard Checking/bypass_check，无输出。",
 			"- Coq Print Assumptions：目标定理 Closed under the global context，没有额外假设。",
 			"- original proof obligation：termination modify_lin 使用 structural recursion/well-founded measure 证明原始递归语义的下降义务；没有 modify_lin_fuel/default_fuel/fuel wrapper。",
 			"",
@@ -1187,7 +1202,7 @@ func TestResolvedCoqUploadRunWithFullAssessmentPasses(t *testing.T) {
 			"Handoff: status=resolved; changed=Model.v, Termination.v, Makefile; verified=make/rg/coqtop; next=none; risks=none",
 		}, "\n"), []RunnerToolEvent{
 			{ID: "build", Status: "completed", Command: "make -B -C /root/tencent/coq-lin-lattice-visible-smoke clean all", Output: "COQC Model.v\nCOQC Termination.v\n", ExitCode: &exitCode},
-			{ID: "scan", Status: "completed", Command: `rg -n "\b(Axiom|Admitted|admit|Parameter|Conjecture|Abort|sorry|TODO|placeholder|quick_and_dirty)\b" /root/tencent/coq-lin-lattice-visible-smoke -S`, Output: "", ExitCode: &exitCode},
+			{ID: "scan", Status: "completed", Command: `rg -n "\b(Axiom|Admitted|admit|Parameter|Conjecture|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check)\b" /root/tencent/coq-lin-lattice-visible-smoke -S`, Output: "", ExitCode: &exitCode},
 			{ID: "assumptions", Status: "completed", Command: "coqtop -batch -l AssumptionAudit.v", Output: "Print Assumptions modify_lin_termination.\nClosed under the global context\n", ExitCode: &exitCode},
 		}),
 	}
@@ -1454,7 +1469,9 @@ func TestComposeFinalVerifierPromptAddsFormalProofGuardrails(t *testing.T) {
 		"Formal proof final verifier guardrails",
 		"Verify the original proof obligation",
 		"bounded/fuel wrapper without equivalence and fuel-sufficiency proofs",
-		"Coq Print Assumptions <target>",
+		"Axiom/Parameter/Conjecture",
+		"Guard Checking/bypass_check",
+		"Coq Print Assumptions <target> with Closed under the global context",
 		"Lean #print axioms <target>",
 		"Isabelle thm_oracles <target>",
 		"actual decrease/well-founded measure",
@@ -1476,12 +1493,73 @@ func TestComposeFinalVerifierPromptRequiresCoqUploadAssessment(t *testing.T) {
 		"new Coq project folder",
 		"make/coqc passed",
 		"source-only placeholder scan",
-		"Coq Print Assumptions",
+		"Closed under the global context",
 		"termination modify_lin",
 		"modify_lin_fuel/default_fuel",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("Coq upload verifier prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestCCBPromptAddsFormalProofAssessmentGuardrails(t *testing.T) {
+	cfg := config.Default()
+	manager := NewOrchestrationManager(&cfg)
+	prompt := manager.ccbPrompt(protocol.OrchestrationStartPayload{
+		Mode:   "collaboration",
+		Prompt: "把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT",
+	})
+	for _, want := range []string{
+		"Formal proof task guardrails",
+		"Formal proof final verifier guardrails",
+		"Coq upload benchmark",
+		"Model.thy/Termination.thy/ROOT input mapping",
+		"source-only placeholder scan",
+		"Closed under the global context",
+		"Guard Checking",
+		"bypass_check",
+		"termination modify_lin original obligation audit",
+		"modify_lin_fuel/default_fuel",
+		orchestrationMsgContract,
+		orchestrationHandoffContract,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("CCB prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestCCBCompletedProofRunUsesFinalAssessmentGate(t *testing.T) {
+	reply := strings.Join([]string{
+		"最终结论：已创建 Coq 项目，Model.thy、Termination.thy、ROOT 已纳入转换，并且 make 通过；但这轮没有执行 Print Assumptions。",
+		"",
+		"验收维度：",
+		"- Coq build：make 通过。",
+		"- source-only placeholder scan：rg 无输出。",
+		"",
+		"Msg: to=user; intent=final; need=none",
+		"Handoff: status=resolved; changed=coq-proj/Model.v, coq-proj/Termination.v; verified=make/rg; next=none; risks=none",
+	}, "\n")
+	history := ccbAssessmentHistory("orc_ccb-ccb", reply, nil, []RunnerToolEvent{
+		{ID: "build", Status: "completed", Command: "make -C coq-proj", Output: "COQC Model.v\nCOQC Termination.v\n"},
+		{ID: "scan", Status: "completed", Command: `rg -n "Axiom|Parameter|Conjecture|Admitted|admit|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check" coq-proj`, Output: ""},
+	})
+	changes := workspaceChangeReport{Available: true, Changed: []string{"coq-proj/Model.v", "coq-proj/Termination.v", "coq-proj/Makefile"}}
+	userPrompt := "把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT"
+	reason, unresolved := unresolvedFinalRun(userPrompt, history, changes)
+	if !unresolved {
+		t.Fatal("CCB completed proof reply without full proof evidence should fail final assessment")
+	}
+	for _, want := range []string{"formal proof assessment incomplete", "Print Assumptions", "termination/modify_lin"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason missing %q: %q", want, reason)
+		}
+	}
+	summary := finalRunAssessmentSummary(userPrompt, history, changes, reason)
+	for _, want := range []string{"最终测试结果：未通过", "验收维度", "假设审计", "原始证明义务", "最终验收"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, summary)
 		}
 	}
 }
@@ -1896,7 +1974,7 @@ func fakeCodexCoqAssessmentGapScript() string {
 		"Handoff: status=resolved; changed=coq-proj/Model.v, coq-proj/Termination.v; verified=make/rg; next=none; risks=none",
 	}, "\n")
 	raw, _ := json.Marshal(first)
-return `#!/usr/bin/env python3
+	return `#!/usr/bin/env python3
 import json
 import os
 import sys
@@ -1913,8 +1991,8 @@ print(json.dumps({"type":"item.started","item":{"id":"write","type":"command_exe
 print(json.dumps({"type":"item.completed","item":{"id":"write","type":"command_execution","command":"mkdir -p coq-proj && write Model.v Termination.v Makefile","status":"completed","exit_code":0,"aggregated_output":"created coq-proj\n"}}), flush=True)
 print(json.dumps({"type":"item.started","item":{"id":"build","type":"command_execution","command":"make -C coq-proj","status":"running"}}), flush=True)
 print(json.dumps({"type":"item.completed","item":{"id":"build","type":"command_execution","command":"make -C coq-proj","status":"completed","exit_code":0,"aggregated_output":"COQC Model.v\nCOQC Termination.v\n"}}), flush=True)
-print(json.dumps({"type":"item.started","item":{"id":"scan","type":"command_execution","command":"rg -n \"Axiom|Admitted|admit|sorry|TODO|placeholder|quick_and_dirty\" coq-proj","status":"running"}}), flush=True)
-print(json.dumps({"type":"item.completed","item":{"id":"scan","type":"command_execution","command":"rg -n \"Axiom|Admitted|admit|sorry|TODO|placeholder|quick_and_dirty\" coq-proj","status":"completed","exit_code":0,"aggregated_output":""}}), flush=True)
+print(json.dumps({"type":"item.started","item":{"id":"scan","type":"command_execution","command":"rg -n \"Axiom|Parameter|Conjecture|Admitted|admit|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check\" coq-proj","status":"running"}}), flush=True)
+print(json.dumps({"type":"item.completed","item":{"id":"scan","type":"command_execution","command":"rg -n \"Axiom|Parameter|Conjecture|Admitted|admit|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check\" coq-proj","status":"completed","exit_code":0,"aggregated_output":""}}), flush=True)
 print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
 `
 }

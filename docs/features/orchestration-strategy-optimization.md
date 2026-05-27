@@ -161,6 +161,15 @@ audits when applicable, and remaining risks. If any required dimension is
 missing, the Bridge emits `run.error` with the same visible checklist so the
 browser shows why the run is not a real success.
 
+Before that terminal `run.error`, the Bridge gets one bounded remediation
+attempt for assessment failures that are plausibly fixable. The remediation
+prompt includes the failed assessment dimensions, the pre-remediation checklist,
+compact prior handoffs, and the original user task. The next CLI must make a
+concrete fix or add the missing proof/verification evidence, then rerun the
+relevant checks. After that single remediation turn, the Bridge recomputes the
+workspace diff and the multi-dimensional assessment; only a still-failing result
+is emitted as `run.error`.
+
 For the Coq upload benchmark using `Model.thy`, `Termination.thy`, and `ROOT`,
 a resolved handoff is insufficient unless the final record contains evidence for
 all required proof dimensions: the uploaded files were accounted for, a new Coq
@@ -201,7 +210,9 @@ semantics, the decrease / well-founded measure, and fuel sufficiency.
    terminal run events.
 8. Ensure the frontend treats the terminal assessment as the final visible
    conclusion, without adding a weaker fallback summary.
-9. Run full Go tests, frontend build, Go build, and doc lint.
+9. Add a bounded final-assessment remediation turn before terminal failure when
+   missing dimensions are fixable.
+10. Run full Go tests, frontend build, Go build, and doc lint.
 
 ## Exit Gates
 
@@ -222,6 +233,8 @@ semantics, the decrease / well-founded measure, and fuel sufficiency.
   unresolved risks.
 - The browser timeline shows a terminal multi-dimensional result assessment for
   completed or failed runs.
+- If the post-test assessment fails on a fixable dimension, one remediation turn
+  runs before final failure and the assessment is recomputed afterward.
 - Formal proof prompts carry proof-specific guidance in both collaboration and
   debate modes, including explicit rejection of compile-only, weakened, or
   fuel-wrapper solutions unless equivalence and termination obligations are

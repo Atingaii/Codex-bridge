@@ -1215,6 +1215,98 @@ func TestFinalRunAssessmentSummaryIsUserVisible(t *testing.T) {
 	}
 }
 
+func TestComposeFinalAssessmentRemediationPromptTargetsFailedDimensions(t *testing.T) {
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_1", "reviewer", "codex", "最终结论：项目已构建，但缺少 Print Assumptions。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=Model.v; verified=make; next=none; risks=none", nil),
+	}
+	prompt := composeFinalAssessmentRemediationPrompt(
+		"collaboration",
+		"把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT",
+		"",
+		false,
+		"implementer",
+		"claude",
+		history,
+		workspaceChangeReport{Available: true, Changed: []string{"Model.v"}},
+		"formal proof assessment incomplete: Coq Print Assumptions/global-context audit evidence is missing",
+	)
+	for _, want := range []string{
+		"final-assessment remediation implementer",
+		"Continue fixing now",
+		"Assessment failure to fix",
+		"Coq Print Assumptions/global-context audit evidence is missing",
+		"Current terminal assessment before remediation",
+		"Original user task",
+		"Formal proof task guardrails",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("assessment remediation prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestFinalAssessmentRemediationRunsBeforeFailure(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeAssessmentRemediationScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexCoqAssessmentGapScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_assessment_remediation",
+		Mode:     "collaboration",
+		Prompt:   "把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT",
+		MaxTurns: 2,
+		CWD:      tmp,
+	})
+
+	var sawRemediation bool
+	var sawRunEnd bool
+	for len(out) > 0 {
+		env := <-out
+		if env.Type != protocol.TypeOrchestrationEvent {
+			continue
+		}
+		event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == "turn.start" && strings.Contains(event.TurnID, "assessment-remediation") {
+			sawRemediation = true
+		}
+		if event.Kind == "run.error" {
+			t.Fatalf("run should remediate and complete, got error: %#v", event)
+		}
+		if event.Kind == "run.end" {
+			sawRunEnd = true
+			for _, want := range []string{"最终测试结果：通过", "验收维度", "Print Assumptions", "原始证明义务"} {
+				if !strings.Contains(event.Content, want) {
+					t.Fatalf("run.end assessment missing %q:\n%s", want, event.Content)
+				}
+			}
+		}
+	}
+	if !sawRemediation {
+		t.Fatal("missing final-assessment remediation turn")
+	}
+	if !sawRunEnd {
+		t.Fatal("missing completed run.end after remediation")
+	}
+}
+
 func TestResolvedHandoffAllowsDomainSpecificCaveatWhenNoOpenRisk(t *testing.T) {
 	exitCode := 0
 	history := []orchestrationTurn{
@@ -1788,5 +1880,78 @@ if len(sys.argv) < 2 or sys.argv[1] != "exec":
     print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
     sys.exit(1)
 print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
+`
+}
+
+func fakeCodexCoqAssessmentGapScript() string {
+	first := strings.Join([]string{
+		"最终结论：已创建 Coq 项目，Model.thy、Termination.thy、ROOT 已纳入转换，并且 make 通过；但这轮没有执行 Print Assumptions。",
+		"",
+		"验收维度：",
+		"- Coq build：make 通过。",
+		"- source-only placeholder scan：rg 无输出。",
+		"- original proof obligation：termination modify_lin 使用 structural recursion/well-founded measure，没有 modify_lin_fuel/default_fuel/fuel wrapper。",
+		"",
+		"Msg: to=user; intent=final; need=none",
+		"Handoff: status=resolved; changed=coq-proj/Model.v, coq-proj/Termination.v; verified=make/rg; next=none; risks=none",
+	}, "\n")
+	raw, _ := json.Marshal(first)
+return `#!/usr/bin/env python3
+import json
+import os
+import sys
+
+text = ` + string(raw) + `
+if len(sys.argv) < 2 or sys.argv[1] != "exec":
+    print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
+    sys.exit(1)
+os.makedirs("coq-proj", exist_ok=True)
+for name in ["Model.v", "Termination.v", "Makefile"]:
+    with open(os.path.join("coq-proj", name), "w", encoding="utf-8") as f:
+        f.write("(* generated smoke proof file *)\n")
+print(json.dumps({"type":"item.started","item":{"id":"write","type":"command_execution","command":"mkdir -p coq-proj && write Model.v Termination.v Makefile","status":"running"}}), flush=True)
+print(json.dumps({"type":"item.completed","item":{"id":"write","type":"command_execution","command":"mkdir -p coq-proj && write Model.v Termination.v Makefile","status":"completed","exit_code":0,"aggregated_output":"created coq-proj\n"}}), flush=True)
+print(json.dumps({"type":"item.started","item":{"id":"build","type":"command_execution","command":"make -C coq-proj","status":"running"}}), flush=True)
+print(json.dumps({"type":"item.completed","item":{"id":"build","type":"command_execution","command":"make -C coq-proj","status":"completed","exit_code":0,"aggregated_output":"COQC Model.v\nCOQC Termination.v\n"}}), flush=True)
+print(json.dumps({"type":"item.started","item":{"id":"scan","type":"command_execution","command":"rg -n \"Axiom|Admitted|admit|sorry|TODO|placeholder|quick_and_dirty\" coq-proj","status":"running"}}), flush=True)
+print(json.dumps({"type":"item.completed","item":{"id":"scan","type":"command_execution","command":"rg -n \"Axiom|Admitted|admit|sorry|TODO|placeholder|quick_and_dirty\" coq-proj","status":"completed","exit_code":0,"aggregated_output":""}}), flush=True)
+print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
+`
+}
+
+func fakeClaudeAssessmentRemediationScript() string {
+	initial := strings.Join([]string{
+		"本轮结论：已读取 Coq 上传任务，等待 reviewer 完成构建和最终证据检查。",
+		"",
+		"Msg: to=reviewer; intent=review; need=check Coq proof evidence",
+		"Handoff: status=needs_next; changed=none; verified=none; next=build and audit Coq project; risks=Print Assumptions not checked yet",
+	}, "\n")
+	text := strings.Join([]string{
+		"最终结论：补救轮已补齐最终测评缺口。Model.thy、Termination.thy、ROOT 均已转换到新 Coq 项目 coq-proj；make 通过；source-only placeholder scan 无输出；Coq Print Assumptions 显示 modify_lin_termination Closed under the global context；original proof obligation termination modify_lin 由 structural recursion/well-founded measure 证明，没有 modify_lin_fuel/default_fuel/fuel wrapper。",
+		"",
+		"Msg: to=user; intent=final; need=none",
+		"Handoff: status=resolved; changed=coq-proj/AssumptionsCheck.v; verified=make/rg/coqtop Print Assumptions; next=none; risks=none",
+	}, "\n")
+	initialRaw, _ := json.Marshal(initial)
+	raw, _ := json.Marshal(text)
+	return `#!/usr/bin/env python3
+import json
+import os
+import sys
+
+initial = ` + string(initialRaw) + `
+text = ` + string(raw) + `
+prompt = " ".join(sys.argv[1:])
+if "final-assessment remediation" not in prompt and "Assessment failure to fix" not in prompt:
+    print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":initial}]}}), flush=True)
+    print(json.dumps({"type":"result","result":initial}), flush=True)
+    raise SystemExit(0)
+os.makedirs("coq-proj", exist_ok=True)
+with open("coq-proj/AssumptionsCheck.v", "w", encoding="utf-8") as f:
+    f.write("Print Assumptions modify_lin_termination.\n")
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"tool_use","id":"assumptions","name":"Bash","input":{"command":"coqtop -quiet -Q coq-proj LinLattice < coq-proj/AssumptionsCheck.v"}}]}}), flush=True)
+print(json.dumps({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"assumptions","content":"Print Assumptions modify_lin_termination.\nClosed under the global context\n"}]}}), flush=True)
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
+print(json.dumps({"type":"result","result":text}), flush=True)
 `
 }

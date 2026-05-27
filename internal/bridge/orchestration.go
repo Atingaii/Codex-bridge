@@ -476,6 +476,24 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		workspaceChanges = diffWorkspaceSnapshots(workspaceBefore, workspaceAfter)
 	}
 	if reason, ok := unresolvedFinalRun(originalPrompt, history, workspaceChanges); ok {
+		if shouldRunFinalAssessmentRemediation(originalPrompt, history, reason) {
+			var stop bool
+			history, stop = m.runFinalAssessmentRemediation(ctx, payload, mode, history, workspaceChanges, reason)
+			if stop {
+				return
+			}
+			workspaceAfter = snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
+			workspaceChanges = diffWorkspaceSnapshots(workspaceBefore, workspaceAfter)
+			reason, ok = unresolvedFinalRun(originalPrompt, history, workspaceChanges)
+			if !ok {
+				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+					Kind:    "run.end",
+					Status:  store.OrchestrationCompleted,
+					Content: finalRunAssessmentSummary(originalPrompt, history, workspaceChanges, ""),
+				})
+				return
+			}
+		}
 		assessment := finalRunAssessmentSummary(originalPrompt, history, workspaceChanges, reason)
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:    "run.error",
@@ -519,6 +537,107 @@ func (m *OrchestrationManager) runWorkspaceChangeRemediation(ctx context.Context
 		Role:    role,
 		CLI:     cli,
 		Content: "workspace-change remediation via " + cli,
+	})
+	content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
+	record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
+	if err != nil {
+		record.Err = err.Error()
+		if summary := erroredTurnFallbackSummary(payload.Prompt, true, history, record); summary != "" {
+			appendConclusionToTurnRecord(&record, summary)
+		}
+		history = append(history, record)
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.end",
+			TurnID:  turnID,
+			Role:    role,
+			CLI:     cli,
+			Content: record.Content,
+			Status:  "error",
+			Error:   err.Error(),
+		})
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:   "run.cancelled",
+				Status: store.OrchestrationCanceled,
+				Error:  "canceled",
+			})
+			return history, true
+		}
+		return history, false
+	}
+	if summary := verifierConclusionFallbackSummary(payload.Prompt, history, record); summary != "" {
+		delta := appendConclusionToTurnRecord(&record, summary)
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.delta",
+			TurnID:  turnID,
+			Role:    role,
+			CLI:     cli,
+			Content: delta,
+		})
+	}
+	history = append(history, record)
+	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+		Kind:    "turn.end",
+		TurnID:  turnID,
+		Role:    role,
+		CLI:     cli,
+		Content: record.Content,
+		Status:  "success",
+	})
+	if blocker, ok := repeatedBlockingHandoff(history); ok {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "run.error",
+			Status:  store.OrchestrationFailed,
+			Error:   "repeated blocker: " + blocker,
+			Content: "Orchestration stopped because the same blocker repeated without concrete progress.",
+		})
+		return history, true
+	}
+	return history, false
+}
+
+func shouldRunFinalAssessmentRemediation(userPrompt string, history []orchestrationTurn, reason string) bool {
+	if strings.TrimSpace(reason) == "" || len(history) == 0 {
+		return false
+	}
+	last := history[len(history)-1]
+	if strings.HasSuffix(last.TurnID, "-assessment-remediation") || strings.Contains(last.TurnID, "-assessment-remediation-") {
+		return false
+	}
+	if last.Err != "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(last.HandoffFields.Status), "blocked") {
+		return false
+	}
+	lower := strings.ToLower(reason)
+	if strings.Contains(lower, "repeated blocker") {
+		return false
+	}
+	return userTaskRequiresWorkspaceChange(userPrompt) || looksLikeFormalProofTask(userPrompt) || strings.Contains(lower, "acceptance")
+}
+
+func (m *OrchestrationManager) runFinalAssessmentRemediation(ctx context.Context, payload protocol.OrchestrationStartPayload, mode string, history []orchestrationTurn, changes workspaceChangeReport, reason string) ([]orchestrationTurn, bool) {
+	if err := ctx.Err(); err != nil {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:   "run.cancelled",
+			Status: store.OrchestrationCanceled,
+			Error:  "canceled",
+		})
+		return history, true
+	}
+	role, cli := remediationRoleCLI(mode, history)
+	turnID := fmt.Sprintf("%s-assessment-remediation", payload.RunID)
+	if payload.PromptSeq > 0 {
+		turnID = fmt.Sprintf("%s-p%03d-assessment-remediation", payload.RunID, payload.PromptSeq)
+	}
+	prompt := composeFinalAssessmentRemediationPrompt(mode, payload.Prompt, payload.Context, payload.Resume, role, cli, history, changes, reason)
+	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+		Kind:    "turn.start",
+		TurnID:  turnID,
+		Role:    role,
+		CLI:     cli,
+		Content: "final-assessment remediation via " + cli,
 	})
 	content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
 	record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
@@ -4686,6 +4805,49 @@ func composeWorkspaceChangeRemediationPrompt(mode, userPrompt, contextSummary st
 	b.WriteString(userPrompt)
 	b.WriteString("\n\n")
 	b.WriteString("End your visible response with these compact lines, and set changed to the concrete files you actually changed:\n")
+	b.WriteString(orchestrationMsgContract)
+	b.WriteByte('\n')
+	b.WriteString(orchestrationHandoffContract)
+	return b.String()
+}
+
+func composeFinalAssessmentRemediationPrompt(mode, userPrompt, contextSummary string, resume bool, role, cli string, history []orchestrationTurn, changes workspaceChangeReport, reason string) string {
+	var b strings.Builder
+	b.WriteString("You are the final-assessment remediation implementer for a local CLI orchestration run.\n")
+	b.WriteString("The post-test multi-dimensional assessment found that the latest user task is still not satisfied. Continue fixing now: make concrete workspace changes or add missing proof/verification evidence, then rerun the relevant checks. Do not merely restate the failure. If the gap cannot be fixed in this environment, report status=blocked with the exact blocker.\n\n")
+	b.WriteString(fmt.Sprintf("From: %s/%s\n", role, cli))
+	b.WriteString("To: user\n")
+	b.WriteString(fmt.Sprintf("Mode: %s\n\n", mode))
+	b.WriteString(orchestrationLanguageRule)
+	b.WriteString("\n\n")
+	if resume {
+		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Prefer the latest user task over older details.\n\n")
+	}
+	if proofTask := formalProofTaskGuidance(userPrompt, mode, role); proofTask != "" {
+		b.WriteString(proofTask)
+		b.WriteString("\n")
+	}
+	b.WriteString("Assessment failure to fix:\n")
+	b.WriteString(trimForPrompt(reason, 1200))
+	b.WriteString("\n\nCurrent terminal assessment before remediation:\n")
+	b.WriteString(trimForPrompt(finalRunAssessmentSummary(userPrompt, history, changes, reason), 2400))
+	b.WriteString("\n\n")
+	if strings.TrimSpace(contextSummary) != "" {
+		b.WriteString("Compacted context from earlier tasks in this conversation:\n")
+		b.WriteString(trimForPrompt(contextSummary, 10000))
+		b.WriteString("\n\n")
+	}
+	if len(history) > 0 {
+		b.WriteString("Compact prior-turn handoffs:\n")
+		for _, item := range history {
+			b.WriteString(formatCompactPriorTurn(item))
+		}
+		b.WriteByte('\n')
+	}
+	b.WriteString("Original user task:\n")
+	b.WriteString(userPrompt)
+	b.WriteString("\n\n")
+	b.WriteString("End your visible response with a concise remediation result, including commands run, and these compact lines:\n")
 	b.WriteString(orchestrationMsgContract)
 	b.WriteByte('\n')
 	b.WriteString(orchestrationHandoffContract)

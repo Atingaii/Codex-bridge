@@ -636,6 +636,54 @@ func TestOrchestrationScanClaudeJSONLEmitsToolEvents(t *testing.T) {
 	}
 }
 
+func TestOrchestrationScanCodexJSONLNormalizesCamelCaseToolStatus(t *testing.T) {
+	input := strings.NewReader(`{"type":"item.started","item":{"id":"cmd_1","type":"command_execution","command":"/bin/bash -lc 'command -v coqc || true'","status":"inProgress"}}
+{"type":"item.completed","item":{"id":"cmd_1","type":"command_execution","command":"/bin/bash -lc 'command -v coqc || true'","status":"completed","exit_code":0,"aggregated_output":"/usr/bin/coqc\n"}}
+{"type":"item.agent_message.delta","delta":"done"}
+`)
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 16)
+	manager.AttachOut(out)
+
+	got, _, err := manager.scanCodexJSONL(input, "orc_test", "turn_1", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "done" {
+		t.Fatalf("content = %q, want done", got)
+	}
+
+	var sawStart, sawEnd bool
+	for len(out) > 0 {
+		env := <-out
+		if env.Type != protocol.TypeOrchestrationEvent {
+			continue
+		}
+		event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Data["id"] != "cmd_1" {
+			continue
+		}
+		switch event.Kind {
+		case "command.start":
+			sawStart = true
+			if event.Status != "inProgress" {
+				t.Fatalf("start status = %q", event.Status)
+			}
+		case "command.end":
+			sawEnd = true
+			if event.Status != "completed" || event.Data["output"] != "/usr/bin/coqc\n" {
+				t.Fatalf("bad command end event: %#v", event)
+			}
+		}
+	}
+	if !sawStart || !sawEnd {
+		t.Fatalf("missing normalized codex tool events: start=%v end=%v", sawStart, sawEnd)
+	}
+}
+
 func TestOrchestrationScanClaudeJSONLSuppressesEmptyPagesReadFailure(t *testing.T) {
 	input := strings.NewReader(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_1","name":"Read","input":{"file_path":"/tmp/Model.thy","pages":""}}]}}
 {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_1","is_error":true,"content":"<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>"}]}}
@@ -799,7 +847,15 @@ func TestComposeOrchestrationPromptAddsFormalProofGuardrails(t *testing.T) {
 	)
 	for _, want := range []string{
 		"Formal proof task guardrails",
+		"Work spec-first",
+		"name the target fact",
 		"build success as a smoke check only",
+		"Run proof-assistant commands serially",
+		"stale in-progress commands make the browser smoke result unverifiable",
+		"Use explicit timeouts for every proof-assistant/toolchain command",
+		"coqc --version",
+		"timeout 10s to 60s",
+		"visible needs_next/blocked ledger",
 		"Do not weaken theorem statements",
 		"Parameter, Conjecture",
 		"Guard Checking changes",
@@ -808,18 +864,33 @@ func TestComposeOrchestrationPromptAddsFormalProofGuardrails(t *testing.T) {
 		"Coq Print Assumptions <target> showing Closed under the global context",
 		"Lean #print axioms <target>",
 		"Isabelle thm_oracles <target>",
+		"Reviewer falsification checklist",
+		"hidden staging or scratch files",
 		"proof-obligation ledger",
+		"uploaded-source mapping",
 		"Exploration budget",
 		"three failed proof strategies",
 		"Do not spend the entire turn repeating similar measure guesses",
 		"Coq/Rocq workflow",
+		"Coq/Rocq toolchain probe",
+		"type -P coqc",
+		"shutil.which",
+		"Do not run bare coqc --version",
+		"Coq/Rocq spec-first plan",
+		"modify_lin_original_terminates",
+		"modify_lin_step_decreases",
+		"modify_lin_semantics_equiv",
 		"Coq/Rocq modeling rule",
 		"tautology",
 		"length-only lemma",
+		"helper-only structural recursion totality",
 		"Coq/Rocq audit",
 		"Variable, Hypothesis",
 		"modify_lin_fuel",
 		"default_fuel",
+		"Coq/Rocq verifier checks",
+		"Print modify_lin",
+		"modify_loop/structural helper",
 		"Coq/Rocq termination rule",
 		"Implementer strategy",
 		"minimal reproducible obligation",
@@ -858,6 +929,8 @@ func TestComposeOrchestrationPromptAddsIsabelleProofGuardrails(t *testing.T) {
 		"Isabelle audit",
 		"thm_oracles",
 		"quick_and_dirty",
+		"Isabelle long-build rule",
+		"timeout 30m or timeout 45m",
 		"Isabelle termination workflow",
 		"generated subgoals",
 		"lexicographic_order once",
@@ -865,6 +938,8 @@ func TestComposeOrchestrationPromptAddsIsabelleProofGuardrails(t *testing.T) {
 		"find_theorems name:<pattern>",
 		"undefined facts",
 		"Isabelle termination rule",
+		"Isabelle verifier checks",
+		"scratch theory imported",
 		"termination modify_lin",
 		"compile-only framework",
 	} {
@@ -1284,7 +1359,9 @@ func TestResolvedCoqUploadRunWithFullAssessmentPasses(t *testing.T) {
 			"验收维度：",
 			"- Coq build：make -B clean all 通过。",
 			"- source-only placeholder scan：rg 对 Model.v、Termination.v、Makefile 扫描 Admitted/admit/Axiom/Parameter/Conjecture/Abort/sorry/TODO/placeholder/quick_and_dirty/Guard Checking/bypass_check，无输出。",
-			"- Coq Print Assumptions：目标定理 Closed under the global context，没有额外假设。",
+			"- Coq Print Assumptions：目标定理 modify_lin_original_terminates Closed under the global context，没有额外假设。",
+			"- named target theorem：modify_lin_original_terminates 对应 termination modify_lin。",
+			"- branch-decrease/equivalence audit：modify_lin_step_decreases 证明每个 recursive branch 的 Distance decreases，modify_lin_semantics_equiv 证明 structural recursion 与 original recursive semantics 等价。",
 			"- original proof obligation：termination modify_lin 使用 structural recursion/well-founded measure 证明原始递归语义的下降义务；没有 modify_lin_fuel/default_fuel/fuel wrapper。",
 			"",
 			"Msg: to=user; intent=final; need=none",
@@ -1292,7 +1369,7 @@ func TestResolvedCoqUploadRunWithFullAssessmentPasses(t *testing.T) {
 		}, "\n"), []RunnerToolEvent{
 			{ID: "build", Status: "completed", Command: "make -B -C /root/tencent/coq-lin-lattice-visible-smoke clean all", Output: "COQC Model.v\nCOQC Termination.v\n", ExitCode: &exitCode},
 			{ID: "scan", Status: "completed", Command: `rg -n "\b(Axiom|Admitted|admit|Parameter|Conjecture|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check)\b" /root/tencent/coq-lin-lattice-visible-smoke -S`, Output: "", ExitCode: &exitCode},
-			{ID: "assumptions", Status: "completed", Command: "coqtop -batch -l AssumptionAudit.v", Output: "Print Assumptions modify_lin_termination.\nClosed under the global context\n", ExitCode: &exitCode},
+			{ID: "assumptions", Status: "completed", Command: "coqtop -batch -l AssumptionAudit.v", Output: "Print Assumptions modify_lin_original_terminates.\nClosed under the global context\n", ExitCode: &exitCode},
 		}),
 	}
 	reason, unresolved := unresolvedFinalRun("把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT", history, workspaceChangeReport{Available: true, Changed: []string{"coq-lin-lattice-visible-smoke/Model.v", "coq-lin-lattice-visible-smoke/Termination.v", "coq-lin-lattice-visible-smoke/Makefile"}})
@@ -1359,7 +1436,9 @@ func TestCoqUploadRunRejectsTautologicalModifyLinTheorem(t *testing.T) {
 			"最终结论：通过。Model.thy、Termination.thy、ROOT 均已转换到 /root/tencent/coq-lin-lattice-visible-smoke 这个新建 Coq 项目目录。",
 			"- Coq build：make 通过。",
 			"- source-only placeholder scan：无输出。",
-			"- Coq Print Assumptions：Closed under the global context。",
+			"- Coq Print Assumptions：modify_lin_total Closed under the global context。",
+			"- named target theorem：modify_lin_total。",
+			"- branch-decrease/equivalence audit：声称 exists/reflexivity 已覆盖。",
 			"- original proof obligation：termination modify_lin 由定理 forall L H bt_val, exists R, modify_lin L H bt_val = R 证明，Proof 使用 exists (modify_lin L H bt_val); reflexivity。",
 			"",
 			"Msg: to=user; intent=final; need=none",
@@ -1424,7 +1503,9 @@ func TestResolvedIsabelleUploadRunWithFullAssessmentPasses(t *testing.T) {
 			"验收维度：",
 			"- Isabelle build：isabelle build -D /root/tencent/isabelle-proof-smoke 通过。",
 			"- source-only placeholder scan：rg 对 Model.thy、Termination.thy、ROOT 扫描 sorry/quick_and_dirty/oops/sketch/admit/TODO/placeholder，无输出。",
-			"- Isabelle thm_oracles：modify_lin 相关目标 no oracles。",
+			"- Isabelle thm_oracles：modify_lin_termination 目标事实 no oracles。",
+			"- named target fact：modify_lin_termination 对应 termination modify_lin。",
+			"- branch-decrease audit：每个 recursive-call branch 都有 well-founded measure decrease lemma。",
 			"- original proof obligation：termination modify_lin 使用 well-founded measure 和 branch decrease lemmas 证明原始递归终止义务。",
 			"",
 			"Msg: to=user; intent=final; need=none",
@@ -1448,7 +1529,9 @@ func TestFormalProofAssessmentSummaryShowsUploadProjectFolderDimension(t *testin
 			"最终结论：通过。Model.thy、Termination.thy、ROOT 均已纳入 /home/zy/study/isabelle-proof-smoke 这个新建 Isabelle 项目目录。",
 			"- Isabelle build：isabelle build -D /home/zy/study/isabelle-proof-smoke 通过。",
 			"- source-only placeholder scan：rg 扫描 sorry/quick_and_dirty/oops/sketch/admit/TODO/placeholder，无输出。",
-			"- Isabelle thm_oracles：modify_lin 相关目标 no oracles。",
+			"- Isabelle thm_oracles：modify_lin_termination 目标事实 no oracles。",
+			"- named target fact：modify_lin_termination 对应 termination modify_lin。",
+			"- branch-decrease audit：每个 recursive-call branch 都有 well-founded measure decrease lemma。",
 			"- original proof obligation：termination modify_lin 使用 well-founded measure 和 branch decrease lemmas 证明。",
 			"",
 			"Msg: to=user; intent=final; need=none",
@@ -1460,7 +1543,7 @@ func TestFormalProofAssessmentSummaryShowsUploadProjectFolderDimension(t *testin
 		}),
 	}
 	summary := finalRunAssessmentSummary("已上传 Model.thy、Termination.thy、ROOT。请补全 Isabelle 中 termination modify_lin 的证明，不能用 sorry/quick_and_dirty。", history, workspaceChangeReport{Available: true, Changed: []string{"isabelle-proof-smoke/Model.thy", "isabelle-proof-smoke/Termination.thy", "isabelle-proof-smoke/ROOT"}}, "")
-	for _, want := range []string{"新建项目目录", "工作目录下的新建 Isabelle 项目路径", "Isabelle oracle 审计"} {
+	for _, want := range []string{"新建项目目录", "工作目录下的新建 Isabelle 项目路径", "Isabelle oracle 审计", "命名目标事实", "分支下降审计"} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("summary missing %q:\n%s", want, summary)
 		}
@@ -1749,6 +1832,9 @@ func TestComposeFinalVerifierPromptRequiresCoqUploadAssessment(t *testing.T) {
 		"make/coqc passed",
 		"source-only placeholder scan",
 		"Closed under the global context",
+		"named target theorem",
+		"Print/inspection of modify_lin",
+		"branch-decrease or equivalence evidence",
 		"termination modify_lin",
 		"modify_lin_fuel/default_fuel",
 	} {
@@ -1765,9 +1851,12 @@ func TestComposeFinalVerifierPromptRequiresIsabelleUploadAssessment(t *testing.T
 		"Model.thy/Termination.thy/ROOT were used",
 		"new Isabelle project folder",
 		"isabelle build passed",
+		"ROOT layout",
+		"timeout-aware isabelle build",
 		"source-only scan found no sorry/quick_and_dirty",
 		"diagnostic leftovers",
 		"thm_oracles",
+		"branch-decrease evidence",
 		"termination modify_lin",
 		"background",
 		"compile-only framework",
@@ -1793,6 +1882,8 @@ func TestCCBPromptAddsFormalProofAssessmentGuardrails(t *testing.T) {
 		"source-only placeholder scan",
 		"Closed under the global context",
 		"_CoqProject/Makefile project shape",
+		"named target theorem",
+		"branch-decrease/equivalence audit",
 		"tautology",
 		"Variable, Hypothesis",
 		"Guard Checking",
@@ -2287,20 +2378,36 @@ func fakeCodexCoqAssessmentGapScript() string {
 		"Msg: to=user; intent=final; need=none",
 		"Handoff: status=resolved; changed=coq-proj/Model.v, coq-proj/Termination.v; verified=make/rg; next=none; risks=none",
 	}, "\n")
+	remediation := strings.Join([]string{
+		"最终结论：补救轮已补齐最终测评缺口。Model.thy、Termination.thy、ROOT 均已转换到新 Coq 项目 coq-proj；make 通过；source-only placeholder scan 无输出；Coq Print Assumptions 显示 modify_lin_termination Closed under the global context；named target theorem 为 modify_lin_termination；branch-decrease/equivalence audit 记录 modify_lin_step_decreases 证明每个 recursive branch 的 Distance decreases，modify_lin_semantics_equiv 连接 structural recursion 与 original recursive semantics；original proof obligation termination modify_lin 由 structural recursion/well-founded measure 证明，没有 modify_lin_fuel/default_fuel/fuel wrapper。",
+		"",
+		"Msg: to=user; intent=final; need=none",
+		"Handoff: status=resolved; changed=coq-proj/Model.v, coq-proj/Termination.v, coq-proj/AssumptionsCheck.v; verified=make/rg/coqtop Print Assumptions; next=none; risks=none",
+	}, "\n")
 	raw, _ := json.Marshal(first)
+	remediationRaw, _ := json.Marshal(remediation)
 	return `#!/usr/bin/env python3
 import json
 import os
 import sys
 
 text = ` + string(raw) + `
+remediation = ` + string(remediationRaw) + `
 if len(sys.argv) < 2 or sys.argv[1] != "exec":
     print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
     sys.exit(1)
+prompt = sys.stdin.read()
 os.makedirs("coq-proj", exist_ok=True)
 for name in ["Model.v", "Termination.v", "Makefile"]:
     with open(os.path.join("coq-proj", name), "w", encoding="utf-8") as f:
         f.write("(* generated smoke proof file *)\n")
+if "final-assessment remediation" in prompt or "Assessment failure to fix" in prompt:
+    with open(os.path.join("coq-proj", "AssumptionsCheck.v"), "w", encoding="utf-8") as f:
+        f.write("Print Assumptions modify_lin_termination.\n")
+    print(json.dumps({"type":"item.started","item":{"id":"assumptions","type":"command_execution","command":"coqtop -quiet -Q coq-proj LinLattice < coq-proj/AssumptionsCheck.v","status":"running"}}), flush=True)
+    print(json.dumps({"type":"item.completed","item":{"id":"assumptions","type":"command_execution","command":"coqtop -quiet -Q coq-proj LinLattice < coq-proj/AssumptionsCheck.v","status":"completed","exit_code":0,"aggregated_output":"Print Assumptions modify_lin_termination.\nClosed under the global context\n"}}), flush=True)
+    print(json.dumps({"type":"item.agent_message.delta","delta":remediation}), flush=True)
+    raise SystemExit(0)
 print(json.dumps({"type":"item.started","item":{"id":"write","type":"command_execution","command":"mkdir -p coq-proj && write Model.v Termination.v Makefile","status":"running"}}), flush=True)
 print(json.dumps({"type":"item.completed","item":{"id":"write","type":"command_execution","command":"mkdir -p coq-proj && write Model.v Termination.v Makefile","status":"completed","exit_code":0,"aggregated_output":"created coq-proj\n"}}), flush=True)
 print(json.dumps({"type":"item.started","item":{"id":"build","type":"command_execution","command":"make -C coq-proj","status":"running"}}), flush=True)
@@ -2319,7 +2426,7 @@ func fakeClaudeAssessmentRemediationScript() string {
 		"Handoff: status=needs_next; changed=none; verified=none; next=build and audit Coq project; risks=Print Assumptions not checked yet",
 	}, "\n")
 	text := strings.Join([]string{
-		"最终结论：补救轮已补齐最终测评缺口。Model.thy、Termination.thy、ROOT 均已转换到新 Coq 项目 coq-proj；make 通过；source-only placeholder scan 无输出；Coq Print Assumptions 显示 modify_lin_termination Closed under the global context；original proof obligation termination modify_lin 由 structural recursion/well-founded measure 证明，没有 modify_lin_fuel/default_fuel/fuel wrapper。",
+		"最终结论：补救轮已补齐最终测评缺口。Model.thy、Termination.thy、ROOT 均已转换到新 Coq 项目 coq-proj；make 通过；source-only placeholder scan 无输出；Coq Print Assumptions 显示 modify_lin_termination Closed under the global context；named target theorem 为 modify_lin_termination；branch-decrease/equivalence audit 记录 modify_lin_step_decreases 证明每个 recursive branch 的 Distance decreases，modify_lin_semantics_equiv 连接 structural recursion 与 original recursive semantics；original proof obligation termination modify_lin 由 structural recursion/well-founded measure 证明，没有 modify_lin_fuel/default_fuel/fuel wrapper。",
 		"",
 		"Msg: to=user; intent=final; need=none",
 		"Handoff: status=resolved; changed=coq-proj/AssumptionsCheck.v; verified=make/rg/coqtop Print Assumptions; next=none; risks=none",

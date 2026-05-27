@@ -109,14 +109,39 @@ recursive call or measure and the exact decrease / well-founded proof obligation
 rather than accepting a wrapper that merely bounds execution.
 
 The proof-strategy prompts follow the standard proof-assistant workflows rather
-than ad hoc completion claims. Isabelle/HOL total functions must discharge
-termination: the worker may try `lexicographic_order`, but after that it should
-use an explicit `relation` / `measure` or `measures` proof and record the
-well-foundedness and recursive-call decrease subgoals. Coq/Rocq proof claims are
-not accepted from compilation alone; the verifier must run `Print Assumptions`
-on the target theorem and require `Closed under the global context`, and source
-scans must also catch `Variable` / `Hypothesis` trust shortcuts when they are
-used as fake proof assumptions.
+than ad hoc completion claims. They are spec-first: the worker must identify the
+exact uploaded theorem/function obligation, name the target fact or theorem, and
+keep a traceable mapping from uploaded constructs to generated Coq/Rocq or
+Isabelle definitions before making proof-script changes. Isabelle/HOL total
+functions must discharge termination: the worker may try `lexicographic_order`,
+but after that it should use an explicit `relation` / `measure` or `measures`
+proof and record the well-foundedness and recursive-call decrease subgoals.
+Coq/Rocq proof claims are not accepted from compilation alone; the verifier must
+run `Print Assumptions` on the target theorem and require `Closed under the
+global context`, and source scans must also catch `Variable` / `Hypothesis`
+trust shortcuts when they are used as fake proof assumptions.
+
+Formal proof tasks also use serial tool execution. Workers must wait for each
+Coq/Rocq or Isabelle command to finish before starting the next build, scan, or
+proof probe, and they must not leave detached/background proof-assistant jobs as
+evidence. This keeps browser smoke tests auditable: a timeline with stale
+in-progress version checks or scans cannot be accepted as a completed proof
+assessment.
+
+Every proof-assistant command also needs an explicit timeout. Quick toolchain
+probes such as `coqc --version`, `rocq --version`, `isabelle version`,
+`command -v`, and source scans should use short timeouts, typically 10s to 60s.
+Full Isabelle or Coq builds may use longer documented timeouts, but if a tool is
+missing or a probe times out, the worker should stop and emit a visible
+`needs_next` / `blocked` obligation ledger rather than leaving the browser run
+stuck.
+
+For Coq/Rocq specifically, probes should first locate a binary with a
+POSIX-safe command such as `timeout 20s sh -lc 'type -P coqc || type -P rocq ||
+true'` or a Python `shutil.which` check. Workers should not start with bare
+`coqc --version` or `timeout 20s command -v coqc` on remote smoke machines,
+because those probes have produced stale tool events when the shell/tool layer
+does not return a final result.
 
 Proof exploration is intentionally bounded. After three failed proof strategies
 or one long proof-assistant build/proof attempt, the worker should stop blind
@@ -146,7 +171,9 @@ worker uses guessed simplification facts such as `_def` rules, it must confirm
 them with `find_theorems name:<pattern>` or `thm <fact>` and include undefined
 fact failures in the obligation ledger. Deliverable projects may not keep
 `Repro.thy`, `*_original.thy`, scratch theories, or diagnostic-only `ROOT`
-imports. A compile-only framework, weakened theorem, changed function semantics,
+imports. Full Isabelle builds for slow sessions should use an explicit long
+timeout, such as 30m or 45m, and the final output must be captured in the same
+turn. A compile-only framework, weakened theorem, changed function semantics,
 remaining fake proof, diagnostic leftover, or detached background build whose
 final output is not captured in the same turn cannot satisfy the task.
 
@@ -159,10 +186,13 @@ bypasses including `Axiom`, `Parameter`, `Variable`, `Hypothesis`,
 and `Print Assumptions` output showing `Closed under the global context`. The
 target theorem must name the translated `modify_lin` obligation and mention the
 chosen well-founded relation, semantic equivalence, or branch-decrease
-invariant; tautologies, length-only lemmas, and bounded-evaluator statements do
-not count as the original proof obligation. Fixed-fuel translations remain
-unresolved unless the result also proves equivalence, decrease, and fuel
-sufficiency.
+invariant; tautologies, length-only lemmas, helper-only structural recursion
+totality, and bounded-evaluator statements do not count as the original proof
+obligation. The verifier must inspect or print the final `modify_lin` definition
+and reject structural helper rewrites such as `modify_loop` unless a named
+bisimulation/equivalence theorem connects them to the original recursive step
+relation. Fixed-fuel translations remain unresolved unless the result also
+proves equivalence, decrease, and fuel sufficiency.
 
 The debate path must converge through adversarial evidence, not role labels
 alone. A proposer handoff is only useful if the critic can falsify it with a
@@ -320,13 +350,14 @@ browser sees `run.error` with the failed dimensions instead of a generic
 - The Coq upload smoke task cannot complete unless the visible assessment covers
   uploaded input mapping, new project folder outside hidden upload staging, Coq
   build, placeholder scan, `Print Assumptions` / `Closed under the global
-  context` audit, and the original `termination modify_lin` obligation.
+  context` audit, a named target theorem, branch-decrease or semantic
+  equivalence evidence, and the original `termination modify_lin` obligation.
 - The Isabelle upload smoke task cannot complete unless the visible assessment
   covers uploaded input mapping, new Isabelle project folder outside hidden
   upload staging, `isabelle build`, source-only fake-proof scan, `thm_oracles` /
   oracle-free audit, no diagnostic leftovers in the final `ROOT` / `.thy`
-  files, no detached background build left unresolved, and the original
-  `termination modify_lin` obligation.
+  files, no detached background build left unresolved, a named target fact,
+  branch-decrease evidence, and the original `termination modify_lin` obligation.
 - The local CCB path cannot report a generic completed result for proof tasks;
   its final browser-visible `run.end` / `run.error` content must be the same
   multi-dimensional assessment used by non-CCB orchestration.

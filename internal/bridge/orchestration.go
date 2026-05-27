@@ -2442,10 +2442,10 @@ func (m *OrchestrationManager) ccbPrompt(payload protocol.OrchestrationStartPayl
 		b.WriteString("\n")
 	}
 	if looksLikeCoqUploadProofBenchmark(payload.Prompt) {
-		b.WriteString("\nBefore returning a completed final answer for this Coq upload benchmark, explicitly report these evidence dimensions: Model.thy/Termination.thy/ROOT input mapping, new Coq project folder path, _CoqProject/Makefile project shape, make/coqc result, source-only placeholder scan result, Coq Print Assumptions showing Closed under the global context, and termination modify_lin original obligation audit. Translate the Isabelle termination target into a named Coq theorem/lemma that states the original recursive termination/equivalence obligation, not only a runnable function or a tautology about a fuel interpreter. The target theorem must mention modify_lin plus the chosen well-founded relation, semantic equivalence, or branch-decrease invariant, and the final answer must name that theorem. Scan source for Axiom, Parameter, Variable, Hypothesis, Conjecture, Admitted, admit, Abort, sorry, TODO, placeholder, quick_and_dirty, Guard Checking, bypass_check, modify_lin_fuel, default_fuel, fuel_wrapper, and fixed_fuel. If modify_lin_fuel/default_fuel or any bounded fuel wrapper exists, mark the task unresolved unless equivalence, decrease/well-foundedness, and fuel sufficiency are proved in the same result.\n")
+		b.WriteString("\nBefore returning a completed final answer for this Coq upload benchmark, explicitly report these evidence dimensions: Model.thy/Termination.thy/ROOT input mapping, new Coq project folder path, _CoqProject/Makefile project shape, make/coqc result, source-only placeholder scan result, Coq Print Assumptions showing Closed under the global context, named target theorem, branch-decrease/equivalence audit, and termination modify_lin original obligation audit. Use a spec-first conversion: first write down the original Isabelle modify_lin recursive step relation and intended termination/equivalence theorem, then implement Coq definitions against that spec. Translate the Isabelle termination target into a named Coq theorem/lemma that states the original recursive termination/equivalence obligation, not only a runnable function or a tautology about a fuel interpreter. The target theorem must mention modify_lin plus the chosen well-founded relation, semantic equivalence, or branch-decrease invariant, and the final answer must name that theorem. The verifier must falsify helper-only solutions by printing modify_lin and checking whether original recursive calls were removed; if structural helpers are used, require a proved bisimulation/equivalence theorem to the original step relation. Scan source for Axiom, Parameter, Variable, Hypothesis, Conjecture, Admitted, admit, Abort, sorry, TODO, placeholder, quick_and_dirty, Guard Checking, bypass_check, modify_lin_fuel, default_fuel, fuel_wrapper, fixed_fuel, and hidden trust assumptions. If modify_lin_fuel/default_fuel or any bounded fuel wrapper exists, mark the task unresolved unless equivalence, decrease/well-foundedness, and fuel sufficiency are proved in the same result.\n")
 	}
 	if looksLikeIsabelleUploadProofBenchmark(payload.Prompt) {
-		b.WriteString("\nBefore returning a completed final answer for this Isabelle upload benchmark, explicitly report these evidence dimensions: Model.thy/Termination.thy/ROOT input mapping, new Isabelle project folder path, ROOT directory layout mapping, isabelle build result, source-only scan for sorry/quick_and_dirty/oops/sketch/admit/placeholders, Isabelle thm_oracles or oracle-free audit for the target facts, and the original termination modify_lin obligation audit. First extract the generated termination subgoals in a scratch area outside the final project or in a temporary theory that is removed from ROOT before the final build. Scratch probes must not use sorry/quick_and_dirty/oops/sketch/admit as fake proof steps; get subgoals by running an incomplete proof attempt and capturing Isabelle's failure output. Before using guessed simp facts such as *_def rules, confirm them with find_theorems name:<pattern> or thm <fact>, and record undefined-fact failures in the obligation ledger. Then try a small set of named measures/relations and record which recursive branches fail to decrease. The final project must not contain Repro.thy, *_original.thy, scratch theories, copied failed attempts, or edited ROOT entries that import diagnostic-only files. Do not mark complete if ROOT enables quick_and_dirty, if any sorry remains in source, if a proof block ends with oops/sketch, if a source scan would hit diagnostic leftovers, if a long build is left running in the background, or if termination modify_lin was replaced by a weaker theorem or compile-only framework.\n")
+		b.WriteString("\nBefore returning a completed final answer for this Isabelle upload benchmark, explicitly report these evidence dimensions: Model.thy/Termination.thy/ROOT input mapping, new Isabelle project folder path, ROOT directory layout mapping, timeout-aware isabelle build result, source-only scan for sorry/quick_and_dirty/oops/sketch/admit/placeholders, Isabelle thm_oracles or oracle-free audit for the target facts, named target fact, branch-decrease audit, and the original termination modify_lin obligation audit. First recreate the uploaded project layout so ROOT reaches the real session, then extract the generated termination subgoals in a scratch area outside the final project or in a temporary theory that is removed from ROOT before the final build. Scratch probes must not use sorry/quick_and_dirty/oops/sketch/admit as fake proof steps; get subgoals by running an incomplete proof attempt and capturing Isabelle's failure output. Before using guessed simp facts such as *_def rules, confirm them with find_theorems name:<pattern> or thm <fact>, and record undefined-fact failures in the obligation ledger. Then try lexicographic_order once and at most two concrete relation/measure/measures attempts, waiting for slow Isabelle builds with a long timeout such as 30m to 45m and capturing the final output in the same turn. The final project must not contain Repro.thy, *_original.thy, scratch theories, copied failed attempts, or edited ROOT entries that import diagnostic-only files. Do not mark complete if ROOT enables quick_and_dirty, if any sorry remains in source, if a proof block ends with oops/sketch, if a source scan would hit diagnostic leftovers, if a long build is left running in the background, or if termination modify_lin was replaced by a weaker theorem or compile-only framework.\n")
 	}
 	b.WriteString("End the final answer with the compact lines:\n")
 	b.WriteString(orchestrationMsgContract)
@@ -3768,12 +3768,22 @@ func stampToolTiming(tool *RunnerToolEvent, starts map[string]time.Time) {
 }
 
 func isRunningToolStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
+	switch normalizeToolStatus(status) {
 	case "in_progress", "running", "started":
 		return true
 	default:
 		return false
 	}
+}
+
+func normalizeToolStatus(status string) string {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return ""
+	}
+	status = strings.ReplaceAll(status, "-", "_")
+	status = regexp.MustCompile(`([a-z0-9])([A-Z])`).ReplaceAllString(status, `${1}_${2}`)
+	return strings.ToLower(status)
 }
 
 func (m *OrchestrationManager) emitTool(runID, turnID, role, cli string, tool *RunnerToolEvent) {
@@ -4384,6 +4394,8 @@ func formalProofAssessmentDimensions(userPrompt string, history []orchestrationT
 		dimensions = append(dimensions,
 			boolAssessmentDimension("上传文件映射", "Uploaded input mapping", evidence.coqInputs, "记录到 Model.thy、Termination.thy、ROOT 均已纳入检查。", "缺少 Model.thy、Termination.thy、ROOT 全部被使用的证据。"),
 			boolAssessmentDimension("新建项目目录", "New project folder", evidence.projectPath, "记录到工作目录下的新建 Coq 项目路径。", "缺少工作目录下新建 Coq 项目文件夹证据。"),
+			boolAssessmentDimension("命名目标定理", "Named target theorem", evidence.namedTarget, "记录到对应 termination modify_lin 的命名 Coq 目标定理。", "缺少对应 termination modify_lin 的命名 Coq 目标定理证据。"),
+			boolAssessmentDimension("分支下降/等价审计", "Branch decrease/equivalence audit", evidence.branchAudit, "记录到原始递归分支下降或语义等价证明审计。", "缺少原始递归分支下降或语义等价证明审计。"),
 			boolAssessmentDimension("原始证明义务", "Original proof obligation", evidence.originalObligation, "记录到 termination modify_lin 原始终止性/等价义务审计。", "缺少 termination modify_lin 原始终止性/等价义务审计。"),
 		)
 		if evidence.fuelShortcut {
@@ -4396,6 +4408,8 @@ func formalProofAssessmentDimensions(userPrompt string, history []orchestrationT
 		dimensions = append(dimensions,
 			boolAssessmentDimension("上传文件映射", "Uploaded input mapping", evidence.coqInputs, "记录到 Model.thy、Termination.thy、ROOT 均已纳入检查。", "缺少 Model.thy、Termination.thy、ROOT 全部被使用的证据。"),
 			boolAssessmentDimension("新建项目目录", "New project folder", evidence.projectPath, "记录到工作目录下的新建 Isabelle 项目路径。", "缺少工作目录下新建 Isabelle 项目文件夹证据。"),
+			boolAssessmentDimension("命名目标事实", "Named target fact", evidence.namedTarget, "记录到对应 termination modify_lin 的命名 Isabelle 目标事实。", "缺少对应 termination modify_lin 的命名 Isabelle 目标事实证据。"),
+			boolAssessmentDimension("分支下降审计", "Branch decrease audit", evidence.branchAudit, "记录到原始递归分支下降证明审计。", "缺少原始递归分支下降证明审计。"),
 			boolAssessmentDimension("原始证明义务", "Original proof obligation", evidence.originalObligation, "记录到 termination modify_lin 原始终止性/下降义务审计。", "缺少 termination modify_lin 原始终止性/下降义务审计。"),
 		)
 	}
@@ -4968,11 +4982,15 @@ func formalProofTaskGuidance(userPrompt, mode, role string) string {
 	}
 	var b strings.Builder
 	b.WriteString("Formal proof task guardrails:\n")
+	b.WriteString("- Work spec-first: identify the exact theorem/function obligation before changing code, name the target fact, and keep a short mapping from the uploaded source constructs to the proof-assistant definitions you create.\n")
 	b.WriteString("- Treat build success as a smoke check only. The acceptance criterion is the requested proof obligation, not merely compiling.\n")
+	b.WriteString("- Run proof-assistant commands serially and wait for each result before starting the next one. Do not launch parallel or detached tool calls for Coq/Isabelle builds, version checks, scans, or proof probes; stale in-progress commands make the browser smoke result unverifiable.\n")
+	b.WriteString("- Use explicit timeouts for every proof-assistant/toolchain command. Quick probes such as coqc --version, rocq --version, isabelle version, command -v, and rg scans should use timeout 10s to 60s; full builds may use longer documented timeouts. If a required tool is missing or a probe times out, stop and report a visible needs_next/blocked ledger instead of hanging the run.\n")
 	b.WriteString("- Do not weaken theorem statements, change the target definition's semantics, move the obligation elsewhere, or add trust assumptions such as Axiom, Parameter, Conjecture, Admitted, admit, Abort, sorry, quick_and_dirty, Guard Checking changes, bypass_check, TODO, or placeholders.\n")
 	b.WriteString("- If you introduce a bounded/fuel wrapper or default fuel for a recursive function, you must also prove equivalence to the original recursive semantics, the required termination/decrease measure, and that the default fuel is sufficient for every intended input. Otherwise report status=needs_next or blocked.\n")
 	b.WriteString("- Include a proof audit when relevant: placeholder scans with rg, Coq Print Assumptions <target> showing Closed under the global context, Lean #print axioms <target>, Isabelle thm_oracles <target>, and the project build command.\n")
-	b.WriteString("- Keep a proof-obligation ledger in the handoff: target theorem/definition, missing obligation, semantic constraints, attempted proof path, exact blocker, and verification command.\n")
+	b.WriteString("- Reviewer falsification checklist: print or inspect the final target definition/fact, compare it to the original uploaded obligation, reject helper-only rewrites without equivalence, and verify that scans/audits ran on the deliverable project instead of hidden staging or scratch files.\n")
+	b.WriteString("- Keep a proof-obligation ledger in the handoff: target theorem/definition, uploaded-source mapping, branch/decrease obligation, semantic constraints, attempted proof path, exact blocker, and verification command.\n")
 	b.WriteString("- Exploration budget: after at most three failed proof strategies or one long proof-assistant build/proof attempt, stop blind search and hand off a compact obligation ledger with the failed goals, attempted measures/relations, and the next most promising lemma. Do not spend the entire turn repeating similar measure guesses.\n")
 	if coqGuidance := coqProofTaskGuidance(userPrompt); coqGuidance != "" {
 		b.WriteString(coqGuidance)
@@ -5009,12 +5027,12 @@ func formalProofVerifierGuidance(userPrompt, mode string) string {
 	}
 	if looksLikeCoqUploadProofBenchmark(userPrompt) {
 		lines = append(lines,
-			"- This task matches the Coq upload benchmark with Model.thy, Termination.thy, and ROOT. Your visible final conclusion must explicitly assess: Model.thy/Termination.thy/ROOT were used, a new Coq project folder was written under the requested cwd, make/coqc passed, source-only placeholder scan found no forbidden tokens, Coq Print Assumptions showed Closed under the global context, and a named theorem states the original termination modify_lin obligation. Reject compile-only projects, tautological proofs, or modify_lin_fuel/default_fuel unless equivalence, decrease, and fuel sufficiency are proved.",
+			"- This task matches the Coq upload benchmark with Model.thy, Termination.thy, and ROOT. Your visible final conclusion must explicitly assess: Model.thy/Termination.thy/ROOT were used, a new Coq project folder was written under the requested cwd, make/coqc passed, source-only placeholder scan found no forbidden tokens, Coq Print Assumptions showed Closed under the global context for the named target theorem, Print/inspection of modify_lin did not reveal helper-only semantic weakening, and a named theorem states the original termination modify_lin obligation with branch-decrease or equivalence evidence. Reject compile-only projects, tautological proofs, or modify_lin_fuel/default_fuel unless equivalence, decrease, and fuel sufficiency are proved.",
 		)
 	}
 	if looksLikeIsabelleUploadProofBenchmark(userPrompt) {
 		lines = append(lines,
-			"- This task matches the Isabelle upload benchmark with Model.thy, Termination.thy, and ROOT. Your visible final conclusion must explicitly assess: Model.thy/Termination.thy/ROOT were used, a new Isabelle project folder was written under the requested cwd, isabelle build passed with no detached/background build left unresolved, source-only scan found no sorry/quick_and_dirty/oops/sketch/admit/placeholders and no diagnostic leftovers such as Repro.thy or *_original.thy, Isabelle thm_oracles or oracle-free audit was run for the target facts, and termination modify_lin was actually proved rather than replaced by a compile-only framework.",
+			"- This task matches the Isabelle upload benchmark with Model.thy, Termination.thy, and ROOT. Your visible final conclusion must explicitly assess: Model.thy/Termination.thy/ROOT were used, a new Isabelle project folder was written under the requested cwd, the ROOT layout was preserved or deliberately remapped, timeout-aware isabelle build passed with no detached/background build left unresolved, source-only scan found no sorry/quick_and_dirty/oops/sketch/admit/placeholders and no diagnostic leftovers such as Repro.thy or *_original.thy, Isabelle thm_oracles or oracle-free audit was run for the target facts, and termination modify_lin was actually proved with branch-decrease evidence rather than replaced by a compile-only framework.",
 		)
 	}
 	if mode == "debate" {
@@ -5029,8 +5047,11 @@ func coqProofTaskGuidance(userPrompt string) string {
 	}
 	var b strings.Builder
 	b.WriteString("- Coq/Rocq workflow: create a self-contained project with _CoqProject/Makefile when converting uploaded sources, keep original semantic names mapped in comments or theorem names, and run make or coqc from the project root.\n")
-	b.WriteString("- Coq/Rocq modeling rule: make the target theorem explicit before coding the proof. For an Isabelle termination benchmark, name the Coq theorem that corresponds to original termination modify_lin, define the intended well-founded relation or semantic equivalence, and keep a traceable mapping from Isabelle constructors/functions to Coq definitions. The theorem must mention modify_lin and the relevant relation/equivalence/decrease invariant; a tautology, length-only lemma, or theorem about a bounded evaluator is not sufficient.\n")
+	b.WriteString("- Coq/Rocq toolchain probe: prefer POSIX-safe short probes such as timeout 20s sh -lc 'type -P coqc || type -P rocq || true' or timeout 20s python3 -c 'import shutil; print(shutil.which(\"coqc\") or shutil.which(\"rocq\") or \"\")'. Do not run bare coqc --version or timeout 20s command -v coqc before a path is known; command is a shell builtin and has caused stale tool events on remote smoke machines.\n")
+	b.WriteString("- Coq/Rocq spec-first plan: before coding the final proof, define or document the original Isabelle modify_lin step relation, the intended well-founded relation/measure, and the named theorem that corresponds to termination modify_lin. Use names such as modify_lin_original_terminates, modify_lin_step_decreases, or modify_lin_semantics_equiv so the verifier can audit the target.\n")
+	b.WriteString("- Coq/Rocq modeling rule: make the target theorem explicit before coding the proof. For an Isabelle termination benchmark, name the Coq theorem that corresponds to original termination modify_lin, define the intended well-founded relation or semantic equivalence, and keep a traceable mapping from Isabelle constructors/functions to Coq definitions. The theorem must mention modify_lin and the relevant relation/equivalence/decrease invariant; a tautology, length-only lemma, theorem about a bounded evaluator, or helper-only structural recursion totality is not sufficient.\n")
 	b.WriteString("- Coq/Rocq audit: scan only project source for Axiom, Parameter, Variable, Hypothesis, Conjecture, Admitted, admit, Abort, sorry, TODO, placeholder, quick_and_dirty, Guard Checking, bypass_check, modify_lin_fuel, default_fuel, fixed_fuel, fuel_wrapper, and fuel wrappers; then run Print Assumptions on the target theorem(s) and require Closed under the global context.\n")
+	b.WriteString("- Coq/Rocq verifier checks: run Print modify_lin or otherwise inspect the final definition, run Print Assumptions <target>, and reject results where recursive behavior was replaced by modify_loop/structural helper code unless a named equivalence/bisimulation theorem connects it to the original Isabelle step relation.\n")
 	b.WriteString("- Coq/Rocq termination rule: structural recursion, Program Fixpoint, Function, Equations, or well-founded recursion is acceptable only when the visible theorem proves the original modify_lin termination/equivalence obligation; fixed fuel wrappers are unresolved unless equivalence, decrease, and fuel sufficiency are proved.\n")
 	return b.String()
 }
@@ -5043,7 +5064,9 @@ func isabelleProofTaskGuidance(userPrompt string) string {
 	b.WriteString("- Isabelle workflow: keep the uploaded ROOT/Model.thy/Termination.thy semantics intact unless the user explicitly asks for a new session; when ROOT names subdirectories such as directories \"HWQ-U\", either recreate that layout or minimally adjust ROOT to the visible project layout before proving, and document the mapping. Write any new proof project under the requested cwd and run isabelle build -D <project> or isabelle build -d <parent> <session> with a long timeout when needed. Do not start long Isabelle builds as detached/background jobs unless you also wait for completion and capture the final output in the same turn.\n")
 	b.WriteString("- Isabelle scratch discipline: use a scratch directory or temporary theory outside the final ROOT session for extracting generated subgoals. Scratch probes must not use sorry/quick_and_dirty/oops/sketch/admit as fake proof steps; obtain subgoals by running an incomplete candidate proof and capturing Isabelle's failure output. If you create Repro.thy, *_original.thy, scratch theories, or diagnostic ROOT imports, remove them from the final project and restore ROOT before the final source scan/build. The final source scan must cover only deliverable ROOT/.thy files and must not report leftovers from failed attempts.\n")
 	b.WriteString("- Isabelle audit: scan source-only deliverable files for sorry, quick_and_dirty, oops, sketch, admit, TODO, placeholder, disabled checks, Repro.thy, *_original.thy, and scratch leftovers; inspect ROOT for quick_and_dirty and diagnostic imports; run thm_oracles or an equivalent oracle audit on the target theorem(s) and report the result.\n")
+	b.WriteString("- Isabelle long-build rule: use timeout 30m or timeout 45m for full isabelle build checks when the session is slow, and do not report success from a still-running or detached build. Capture the exact final command and exit result in the same visible turn.\n")
 	b.WriteString("- Isabelle termination workflow: first extract the generated termination subgoals in scratch, then restore the final project and try Isabelle's lexicographic_order once, followed by at most two concrete relation/measure/measures attempts; before using guessed simp facts such as *_def rules, confirm them with find_theorems name:<pattern> or thm <fact>. After the bounded attempts, summarize the exact recursive calls, undefined facts, and failed decrease goals instead of continuing blind search.\n")
+	b.WriteString("- Isabelle verifier checks: inspect the final ROOT imports, run a source-only scan on deliverable files, confirm the named target fact with thm/thm_oracles when available, and reject any result where termination modify_lin was hidden by changing the function, deleting recursive equations, or leaving a scratch theory imported.\n")
 	b.WriteString("- Isabelle termination rule: for termination modify_lin, prove the original function termination obligation with a concrete measure/relation and branch decrease lemmas; a compile-only framework, weakened theorem, removed recursion, changed function semantics, or remaining sorry is unresolved.\n")
 	return b.String()
 }
@@ -5610,6 +5633,12 @@ func coqUploadProofAssessmentGap(history []orchestrationTurn, changes workspaceC
 	if !evidence.originalObligation {
 		missing = append(missing, "original termination/modify_lin obligation audit evidence is missing")
 	}
+	if !evidence.namedTarget {
+		missing = append(missing, "named Coq target theorem for termination/modify_lin is missing")
+	}
+	if !evidence.branchAudit {
+		missing = append(missing, "branch-decrease or original-semantics equivalence audit evidence is missing")
+	}
 	if evidence.semanticWeakening {
 		return "formal proof assessment failed: target definition/theorem appears semantically weakened or lacks equivalence to the original recursive modify_lin obligation", true
 	}
@@ -5645,6 +5674,12 @@ func isabelleUploadProofAssessmentGap(history []orchestrationTurn, changes works
 	}
 	if !evidence.originalObligation {
 		missing = append(missing, "original termination/modify_lin obligation audit evidence is missing")
+	}
+	if !evidence.namedTarget {
+		missing = append(missing, "named Isabelle target fact for termination/modify_lin is missing")
+	}
+	if !evidence.branchAudit {
+		missing = append(missing, "branch-decrease audit evidence is missing")
 	}
 	if evidence.semanticWeakening {
 		return "formal proof assessment failed: target theorem/function appears weakened or replaced instead of proving original termination modify_lin", true
@@ -5700,6 +5735,8 @@ type proofAssessmentEvidence struct {
 	placeholderScan    bool
 	assumptionAudit    bool
 	originalObligation bool
+	namedTarget        bool
+	branchAudit        bool
 	semanticWeakening  bool
 	trivialObligation  bool
 	fuelShortcut       bool
@@ -5720,6 +5757,8 @@ func collectProofAssessmentEvidence(history []orchestrationTurn, changes workspa
 		placeholderScan:    placeholderScanEvidenceForHistory(history, text),
 		assumptionAudit:    proofAssumptionAuditEvidence(history, combined),
 		originalObligation: originalProofObligationEvidence(combined),
+		namedTarget:        namedProofTargetEvidence(combined),
+		branchAudit:        branchDecreaseOrEquivalenceEvidence(combined),
 		semanticWeakening:  semanticWeakeningEvidence(combined),
 		trivialObligation:  trivialProofObligationEvidence(combined),
 		fuelShortcut:       fuelShortcutEvidence(outputLower, text),
@@ -5976,6 +6015,41 @@ func originalProofObligationEvidence(text string) bool {
 		return true
 	}
 	return false
+}
+
+func namedProofTargetEvidence(text string) bool {
+	lower := strings.ToLower(text)
+	if semanticWeakeningEvidence(lower) || trivialProofObligationEvidence(lower) {
+		return false
+	}
+	if regexp.MustCompile(`\b(print assumptions|check|about|thm|thm_oracles|print)\s+[a-z0-9_'.]*modify_lin[a-z0-9_'.]*`).MatchString(lower) {
+		return true
+	}
+	return containsAny(lower, []string{
+		"target theorem", "target lemma", "named theorem", "named target theorem", "target fact", "named target fact",
+		"modify_lin_termination", "modify_lin_terminates", "modify_lin_original_terminates",
+		"modify_lin_step_decreases", "modify_lin_semantics_equiv", "modify_lin_wf", "termination_modify_lin",
+		"目标定理", "目标引理", "命名定理", "命名目标", "目标事实", "命名事实",
+	})
+}
+
+func branchDecreaseOrEquivalenceEvidence(text string) bool {
+	lower := strings.ToLower(text)
+	if semanticWeakeningEvidence(lower) || trivialProofObligationEvidence(lower) {
+		return false
+	}
+	if containsAny(lower, []string{
+		"branch-decrease", "branch decrease", "recursive-call decrease", "recursive call decrease",
+		"step decreases", "decrease lemma", "decreases by", "well-founded relation", "well founded relation",
+		"semantic equivalence", "semantics equivalence", "bisimulation", "equivalence theorem",
+		"original-step", "original step", "original recursive step", "distance decreases",
+		"分支下降", "递归调用下降", "下降引理", "每个分支", "每个递归分支", "良基关系",
+		"语义等价", "等价定理", "原始步进", "原始递归步", "distance 下降",
+	}) {
+		return true
+	}
+	return containsAny(lower, []string{"decrease", "下降", "等价", "equivalence"}) &&
+		containsAny(lower, []string{"modify_lin", "termination", "recursive", "branch", "distance", "measure", "well-founded", "well founded", "终止", "递归", "分支", "度量", "良基"})
 }
 
 func semanticWeakeningEvidence(text string) bool {

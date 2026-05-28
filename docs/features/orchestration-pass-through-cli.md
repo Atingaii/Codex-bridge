@@ -8,10 +8,10 @@
   events, and terminal status in the browser-visible timeline.
 - Avoid Bridge-owned proof strategies, proof acceptance gates, automatic proof
   remediation turns, or runtime command bans that constrain what the CLI may do.
-- Keep one narrow safety boundary for Isabelle work: when Claude Code appears
-  to be running a long Isabelle build, Bridge may append a user-style note to
-  the same Claude stdin stream telling it to stop waiting, inspect the latest
-  output/log, and continue if enough no-error evidence is available.
+- Keep one narrow safety boundary for explicit Isabelle work: when Claude Code
+  appears to be running a long Isabelle build, Bridge may append a user-style
+  note to the same Claude stdin stream telling it to stop waiting, inspect the
+  latest output/log, and continue if enough no-error evidence is available.
 
 ## Non-Goals
 
@@ -30,7 +30,9 @@
 - No frontend event shape changes.
 - Existing `turn.start`, `turn.delta`, `command.start`, `command.end`,
   `turn.end`, `run.end`, `run.error`, and `run.cancelled` events continue to
-  carry the visible result.
+  carry the visible result. When a CLI exits before returning final text,
+  `turn.end` and `run.error` carry a sanitized process error so the browser
+  timeline shows the failure reason.
 - Terminal `run.end` content becomes a relay summary of the CLI output and
   recorded commands instead of an independent proof-assessment checklist.
 
@@ -42,15 +44,16 @@ Bridge prompt construction keeps only generic orchestration context:
   `internal/bridge/orchestration.go:PrepareOrchestrationPromptFiles`;
 - compact prior handoffs when the run has more than one scheduled turn;
 - language and compact handoff formatting so browser output remains readable;
-- a short Isabelle timeout boundary when the prompt looks like it may involve
-  Isabelle build work.
+- a short Isabelle timeout boundary when the prompt looks like it asks for
+  Isabelle build work. A Coq conversion task that happens to upload `.thy` and
+  `ROOT` files does not receive this Isabelle runtime boundary.
 
 Bridge no longer injects proof-assistant guardrails such as required
 `Print Assumptions`, forbidden fuel wrappers, source scans, semantic weakening
 checks, or fixed Isabelle build templates. It also no longer rejects foreground
 Isabelle build commands after the CLI has run.
 
-For Isabelle-looking Claude turns, Bridge starts Claude Code with
+For explicit Isabelle-looking Claude turns, Bridge starts Claude Code with
 `--input-format=stream-json` and sends the initial user task as a normal stream
 JSON user message. If a command event for `isabelle build`, `isabelle process`,
 or a related long Isabelle command remains active past
@@ -102,7 +105,11 @@ without a Bridge-owned formal-proof acceptance gate.
   Assumptions`, `modify_lin_fuel`, `default_fuel`, or controlled-background
   Isabelle templates.
 - Isabelle-looking prompts include only the explicit-timeout stop/report
-  boundary and do not ban foreground builds.
+  boundary and do not ban foreground builds. Coq conversion prompts with
+  uploaded Isabelle files do not enter the Isabelle stream-input/nudge path.
+- A failed CLI subprocess with no final text is visible in the browser timeline
+  as sanitized `turn.end` / `run.error` content instead of a generic status
+  alone.
 - Long-running Isabelle command events in a Claude stream-input turn cause one
   same-process stdin nudge and a browser-visible `turn.delta` notice, without
   interrupting the CLI process.

@@ -346,16 +346,17 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		content, tools, err := m.runRelayCLI(ctx, payload, turnID, role, cli, prompt, &sessionState)
 		record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
 		if err != nil {
-			record.Err = err.Error()
+			record.Err = visibleCLIError(err)
 			history = append(history, record)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 				Kind:    "turn.end",
 				TurnID:  turnID,
 				Role:    role,
 				CLI:     cli,
-				Content: record.Content,
+				Content: relayTerminalContent([]orchestrationTurn{record}),
 				Status:  "error",
-				Error:   err.Error(),
+				Error:   record.Err,
+				Data:    relayTurnEndData(cli, sessionState),
 			})
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -369,8 +370,12 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 				Kind:    "run.error",
 				Status:  store.OrchestrationFailed,
 				CLI:     cli,
-				Error:   err.Error(),
+				Error:   record.Err,
 				Content: relayTerminalContent(history),
+				Data: map[string]any{
+					"relayOnly": true,
+					"error":     record.Err,
+				},
 			})
 			return
 		}
@@ -410,9 +415,21 @@ func relayTerminalContent(history []orchestrationTurn) string {
 		return "CLI returned without a final text response. Command events are shown above."
 	}
 	if record.Err != "" {
-		return "CLI process failed before returning a final text response."
+		return "CLI process failed before returning a final text response.\n\nError: " + trimForPrompt(record.Err, 3000)
 	}
 	return "CLI returned without a final text response."
+}
+
+func visibleCLIError(err error) string {
+	if err == nil {
+		return ""
+	}
+	value := strings.TrimSpace(stripANSI(err.Error()))
+	value = redactSensitiveText(value)
+	if value == "" {
+		return "unknown CLI process error"
+	}
+	return trimForPrompt(value, 3000)
 }
 
 func relayTurnEndData(cli string, state orchestrationSessionState) map[string]any {
@@ -4034,7 +4051,7 @@ func claudeIsabelleNudgeMessage(command string, after time.Duration) string {
 }
 
 func shouldUseClaudeStreamInput(userPrompt string) bool {
-	return looksLikeIsabelleProofTask(userPrompt)
+	return looksLikeIsabelleRuntimeTask(userPrompt)
 }
 
 func isLongIsabelleBuildCommand(command string) bool {
@@ -5206,7 +5223,7 @@ func relayCommandSummaries(tools []RunnerToolEvent, max int) []string {
 }
 
 func isabelleTimeoutBoundary(userPrompt string) string {
-	if !looksLikeIsabelleProofTask(userPrompt) {
+	if !looksLikeIsabelleRuntimeTask(userPrompt) {
 		return ""
 	}
 	return "Isabelle timeout boundary: if you run a full Isabelle build or long Isabelle compilation, choose and use an explicit timeout appropriate to the task. If that timeout is exceeded, stop the build and report the command, elapsed time, timeout value, and latest output or log. Bridge otherwise does not constrain how you run the CLI task.\n"
@@ -5827,6 +5844,24 @@ func looksLikeFormalProofTask(text string) bool {
 func looksLikeCoqProofTask(text string) bool {
 	lower := strings.ToLower(text)
 	return containsAny(lower, []string{"coq", "rocq", ".v", "_coqproject", "coqc", "print assumptions"})
+}
+
+func looksLikeExplicitCoqConversionTask(lower string) bool {
+	if !containsAny(lower, []string{"coq", "rocq", "_coqproject", ".v", "coqc"}) {
+		return false
+	}
+	return containsAny(lower, []string{
+		"做成coq", "coq 证明项目", "coq证明项目", "coq 项目", "coq项目",
+		"new coq project", "coq proof project", "convert", "translation", "translate", "转换", "转成", "翻译",
+	})
+}
+
+func looksLikeIsabelleRuntimeTask(text string) bool {
+	lower := strings.ToLower(text)
+	if looksLikeExplicitCoqConversionTask(lower) {
+		return false
+	}
+	return looksLikeIsabelleProofTask(text)
 }
 
 func looksLikeIsabelleProofTask(text string) bool {

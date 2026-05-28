@@ -650,12 +650,58 @@ func TestOrchestrationRelayRunEmitsFrontendVisiblePromptsCommandsAndSessionState
 	if !strings.Contains(string(claudeArgv), "--session-id") {
 		t.Fatalf("Claude was not started with stable session id: %s", claudeArgv)
 	}
+	if strings.Contains(string(claudeArgv), "--input-format=stream-json") {
+		t.Fatalf("Coq upload relay should not use Isabelle stream-input mode: %s", claudeArgv)
+	}
 	codexArgv, err := os.ReadFile(codexArgvPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(codexArgv), "exec") || !strings.Contains(string(codexArgv), "--cd") {
 		t.Fatalf("Codex initial exec args did not include cwd/thread setup: %s", codexArgv)
+	}
+}
+
+func TestRelayCLIErrorIsFrontendVisibleAndRedacted(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeErrorScript("server_error token=secret Authorization: Bearer abc.def")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexExecScript("unused")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_cli_error",
+		Mode:     "collaboration",
+		Prompt:   "检查证明框架",
+		MaxTurns: 1,
+		CWD:      tmp,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.end", "claude", "CLI process failed before returning a final text response") ||
+		!orchestrationEventsContain(events, "turn.end", "claude", "server_error") {
+		t.Fatalf("turn.end did not expose CLI error details: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "run.error", "claude", "server_error") {
+		t.Fatalf("run.error did not expose CLI error details: %#v", events)
+	}
+	for _, event := range events {
+		if strings.Contains(event.Content, "abc.def") || strings.Contains(event.Error, "abc.def") || strings.Contains(event.Content, "token=secret") || strings.Contains(event.Error, "token=secret") {
+			t.Fatalf("CLI error leaked sensitive value: %#v", event)
+		}
 	}
 }
 
@@ -740,7 +786,7 @@ func TestClaudeStreamInputClosesAfterIdleWindowWithoutInterruptingProcess(t *tes
 	if !stdin.closed {
 		t.Fatal("Claude stream input was not closed after idle window")
 	}
-	if !orchestrationEventsContain(drainOrchestrationEvents(t, out), "turn.delta", "claude", "Bridge closed Claude stream input after an idle window") {
+	if !waitForOrchestrationEvent(t, out, "turn.delta", "claude", "Bridge closed Claude stream input after an idle window") {
 		t.Fatal("frontend-visible idle close event was not emitted")
 	}
 }
@@ -1228,6 +1274,23 @@ func TestComposeRelayPromptAddsOnlyIsabelleTimeoutBoundary(t *testing.T) {
 		if strings.Contains(prompt, bad) {
 			t.Fatalf("Isabelle relay prompt should not inject old guardrail %q:\n%s", bad, prompt)
 		}
+	}
+}
+
+func TestCoqUploadPromptDoesNotTriggerIsabelleRuntimeBoundary(t *testing.T) {
+	task := "把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT"
+	prompt := composeRelayPrompt("collaboration", task, "", false, "implementer", "claude", 1, 2, nil)
+	if strings.Contains(prompt, "Isabelle timeout boundary") {
+		t.Fatalf("Coq upload prompt should not include Isabelle runtime boundary:\n%s", prompt)
+	}
+	if shouldUseClaudeStreamInput(task) {
+		t.Fatal("Coq upload prompt should not use Claude stream input")
+	}
+	if !looksLikeIsabelleProofTask(task) {
+		t.Fatal("fixture should still look like a formal Isabelle-source upload due .thy/ROOT files")
+	}
+	if !looksLikeCoqProofTask(task) {
+		t.Fatal("fixture should look like a Coq proof task")
 	}
 }
 
@@ -2943,6 +3006,28 @@ func drainOrchestrationEvents(t *testing.T, out <-chan protocol.Envelope) []prot
 	return events
 }
 
+func waitForOrchestrationEvent(t *testing.T, out <-chan protocol.Envelope, kind, cli, content string) bool {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case env := <-out:
+			if env.Type != protocol.TypeOrchestrationEvent {
+				continue
+			}
+			event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if orchestrationEventsContain([]protocol.OrchestrationEventPayload{event}, kind, cli, content) {
+				return true
+			}
+		case <-deadline:
+			return false
+		}
+	}
+}
+
 type trackingWriteCloser struct {
 	bytes.Buffer
 	closed bool
@@ -2983,6 +3068,17 @@ import json
 text = ` + string(raw) + `
 print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
 print(json.dumps({"type":"result","result":text}), flush=True)
+`
+}
+
+func fakeClaudeErrorScript(text string) string {
+	raw, _ := json.Marshal(text)
+	return `#!/usr/bin/env python3
+import sys
+
+text = ` + string(raw) + `
+print(text, file=sys.stderr, flush=True)
+sys.exit(1)
 `
 }
 

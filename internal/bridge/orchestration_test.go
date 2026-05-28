@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
@@ -1651,6 +1652,28 @@ func TestFinalVerifierDisabledForPassThroughRelay(t *testing.T) {
 	}}
 	if manager.shouldRunFinalVerifier(failed) {
 		t.Fatal("pass-through relay should not trigger hidden final verifier for command results")
+	}
+}
+
+func TestTrimForPromptPreservesUTF8WhenTruncatingMultibyteText(t *testing.T) {
+	got := trimForPrompt("验", 1)
+	if !utf8.ValidString(got) {
+		t.Fatalf("trimForPrompt returned invalid UTF-8 bytes: % x", []byte(got))
+	}
+
+	history := []orchestrationTurn{{
+		Role:    "implementer",
+		CLI:     "claude",
+		Content: strings.Repeat("a", 1799) + "验" + strings.Repeat("b", 64),
+		Tools: []RunnerToolEvent{{
+			Command: strings.Repeat("c", 259) + "证" + strings.Repeat("d", 32),
+			Status:  "completed",
+			Output:  strings.Repeat("e", 259) + "据" + strings.Repeat("f", 32),
+		}},
+	}}
+	prompt := composeRelayPrompt("collaboration", "继续验证", "", false, "reviewer", "codex", 2, 2, history)
+	if !utf8.ValidString(prompt) {
+		t.Fatalf("composeRelayPrompt produced invalid UTF-8 around handoff truncation")
 	}
 }
 

@@ -122,7 +122,7 @@ func (r *CodexExecRunner) Prompt(ctx context.Context, req RunnerRequest, onUpdat
 	if err := cmd.Start(); err != nil {
 		return RunnerResult{}, err
 	}
-	_, _ = io.WriteString(stdin, req.Content)
+	_, _ = io.WriteString(stdin, sanitizePromptText(req.Content))
 	_ = stdin.Close()
 
 	result, scanErr := r.scanJSONL(stdout, req.RemoteThreadID, onUpdate)

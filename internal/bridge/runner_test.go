@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/tencent/codex-bridge/internal/config"
 )
@@ -31,6 +32,16 @@ func TestCodexExecScanJSONL(t *testing.T) {
 	}
 	if string(got.Usage) != `{"input_tokens":1,"output_tokens":2}` {
 		t.Fatalf("usage = %s", got.Usage)
+	}
+}
+
+func TestSanitizePromptTextReplacesInvalidUTF8(t *testing.T) {
+	got := sanitizePromptText("ok" + string([]byte{0xff}) + "done")
+	if !utf8.ValidString(got) {
+		t.Fatalf("sanitizePromptText returned invalid UTF-8 bytes: % x", []byte(got))
+	}
+	if !strings.Contains(got, "ok") || !strings.Contains(got, "done") {
+		t.Fatalf("sanitizePromptText dropped surrounding content: %q", got)
 	}
 }
 

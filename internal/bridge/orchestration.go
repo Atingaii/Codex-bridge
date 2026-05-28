@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
@@ -3145,6 +3146,7 @@ func (m *OrchestrationManager) runCodexWithThread(ctx context.Context, payload p
 	if m.shouldRunCodexAppServer() {
 		return m.runCodexAppServerWithThread(ctx, payload, turnID, role, prompt, threadID)
 	}
+	prompt = sanitizePromptText(prompt)
 	cmdCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	args := m.codexOrchestrationArgs(payload, threadID)
@@ -5888,11 +5890,25 @@ func looksLikeIsabelleUploadProofBenchmark(text string) bool {
 }
 
 func trimForPrompt(value string, max int) string {
-	value = strings.TrimSpace(value)
-	if len(value) <= max {
+	value = sanitizePromptText(strings.TrimSpace(value))
+	if max <= 0 || len(value) <= max {
 		return value
 	}
-	return value[:max] + "\n[truncated]"
+	if utf8.ValidString(value[:max]) {
+		return value[:max] + "\n[truncated]"
+	}
+	end := 0
+	for i := range value {
+		if i > max {
+			break
+		}
+		end = i
+	}
+	return value[:end] + "\n[truncated]"
+}
+
+func sanitizePromptText(value string) string {
+	return strings.ToValidUTF8(value, "\uFFFD")
 }
 
 func formatCompactPriorTurn(item orchestrationTurn) string {

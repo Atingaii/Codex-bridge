@@ -36,41 +36,35 @@ context in the same `runID`.
 - The orchestration WebSocket is the live path. If it disconnects while the
   selected run is active, the frontend reconnects and reloads persisted events
   so progress that arrived during the gap is rendered.
-- The final turn must leave a user-readable conclusion. If the CLI only emits a
-  process note and command events, the Bridge appends a concise, human-readable
-  fallback summary from prior conclusions and successful verification commands
-  instead of raw command-log prose.
+- The final turn should leave a user-readable conclusion, and successful
+  `turn.end` / `run.end` events carry the CLI's visible content. If the CLI
+  returns no text, Bridge reports that absence rather than adding an independent
+  proof assessment.
 - Command events include timing metadata so long-running checks such as
   Isabelle, Coq, and Lean builds show when the command started and how long it
   has been running or took to finish.
-- Isabelle proof runs must monitor full `isabelle build -D` / `isabelle build
-  -d` checks through a controlled background command that writes `build.log`,
-  `build.pid`, `build.pgid`, and `build.exit`, then emits short
-  `tail -n 80 build.log` and PID/PGID/exit checks. Foreground full-build
-  commands are not acceptable for the web smoke path because the browser sees no
-  useful log tail until they finish. If the build is handed back to the user,
-  Bridge injects a carry-over prompt into subsequent orchestration turns with
-  the known manual command, log path, PID/PGID/exit files, and latest tail. The
-  next CLI should render the existing log/tail evidence, stop via the recorded
-  process group when requested, and avoid rerunning the same build automatically
-  unless the user explicitly asks for a fresh build; the terminal event must say
-  that acceptance is pending the user's manual build result.
+- Isabelle-looking proof runs receive only a prompt-level timeout boundary:
+  when a CLI chooses to run a full Isabelle build or long Isabelle compilation,
+  it should choose an explicit timeout and report the command, elapsed time,
+  timeout value, and latest output/log if the timeout is exceeded. Bridge does
+  not require a controlled background build template and does not reject the
+  CLI's foreground build choice after the fact.
 - If a Bridge disconnects or restarts while an orchestration run is active, Hub
   marks that run failed and appends a `run.error` event instead of leaving the
   browser stuck in `running`.
 - Bridge-launched Codex and Claude CLI turns run in managed process groups.
   Canceling a run cancels the direct CLI process and its child process tree so
   Hub can receive `run.cancelled` instead of leaving the page in `canceling`.
-- Direct Codex JSONL orchestration has an idle guard after all command events
-  have ended. If Codex emits no assistant text or new tool events for the guard
-  window while no command is active, Bridge ends that turn with an error and the
-  run reaches a browser-visible terminal state.
+- Direct Codex JSONL orchestration waits for the CLI process and scanner to
+  finish so the browser-visible timeline reflects the actual CLI output and
+  terminal status.
 - The frontend must render persisted `turn.delta` and `command.*` events as
   visible timeline entries. Detailed content that reaches `/events` must not be
   hidden behind only `turn.start` status cards.
-- Turn-to-turn strategy now uses compact handoffs documented in
-  [orchestration-strategy-optimization.md](orchestration-strategy-optimization.md);
-  this preserves continuity without replaying full prior turn transcripts.
+- Turn-to-turn strategy now uses the pass-through relay documented in
+  [orchestration-pass-through-cli.md](orchestration-pass-through-cli.md);
+  the next CLI receives the previous visible result plus useful command context
+  without Bridge adding a proof strategy.
 - Uploaded orchestration file contents are sent to the Bridge with the current
   prompt, while `user.message` events persist only file metadata in
   `event.data.files` so the timeline can show what was attached without
@@ -117,14 +111,10 @@ new files are attached. New follow-up uploads are merged into the run-level
 metadata while each `user.message` event still records only that prompt's
 attachments.
 Successful turn-end events carry the final turn content so the UI can show the
-final answer after command events instead of visually ending on the last
-`command.end` card.
-Every successful turn-end must leave a human-readable conclusion visible at the
-end of the timeline. Machine-readable `Msg:` and `Handoff:` lines are preserved
-for orchestration control, but they do not count as the user-facing conclusion.
-When a CLI response only contains progress text, command output, or contract
-lines, Bridge appends a concise turn/final conclusion derived from the current
-turn's command state and prior handoffs.
+CLI answer after command events instead of visually ending on the last
+`command.end` card. Bridge does not append proof-specific acceptance summaries
+or final verifier conclusions; if a CLI response is sparse, the browser still
+shows the recorded command events and relay terminal message.
 The browser event stream is only kept open for active runs. Completed, failed,
 or canceled runs are read from persisted Hub events and show the stream as idle,
 so the stream indicator cannot be confused with the selected worker's online
@@ -158,17 +148,15 @@ state.
     follow-up uploads without duplicating existing file entries.
 15. Emit successful `turn.end` content and render contentful turn-end events as
     final answer cards after command events.
-16. Ensure every successful turn-end has a user-readable conclusion, including
-    early `resolved` turns and verifier turns, while preserving `Msg:` and
-    `Handoff:` contract lines.
+16. Preserve CLI-provided turn-end and run-end content without adding hidden
+    proof assessment, verifier, or remediation conclusions.
 17. Only open `/ws/orchestrations` for active runs; terminal runs should use
     persisted events and show an idle event stream.
 18. Manage CLI subprocess groups and detect idle direct-Codex JSONL turns after
     command completion so cancellation and stalled final responses become
     terminal, visible events.
-19. For Isabelle manual-build handoffs, keep the manual command/log path visible
-    in the final timeline and do not let automatic remediation rerun the same
-    long build.
+19. For Isabelle-looking tasks, keep the prompt-level timeout boundary visible
+    and leave execution strategy to the CLI.
 
 ## Exit Gates
 
@@ -181,8 +169,8 @@ state.
   reloads events.
 - A newly started follow-up shows the active turn before the CLI returns final
   prose.
-- A final turn that only emits process text still produces a clear final
-  conclusion in the timeline.
+- A final turn that only emits process text still produces a terminal
+  browser-visible run status and preserves recorded command events.
 - Timeline events include specific times, and sidebar runs include calendar
   dates.
 - Persisted assistant deltas and command outputs returned from `/events` are
@@ -200,15 +188,14 @@ state.
 - A direct Codex turn that has completed its command events but stops emitting
   JSONL produces a visible turn error and terminal run status instead of
   remaining `running`.
-- A timed-out or handed-off Isabelle build leaves a browser-visible manual
-  command and log path, and later turns do not repeat that build automatically.
+- An Isabelle-looking prompt includes the explicit timeout stop/report boundary
+  and later turns continue from the previous visible CLI result.
 - Continuing a run without new uploads keeps the original uploaded files visible
   in the selected-run side panel.
 - A final response carried on `turn.end.content` is visible in the timeline
   after command cards.
-- A turn that otherwise ends with only command output or machine-readable
-  `Msg:`/`Handoff:` lines still renders a concise human-readable conclusion as
-  the last visible message for that turn.
+- A turn that ends with only command output still leaves those command events
+  visible and the run reaches a terminal browser-visible state.
 - Selecting a completed run does not show the browser event stream as connected.
 
 ## Reviewer Q&A

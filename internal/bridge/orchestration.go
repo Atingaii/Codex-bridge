@@ -64,6 +64,27 @@ type orchestrationHandoffFields struct {
 	Risks    string
 }
 
+type orchestrationSessionState struct {
+	CodexThreadID        string
+	ClaudeSessionID      string
+	ClaudeSessionStarted bool
+}
+
+const claudeIsabelleLongCommandNudgeAfter = 2 * time.Minute
+const claudeStreamInputIdleCloseAfter = 45 * time.Second
+
+type claudeStreamNudge struct {
+	After   time.Duration
+	Message string
+}
+
+type claudeScanOptions struct {
+	Input          io.Writer
+	CanNudge       bool
+	NudgeAfter     time.Duration
+	IdleCloseAfter time.Duration
+}
+
 type workspaceSnapshot struct {
 	Root      string
 	Files     map[string]workspaceFileState
@@ -87,11 +108,10 @@ type workspaceChangeReport struct {
 
 var safeOrchestrationFileName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
-const orchestrationCLIIdleTimeout = 2 * time.Minute
-
-type jsonlLineResult struct {
-	line []byte
-	err  error
+type codexScanResult struct {
+	Content  string
+	Tools    []RunnerToolEvent
+	ThreadID string
 }
 
 func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
@@ -266,24 +286,31 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		})
 		return
 	}
-	originalPrompt := payload.Prompt
 	payload.Prompt = preparedPrompt
-	workspaceBefore := snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
 	mode := payload.Mode
 	if mode != "collaboration" && mode != "debate" {
 		mode = "collaboration"
 	}
 	maxTurns := payload.MaxTurns
 	if maxTurns <= 0 {
-		maxTurns = 4
+		maxTurns = 2
 	}
 	if maxTurns > 12 {
 		maxTurns = 12
 	}
+	sessionState := orchestrationSessionState{
+		ClaudeSessionID: stableOrchestrationSessionID(payload.RunID, "claude"),
+	}
 	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 		Kind:    "run.start",
 		Status:  store.OrchestrationRunning,
-		Content: fmt.Sprintf("Starting %s run with %d turns.", mode, maxTurns),
+		Content: fmt.Sprintf("Starting relay orchestration with %d CLI turns.", maxTurns),
+		Data: map[string]any{
+			"cwd":       m.cwd(payload),
+			"mode":      mode,
+			"maxTurns":  maxTurns,
+			"promptSeq": payload.PromptSeq,
+		},
 	})
 
 	var history []orchestrationTurn
@@ -301,22 +328,25 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		if payload.PromptSeq > 0 {
 			turnID = fmt.Sprintf("%s-p%03d-%02d", payload.RunID, payload.PromptSeq, turn)
 		}
-		prompt := composeOrchestrationPrompt(mode, payload.Prompt, payload.Context, payload.Resume, role, cli, turn, maxTurns, history)
+		prompt := composeRelayPrompt(mode, payload.Prompt, payload.Context, payload.Resume, role, cli, turn, maxTurns, history)
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:    "turn.start",
 			TurnID:  turnID,
 			Role:    role,
 			CLI:     cli,
-			Content: promptHeader(role, cli, turn),
+			Content: "Prompt sent to " + cli + ":\n" + prompt,
+			Data: map[string]any{
+				"cwd":       m.cwd(payload),
+				"cli":       cli,
+				"turn":      turn,
+				"maxTurns":  maxTurns,
+				"relayOnly": true,
+			},
 		})
-		m.emitIsabelleManualBuildCarryOver(payload.RunID, turnID, role, cli, payload.Prompt, payload.Context, history)
-		content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
+		content, tools, err := m.runRelayCLI(ctx, payload, turnID, role, cli, prompt, &sessionState)
 		record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
 		if err != nil {
 			record.Err = err.Error()
-			if summary := erroredTurnFallbackSummary(payload.Prompt, turn >= maxTurns, history, record); summary != "" {
-				appendConclusionToTurnRecord(&record, summary)
-			}
 			history = append(history, record)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 				Kind:    "turn.end",
@@ -335,26 +365,14 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 				})
 				return
 			}
-			if blocker, ok := repeatedBlockingHandoff(history); ok {
-				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-					Kind:    "run.error",
-					Status:  store.OrchestrationFailed,
-					Error:   "repeated blocker: " + blocker,
-					Content: "Orchestration stopped because the same blocker repeated without concrete progress.",
-				})
-				return
-			}
-			continue
-		}
-		if summary := turnConclusionFallbackSummary(payload.Prompt, turn, maxTurns, history, record); summary != "" {
-			delta := appendConclusionToTurnRecord(&record, summary)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-				Kind:    "turn.delta",
-				TurnID:  turnID,
-				Role:    role,
+				Kind:    "run.error",
+				Status:  store.OrchestrationFailed,
 				CLI:     cli,
-				Content: delta,
+				Error:   err.Error(),
+				Content: relayTerminalContent(history),
 			})
+			return
 		}
 		history = append(history, record)
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -364,160 +382,61 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			CLI:     cli,
 			Content: record.Content,
 			Status:  "success",
+			Data:    relayTurnEndData(cli, sessionState),
 		})
-		if blocker, ok := repeatedBlockingHandoff(history); ok {
-			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-				Kind:    "run.error",
-				Status:  store.OrchestrationFailed,
-				Error:   "repeated blocker: " + blocker,
-				Content: "Orchestration stopped because the same blocker repeated without concrete progress.",
-			})
-			return
-		}
-		if turn >= 2 && resolvedHandoffReady(record.Content) {
-			break
-		}
 	}
-	if m.shouldRunFinalVerifier(history) {
-		if err := ctx.Err(); err != nil {
-			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-				Kind:   "run.cancelled",
-				Status: store.OrchestrationCanceled,
-				Error:  "canceled",
-			})
-			return
-		}
-		role, cli := verifierRoleCLI(mode, history)
-		turnID := fmt.Sprintf("%s-verifier", payload.RunID)
-		if payload.PromptSeq > 0 {
-			turnID = fmt.Sprintf("%s-p%03d-verifier", payload.RunID, payload.PromptSeq)
-		}
-		prompt := composeFinalVerifierPrompt(mode, payload.Prompt, payload.Context, payload.Resume, role, cli, history)
-		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-			Kind:    "turn.start",
-			TurnID:  turnID,
-			Role:    role,
-			CLI:     cli,
-			Content: "final verifier via " + cli,
-		})
-		m.emitIsabelleManualBuildCarryOver(payload.RunID, turnID, role, cli, payload.Prompt, payload.Context, history)
-		content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
-		record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
-		record.Verifier = true
-		if err != nil {
-			record.Err = err.Error()
-			if summary := erroredTurnFallbackSummary(payload.Prompt, true, history, record); summary != "" {
-				appendConclusionToTurnRecord(&record, summary)
-			}
-			history = append(history, record)
-			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-				Kind:    "turn.end",
-				TurnID:  turnID,
-				Role:    role,
-				CLI:     cli,
-				Content: record.Content,
-				Status:  "error",
-				Error:   err.Error(),
-			})
-			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-					Kind:   "run.cancelled",
-					Status: store.OrchestrationCanceled,
-					Error:  "canceled",
-				})
-				return
-			}
-			if blocker, ok := repeatedBlockingHandoff(history); ok {
-				if !m.shouldDeferRepeatedBlockerForWorkspaceRemediation(payload, originalPrompt, history, workspaceBefore) {
-					m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-						Kind:    "run.error",
-						Status:  store.OrchestrationFailed,
-						Error:   "repeated blocker: " + blocker,
-						Content: "Orchestration stopped because the same blocker repeated without concrete progress.",
-					})
-					return
-				}
-			}
-		} else {
-			if summary := verifierConclusionFallbackSummary(payload.Prompt, history, record); summary != "" {
-				delta := appendConclusionToTurnRecord(&record, summary)
-				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-					Kind:    "turn.delta",
-					TurnID:  turnID,
-					Role:    role,
-					CLI:     cli,
-					Content: delta,
-				})
-			}
-			history = append(history, record)
-			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-				Kind:    "turn.end",
-				TurnID:  turnID,
-				Role:    role,
-				CLI:     cli,
-				Content: record.Content,
-				Status:  "success",
-			})
-			if blocker, ok := repeatedBlockingHandoff(history); ok {
-				if !m.shouldDeferRepeatedBlockerForWorkspaceRemediation(payload, originalPrompt, history, workspaceBefore) {
-					m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-						Kind:    "run.error",
-						Status:  store.OrchestrationFailed,
-						Error:   "repeated blocker: " + blocker,
-						Content: "Orchestration stopped because the same blocker repeated without concrete progress.",
-					})
-					return
-				}
-			}
-		}
-	}
-
-	workspaceAfter := snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
-	workspaceChanges := diffWorkspaceSnapshots(workspaceBefore, workspaceAfter)
-	if shouldRunWorkspaceChangeRemediation(originalPrompt, history, workspaceChanges) {
-		reason := missingWorkspaceChangeReason(workspaceChanges, history)
-		var stop bool
-		history, stop = m.runWorkspaceChangeRemediation(ctx, payload, mode, history, reason)
-		if stop {
-			return
-		}
-		workspaceAfter = snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
-		workspaceChanges = diffWorkspaceSnapshots(workspaceBefore, workspaceAfter)
-	}
-	if reason, ok := unresolvedFinalRun(originalPrompt, history, workspaceChanges); ok {
-		if shouldRunFinalAssessmentRemediation(originalPrompt, history, reason) && !isabelleManualBuildRequired(reason, history) {
-			var stop bool
-			history, stop = m.runFinalAssessmentRemediation(ctx, payload, mode, history, workspaceChanges, reason)
-			if stop {
-				return
-			}
-			workspaceAfter = snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
-			workspaceChanges = diffWorkspaceSnapshots(workspaceBefore, workspaceAfter)
-			reason, ok = unresolvedFinalRun(originalPrompt, history, workspaceChanges)
-			if !ok {
-				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-					Kind:    "run.end",
-					Status:  store.OrchestrationCompleted,
-					Content: finalRunAssessmentSummary(originalPrompt, history, workspaceChanges, ""),
-				})
-				return
-			}
-		}
-		assessment := finalRunAssessmentSummary(originalPrompt, history, workspaceChanges, reason)
-		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-			Kind:    "run.error",
-			Status:  store.OrchestrationFailed,
-			Error:   reason,
-			Content: assessment,
-		})
-		return
-	}
-
 	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 		Kind:    "run.end",
 		Status:  store.OrchestrationCompleted,
-		Content: finalRunAssessmentSummary(originalPrompt, history, workspaceChanges, ""),
+		Content: relayTerminalContent(history),
+		Data: map[string]any{
+			"relayOnly":       true,
+			"codexThreadId":   sessionState.CodexThreadID,
+			"claudeSessionId": sessionState.ClaudeSessionID,
+		},
 	})
+}
+
+func relayTerminalContent(history []orchestrationTurn) string {
+	if len(history) == 0 {
+		return "Relay orchestration ended without a CLI response."
+	}
+	record := history[len(history)-1]
+	content := strings.TrimSpace(record.Content)
+	if content != "" {
+		return content
+	}
+	if len(record.Tools) > 0 {
+		return "CLI returned without a final text response. Command events are shown above."
+	}
+	if record.Err != "" {
+		return "CLI process failed before returning a final text response."
+	}
+	return "CLI returned without a final text response."
+}
+
+func relayTurnEndData(cli string, state orchestrationSessionState) map[string]any {
+	data := map[string]any{"relayOnly": true}
+	switch cli {
+	case "codex":
+		if state.CodexThreadID != "" {
+			data["threadId"] = state.CodexThreadID
+		}
+	case "claude":
+		if state.ClaudeSessionID != "" {
+			data["sessionId"] = state.ClaudeSessionID
+		}
+	}
+	return data
+}
+
+func stableOrchestrationSessionID(runID, cli string) string {
+	sum := sha1.Sum([]byte("codex-bridge/orchestration/" + runID + "/" + cli))
+	raw := append([]byte(nil), sum[:16]...)
+	raw[6] = (raw[6] & 0x0f) | 0x50
+	raw[8] = (raw[8] & 0x3f) | 0x80
+	encoded := hex.EncodeToString(raw)
+	return encoded[:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
 }
 
 func (m *OrchestrationManager) shouldDeferRepeatedBlockerForWorkspaceRemediation(payload protocol.OrchestrationStartPayload, userPrompt string, history []orchestrationTurn, before workspaceSnapshot) bool {
@@ -547,7 +466,6 @@ func (m *OrchestrationManager) runWorkspaceChangeRemediation(ctx context.Context
 		CLI:     cli,
 		Content: "workspace-change remediation via " + cli,
 	})
-	m.emitIsabelleManualBuildCarryOver(payload.RunID, turnID, role, cli, payload.Prompt, payload.Context, history)
 	content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
 	record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
 	if err != nil {
@@ -607,24 +525,7 @@ func (m *OrchestrationManager) runWorkspaceChangeRemediation(ctx context.Context
 }
 
 func shouldRunFinalAssessmentRemediation(userPrompt string, history []orchestrationTurn, reason string) bool {
-	if strings.TrimSpace(reason) == "" || len(history) == 0 {
-		return false
-	}
-	last := history[len(history)-1]
-	if strings.HasSuffix(last.TurnID, "-assessment-remediation") || strings.Contains(last.TurnID, "-assessment-remediation-") {
-		return false
-	}
-	if last.Err != "" {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(last.HandoffFields.Status), "blocked") {
-		return false
-	}
-	lower := strings.ToLower(reason)
-	if strings.Contains(lower, "repeated blocker") {
-		return false
-	}
-	return userTaskRequiresWorkspaceChange(userPrompt) || looksLikeFormalProofTask(userPrompt) || strings.Contains(lower, "acceptance")
+	return false
 }
 
 func isabelleManualBuildRequired(reason string, history []orchestrationTurn) bool {
@@ -708,7 +609,6 @@ func (m *OrchestrationManager) runFinalAssessmentRemediation(ctx context.Context
 		CLI:     cli,
 		Content: "final-assessment remediation via " + cli,
 	})
-	m.emitIsabelleManualBuildCarryOver(payload.RunID, turnID, role, cli, payload.Prompt, payload.Context, history)
 	content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
 	record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
 	if err != nil {
@@ -777,9 +677,7 @@ func (m *OrchestrationManager) runCCB(ctx context.Context, payload protocol.Orch
 		})
 		return
 	}
-	originalPrompt := payload.Prompt
 	payload.Prompt = preparedPrompt
-	workspaceBefore := snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
 	target := m.ccbTarget()
 	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 		Kind:    "run.start",
@@ -947,7 +845,6 @@ func (m *OrchestrationManager) runCCB(ctx context.Context, payload protocol.Orch
 	reply, synthesizedEmptyReply := ccbFinalReply(result, watchOutput, streamState, target)
 	result.Reply = reply
 	m.emitCCBAgentConsoleSnapshots(ctx, payload, turnID, 80)
-	tools := ccbAssessmentTools(streamState, jobID)
 	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 		Kind:    "turn.end",
 		TurnID:  turnID,
@@ -974,27 +871,11 @@ func (m *OrchestrationManager) runCCB(ctx context.Context, payload protocol.Orch
 			})
 			return
 		}
-		history := ccbAssessmentHistory(turnID, result.Reply, streamState, tools)
-		workspaceAfter := snapshotWorkspace(m.cwd(payload), workspaceSnapshotIgnoredPaths(m.cfg)...)
-		workspaceChanges := diffWorkspaceSnapshots(workspaceBefore, workspaceAfter)
-		if reason, ok := unresolvedFinalRun(originalPrompt, history, workspaceChanges); ok {
-			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-				Kind:    "run.error",
-				Status:  store.OrchestrationFailed,
-				CLI:     "ccb",
-				Error:   reason,
-				Content: finalRunAssessmentSummary(originalPrompt, history, workspaceChanges, reason),
-				Data: map[string]any{
-					"jobId": jobID,
-				},
-			})
-			return
-		}
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:    "run.end",
 			Status:  store.OrchestrationCompleted,
 			CLI:     "ccb",
-			Content: finalRunAssessmentSummary(originalPrompt, history, workspaceChanges, ""),
+			Content: result.Reply,
 			Data: map[string]any{
 				"jobId": jobID,
 			},
@@ -1027,6 +908,15 @@ func (m *OrchestrationManager) runCCB(ctx context.Context, payload protocol.Orch
 			"jobId": jobID,
 		},
 	})
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type ccbJobResult struct {
@@ -2500,22 +2390,11 @@ func (m *OrchestrationManager) ccbPrompt(payload protocol.OrchestrationStartPayl
 	b.WriteString(strings.TrimSpace(payload.Prompt))
 	b.WriteString("\n\n")
 	b.WriteString("Use only the local CCB Codex and Claude Code agents for any coordination. Do not involve Gemini, OpenCode, Droid, or other CLI providers.\n")
-	b.WriteString("Codex Bridge will independently assess the final CCB result against the user's real acceptance criterion. Return a final user-visible conclusion that includes concrete files changed, commands run, blockers, risks, verification, and next actions only when relevant.\n")
-	if proofTask := formalProofTaskGuidance(payload.Prompt, payload.Mode, "implementer"); proofTask != "" {
+	b.WriteString("Codex Bridge is only relaying this task and the final CCB result. Return a final user-visible conclusion that includes concrete files changed, commands run, blockers, risks, verification, and next actions only when relevant.\n")
+	if boundary := isabelleTimeoutBoundary(payload.Prompt); boundary != "" {
 		b.WriteString("\n")
-		b.WriteString(proofTask)
+		b.WriteString(boundary)
 		b.WriteString("\n")
-	}
-	if proofVerifier := formalProofVerifierGuidance(payload.Prompt, payload.Mode); proofVerifier != "" {
-		b.WriteString("\n")
-		b.WriteString(proofVerifier)
-		b.WriteString("\n")
-	}
-	if looksLikeCoqUploadProofBenchmark(payload.Prompt) {
-		b.WriteString("\nBefore returning a completed final answer for this Coq upload benchmark, explicitly report these evidence dimensions: Model.thy/Termination.thy/ROOT input mapping, new Coq project folder path, _CoqProject/Makefile project shape, make/coqc result, source-only placeholder scan result, Coq Print Assumptions showing Closed under the global context, named target theorem, branch-decrease/equivalence audit, and termination modify_lin original obligation audit. Use a spec-first conversion: first write down the original Isabelle modify_lin recursive step relation and intended termination/equivalence theorem, then implement Coq definitions against that spec. Translate the Isabelle termination target into a named Coq theorem/lemma that states the original recursive termination/equivalence obligation, not only a runnable function or a tautology about a fuel interpreter. The target theorem must mention modify_lin plus the chosen well-founded relation, semantic equivalence, or branch-decrease invariant, and the final answer must name that theorem. The verifier must falsify helper-only solutions by printing modify_lin and checking whether original recursive calls were removed; if structural helpers are used, require a proved bisimulation/equivalence theorem to the original step relation. Scan source for Axiom, Parameter, Variable, Hypothesis, Conjecture, Admitted, admit, Abort, sorry, TODO, placeholder, quick_and_dirty, Guard Checking, bypass_check, modify_lin_fuel, default_fuel, fuel_wrapper, fixed_fuel, and hidden trust assumptions. If modify_lin_fuel/default_fuel or any bounded fuel wrapper exists, mark the task unresolved unless equivalence, decrease/well-foundedness, and fuel sufficiency are proved in the same result.\n")
-	}
-	if looksLikeIsabelleUploadProofBenchmark(payload.Prompt) {
-		b.WriteString("\nBefore returning a completed final answer for this Isabelle upload benchmark, explicitly report these evidence dimensions: Model.thy/Termination.thy/ROOT input mapping, new Isabelle project folder path, ROOT directory layout mapping, timeout-aware isabelle build result, source-only scan for sorry/quick_and_dirty/oops/sketch/admit/placeholders, Isabelle thm_oracles or oracle-free audit for the target facts, named target fact, branch-decrease audit, and the original termination modify_lin obligation audit. First recreate the uploaded project layout so ROOT reaches the real session, then extract the generated termination subgoals in a scratch area outside the final project or in a temporary theory that is removed from ROOT before the final build. Scratch probes must not use sorry/quick_and_dirty/oops/sketch/admit as fake proof steps; get subgoals by running an incomplete proof attempt and capturing Isabelle's failure output. Before using guessed simp facts such as *_def rules, confirm them with find_theorems name:<pattern> or thm <fact>, and record undefined-fact failures in the obligation ledger. Then try lexicographic_order once and at most two concrete relation/measure/measures attempts, waiting for slow Isabelle builds with a long timeout such as 30m to 45m and capturing the final output in the same turn. The final project must not contain Repro.thy, *_original.thy, scratch theories, copied failed attempts, or edited ROOT entries that import diagnostic-only files. Do not mark complete if ROOT enables quick_and_dirty, if any sorry remains in source, if a proof block ends with oops/sketch, if a source scan would hit diagnostic leftovers, if a long build is left running in the background, or if termination modify_lin was replaced by a weaker theorem or compile-only framework.\n")
 	}
 	b.WriteString("End the final answer with the compact lines:\n")
 	b.WriteString(orchestrationMsgContract)
@@ -3171,14 +3050,35 @@ func isCCBWatchMetadataLine(line string) bool {
 	}
 }
 
+func (m *OrchestrationManager) runRelayCLI(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, error) {
+	switch cli {
+	case "claude":
+		if state == nil {
+			return m.runClaude(ctx, payload, turnID, role, prompt)
+		}
+		content, tools, err := m.runClaudeWithSession(ctx, payload, turnID, role, prompt, state.ClaudeSessionID, state.ClaudeSessionStarted)
+		if err == nil {
+			state.ClaudeSessionStarted = true
+		}
+		return content, tools, err
+	default:
+		if state == nil {
+			return m.runCodex(ctx, payload, turnID, role, prompt)
+		}
+		content, tools, threadID, err := m.runCodexWithThread(ctx, payload, turnID, role, prompt, state.CodexThreadID)
+		if threadID != "" {
+			state.CodexThreadID = threadID
+		}
+		return content, tools, err
+	}
+}
+
 func (m *OrchestrationManager) runCLI(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, prompt string) (string, []RunnerToolEvent, error) {
 	switch cli {
 	case "claude":
-		content, tools, err := m.runClaude(ctx, payload, turnID, role, prompt)
-		return content, tools, forbiddenForegroundIsabelleBuildError(payload.Prompt, tools, err)
+		return m.runClaude(ctx, payload, turnID, role, prompt)
 	default:
-		content, tools, err := m.runCodex(ctx, payload, turnID, role, prompt)
-		return content, tools, forbiddenForegroundIsabelleBuildError(payload.Prompt, tools, err)
+		return m.runCodex(ctx, payload, turnID, role, prompt)
 	}
 }
 
@@ -3220,11 +3120,83 @@ func hasIsabelleBuildDirectoryOption(lowerCommand string) bool {
 }
 
 func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, []RunnerToolEvent, error) {
+	content, tools, _, err := m.runCodexWithThread(ctx, payload, turnID, role, prompt, "")
+	return content, tools, err
+}
+
+func (m *OrchestrationManager) runCodexWithThread(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt, threadID string) (string, []RunnerToolEvent, string, error) {
 	if m.shouldRunCodexAppServer() {
-		return m.runCodexAppServer(ctx, payload, turnID, role, prompt)
+		return m.runCodexAppServerWithThread(ctx, payload, turnID, role, prompt, threadID)
 	}
 	cmdCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	args := m.codexOrchestrationArgs(payload, threadID)
+	cwd := m.cwd(payload)
+
+	cmd := exec.CommandContext(cmdCtx, m.codexPath(), args...)
+	configureManagedCommand(cmd)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", nil, threadID, err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return "", nil, threadID, err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", nil, threadID, err
+	}
+	_, _ = io.WriteString(stdin, prompt)
+	_ = stdin.Close()
+
+	scanResult, scanErr := m.scanCodexJSONLResult(stdout, payload.RunID, turnID, role)
+	if scanErr != nil {
+		cancel()
+	}
+	waitErr := cmd.Wait()
+	if err := ctx.Err(); err != nil {
+		return scanResult.Content, scanResult.Tools, firstNonEmpty(scanResult.ThreadID, threadID), err
+	}
+	if scanErr != nil {
+		return scanResult.Content, scanResult.Tools, firstNonEmpty(scanResult.ThreadID, threadID), scanErr
+	}
+	if waitErr != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = waitErr.Error()
+		}
+		return scanResult.Content, scanResult.Tools, firstNonEmpty(scanResult.ThreadID, threadID), errors.New(msg)
+	}
+	if scanResult.Content == "" {
+		scanResult.Content = strings.TrimSpace(stderr.String())
+	}
+	return scanResult.Content, scanResult.Tools, firstNonEmpty(scanResult.ThreadID, threadID), nil
+}
+
+func (m *OrchestrationManager) codexOrchestrationArgs(payload protocol.OrchestrationStartPayload, threadID string) []string {
+	if threadID != "" {
+		args := []string{"exec", "resume", "--json", "--skip-git-repo-check"}
+		if m.cfg.Bridge.Model != "" {
+			args = append(args, "--model", m.cfg.Bridge.Model)
+		}
+		if strings.EqualFold(m.cfg.Bridge.ApprovalPolicy, "never") && strings.EqualFold(m.cfg.Bridge.Sandbox, "danger-full-access") {
+			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+		} else {
+			if m.cfg.Bridge.Sandbox != "" {
+				args = append(args, "-c", "sandbox_mode="+quoteTomlString(m.cfg.Bridge.Sandbox))
+			}
+			if m.cfg.Bridge.ApprovalPolicy != "" {
+				args = append(args, "-c", "approval_policy="+quoteTomlString(m.cfg.Bridge.ApprovalPolicy))
+			}
+		}
+		return append(args, threadID, "-")
+	}
+
 	args := []string{"exec", "--json", "--color", "never", "--skip-git-repo-check"}
 	if m.cfg.Bridge.Model != "" {
 		args = append(args, "--model", m.cfg.Bridge.Model)
@@ -3241,63 +3213,25 @@ func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.Or
 	if cwd != "" {
 		args = append(args, "--cd", cwd)
 	}
-	args = append(args, "-")
-
-	cmd := exec.CommandContext(cmdCtx, m.codexPath(), args...)
-	configureManagedCommand(cmd)
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", nil, err
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return "", nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		return "", nil, err
-	}
-	_, _ = io.WriteString(stdin, prompt)
-	_ = stdin.Close()
-
-	content, tools, scanErr := m.scanCodexJSONL(stdout, payload.RunID, turnID, role)
-	if scanErr != nil {
-		cancel()
-	}
-	waitErr := cmd.Wait()
-	if err := ctx.Err(); err != nil {
-		return content, tools, err
-	}
-	if scanErr != nil {
-		return content, tools, scanErr
-	}
-	if waitErr != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = waitErr.Error()
-		}
-		return content, tools, errors.New(msg)
-	}
-	if content == "" {
-		content = strings.TrimSpace(stderr.String())
-	}
-	return content, tools, nil
+	return append(args, "-")
 }
 
 func (m *OrchestrationManager) runCodexAppServer(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, []RunnerToolEvent, error) {
+	content, tools, _, err := m.runCodexAppServerWithThread(ctx, payload, turnID, role, prompt, "")
+	return content, tools, err
+}
+
+func (m *OrchestrationManager) runCodexAppServerWithThread(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt, threadID string) (string, []RunnerToolEvent, string, error) {
 	runner := NewCodexAppServerRunner(m.cfg)
 	defer runner.Close()
 	var tools []RunnerToolEvent
 	toolStarts := make(map[string]time.Time)
 	result, err := runner.Prompt(ctx, RunnerRequest{
-		Content:  prompt,
-		RunID:    payload.RunID,
-		PromptID: turnID,
-		CWD:      m.cwd(payload),
+		Content:        prompt,
+		RemoteThreadID: threadID,
+		RunID:          payload.RunID,
+		PromptID:       turnID,
+		CWD:            m.cwd(payload),
 		Approvals: orchestrationApprovalRequester{
 			manager: m,
 			runID:   payload.RunID,
@@ -3319,10 +3253,14 @@ func (m *OrchestrationManager) runCodexAppServer(ctx context.Context, payload pr
 			m.emitTool(payload.RunID, turnID, role, "codex", update.Tool)
 		}
 	})
-	return strings.TrimSpace(result.Content), tools, err
+	return strings.TrimSpace(result.Content), tools, firstNonEmpty(result.RemoteThreadID, threadID), err
 }
 
 func (m *OrchestrationManager) runClaude(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, []RunnerToolEvent, error) {
+	return m.runClaudeWithSession(ctx, payload, turnID, role, prompt, "", false)
+}
+
+func (m *OrchestrationManager) runClaudeWithSession(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt, sessionID string, resume bool) (string, []RunnerToolEvent, error) {
 	approvalServer, cleanup, err := m.prepareClaudeApprovalServer(ctx, payload, turnID, role)
 	if err != nil {
 		return "", nil, err
@@ -3330,7 +3268,11 @@ func (m *OrchestrationManager) runClaude(ctx context.Context, payload protocol.O
 	defer cleanup()
 	cmdCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	args := m.claudeArgs(payload, prompt)
+	args := m.claudeArgsWithSession(payload, prompt, sessionID, resume)
+	useStreamInput := shouldUseClaudeStreamInput(payload.Prompt)
+	if useStreamInput {
+		args = m.claudeArgsWithStreamInput(payload, sessionID, resume)
+	}
 	if approvalServer != nil {
 		args = m.withClaudeApprovalArgs(args, approvalServer.configPath)
 	}
@@ -3345,11 +3287,36 @@ func (m *OrchestrationManager) runClaude(ctx context.Context, payload protocol.O
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	cmd.Stdin = nil
+	var stdin io.WriteCloser
+	if useStreamInput {
+		stdin, err = cmd.StdinPipe()
+		if err != nil {
+			return "", nil, err
+		}
+	} else {
+		cmd.Stdin = nil
+	}
 	if err := cmd.Start(); err != nil {
 		return "", nil, err
 	}
-	content, tools, scanErr := m.scanClaudeJSONL(stdout, payload.RunID, turnID, role)
+	if useStreamInput {
+		if err := writeClaudeStreamUserMessage(stdin, prompt); err != nil {
+			cancel()
+			_ = stdin.Close()
+			_ = cmd.Wait()
+			return "", nil, err
+		}
+	}
+	var input io.Writer
+	if stdin != nil {
+		input = stdin
+		defer stdin.Close()
+	}
+	content, tools, scanErr := m.scanClaudeJSONLWithOptions(stdout, payload.RunID, turnID, role, claudeScanOptions{
+		Input:      input,
+		CanNudge:   useStreamInput,
+		NudgeAfter: claudeIsabelleLongCommandNudgeAfter,
+	})
 	if scanErr != nil {
 		cancel()
 	}
@@ -3440,11 +3407,22 @@ func (m *OrchestrationManager) prepareClaudeApprovalServer(ctx context.Context, 
 }
 
 func (m *OrchestrationManager) claudeArgs(payload protocol.OrchestrationStartPayload, prompt string) []string {
+	return m.claudeArgsWithSession(payload, prompt, "", false)
+}
+
+func (m *OrchestrationManager) claudeArgsWithSession(payload protocol.OrchestrationStartPayload, prompt, sessionID string, resume bool) []string {
 	args := []string{"--print", "--output-format=stream-json"}
 	if cwd := m.cwd(payload); cwd != "" {
 		args = append(args, "--add-dir", cwd)
 	}
 	args = append(args, "--verbose")
+	if sessionID != "" {
+		if resume {
+			args = append(args, "--resume", sessionID)
+		} else {
+			args = append(args, "--session-id", sessionID)
+		}
+	}
 	if m.bypassApprovalsAndSandbox() {
 		if runningAsRoot() {
 			args = append(args, "--permission-mode", "acceptEdits")
@@ -3461,6 +3439,37 @@ func (m *OrchestrationManager) claudeArgs(payload protocol.OrchestrationStartPay
 		args = append(args, "--effort", m.cfg.Bridge.ClaudeEffort)
 	}
 	args = append(args, prompt)
+	return args
+}
+
+func (m *OrchestrationManager) claudeArgsWithStreamInput(payload protocol.OrchestrationStartPayload, sessionID string, resume bool) []string {
+	args := []string{"--print", "--input-format=stream-json", "--output-format=stream-json"}
+	if cwd := m.cwd(payload); cwd != "" {
+		args = append(args, "--add-dir", cwd)
+	}
+	args = append(args, "--verbose")
+	if sessionID != "" {
+		if resume {
+			args = append(args, "--resume", sessionID)
+		} else {
+			args = append(args, "--session-id", sessionID)
+		}
+	}
+	if m.bypassApprovalsAndSandbox() {
+		if runningAsRoot() {
+			args = append(args, "--permission-mode", "acceptEdits")
+		} else {
+			args = append(args, "--permission-mode", "bypassPermissions")
+		}
+	}
+	if m.cfg.Bridge.ClaudeModel != "" {
+		args = append(args, "--model", m.cfg.Bridge.ClaudeModel)
+	} else if m.cfg.Bridge.Model != "" {
+		args = append(args, "--model", m.cfg.Bridge.Model)
+	}
+	if m.cfg.Bridge.ClaudeEffort != "" {
+		args = append(args, "--effort", m.cfg.Bridge.ClaudeEffort)
+	}
 	return args
 }
 
@@ -3498,18 +3507,6 @@ func (m *OrchestrationManager) shouldRunCodexAppServer() bool {
 }
 
 func (m *OrchestrationManager) shouldRunFinalVerifier(history []orchestrationTurn) bool {
-	if len(history) == 0 {
-		return false
-	}
-	last := history[len(history)-1]
-	if strings.EqualFold(last.HandoffFields.Status, "resolved") && meaningfulHandoffValue(last.HandoffFields.Verified) && !meaningfulHandoffValue(last.HandoffFields.Changed) && !hasRiskyHandoff(last) && failedCommandCount(history) == 0 {
-		return false
-	}
-	for _, item := range history {
-		if item.Err != "" || failedCommandCount([]orchestrationTurn{item}) > 0 || hasRiskyHandoff(item) || meaningfulHandoffValue(item.HandoffFields.Changed) {
-			return true
-		}
-	}
 	return false
 }
 
@@ -3696,64 +3693,32 @@ func runningAsRoot() bool {
 }
 
 func (m *OrchestrationManager) scanCodexJSONL(stdout io.Reader, runID, turnID, role string) (string, []RunnerToolEvent, error) {
-	return m.scanCodexJSONLWithIdleTimeout(stdout, runID, turnID, role, orchestrationCLIIdleTimeout)
+	result, err := m.scanCodexJSONLResult(stdout, runID, turnID, role)
+	return result.Content, result.Tools, err
 }
 
-func (m *OrchestrationManager) scanCodexJSONLWithIdleTimeout(stdout io.Reader, runID, turnID, role string, idleTimeout time.Duration) (string, []RunnerToolEvent, error) {
+func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, turnID, role string) (codexScanResult, error) {
 	reader := bufio.NewReaderSize(stdout, 64*1024)
-	lines := make(chan jsonlLineResult, 1)
-	go func() {
-		for {
-			line, err := readJSONLLine(reader, 32*1024*1024)
-			lines <- jsonlLineResult{line: line, err: err}
-			if err != nil {
-				return
-			}
-		}
-	}()
 	var content strings.Builder
 	var eventErr string
 	var tools []RunnerToolEvent
+	var threadID string
 	toolStarts := make(map[string]time.Time)
-	openTools := make(map[string]struct{})
-	lastActivity := time.Now()
 	emitCodexTool := func(tool *RunnerToolEvent) {
 		if tool == nil {
 			return
 		}
 		stampToolTiming(tool, toolStarts)
-		if tool.ID != "" {
-			if isRunningToolStatus(tool.Status) {
-				openTools[tool.ID] = struct{}{}
-			} else {
-				delete(openTools, tool.ID)
-			}
-		}
-		lastActivity = time.Now()
 		tools = append(tools, *tool)
 		m.emitTool(runID, turnID, role, "codex", tool)
 	}
 	for {
-		var result jsonlLineResult
-		if idleTimeout > 0 && len(openTools) == 0 {
-			idleFor := time.Since(lastActivity)
-			if idleFor >= idleTimeout {
-				return strings.TrimSpace(content.String()), tools, fmt.Errorf("codex orchestration turn idle for %s after all command events completed", idleTimeout)
-			}
-			select {
-			case result = <-lines:
-			case <-time.After(idleTimeout - idleFor):
-				return strings.TrimSpace(content.String()), tools, fmt.Errorf("codex orchestration turn idle for %s after all command events completed", idleTimeout)
-			}
-		} else {
-			result = <-lines
-		}
-		line, err := result.line, result.err
+		line, err := readJSONLLine(reader, 32*1024*1024)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return content.String(), tools, err
+			return codexScanResult{Content: content.String(), Tools: tools, ThreadID: threadID}, err
 		}
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
@@ -3770,10 +3735,19 @@ func (m *OrchestrationManager) scanCodexJSONLWithIdleTimeout(stdout io.Reader, r
 			}
 		}
 		switch typ {
+		case "thread.started":
+			if id, _ := msg["thread_id"].(string); id != "" {
+				threadID = id
+			}
+			if id, _ := msg["threadId"].(string); id != "" {
+				threadID = id
+			}
+			if id := nestedString(msg, "thread", "id"); id != "" {
+				threadID = id
+			}
 		case "item.agent_message.delta", "item.agentMessage.delta", "agent_message.delta", "agentMessage.delta", "response.output_text.delta":
 			if delta := extractDelta(msg); delta != "" {
 				content.WriteString(delta)
-				lastActivity = time.Now()
 				m.emit(runID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: delta})
 			}
 		case "item.completed":
@@ -3782,7 +3756,6 @@ func (m *OrchestrationManager) scanCodexJSONLWithIdleTimeout(stdout io.Reader, r
 			if itemType == "agent_message" || itemType == "agentMessage" {
 				if text := agentMessageText(item); text != "" {
 					if delta := appendAgentMessageContent(&content, text); delta != "" {
-						lastActivity = time.Now()
 						m.emit(runID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: delta})
 					}
 				}
@@ -3799,18 +3772,78 @@ func (m *OrchestrationManager) scanCodexJSONLWithIdleTimeout(stdout io.Reader, r
 		}
 	}
 	if eventErr != "" {
-		return content.String(), tools, errors.New(eventErr)
+		return codexScanResult{Content: content.String(), Tools: tools, ThreadID: threadID}, errors.New(eventErr)
 	}
-	return strings.TrimSpace(content.String()), tools, nil
+	return codexScanResult{Content: strings.TrimSpace(content.String()), Tools: tools, ThreadID: threadID}, nil
 }
 
 func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, role string) (string, []RunnerToolEvent, error) {
+	return m.scanClaudeJSONLWithOptions(stdout, runID, turnID, role, claudeScanOptions{})
+}
+
+func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runID, turnID, role string, options claudeScanOptions) (string, []RunnerToolEvent, error) {
 	reader := bufio.NewReaderSize(stdout, 64*1024)
 	var content strings.Builder
 	var tools []RunnerToolEvent
 	toolCommands := make(map[string]string)
 	toolStarts := make(map[string]time.Time)
 	deferredReadStarts := make(map[string]*RunnerToolEvent)
+	activeNudges := make(map[string]context.CancelFunc)
+	activeTools := make(map[string]bool)
+	var idleCloseCancel context.CancelFunc
+	streamInputClosed := false
+	closeStreamInput := func(reason string) {
+		if streamInputClosed {
+			return
+		}
+		streamInputClosed = true
+		closeClaudeStreamInput(options.Input)
+		if reason != "" {
+			m.emit(runID, protocol.OrchestrationEventPayload{
+				Kind:    "turn.delta",
+				TurnID:  turnID,
+				Role:    role,
+				CLI:     "claude",
+				Status:  "info",
+				Content: reason,
+				Data: map[string]any{
+					"relayOnly": true,
+				},
+			})
+		}
+	}
+	scheduleIdleClose := func() {
+		if !options.CanNudge || options.Input == nil || streamInputClosed || len(activeTools) > 0 {
+			return
+		}
+		if idleCloseCancel != nil {
+			idleCloseCancel()
+		}
+		after := options.IdleCloseAfter
+		if after <= 0 {
+			after = claudeStreamInputIdleCloseAfter
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		idleCloseCancel = cancel
+		go func() {
+			timer := time.NewTimer(after)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				closeStreamInput("Bridge closed Claude stream input after an idle window; the CLI process was not interrupted.")
+			}
+		}()
+	}
+	defer func() {
+		if idleCloseCancel != nil {
+			idleCloseCancel()
+		}
+		for _, cancel := range activeNudges {
+			cancel()
+		}
+	}()
 	emitClaudeTool := func(tool *RunnerToolEvent) {
 		if tool == nil {
 			return
@@ -3832,6 +3865,29 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 		}
 		stampToolTiming(tool, toolStarts)
 		if tool.ID != "" {
+			if isRunningToolStatus(tool.Status) {
+				activeTools[tool.ID] = true
+				if idleCloseCancel != nil {
+					idleCloseCancel()
+					idleCloseCancel = nil
+				}
+			} else {
+				delete(activeTools, tool.ID)
+			}
+		}
+		if options.CanNudge && tool.ID != "" {
+			if isRunningToolStatus(tool.Status) && isLongIsabelleBuildCommand(tool.Command) {
+				if activeNudges[tool.ID] == nil {
+					activeNudges[tool.ID] = m.scheduleClaudeIsabelleNudge(runID, turnID, role, tool, options)
+				}
+			} else if !isRunningToolStatus(tool.Status) {
+				if cancel := activeNudges[tool.ID]; cancel != nil {
+					cancel()
+					delete(activeNudges, tool.ID)
+				}
+			}
+		}
+		if tool.ID != "" {
 			if start := deferredReadStarts[tool.ID]; start != nil {
 				tools = append(tools, *start)
 				m.emitTool(runID, turnID, role, "claude", start)
@@ -3840,6 +3896,7 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 		}
 		tools = append(tools, *tool)
 		m.emitTool(runID, turnID, role, "claude", tool)
+		scheduleIdleClose()
 	}
 	for {
 		line, err := readJSONLLine(reader, 32*1024*1024)
@@ -3875,6 +3932,7 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 				emitClaudeTool(tool)
 			}
 		case "result":
+			closeStreamInput("")
 			if isErr, _ := msg["is_error"].(bool); isErr {
 				if text := firstString(msg, "result", "error"); text != "" {
 					return content.String(), tools, errors.New(text)
@@ -3890,8 +3948,101 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 				return content.String(), tools, errors.New(message)
 			}
 		}
+		scheduleIdleClose()
 	}
 	return strings.TrimSpace(content.String()), tools, nil
+}
+
+func closeClaudeStreamInput(w io.Writer) {
+	if closer, ok := w.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
+func (m *OrchestrationManager) scheduleClaudeIsabelleNudge(runID, turnID, role string, tool *RunnerToolEvent, options claudeScanOptions) context.CancelFunc {
+	ctx, cancel := context.WithCancel(context.Background())
+	after := options.NudgeAfter
+	if after <= 0 {
+		after = claudeIsabelleLongCommandNudgeAfter
+	}
+	command := strings.TrimSpace(tool.Command)
+	go func() {
+		timer := time.NewTimer(after)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		message := claudeIsabelleNudgeMessage(command, after)
+		if err := writeClaudeStreamUserMessage(options.Input, message); err != nil {
+			m.emit(runID, protocol.OrchestrationEventPayload{
+				Kind:   "turn.delta",
+				TurnID: turnID,
+				Role:   role,
+				CLI:    "claude",
+				Status: "warning",
+				Error:  "failed to send Isabelle timeout nudge to Claude: " + err.Error(),
+			})
+			return
+		}
+		m.emit(runID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.delta",
+			TurnID:  turnID,
+			Role:    role,
+			CLI:     "claude",
+			Status:  "info",
+			Content: "Bridge sent Claude an Isabelle timeout nudge without interrupting the running CLI turn.",
+			Data: map[string]any{
+				"command":      command,
+				"afterSeconds": int(after.Seconds()),
+				"relayOnly":    true,
+			},
+		})
+	}()
+	return cancel
+}
+
+func writeClaudeStreamUserMessage(w io.Writer, text string) error {
+	if w == nil {
+		return errors.New("claude stream input is unavailable")
+	}
+	msg := map[string]any{
+		"type": "user",
+		"message": map[string]any{
+			"role": "user",
+			"content": []map[string]string{{
+				"type": "text",
+				"text": text,
+			}},
+		},
+	}
+	encoded, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(w, string(encoded))
+	return err
+}
+
+func claudeIsabelleNudgeMessage(command string, after time.Duration) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		command = "the current Isabelle build or compilation command"
+	}
+	return fmt.Sprintf("Bridge observer note: the Isabelle command `%s` has been running for about %s. Do not discard your current work and do not restart the command. Check whether it has already produced enough error/no-error evidence. If it is still running too long, skip further waiting, report the latest output/log you can see, and continue the task with the available information.", command, after.Round(time.Second))
+}
+
+func shouldUseClaudeStreamInput(userPrompt string) bool {
+	return looksLikeIsabelleProofTask(userPrompt)
+}
+
+func isLongIsabelleBuildCommand(command string) bool {
+	lower := strings.ToLower(strings.TrimSpace(command))
+	if !strings.Contains(lower, "isabelle") {
+		return false
+	}
+	return strings.Contains(lower, "build") || strings.Contains(lower, "process") || strings.Contains(lower, "scala") || strings.Contains(lower, "jedit")
 }
 
 func isClaudeReadCommand(command string) bool {
@@ -4409,9 +4560,6 @@ func finalRunAssessmentDimensions(userPrompt string, history []orchestrationTurn
 		},
 		finalWorkspaceAssessmentDimension(userPrompt, history, changes),
 		finalCommandAssessmentDimension(history),
-	}
-	if looksLikeFormalProofTask(userPrompt) {
-		dimensions = append(dimensions, formalProofAssessmentDimensions(userPrompt, history, changes)...)
 	}
 	dimensions = append(dimensions, finalRiskAssessmentDimension(userPrompt, history))
 	return dimensions
@@ -4944,6 +5092,126 @@ const orchestrationHandoffContract = "Handoff: status=<needs_next|blocked|resolv
 const orchestrationMsgContract = "Msg: to=<next-role|user>; intent=<implement|review|challenge|final>; need=<one request or none>"
 const orchestrationLanguageRule = "Language rule: write all user-visible prose in Chinese by default unless the user explicitly asks for another language. Keep the machine-readable Msg: and Handoff: field names and values in the required English shape."
 
+func composePassThroughPrompt(userPrompt, contextSummary string, resume bool) string {
+	var b strings.Builder
+	b.WriteString("Codex Bridge is relaying this browser task to the selected local CLI. The CLI should use its normal capabilities to handle the user's task; Bridge is not adding proof strategy requirements, acceptance gates, or command restrictions.\n\n")
+	b.WriteString(orchestrationLanguageRule)
+	b.WriteString("\n\n")
+	if resume {
+		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Use the compact context below when relevant, and treat the latest user task as authoritative.\n\n")
+	}
+	if strings.TrimSpace(contextSummary) != "" {
+		b.WriteString("Compacted context from earlier tasks in this conversation:\n")
+		b.WriteString(trimForPrompt(contextSummary, 14000))
+		b.WriteString("\n\n")
+	}
+	if boundary := isabelleTimeoutBoundary(userPrompt); boundary != "" {
+		b.WriteString(boundary)
+		b.WriteString("\n")
+	}
+	b.WriteString("User task:\n")
+	b.WriteString(strings.TrimSpace(userPrompt))
+	b.WriteString("\n")
+	return b.String()
+}
+
+func composeRelayPrompt(mode, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {
+	var b strings.Builder
+	b.WriteString("Codex Bridge is relaying this browser orchestration like a human handoff between local CLIs. Treat this as a real user instruction, use your normal capabilities, and do not wait for Bridge to validate strategy or proof choices.\n\n")
+	b.WriteString(orchestrationLanguageRule)
+	b.WriteString("\n\n")
+	if turn == 1 {
+		b.WriteString("You are the first CLI handling the user's task. Your visible result will be handed to another CLI afterward, so include the important files changed, commands run, blockers, and useful next context in your final response.\n\n")
+	} else {
+		b.WriteString("You are continuing from the previous CLI's visible result. Treat the prior result as context from another person, decide independently what to do next, and continue the same user task.\n\n")
+	}
+	if resume {
+		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Use the compact context below when relevant, and treat the latest user task as authoritative.\n\n")
+	}
+	if strings.TrimSpace(contextSummary) != "" {
+		b.WriteString("Compacted context from earlier tasks in this conversation:\n")
+		b.WriteString(trimForPrompt(contextSummary, 12000))
+		b.WriteString("\n\n")
+	}
+	if boundary := isabelleTimeoutBoundary(userPrompt); boundary != "" {
+		b.WriteString(boundary)
+		b.WriteString("\n")
+	}
+	b.WriteString(fmt.Sprintf("Relay turn: %d of %d. Mode: %s. Current CLI: %s/%s.\n\n", turn, maxTurns, mode, role, cli))
+	if len(history) > 0 {
+		b.WriteString("Previous CLI result and useful command context:\n")
+		for _, item := range history {
+			b.WriteString(formatRelayPriorTurn(item))
+		}
+		b.WriteByte('\n')
+	}
+	b.WriteString("User task:\n")
+	b.WriteString(strings.TrimSpace(userPrompt))
+	b.WriteString("\n")
+	return b.String()
+}
+
+func formatRelayPriorTurn(item orchestrationTurn) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("- %s/%s", item.Role, item.CLI))
+	if item.Err != "" {
+		b.WriteString(" error=")
+		b.WriteString(trimForPrompt(oneLine(item.Err), 220))
+	}
+	content := strings.TrimSpace(item.Content)
+	if content != "" {
+		b.WriteString("\n  result: ")
+		b.WriteString(strings.ReplaceAll(trimForPrompt(content, 1800), "\n", "\n  "))
+	}
+	if summaries := relayCommandSummaries(item.Tools, 6); len(summaries) > 0 {
+		b.WriteString("\n  commands:\n")
+		for _, summary := range summaries {
+			b.WriteString("  - ")
+			b.WriteString(summary)
+			b.WriteByte('\n')
+		}
+	}
+	if !strings.HasSuffix(b.String(), "\n") {
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func relayCommandSummaries(tools []RunnerToolEvent, max int) []string {
+	if max <= 0 || len(tools) == 0 {
+		return nil
+	}
+	var out []string
+	for _, tool := range tools {
+		if strings.TrimSpace(tool.Command) == "" {
+			continue
+		}
+		status := strings.TrimSpace(tool.Status)
+		if status == "" {
+			status = "observed"
+		}
+		summary := trimForPrompt(oneLine(tool.Command), 260) + " | " + status
+		if tool.ExitCode != nil {
+			summary += fmt.Sprintf(" | exit=%d", *tool.ExitCode)
+		}
+		if strings.TrimSpace(tool.Output) != "" {
+			summary += " | " + trimForPrompt(oneLine(tool.Output), 260)
+		}
+		out = append(out, summary)
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
+}
+
+func isabelleTimeoutBoundary(userPrompt string) string {
+	if !looksLikeIsabelleProofTask(userPrompt) {
+		return ""
+	}
+	return "Isabelle timeout boundary: if you run a full Isabelle build or long Isabelle compilation, choose and use an explicit timeout appropriate to the task. If that timeout is exceeded, stop the build and report the command, elapsed time, timeout value, and latest output or log. Bridge otherwise does not constrain how you run the CLI task.\n"
+}
+
 func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {
 	var b strings.Builder
 	b.WriteString("You are participating in a local CLI orchestration run.\n")
@@ -4983,12 +5251,8 @@ func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume 
 		}
 	}
 	b.WriteString(fmt.Sprintf("Turn: %d of %d. CLI: %s.\n\n", turn, maxTurns, cli))
-	if proofTask := formalProofTaskGuidance(userPrompt, mode, role); proofTask != "" {
-		b.WriteString(proofTask)
-		b.WriteString("\n")
-	}
-	if manualBuild := isabelleManualBuildContinuationNotice(userPrompt, contextSummary, history); manualBuild != "" {
-		b.WriteString(manualBuild)
+	if boundary := isabelleTimeoutBoundary(userPrompt); boundary != "" {
+		b.WriteString(boundary)
 		b.WriteString("\n")
 	}
 	b.WriteString("Token budget rules: do not restate the full history, do not quote large files, and keep inter-agent notes compact. Prefer file paths, command names, and exact unresolved blockers.\n")
@@ -5032,12 +5296,8 @@ func composeFinalVerifierPrompt(mode, userPrompt, contextSummary string, resume 
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Prefer the latest user task over older details.\n\n")
 	}
-	if proofTask := formalProofVerifierGuidance(userPrompt, mode); proofTask != "" {
-		b.WriteString(proofTask)
-		b.WriteString("\n")
-	}
-	if manualBuild := isabelleManualBuildContinuationNotice(userPrompt, contextSummary, history); manualBuild != "" {
-		b.WriteString(manualBuild)
+	if boundary := isabelleTimeoutBoundary(userPrompt); boundary != "" {
+		b.WriteString(boundary)
 		b.WriteString("\n")
 	}
 	b.WriteString("End your visible response with a concise final conclusion and the same compact lines:\n")
@@ -5079,12 +5339,8 @@ func composeWorkspaceChangeRemediationPrompt(mode, userPrompt, contextSummary st
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Prefer the latest user task over older details.\n\n")
 	}
-	if proofTask := formalProofTaskGuidance(userPrompt, mode, role); proofTask != "" {
-		b.WriteString(proofTask)
-		b.WriteString("\n")
-	}
-	if manualBuild := isabelleManualBuildContinuationNotice(userPrompt, contextSummary, history); manualBuild != "" {
-		b.WriteString(manualBuild)
+	if boundary := isabelleTimeoutBoundary(userPrompt); boundary != "" {
+		b.WriteString(boundary)
 		b.WriteString("\n")
 	}
 	if strings.TrimSpace(contextSummary) != "" {
@@ -5124,12 +5380,8 @@ func composeFinalAssessmentRemediationPrompt(mode, userPrompt, contextSummary st
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Prefer the latest user task over older details.\n\n")
 	}
-	if proofTask := formalProofTaskGuidance(userPrompt, mode, role); proofTask != "" {
-		b.WriteString(proofTask)
-		b.WriteString("\n")
-	}
-	if manualBuild := isabelleManualBuildContinuationNotice(userPrompt, contextSummary, history); manualBuild != "" {
-		b.WriteString(manualBuild)
+	if boundary := isabelleTimeoutBoundary(userPrompt); boundary != "" {
+		b.WriteString(boundary)
 		b.WriteString("\n")
 	}
 	b.WriteString("Assessment failure to fix:\n")
@@ -7191,8 +7443,6 @@ func PrepareOrchestrationPromptFiles(cfg *config.Config, runID, prompt string, f
 		b.WriteByte('\n')
 	}
 	b.WriteString("\nUse these local file paths directly when the task refers to uploaded files.")
-	b.WriteString("\nFor uploaded source/text files such as .thy, ROOT, .go, .md, and .txt, inspect them with shell commands like sed -n '1,220p' <path>, cat <path>, or wc -l <path>; do not use Claude's Read tool for these uploaded text/source files.")
-	b.WriteString("\nDo not send an empty pages field to any file-reading tool. Only include pages when a non-empty page range is required for a real PDF/document; otherwise omit the page filter.")
 	return b.String(), metas, nil
 }
 

@@ -792,6 +792,13 @@ function compareOrchestrationEvents(a: OrchestrationEvent, b: OrchestrationEvent
   return orchestrationEventKey(a).localeCompare(orchestrationEventKey(b));
 }
 
+function isBridgeRelayNotice(event: Pick<OrchestrationEvent, 'kind' | 'content'>) {
+  if (event.kind !== 'turn.delta') return false;
+  const content = stringsTrim(event.content);
+  return content.startsWith('Bridge closed Claude stream input after an idle window') ||
+    content.startsWith('Bridge sent Claude an Isabelle timeout nudge');
+}
+
 function mergeOrchestrationEvents(current: OrchestrationEvent[], incoming: OrchestrationEvent[]) {
   const merged = new Map<string, OrchestrationEvent>();
   current.forEach((event, index) => merged.set(orchestrationEventKey(event, index), event));
@@ -991,7 +998,7 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
     }
 
     if (event.kind === 'turn.delta') {
-      if (contentfulTurnEnds.has(orchestrationTurnKey(event))) return;
+      if (contentfulTurnEnds.has(orchestrationTurnKey(event)) && !isBridgeRelayNotice(event)) return;
       const content = cleanOrchestrationDisplayContent(event.content);
       if (!content) return;
       if (isRawCCBObserverDump(content)) return;
@@ -1122,26 +1129,19 @@ function finalOrchestrationConclusionFallback(
   const zh = t === uiText.zh || t.currentTurn === uiText.zh.currentTurn || textLooksChinese(segmentPrompt);
   const issueCount = failedCommands + erroredTurns;
   const ccbSummary = ccbOrchestrationSummary(runEvents);
-  const acceptanceIssue = unresolvedAcceptanceSummary(runEvents);
   const content = zh
     ? [
-        acceptanceIssue
-          ? '最终结论：本次编排已经结束，但当前记录显示用户的核心验收条件仍未满足，因此不能视为真正成功。'
-          : '最终结论：本次编排已经结束，但最后一轮没有返回可直接阅读的总结，因此这里根据已记录事件生成兜底摘要。',
+        '最终结论：本次编排已经结束，但最后一轮没有返回可直接阅读的总结，因此这里根据已记录事件生成兜底摘要。',
         ccbSummary ? `CCB 状态：${ccbSummary}` : '',
         `进展：${completedCommands > 0 ? `记录到 ${completedCommands} 个完成的命令事件。` : '没有可提炼的完成命令摘要，可展开命令详情审计原始事件。'}`,
         fileNames.length ? `相关文件：${fileNames.map((name) => `\`${name}\``).join('、')}。` : '',
-        acceptanceIssue ? `未满足验收：${acceptanceIssue}` : '',
         issueCount > 0 ? `剩余风险：记录到 ${issueCount} 个失败命令或错误轮次；请展开命令详情查看原始输出。` : '剩余风险：未记录新的失败命令；请按需展开命令详情审计原始输出。',
       ].filter(Boolean).join('\n\n')
     : [
-        acceptanceIssue
-          ? 'Final conclusion: this orchestration ended, but the recorded state shows the user acceptance criterion is still unmet, so it must not be treated as a real success.'
-          : 'Final conclusion: this orchestration completed, but the last turn did not return a directly readable summary, so this fallback was generated from recorded events.',
+        'Final conclusion: this orchestration completed, but the last turn did not return a directly readable summary, so this fallback was generated from recorded events.',
         ccbSummary ? `CCB state: ${ccbSummary}` : '',
         `Progress: ${completedCommands > 0 ? `${completedCommands} completed command event(s) were recorded.` : 'no concise completed command summary was available; expand command details to audit raw events.'}`,
         fileNames.length ? `Files: ${fileNames.map((name) => `\`${name}\``).join(', ')}.` : '',
-        acceptanceIssue ? `Unmet acceptance: ${acceptanceIssue}` : '',
         issueCount > 0 ? `Remaining risk: ${issueCount} failed command or error turn event(s) were recorded; expand command details for raw output.` : 'Remaining risk: no new failed command was recorded; expand command details to audit raw output if needed.',
       ].filter(Boolean).join('\n\n');
   const lastTurn = findLastOrchestrationTurnEvent(runEvents);
@@ -1267,7 +1267,6 @@ function isReadableFinalConclusion(content?: string) {
   const value = stringsTrim(content).toLowerCase();
   if (!value) return false;
   if (isRawCCBObserverDump(value)) return false;
-  if (hasUnresolvedAcceptanceSignal(value)) return false;
   if (value.includes('最终结论') || value.includes('最终总结') || value.includes('最终测试结果') || value.includes('final conclusion') || value.includes('final summary') || value.includes('final test result')) {
     return true;
   }
@@ -1275,98 +1274,6 @@ function isReadableFinalConclusion(content?: string) {
   const hasCompletion = value.includes('完成') || value.includes('通过') || value.includes('验证') || value.includes('completed') || value.includes('verified') || value.includes('passed');
   const hasRisk = value.includes('剩余风险') || value.includes('remaining risk');
   return hasConclusion && (hasCompletion || hasRisk);
-}
-
-function unresolvedAcceptanceSummary(events: OrchestrationEvent[]) {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    const candidates = [
-      event.content || '',
-      event.error || '',
-      typeof event.data?.output === 'string' ? event.data.output : '',
-      typeof event.data?.command === 'string' ? event.data.command : '',
-    ];
-    const hit = candidates.find(hasUnresolvedAcceptanceSignal);
-    if (hit) return acceptanceIssueLine(hit);
-  }
-  return '';
-}
-
-function hasUnresolvedAcceptanceSignal(content?: string) {
-  const value = stringsTrim(content).toLowerCase();
-  if (!value) return false;
-  if (hasResolvedSorrySignal(value) && !hasExplicitUnresolvedSorryRisk(value)) {
-    return false;
-  }
-  if (includesAny(value, ['main theorem', '主定理', 'termination modify_lin', 'modify_lin'])
-    && includesAny(value, ['sorry', '未消除', '没有消除', '还保留', 'placeholder', '占位'])) {
-    return true;
-  }
-  return includesAny(value, [
-    'sorry placeholder',
-    'sorry placeholders',
-    'still contains sorry',
-    'contains sorry',
-    'quick_and_dirty',
-    '可编译的证明框架',
-    '证明框架可编译',
-    '不是完整证明',
-    '不是完全无 sorry',
-    '只是通过编译',
-    '只能说通过编译',
-    '没有实质上的进展',
-  ]);
-}
-
-function hasExplicitUnresolvedSorryRisk(value: string) {
-  return includesAny(value, [
-    'sorry placeholder',
-    'sorry placeholders',
-    'still contains sorry',
-    'contains sorry',
-    'quick_and_dirty',
-    '可编译的证明框架',
-    '证明框架可编译',
-    '不是完整证明',
-    '不是完全无 sorry',
-    'not without sorry',
-    'not fully without sorry',
-    'not a completed proof',
-  ]);
-}
-
-function hasResolvedSorrySignal(value: string) {
-  if (includesAny(value, [
-    'without sorry',
-    'without any sorry',
-    'no sorry placeholders',
-    'no remaining sorry',
-    '无 sorry',
-    '无sorry',
-    '没有 sorry',
-    'without quick_and_dirty',
-    'quick_and_dirty = false',
-  ])) {
-    return true;
-  }
-  return /\bno\s+sorry\b/.test(value);
-}
-
-function acceptanceIssueLine(content?: string) {
-  const lines = decodeEscapedLineBreaks(String(content || '')).split(/\r?\n/);
-  const line = lines.find(hasUnresolvedAcceptanceSignal) || stringsTrim(content);
-  return line ? trimMiddle(line.trim(), 220) : 'the requested acceptance criterion remains unresolved';
-}
-
-function includesAny(value: string, signals: string[]) {
-  return signals.some((signal) => value.includes(signal.toLowerCase()));
-}
-
-function trimMiddle(value: string, max: number) {
-  if (value.length <= max) return value;
-  const left = Math.max(20, Math.floor((max - 3) * 0.6));
-  const right = Math.max(20, max - 3 - left);
-  return `${value.slice(0, left)}...${value.slice(-right)}`;
 }
 
 function textLooksChinese(content?: string) {
@@ -1389,6 +1296,10 @@ function mergeOrchestrationDeltaEvents(events: OrchestrationEvent[]): Orchestrat
     }
     const content = decodeEscapedLineBreaks(String(event.content || ''));
     if (!stringsTrim(content)) return;
+    if (isBridgeRelayNotice({ ...event, content })) {
+      merged.push({ ...event, content });
+      return;
+    }
     const key = orchestrationTurnKey(event);
     const index = deltaIndexes.get(key);
     if (typeof index !== 'number') {

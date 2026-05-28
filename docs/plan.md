@@ -26,7 +26,7 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P6 | Orchestration create/continue event stream | implemented |
 | P6.1 | Low-token orchestration handoff strategies | implemented |
 | P6.2 | Deep collaboration routing and orchestration browser approval | implemented |
-| P6.3 | Orchestration capability matrix, structured handoffs, and conditional verifier | implemented |
+| P6.3 | Orchestration capability matrix and pass-through Claude/Codex relay | implemented |
 | P6.4 | CLI endpoint repair commands | implemented |
 | P7 | Browser permission prompts over app-server | implemented for Codex chat and Codex orchestration |
 

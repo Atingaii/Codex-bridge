@@ -34,16 +34,17 @@ Codex CLI / Claude CLI
 ```
 
 The Bridge keeps orchestration deterministic and low overhead: it still spawns
-one CLI per turn in auto-execute mode, and uses `codex app-server` for Codex
-turns when browser approval is required. Prompts use compact `Msg:` and
-`Handoff:` lines between turns, and the Bridge stores parsed handoff fields as
-turn state so the next CLI receives structured context instead of the full
-transcript. Failed command summaries are carried forward, and repeated blockers
-stop with the existing `run.error` event before the turn budget is exhausted. In
-collaboration mode Claude acts as builder and Codex as reviewer; in debate mode
-Claude proposes and Codex criticizes with evidence. The handoff contract is
-documented in
-[docs/features/orchestration-strategy-optimization.md](features/orchestration-strategy-optimization.md).
+one CLI process per turn, and uses `codex app-server` for Codex turns when
+browser approval is required. Direct orchestration is a pass-through relay:
+Claude receives the browser task first as a real user instruction, Bridge
+streams the prompt, CLI deltas, command events, and terminal status to the
+browser, and Codex receives the previous CLI's visible result plus useful
+command context on the next turn. Bridge preserves a stable Claude session id
+and Codex thread id where each CLI supports resume. It does not add hidden proof
+strategy gates, automatic verifier turns, or remediation turns; the only
+proof-related boundary in prompt text is an Isabelle timeout instruction for
+long builds. The relay contract is documented in
+[docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
 
 Review-required Claude orchestration uses Claude Code's
 `--permission-prompt-tool` support. `internal/bridge/orchestration.go:runClaude`

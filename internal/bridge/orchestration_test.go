@@ -1,9 +1,12 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -56,6 +59,45 @@ func TestOrchestrationClaudeArgsDoNotBypassPermissionsForWorkspaceSandbox(t *tes
 	args := NewOrchestrationManager(&cfg).claudeArgs(protocol.OrchestrationStartPayload{}, "task")
 	if containsArg(args, "--permission-mode") {
 		t.Fatalf("claude args should not bypass permissions for workspace sandbox: %#v", args)
+	}
+}
+
+func TestOrchestrationClaudeStreamInputArgsKeepSessionAndOmitPromptArg(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	args := manager.claudeArgsWithStreamInput(protocol.OrchestrationStartPayload{CWD: "/repo"}, "11111111-1111-5111-8111-111111111111", false)
+	for _, want := range []string{"--print", "--input-format=stream-json", "--output-format=stream-json", "--verbose", "--session-id", "11111111-1111-5111-8111-111111111111"} {
+		if !containsArg(args, want) {
+			t.Fatalf("stream claude args missing %q: %#v", want, args)
+		}
+	}
+	if containsArg(args, "task") {
+		t.Fatalf("stream claude args should not append prompt as argv: %#v", args)
+	}
+}
+
+func TestWriteClaudeStreamUserMessageUsesClaudeJSONShape(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeClaudeStreamUserMessage(&buf, "继续处理"); err != nil {
+		t.Fatal(err)
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg["type"] != "user" {
+		t.Fatalf("message type = %#v", msg["type"])
+	}
+	message := msg["message"].(map[string]any)
+	if message["role"] != "user" {
+		t.Fatalf("message role = %#v", message["role"])
+	}
+	content := message["content"].([]any)
+	part := content[0].(map[string]any)
+	if part["type"] != "text" || part["text"] != "继续处理" {
+		t.Fatalf("content = %#v", content)
 	}
 }
 
@@ -514,7 +556,196 @@ func TestOrchestrationSuccessfulTurnEndCarriesFinalContent(t *testing.T) {
 	}
 }
 
-func TestOrchestrationResolvedMachineOnlyTurnGetsReadableConclusion(t *testing.T) {
+func TestOrchestrationRelayRunEmitsFrontendVisiblePromptsCommandsAndSessionState(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	claudePromptPath := filepath.Join(tmp, "claude_prompt.txt")
+	codexPromptPath := filepath.Join(tmp, "codex_prompt.txt")
+	claudeArgvPath := filepath.Join(tmp, "claude_argv.json")
+	codexArgvPath := filepath.Join(tmp, "codex_argv.json")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeRelayScript(claudePromptPath, claudeArgvPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexRelayScript(codexPromptPath, codexArgvPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+
+	task := "把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全"
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_relay",
+		Mode:     "collaboration",
+		Prompt:   task,
+		MaxTurns: 2,
+		CWD:      tmp,
+		Files: []protocol.AttachmentPayload{
+			{Name: "Model.thy", MimeType: "application/octet-stream", Size: int64(len("theory Model\n")), Data: base64.StdEncoding.EncodeToString([]byte("theory Model\n"))},
+			{Name: "Termination.thy", MimeType: "application/octet-stream", Size: int64(len("theory Termination\n")), Data: base64.StdEncoding.EncodeToString([]byte("theory Termination\n"))},
+			{Name: "ROOT", MimeType: "application/octet-stream", Size: int64(len("session demo\n")), Data: base64.StdEncoding.EncodeToString([]byte("session demo\n"))},
+		},
+	})
+
+	var events []protocol.OrchestrationEventPayload
+	for len(out) > 0 {
+		env := <-out
+		if env.Type != protocol.TypeOrchestrationEvent {
+			continue
+		}
+		event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	if !orchestrationEventsContain(events, "turn.start", "claude", task) ||
+		!orchestrationEventsContain(events, "turn.start", "claude", "Prompt sent to claude") {
+		t.Fatalf("Claude prompt was not frontend-visible: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "command.start", "claude", "mkdir -p coq-relay") ||
+		!orchestrationEventsContain(events, "command.end", "codex", "go test ./...") {
+		t.Fatalf("command events were not frontend-visible: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "turn.start", "codex", "Claude result: wrote Model.v") ||
+		!orchestrationEventsContain(events, "turn.start", "codex", "mkdir -p coq-relay") {
+		t.Fatalf("Codex handoff prompt did not include Claude result and command context: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "run.end", "", "Codex final: verified relay result") {
+		t.Fatalf("run.end did not relay final Codex content: %#v", events)
+	}
+	for _, event := range events {
+		if event.Kind == "turn.start" && (strings.Contains(event.Content, "Formal proof task guardrails") || strings.Contains(event.Content, "modify_lin_fuel") || strings.Contains(event.Content, "default_fuel")) {
+			t.Fatalf("relay prompt leaked old proof guardrail: %#v", event)
+		}
+		if strings.Contains(event.TurnID, "verifier") || strings.Contains(event.TurnID, "remediation") {
+			t.Fatalf("pass-through relay should not schedule hidden verifier/remediation turn: %#v", event)
+		}
+	}
+	claudePrompt, err := os.ReadFile(claudePromptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(claudePrompt), "visible result will be handed to another CLI") {
+		t.Fatalf("Claude prompt missing first-turn handoff notice:\n%s", claudePrompt)
+	}
+	codexPrompt, err := os.ReadFile(codexPromptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(codexPrompt), "Claude result: wrote Model.v") || !strings.Contains(string(codexPrompt), "mkdir -p coq-relay") {
+		t.Fatalf("Codex stdin missing Claude handoff context:\n%s", codexPrompt)
+	}
+	claudeArgv, err := os.ReadFile(claudeArgvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(claudeArgv), "--session-id") {
+		t.Fatalf("Claude was not started with stable session id: %s", claudeArgv)
+	}
+	codexArgv, err := os.ReadFile(codexArgvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(codexArgv), "exec") || !strings.Contains(string(codexArgv), "--cd") {
+		t.Fatalf("Codex initial exec args did not include cwd/thread setup: %s", codexArgv)
+	}
+}
+
+func TestClaudeIsabelleLongCommandNudgeWritesToSameStreamAndEmitsEvent(t *testing.T) {
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 16)
+	manager.AttachOut(out)
+	stdoutReader, stdoutWriter := io.Pipe()
+	var stdin bytes.Buffer
+
+	done := make(chan struct{})
+	var content string
+	var tools []RunnerToolEvent
+	var scanErr error
+	go func() {
+		defer close(done)
+		content, tools, scanErr = manager.scanClaudeJSONLWithOptions(stdoutReader, "orc_nudge", "orc_nudge-01", "implementer", claudeScanOptions{
+			Input:      &stdin,
+			CanNudge:   true,
+			NudgeAfter: 10 * time.Millisecond,
+		})
+	}()
+
+	fmt.Fprintln(stdoutWriter, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_build","name":"Bash","input":{"command":"isabelle build -D isabelle_bridge_demo"}}]}}`)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(stdin.String(), "Bridge observer note") {
+		time.Sleep(10 * time.Millisecond)
+	}
+	fmt.Fprintln(stdoutWriter, `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_build","content":"Finished\n"}]}}`)
+	fmt.Fprintln(stdoutWriter, `{"type":"assistant","message":{"content":[{"type":"text","text":"完成"}]}}`)
+	fmt.Fprintln(stdoutWriter, `{"type":"result","result":"完成"}`)
+	stdoutWriter.Close()
+	<-done
+
+	if scanErr != nil {
+		t.Fatal(scanErr)
+	}
+	if content != "完成" {
+		t.Fatalf("content = %q", content)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("tools = %#v", tools)
+	}
+	if got := stdin.String(); !strings.Contains(got, "Bridge observer note") || !strings.Contains(got, "isabelle build -D isabelle_bridge_demo") {
+		t.Fatalf("nudge was not written to Claude stream: %s", got)
+	}
+	if !orchestrationEventsContain(drainOrchestrationEvents(t, out), "turn.delta", "claude", "Bridge sent Claude an Isabelle timeout nudge") {
+		t.Fatal("frontend-visible nudge event was not emitted")
+	}
+}
+
+func TestClaudeStreamInputClosesAfterIdleWindowWithoutInterruptingProcess(t *testing.T) {
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 16)
+	manager.AttachOut(out)
+	stdoutReader, stdoutWriter := io.Pipe()
+	stdin := &trackingWriteCloser{}
+
+	done := make(chan struct{})
+	var scanErr error
+	go func() {
+		defer close(done)
+		_, _, scanErr = manager.scanClaudeJSONLWithOptions(stdoutReader, "orc_idle", "orc_idle-01", "implementer", claudeScanOptions{
+			Input:          stdin,
+			CanNudge:       true,
+			IdleCloseAfter: 10 * time.Millisecond,
+		})
+	}()
+
+	fmt.Fprintln(stdoutWriter, `{"type":"assistant","message":{"content":[{"type":"text","text":"开始处理"}]}}`)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && !stdin.closed {
+		time.Sleep(10 * time.Millisecond)
+	}
+	fmt.Fprintln(stdoutWriter, `{"type":"result","result":"开始处理"}`)
+	stdoutWriter.Close()
+	<-done
+
+	if scanErr != nil {
+		t.Fatal(scanErr)
+	}
+	if !stdin.closed {
+		t.Fatal("Claude stream input was not closed after idle window")
+	}
+	if !orchestrationEventsContain(drainOrchestrationEvents(t, out), "turn.delta", "claude", "Bridge closed Claude stream input after an idle window") {
+		t.Fatal("frontend-visible idle close event was not emitted")
+	}
+}
+
+func TestOrchestrationMachineOnlyTurnIsRelayedWithoutInjectedConclusion(t *testing.T) {
 	tmp := t.TempDir()
 	claudePath := filepath.Join(tmp, "claude")
 	codexPath := filepath.Join(tmp, "codex")
@@ -542,7 +773,7 @@ func TestOrchestrationResolvedMachineOnlyTurnGetsReadableConclusion(t *testing.T
 		CWD:      tmp,
 	})
 
-	var sawReadableConclusion bool
+	var sawRelayedTurn bool
 	for len(out) > 0 {
 		env := <-out
 		if env.Type != protocol.TypeOrchestrationEvent {
@@ -553,17 +784,17 @@ func TestOrchestrationResolvedMachineOnlyTurnGetsReadableConclusion(t *testing.T
 			t.Fatal(err)
 		}
 		if event.Kind == "turn.end" && event.CLI == "claude" {
-			if !strings.Contains(event.Content, "最终结论") {
-				t.Fatalf("machine-only turn.end did not get readable conclusion: %#v", event)
-			}
 			if !strings.Contains(event.Content, "Msg: to=user") || !strings.Contains(event.Content, "Handoff: status=resolved") {
 				t.Fatalf("machine contract lines were not preserved: %#v", event)
 			}
-			sawReadableConclusion = true
+			if strings.Contains(event.Content, "最终结论") {
+				t.Fatalf("relay should not inject a conclusion into CLI output: %#v", event)
+			}
+			sawRelayedTurn = true
 		}
 	}
-	if !sawReadableConclusion {
-		t.Fatal("did not see readable turn.end conclusion")
+	if !sawRelayedTurn {
+		t.Fatal("did not see relayed turn.end content")
 	}
 }
 
@@ -688,32 +919,50 @@ func TestOrchestrationScanCodexJSONLNormalizesCamelCaseToolStatus(t *testing.T) 
 	}
 }
 
-func TestOrchestrationScanCodexJSONLReturnsIdleErrorAfterCompletedCommands(t *testing.T) {
+func TestOrchestrationScanCodexJSONLWaitsForProcessEOFAfterCompletedCommands(t *testing.T) {
 	reader, writer := io.Pipe()
 	manager := NewOrchestrationManager(&config.Config{})
 	out := make(chan protocol.Envelope, 16)
 	manager.AttachOut(out)
 
-	done := make(chan error, 1)
+	done := make(chan struct {
+		content string
+		err     error
+	}, 1)
 	go func() {
-		_, _, err := manager.scanCodexJSONLWithIdleTimeout(reader, "orc_test", "turn_1", "reviewer", 20*time.Millisecond)
-		done <- err
+		content, _, err := manager.scanCodexJSONL(reader, "orc_test", "turn_1", "reviewer")
+		done <- struct {
+			content string
+			err     error
+		}{content: content, err: err}
 	}()
 
 	_, err := writer.Write([]byte(`{"type":"item.started","item":{"id":"cmd_1","type":"command_execution","command":"true","status":"inProgress"}}` + "\n" +
-		`{"type":"item.completed","item":{"id":"cmd_1","type":"command_execution","command":"true","status":"completed","exit_code":0}}` + "\n"))
+		`{"type":"item.completed","item":{"id":"cmd_1","type":"command_execution","command":"true","status":"completed","exit_code":0}}` + "\n" +
+		`{"type":"item.agent_message.delta","delta":"finished after command"}` + "\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer writer.Close()
 
 	select {
-	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "idle") {
-			t.Fatalf("scan error = %v, want idle error", err)
+	case result := <-done:
+		t.Fatalf("scan returned before process EOF: content=%q err=%v", result.content, result.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("scan error = %v", result.err)
+		}
+		if result.content != "finished after command" {
+			t.Fatalf("content = %q", result.content)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("scan did not return after completed command became idle")
+		t.Fatal("scan did not return after process EOF")
 	}
 }
 
@@ -905,8 +1154,8 @@ func TestComposeOrchestrationPromptRequiresGoalProgressAudit(t *testing.T) {
 	}
 }
 
-func TestComposeOrchestrationPromptAddsFormalProofGuardrails(t *testing.T) {
-	prompt := composeOrchestrationPrompt(
+func TestComposeRelayPromptKeepsCoqUploadTaskPassThrough(t *testing.T) {
+	prompt := composeRelayPrompt(
 		"collaboration",
 		"把 Model.thy Termination.thy ROOT 做成 Coq 项目，补全 termination modify_lin 的证明，不能用占位符。",
 		"",
@@ -918,63 +1167,34 @@ func TestComposeOrchestrationPromptAddsFormalProofGuardrails(t *testing.T) {
 		nil,
 	)
 	for _, want := range []string{
-		"Formal proof task guardrails",
-		"Work spec-first",
-		"name the target fact",
-		"build success as a smoke check only",
-		"Run proof-assistant commands serially",
-		"stale in-progress commands make the browser smoke result unverifiable",
-		"Use explicit timeouts for every proof-assistant/toolchain command",
-		"coqc --version",
-		"timeout 10s to 60s",
-		"visible needs_next/blocked ledger",
-		"Do not weaken theorem statements",
-		"Parameter, Conjecture",
-		"Guard Checking changes",
-		"bounded/fuel wrapper or default fuel",
-		"prove equivalence to the original recursive semantics",
-		"Coq Print Assumptions <target> showing Closed under the global context",
-		"Lean #print axioms <target>",
-		"Isabelle thm_oracles <target>",
-		"Reviewer falsification checklist",
-		"hidden staging or scratch files",
-		"proof-obligation ledger",
-		"uploaded-source mapping",
-		"Exploration budget",
-		"three failed proof strategies",
-		"Do not spend the entire turn repeating similar measure guesses",
-		"Coq/Rocq workflow",
-		"Coq/Rocq toolchain probe",
-		"type -P coqc",
-		"shutil.which",
-		"Do not run bare coqc --version",
-		"Coq/Rocq spec-first plan",
-		"modify_lin_original_terminates",
-		"modify_lin_step_decreases",
-		"modify_lin_semantics_equiv",
-		"Coq/Rocq modeling rule",
-		"tautology",
-		"length-only lemma",
-		"helper-only structural recursion totality",
-		"Coq/Rocq audit",
-		"Variable, Hypothesis",
-		"modify_lin_fuel",
-		"default_fuel",
-		"Coq/Rocq verifier checks",
-		"Print modify_lin",
-		"modify_loop/structural helper",
-		"Coq/Rocq termination rule",
-		"Implementer strategy",
-		"minimal reproducible obligation",
+		"Codex Bridge is relaying this browser orchestration like a human handoff",
+		"Treat this as a real user instruction",
+		"You are the first CLI handling the user's task",
+		"visible result will be handed to another CLI afterward",
+		"User task:",
+		"Model.thy Termination.thy ROOT",
+		"termination modify_lin",
 	} {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("formal proof prompt missing %q:\n%s", want, prompt)
+			t.Fatalf("relay prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, bad := range []string{
+		"Formal proof task guardrails",
+		"Print Assumptions",
+		"modify_lin_fuel",
+		"default_fuel",
+		"controlled background",
+		"Coq upload benchmark",
+	} {
+		if strings.Contains(prompt, bad) {
+			t.Fatalf("relay prompt should not inject proof guardrail %q:\n%s", bad, prompt)
 		}
 	}
 }
 
-func TestComposeOrchestrationPromptAddsIsabelleProofGuardrails(t *testing.T) {
-	prompt := composeOrchestrationPrompt(
+func TestComposeRelayPromptAddsOnlyIsabelleTimeoutBoundary(t *testing.T) {
+	prompt := composeRelayPrompt(
 		"collaboration",
 		"已上传 Model.thy、Termination.thy、ROOT。请在 Isabelle 中补全 termination modify_lin 证明，不能用 sorry 或 quick_and_dirty。",
 		"",
@@ -986,58 +1206,32 @@ func TestComposeOrchestrationPromptAddsIsabelleProofGuardrails(t *testing.T) {
 		nil,
 	)
 	for _, want := range []string{
-		"Formal proof task guardrails",
-		"Isabelle workflow",
-		"directories \"HWQ-U\"",
-		"full `isabelle build -D` / `isabelle build -d` check",
-		"foreground build command",
-		"Isabelle scratch discipline",
-		"scratch directory",
-		"Scratch probes must not use sorry/quick_and_dirty/oops/sketch/admit",
-		"incomplete candidate proof",
-		"Repro.thy",
-		"*_original.thy",
-		"restore ROOT",
-		"Isabelle audit",
-		"thm_oracles",
-		"quick_and_dirty",
-		"Isabelle full-build visibility rule",
-		"every full `isabelle build -D` or `isabelle build -d` check must use controlled background execution",
-		"controlled background build",
-		"build.log",
-		"build.pid",
-		"build.pgid",
-		"build.exit",
-		"rm -f build.log build.pid build.pgid build.exit",
-		"setsid sh -lc",
-		"echo \\$\\$ > build.pid",
-		"echo \\$\\$ > build.pgid",
-		"tail -n 80 build.log",
-		"test -f build.exit && cat build.exit",
-		"kill -- -\"$(cat build.pgid)\"",
-		"Do not run `timeout ... isabelle build ...`",
-		"`isabelle build ... | tee build.log`",
-		"Isabelle manual-build handoff rule",
-		"Later CLI turns must not rerun the same long isabelle build automatically",
-		"Isabelle termination workflow",
-		"generated subgoals",
-		"lexicographic_order once",
-		"at most two concrete relation/measure/measures attempts",
-		"find_theorems name:<pattern>",
-		"undefined facts",
-		"Isabelle termination rule",
-		"Isabelle verifier checks",
-		"scratch theory imported",
+		"Isabelle timeout boundary",
+		"choose and use an explicit timeout",
+		"If that timeout is exceeded, stop the build and report the command",
+		"Bridge otherwise does not constrain how you run the CLI task",
+		"User task:",
 		"termination modify_lin",
-		"compile-only framework",
 	} {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("Isabelle proof prompt missing %q:\n%s", want, prompt)
+			t.Fatalf("Isabelle relay prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, bad := range []string{
+		"Formal proof task guardrails",
+		"Isabelle full-build visibility rule",
+		"controlled background",
+		"Do not run `timeout ... isabelle build ...`",
+		"build.pid",
+		"thm_oracles",
+	} {
+		if strings.Contains(prompt, bad) {
+			t.Fatalf("Isabelle relay prompt should not inject old guardrail %q:\n%s", bad, prompt)
 		}
 	}
 }
 
-func TestComposePromptCarriesIsabelleManualBuildHandoffToNextCLI(t *testing.T) {
+func TestComposeRelayPromptCarriesPreviousCLIResultAndCommandContext(t *testing.T) {
 	exitCode := 124
 	tailExitCode := 0
 	history := []orchestrationTurn{
@@ -1068,7 +1262,7 @@ func TestComposePromptCarriesIsabelleManualBuildHandoffToNextCLI(t *testing.T) {
 		}),
 	}
 
-	prompt := composeOrchestrationPrompt(
+	prompt := composeRelayPrompt(
 		"collaboration",
 		"已上传 Model.thy、Termination.thy、ROOT。请在 Isabelle 中补全 termination modify_lin 证明。",
 		"",
@@ -1081,23 +1275,30 @@ func TestComposePromptCarriesIsabelleManualBuildHandoffToNextCLI(t *testing.T) {
 	)
 
 	for _, want := range []string{
-		"Isabelle manual-build carry-over",
-		"Do not rerun the same `isabelle build -D` / `isabelle build -d` automatically",
-		"Inspect source files plus existing build artifacts only",
-		"final proof acceptance is pending the user's manual Isabelle build result",
+		"You are continuing from the previous CLI's visible result",
+		"Previous CLI result and useful command context",
+		"implementer/claude",
+		"manual build pending",
 		"/root/tencent/linlattice-isabelle/build.log",
-		"/root/tencent/linlattice-isabelle/build.pid",
-		"/root/tencent/linlattice-isabelle/build.pgid",
-		"/root/tencent/linlattice-isabelle/build.exit",
+		"tail -n 80 /root/tencent/linlattice-isabelle/build.log",
 		"Running LinLattice",
 	} {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("manual build carry-over prompt missing %q:\n%s", want, prompt)
+			t.Fatalf("relay handoff prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, bad := range []string{
+		"Isabelle manual-build carry-over",
+		"Do not rerun the same `isabelle build -D`",
+		"final proof acceptance is pending",
+	} {
+		if strings.Contains(prompt, bad) {
+			t.Fatalf("relay prompt should not inject manual-build policy %q:\n%s", bad, prompt)
 		}
 	}
 }
 
-func TestComposePromptCarriesIsabelleManualBuildFromResumeContext(t *testing.T) {
+func TestComposeRelayPromptCarriesResumeContextWithoutManualBuildPolicy(t *testing.T) {
 	contextSummary := strings.Join([]string{
 		"Compacted orchestration context from previous work.",
 		"Tool outcomes and commands:",
@@ -1107,7 +1308,7 @@ func TestComposePromptCarriesIsabelleManualBuildFromResumeContext(t *testing.T) 
 		"- 后续 CLI 不需要执行这个build，只读取日志和源码。状态文件 /root/tencent/linlattice-isabelle/build.pid /root/tencent/linlattice-isabelle/build.pgid /root/tencent/linlattice-isabelle/build.exit",
 	}, "\n")
 
-	prompt := composeOrchestrationPrompt(
+	prompt := composeRelayPrompt(
 		"collaboration",
 		"已上传 Model.thy、Termination.thy、ROOT。继续补全 Isabelle termination modify_lin 证明。",
 		contextSummary,
@@ -1120,8 +1321,8 @@ func TestComposePromptCarriesIsabelleManualBuildFromResumeContext(t *testing.T) 
 	)
 
 	for _, want := range []string{
-		"Isabelle manual-build carry-over",
-		"Do not rerun the same `isabelle build -D` / `isabelle build -d` automatically",
+		"continuation of the same user-visible orchestration conversation",
+		"Compacted context from earlier tasks in this conversation",
 		"/root/tencent/linlattice-isabelle/build.log",
 		"/root/tencent/linlattice-isabelle/build.pid",
 		"/root/tencent/linlattice-isabelle/build.pgid",
@@ -1129,7 +1330,16 @@ func TestComposePromptCarriesIsabelleManualBuildFromResumeContext(t *testing.T) 
 		"Running LinLattice",
 	} {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("resume-context manual build prompt missing %q:\n%s", want, prompt)
+			t.Fatalf("resume relay prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, bad := range []string{
+		"Isabelle manual-build carry-over",
+		"Do not rerun the same `isabelle build -D`",
+		"final proof acceptance is pending",
+	} {
+		if strings.Contains(prompt, bad) {
+			t.Fatalf("relay prompt should not inject resume manual-build policy %q:\n%s", bad, prompt)
 		}
 	}
 }
@@ -1191,7 +1401,7 @@ func TestIsabelleManualBuildVisibleSummaryQualifiesRelativeArtifacts(t *testing.
 	}
 }
 
-func TestForbiddenForegroundIsabelleBuildError(t *testing.T) {
+func TestForbiddenForegroundIsabelleBuildErrorHelperDoesNotAffectRelayPath(t *testing.T) {
 	err := forbiddenForegroundIsabelleBuildError(
 		"已上传 Model.thy、Termination.thy、ROOT。请在 Isabelle 中补全 termination modify_lin 证明。",
 		[]RunnerToolEvent{{Command: "timeout 60s sh -lc 'cd /root/tencent/linlattice_formal && isabelle build -D . -v'"}},
@@ -1199,6 +1409,10 @@ func TestForbiddenForegroundIsabelleBuildError(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "foreground Isabelle build is not allowed") {
 		t.Fatalf("foreground Isabelle build error = %v", err)
+	}
+	prompt := composeRelayPrompt("collaboration", "已上传 Model.thy、Termination.thy、ROOT。请在 Isabelle 中补全 termination modify_lin 证明。", "", false, "implementer", "claude", 1, 2, nil)
+	if strings.Contains(prompt, "foreground Isabelle build is not allowed") || strings.Contains(prompt, "controlled background") {
+		t.Fatalf("relay prompt should not expose old foreground-build rejection policy:\n%s", prompt)
 	}
 
 	err = forbiddenForegroundIsabelleBuildError(
@@ -1220,8 +1434,8 @@ func TestForbiddenForegroundIsabelleBuildError(t *testing.T) {
 	}
 }
 
-func TestComposeDebatePromptAddsFormalProofFalsificationStrategy(t *testing.T) {
-	prompt := composeOrchestrationPrompt(
+func TestComposeRelayDebatePromptDoesNotInjectProofFalsificationStrategy(t *testing.T) {
+	prompt := composeRelayPrompt(
 		"debate",
 		"补全 Coq theorem，不能用 Admitted 或 Axiom。",
 		"",
@@ -1233,22 +1447,30 @@ func TestComposeDebatePromptAddsFormalProofFalsificationStrategy(t *testing.T) {
 		nil,
 	)
 	for _, want := range []string{
-		"Formal proof task guardrails",
-		"Debate proof workflow",
-		"Debate critic strategy",
-		"weakened statements",
-		"fuel/default_fuel shortcuts",
-		"hidden axioms/admissions",
-		"missing equivalence lemmas",
+		"human handoff",
+		"Treat this as a real user instruction",
+		"Mode: debate",
+		"Current CLI: critic/codex",
+		"补全 Coq theorem",
 	} {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("formal proof debate prompt missing %q:\n%s", want, prompt)
+			t.Fatalf("debate relay prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, bad := range []string{
+		"Formal proof task guardrails",
+		"Debate proof workflow",
+		"fuel/default_fuel shortcuts",
+		"missing equivalence lemmas",
+	} {
+		if strings.Contains(prompt, bad) {
+			t.Fatalf("debate relay prompt should not inject proof strategy %q:\n%s", bad, prompt)
 		}
 	}
 }
 
-func TestFormalProofGuardrailsDoNotTriggerOnRootPathOnly(t *testing.T) {
-	prompt := composeOrchestrationPrompt("collaboration", "修复 /root/tencent/bridge 的前端刷新问题", "", false, "implementer", "claude", 1, 4, nil)
+func TestRelayProofGuardrailsDoNotTriggerOnRootPathOnly(t *testing.T) {
+	prompt := composeRelayPrompt("collaboration", "修复 /root/tencent/bridge 的前端刷新问题", "", false, "implementer", "claude", 1, 4, nil)
 	if strings.Contains(prompt, "Formal proof task guardrails") {
 		t.Fatalf("root path alone should not trigger proof guardrails:\n%s", prompt)
 	}
@@ -1313,7 +1535,7 @@ func TestParseHandoffFieldsAndCompactPromptAvoidsRawTranscript(t *testing.T) {
 	}
 }
 
-func TestPrepareOrchestrationPromptFilesWarnsAgainstEmptyPDFPages(t *testing.T) {
+func TestPrepareOrchestrationPromptFilesProvidesLocalPathsOnly(t *testing.T) {
 	cfg := config.Default()
 	cfg.Bridge.CWD = t.TempDir()
 	prompt, metas, err := PrepareOrchestrationPromptFiles(&cfg, "orc_pdf", "read this", []protocol.AttachmentPayload{{
@@ -1328,18 +1550,19 @@ func TestPrepareOrchestrationPromptFilesWarnsAgainstEmptyPDFPages(t *testing.T) 
 	if len(metas) != 1 || metas[0].Name != "paper.pdf" {
 		t.Fatalf("metas = %#v", metas)
 	}
-	for _, want := range []string{
-		"inspect them with shell commands",
-		"do not use Claude's Read tool",
-		"Do not send an empty pages field to any file-reading tool",
-	} {
+	for _, want := range []string{"Uploaded files for this orchestration run:", "01-paper.pdf", "Use these local file paths directly"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
 	}
+	for _, bad := range []string{"do not use Claude's Read tool", "Do not send an empty pages field", "inspect them with shell commands"} {
+		if strings.Contains(prompt, bad) {
+			t.Fatalf("prompt should not inject file-tool policy %q:\n%s", bad, prompt)
+		}
+	}
 }
 
-func TestFinalVerifierRunsOnlyWhenRiskSignalsExist(t *testing.T) {
+func TestFinalVerifierDisabledForPassThroughRelay(t *testing.T) {
 	manager := NewOrchestrationManager(&config.Config{})
 	clean := []orchestrationTurn{{
 		HandoffFields: orchestrationHandoffFields{Status: "resolved", Verified: "go test ./...", Risks: "none"},
@@ -1350,25 +1573,25 @@ func TestFinalVerifierRunsOnlyWhenRiskSignalsExist(t *testing.T) {
 	resolvedChanged := []orchestrationTurn{{
 		HandoffFields: orchestrationHandoffFields{Status: "resolved", Changed: "main.go", Verified: "go test ./...", Risks: "none"},
 	}}
-	if !manager.shouldRunFinalVerifier(resolvedChanged) {
-		t.Fatal("resolved file changes should still trigger final verifier")
+	if manager.shouldRunFinalVerifier(resolvedChanged) {
+		t.Fatal("pass-through relay should not trigger hidden final verifier for file changes")
 	}
 	changed := []orchestrationTurn{{
 		HandoffFields: orchestrationHandoffFields{Status: "needs_next", Changed: "main.go"},
 	}}
-	if !manager.shouldRunFinalVerifier(changed) {
-		t.Fatal("changed files should trigger final verifier")
+	if manager.shouldRunFinalVerifier(changed) {
+		t.Fatal("pass-through relay should not trigger hidden final verifier for needs_next handoff")
 	}
 	exitCode := 1
 	failed := []orchestrationTurn{{
 		Tools: []RunnerToolEvent{{Command: "go test ./...", Status: "completed", ExitCode: &exitCode}},
 	}}
-	if !manager.shouldRunFinalVerifier(failed) {
-		t.Fatal("failed command should trigger final verifier")
+	if manager.shouldRunFinalVerifier(failed) {
+		t.Fatal("pass-through relay should not trigger hidden final verifier for command results")
 	}
 }
 
-func TestRepeatedBlockedHandoffStopsRunAsFailed(t *testing.T) {
+func TestRepeatedBlockedHandoffIsRelayedThroughScheduledTurns(t *testing.T) {
 	tmp := t.TempDir()
 	claudePath := filepath.Join(tmp, "claude")
 	codexPath := filepath.Join(tmp, "codex")
@@ -1402,8 +1625,8 @@ func TestRepeatedBlockedHandoffStopsRunAsFailed(t *testing.T) {
 		CWD:      tmp,
 	})
 
-	var runError protocol.OrchestrationEventPayload
 	turnStarts := 0
+	var runEnd protocol.OrchestrationEventPayload
 	for len(out) > 0 {
 		env := <-out
 		if env.Type != protocol.TypeOrchestrationEvent {
@@ -1417,18 +1640,21 @@ func TestRepeatedBlockedHandoffStopsRunAsFailed(t *testing.T) {
 			turnStarts++
 		}
 		if event.Kind == "run.error" {
-			runError = event
+			t.Fatalf("pass-through relay should not fail repeated CLI blockers: %#v", event)
+		}
+		if event.Kind == "run.end" {
+			runEnd = event
 		}
 	}
-	if runError.Kind != "run.error" || !strings.Contains(runError.Error, "repeated blocker") {
-		t.Fatalf("missing repeated-blocker run.error: %#v", runError)
+	if runEnd.Kind != "run.end" || !strings.Contains(runEnd.Content, "permission layer blocks mkdir") {
+		t.Fatalf("missing relayed run.end with blocker content: %#v", runEnd)
 	}
-	if turnStarts >= 6 {
-		t.Fatalf("run should stop before exhausting all turns, saw %d starts", turnStarts)
+	if turnStarts != 6 {
+		t.Fatalf("relay should exhaust scheduled turns, saw %d starts", turnStarts)
 	}
 }
 
-func TestUnresolvedFinalHandoffFailsRun(t *testing.T) {
+func TestUnresolvedFinalHandoffCompletesAsRelayedCLIResult(t *testing.T) {
 	tmp := t.TempDir()
 	claudePath := filepath.Join(tmp, "claude")
 	codexPath := filepath.Join(tmp, "codex")
@@ -1458,7 +1684,7 @@ func TestUnresolvedFinalHandoffFailsRun(t *testing.T) {
 		CWD:      tmp,
 	})
 
-	var sawRunError bool
+	var sawRunEnd bool
 	for len(out) > 0 {
 		env := <-out
 		if env.Type != protocol.TypeOrchestrationEvent {
@@ -1469,17 +1695,17 @@ func TestUnresolvedFinalHandoffFailsRun(t *testing.T) {
 			t.Fatal(err)
 		}
 		if event.Kind == "run.end" {
-			t.Fatalf("unresolved final handoff should not complete run: %#v", event)
-		}
-		if event.Kind == "run.error" {
-			sawRunError = true
-			if !strings.Contains(event.Error, "主定理 sorry") {
-				t.Fatalf("run.error lost unresolved goal: %#v", event)
+			sawRunEnd = true
+			if !strings.Contains(event.Content, "主定理 sorry 仍未消除") {
+				t.Fatalf("run.end lost unresolved CLI content: %#v", event)
 			}
 		}
+		if event.Kind == "run.error" {
+			t.Fatalf("pass-through relay should not fail unresolved CLI handoff: %#v", event)
+		}
 	}
-	if !sawRunError {
-		t.Fatal("missing run.error for unresolved final handoff")
+	if !sawRunEnd {
+		t.Fatal("missing run.end for unresolved final handoff")
 	}
 }
 
@@ -1874,7 +2100,7 @@ func TestIsabelleManualBuildSignalDoesNotTreatTimeoutWrapperAsTimedOut(t *testin
 	}
 }
 
-func TestFormalProofAssessmentSummaryShowsUploadProjectFolderDimension(t *testing.T) {
+func TestFinalRunAssessmentSummaryIsGenericRelayAssessment(t *testing.T) {
 	exitCode := 0
 	history := []orchestrationTurn{
 		newOrchestrationTurnRecord("turn_verifier", "reviewer", "codex", strings.Join([]string{
@@ -1895,9 +2121,14 @@ func TestFormalProofAssessmentSummaryShowsUploadProjectFolderDimension(t *testin
 		}),
 	}
 	summary := finalRunAssessmentSummary("已上传 Model.thy、Termination.thy、ROOT。请补全 Isabelle 中 termination modify_lin 的证明，不能用 sorry/quick_and_dirty。", history, workspaceChangeReport{Available: true, Changed: []string{"isabelle-proof-smoke/Model.thy", "isabelle-proof-smoke/Termination.thy", "isabelle-proof-smoke/ROOT"}}, "")
-	for _, want := range []string{"新建项目目录", "工作目录下的新建 Isabelle 项目路径", "Isabelle oracle 审计", "命名目标事实", "分支下降审计"} {
+	for _, want := range []string{"最终测试结果：通过", "验收维度", "工作区变更", "命令验证", "剩余风险"} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("summary missing %q:\n%s", want, summary)
+		}
+	}
+	for _, bad := range []string{"Isabelle oracle 审计", "命名目标事实", "分支下降审计", "假设审计"} {
+		if strings.Contains(summary, bad) {
+			t.Fatalf("generic relay assessment should not include proof-specific dimension %q:\n%s", bad, summary)
 		}
 	}
 }
@@ -1942,15 +2173,17 @@ func TestComposeFinalAssessmentRemediationPromptTargetsFailedDimensions(t *testi
 		"Coq Print Assumptions/global-context audit evidence is missing",
 		"Current terminal assessment before remediation",
 		"Original user task",
-		"Formal proof task guardrails",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("assessment remediation prompt missing %q:\n%s", want, prompt)
 		}
 	}
+	if strings.Contains(prompt, "Formal proof task guardrails") {
+		t.Fatalf("assessment remediation prompt should not inject old proof guardrails:\n%s", prompt)
+	}
 }
 
-func TestFinalAssessmentRemediationRunsBeforeFailure(t *testing.T) {
+func TestFinalAssessmentRemediationDoesNotRunInPassThroughRelay(t *testing.T) {
 	tmp := t.TempDir()
 	claudePath := filepath.Join(tmp, "claude")
 	codexPath := filepath.Join(tmp, "codex")
@@ -1978,7 +2211,6 @@ func TestFinalAssessmentRemediationRunsBeforeFailure(t *testing.T) {
 		CWD:      tmp,
 	})
 
-	var sawRemediation bool
 	var sawRunEnd bool
 	for len(out) > 0 {
 		env := <-out
@@ -1990,22 +2222,19 @@ func TestFinalAssessmentRemediationRunsBeforeFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 		if event.Kind == "turn.start" && strings.Contains(event.TurnID, "assessment-remediation") {
-			sawRemediation = true
+			t.Fatalf("pass-through relay should not start hidden assessment remediation: %#v", event)
 		}
 		if event.Kind == "run.error" {
-			t.Fatalf("run should remediate and complete, got error: %#v", event)
+			t.Fatalf("pass-through relay should complete with CLI content, got error: %#v", event)
 		}
 		if event.Kind == "run.end" {
 			sawRunEnd = true
-			for _, want := range []string{"最终测试结果：通过", "验收维度", "Print Assumptions", "原始证明义务"} {
+			for _, want := range []string{"最终结论：已创建 Coq 项目", "没有执行 Print Assumptions", "Handoff: status=resolved"} {
 				if !strings.Contains(event.Content, want) {
-					t.Fatalf("run.end assessment missing %q:\n%s", want, event.Content)
+					t.Fatalf("run.end relay content missing %q:\n%s", want, event.Content)
 				}
 			}
 		}
-	}
-	if !sawRemediation {
-		t.Fatal("missing final-assessment remediation turn")
 	}
 	if !sawRunEnd {
 		t.Fatal("missing completed run.end after remediation")
@@ -2149,77 +2378,76 @@ func TestComposeFinalVerifierPromptUsesStructuredState(t *testing.T) {
 	}
 }
 
-func TestComposeFinalVerifierPromptAddsFormalProofGuardrails(t *testing.T) {
+func TestComposeFinalVerifierPromptDoesNotAddFormalProofGuardrails(t *testing.T) {
 	prompt := composeFinalVerifierPrompt("collaboration", "补全 Coq termination modify_lin 证明，不能用占位符", "", false, "verifier", "codex", []orchestrationTurn{{
 		Role:          "implementer",
 		CLI:           "claude",
 		HandoffFields: orchestrationHandoffFields{Status: "needs_next", Changed: "Model.v", Verified: "make", Risks: "default_fuel wrapper lacks equivalence proof"},
 	}})
 	for _, want := range []string{
-		"Formal proof final verifier guardrails",
-		"Verify the original proof obligation",
-		"bounded/fuel wrapper without equivalence and fuel-sufficiency proofs",
-		"Axiom/Parameter/Conjecture",
-		"Guard Checking/bypass_check",
-		"Coq Print Assumptions <target> with Closed under the global context",
-		"Lean #print axioms <target>",
-		"Isabelle thm_oracles <target>",
-		"actual decrease/well-founded measure",
-		"multi-dimensional result assessment",
-		"uploaded inputs accounted for",
-		"original obligation/equivalence or termination audit",
+		"lightweight final verifier",
+		"actual acceptance criterion",
+		"default_fuel wrapper lacks equivalence proof",
+		"补全 Coq",
 	} {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("formal proof verifier prompt missing %q:\n%s", want, prompt)
+			t.Fatalf("verifier prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, bad := range []string{
+		"Formal proof final verifier guardrails",
+		"Coq upload benchmark",
+		"Print Assumptions <target>",
+		"thm_oracles",
+	} {
+		if strings.Contains(prompt, bad) {
+			t.Fatalf("verifier prompt should not inject proof guardrail %q:\n%s", bad, prompt)
 		}
 	}
 }
 
-func TestComposeFinalVerifierPromptRequiresCoqUploadAssessment(t *testing.T) {
+func TestComposeFinalVerifierPromptDoesNotRequireCoqUploadAssessment(t *testing.T) {
 	prompt := composeFinalVerifierPrompt("collaboration", "把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT", "", false, "verifier", "codex", nil)
 	for _, want := range []string{
-		"Coq upload benchmark",
-		"Model.thy/Termination.thy/ROOT were used",
-		"new Coq project folder",
-		"make/coqc passed",
-		"source-only placeholder scan",
-		"Closed under the global context",
-		"named target theorem",
-		"Print/inspection of modify_lin",
-		"branch-decrease or equivalence evidence",
-		"termination modify_lin",
-		"modify_lin_fuel/default_fuel",
+		"lightweight final verifier",
+		"actual acceptance criterion",
+		"Original user task",
+		"Model.thy",
+		"Termination.thy",
+		"ROOT",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("Coq upload verifier prompt missing %q:\n%s", want, prompt)
 		}
 	}
+	for _, bad := range []string{"Coq upload benchmark", "Print/inspection of modify_lin", "modify_lin_fuel/default_fuel", "Closed under the global context"} {
+		if strings.Contains(prompt, bad) {
+			t.Fatalf("Coq upload verifier prompt should not inject proof assessment %q:\n%s", bad, prompt)
+		}
+	}
 }
 
-func TestComposeFinalVerifierPromptRequiresIsabelleUploadAssessment(t *testing.T) {
+func TestComposeFinalVerifierPromptDoesNotRequireIsabelleUploadAssessment(t *testing.T) {
 	prompt := composeFinalVerifierPrompt("collaboration", "已上传 Model.thy、Termination.thy、ROOT。请补全 Isabelle 中 termination modify_lin 的证明，不能用 sorry/quick_and_dirty。", "", false, "verifier", "codex", nil)
 	for _, want := range []string{
-		"Isabelle upload benchmark",
-		"Model.thy/Termination.thy/ROOT were used",
-		"new Isabelle project folder",
-		"isabelle build passed",
-		"ROOT layout",
-		"timeout-aware isabelle build",
-		"source-only scan found no sorry/quick_and_dirty",
-		"diagnostic leftovers",
-		"thm_oracles",
-		"branch-decrease evidence",
+		"lightweight final verifier",
+		"actual acceptance criterion",
+		"Isabelle timeout boundary",
+		"Original user task",
 		"termination modify_lin",
-		"background",
-		"compile-only framework",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("Isabelle upload verifier prompt missing %q:\n%s", want, prompt)
 		}
 	}
+	for _, bad := range []string{"Isabelle upload benchmark", "thm_oracles", "background", "compile-only framework"} {
+		if strings.Contains(prompt, bad) {
+			t.Fatalf("Isabelle upload verifier prompt should not inject proof assessment %q:\n%s", bad, prompt)
+		}
+	}
 }
 
-func TestCCBPromptAddsFormalProofAssessmentGuardrails(t *testing.T) {
+func TestCCBPromptRelaysWithoutFormalProofAssessmentGuardrails(t *testing.T) {
 	cfg := config.Default()
 	manager := NewOrchestrationManager(&cfg)
 	prompt := manager.ccbPrompt(protocol.OrchestrationStartPayload{
@@ -2227,22 +2455,9 @@ func TestCCBPromptAddsFormalProofAssessmentGuardrails(t *testing.T) {
 		Prompt: "把这三个做成coq的证明项目写到工作路径下的一个新建文件夹中，并补全缺失的证明，不能用某些占位符占住，应该补全\n已上传文件\nModel.thy\nTermination.thy\nROOT",
 	})
 	for _, want := range []string{
-		"Formal proof task guardrails",
-		"Formal proof final verifier guardrails",
-		"Coq upload benchmark",
-		"Model.thy/Termination.thy/ROOT input mapping",
-		"source-only placeholder scan",
-		"Closed under the global context",
-		"_CoqProject/Makefile project shape",
-		"named target theorem",
-		"branch-decrease/equivalence audit",
-		"tautology",
-		"Variable, Hypothesis",
-		"Guard Checking",
-		"bypass_check",
-		"fixed_fuel",
-		"termination modify_lin original obligation audit",
-		"modify_lin_fuel/default_fuel",
+		"Use only the local CCB Codex and Claude Code agents",
+		"Codex Bridge is only relaying this task and the final CCB result",
+		"Return a final user-visible conclusion",
 		orchestrationMsgContract,
 		orchestrationHandoffContract,
 	} {
@@ -2250,9 +2465,14 @@ func TestCCBPromptAddsFormalProofAssessmentGuardrails(t *testing.T) {
 			t.Fatalf("CCB prompt missing %q:\n%s", want, prompt)
 		}
 	}
+	for _, bad := range []string{"Formal proof task guardrails", "Formal proof final verifier guardrails", "Coq upload benchmark", "modify_lin_fuel/default_fuel"} {
+		if strings.Contains(prompt, bad) {
+			t.Fatalf("CCB prompt should not inject proof assessment %q:\n%s", bad, prompt)
+		}
+	}
 }
 
-func TestCCBCompletedProofRunUsesFinalAssessmentGate(t *testing.T) {
+func TestCCBCompletedProofRunRelayUsesGenericAssessmentSummary(t *testing.T) {
 	reply := strings.Join([]string{
 		"最终结论：已创建 Coq 项目，Model.thy、Termination.thy、ROOT 已纳入转换，并且 make 通过；但这轮没有执行 Print Assumptions。",
 		"",
@@ -2279,28 +2499,35 @@ func TestCCBCompletedProofRunUsesFinalAssessmentGate(t *testing.T) {
 		}
 	}
 	summary := finalRunAssessmentSummary(userPrompt, history, changes, reason)
-	for _, want := range []string{"最终测试结果：未通过", "验收维度", "假设审计", "原始证明义务", "最终验收"} {
+	for _, want := range []string{"最终测试结果：未通过", "验收维度", "工作区变更", "命令验证", "最终验收"} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("summary missing %q:\n%s", want, summary)
 		}
 	}
+	if strings.Contains(summary, "假设审计") {
+		t.Fatalf("generic assessment summary should not add proof-specific dimension:\n%s", summary)
+	}
 }
 
-func TestComposeDebateFinalVerifierPromptAddsAdversarialProofAudit(t *testing.T) {
+func TestComposeDebateFinalVerifierPromptDoesNotAddAdversarialProofAudit(t *testing.T) {
 	prompt := composeFinalVerifierPrompt("debate", "补全 Coq termination modify_lin 证明，不能用占位符", "", false, "verifier", "codex", []orchestrationTurn{{
 		Role:          "critic",
 		CLI:           "codex",
 		HandoffFields: orchestrationHandoffFields{Status: "needs_next", Verified: "make", Risks: "critic found default_fuel shortcut without equivalence proof"},
 	}})
 	for _, want := range []string{
-		"Formal proof final verifier guardrails",
-		"Debate verifier strategy",
-		"critic falsification",
-		"fuel/default_fuel shortcuts",
-		"missing equivalence",
+		"lightweight final verifier",
+		"Mode: debate",
+		"critic found default_fuel shortcut",
+		"Original user task",
 	} {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("formal proof debate verifier prompt missing %q:\n%s", want, prompt)
+			t.Fatalf("debate verifier prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, bad := range []string{"Formal proof final verifier guardrails", "Debate verifier strategy", "fuel/default_fuel shortcuts"} {
+		if strings.Contains(prompt, bad) {
+			t.Fatalf("debate verifier prompt should not inject proof audit %q:\n%s", bad, prompt)
 		}
 	}
 }
@@ -2683,6 +2910,61 @@ func TestClaudeApprovalMCPToolCallReturnsDenyJSON(t *testing.T) {
 	}
 }
 
+func orchestrationEventsContain(events []protocol.OrchestrationEventPayload, kind, cli, content string) bool {
+	for _, event := range events {
+		if kind != "" && event.Kind != kind {
+			continue
+		}
+		if cli != "" && event.CLI != cli {
+			continue
+		}
+		if content != "" && !orchestrationEventContainsText(event, content) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func drainOrchestrationEvents(t *testing.T, out <-chan protocol.Envelope) []protocol.OrchestrationEventPayload {
+	t.Helper()
+	var events []protocol.OrchestrationEventPayload
+	for len(out) > 0 {
+		env := <-out
+		if env.Type != protocol.TypeOrchestrationEvent {
+			continue
+		}
+		event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+type trackingWriteCloser struct {
+	bytes.Buffer
+	closed bool
+}
+
+func (w *trackingWriteCloser) Close() error {
+	w.closed = true
+	return nil
+}
+
+func orchestrationEventContainsText(event protocol.OrchestrationEventPayload, want string) bool {
+	if strings.Contains(event.Content, want) || strings.Contains(event.Error, want) {
+		return true
+	}
+	for _, key := range []string{"command", "output", "id", "target"} {
+		if value, _ := event.Data[key].(string); strings.Contains(value, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func assertArgPair(t *testing.T, args []string, key, value string) {
 	t.Helper()
 	for i := 0; i < len(args)-1; i++ {
@@ -2699,6 +2981,33 @@ func fakeClaudePrintScript(text string) string {
 import json
 
 text = ` + string(raw) + `
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
+print(json.dumps({"type":"result","result":text}), flush=True)
+`
+}
+
+func fakeClaudeRelayScript(promptPath, argvPath string) string {
+	promptPathRaw, _ := json.Marshal(promptPath)
+	argvPathRaw, _ := json.Marshal(argvPath)
+	textRaw, _ := json.Marshal("Claude result: wrote Model.v and Termination.v\n\nMsg: to=reviewer; intent=review; need=verify relay\nHandoff: status=needs_next; changed=coq-relay/Model.v, coq-relay/Termination.v; verified=none; next=run tests; risks=none")
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+prompt_path = ` + string(promptPathRaw) + `
+argv_path = ` + string(argvPathRaw) + `
+text = ` + string(textRaw) + `
+with open(prompt_path, "w", encoding="utf-8") as f:
+    if "--input-format=stream-json" in sys.argv:
+        line = sys.stdin.readline()
+        payload = json.loads(line)
+        f.write(payload["message"]["content"][0]["text"])
+    else:
+        f.write(sys.argv[-1])
+with open(argv_path, "w", encoding="utf-8") as f:
+    json.dump(sys.argv[1:], f)
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_1","name":"Bash","input":{"command":"mkdir -p coq-relay && write Model.v Termination.v"}}]}}), flush=True)
+print(json.dumps({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_1","content":"created coq-relay\n"}]}}), flush=True)
 print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
 print(json.dumps({"type":"result","result":text}), flush=True)
 `
@@ -2749,6 +3058,32 @@ text = ` + string(raw) + `
 if len(sys.argv) < 2 or sys.argv[1] != "exec":
     print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
     sys.exit(1)
+print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
+`
+}
+
+func fakeCodexRelayScript(promptPath, argvPath string) string {
+	promptPathRaw, _ := json.Marshal(promptPath)
+	argvPathRaw, _ := json.Marshal(argvPath)
+	textRaw, _ := json.Marshal("Codex final: verified relay result\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=coq-relay/Model.v, coq-relay/Termination.v; verified=go test ./...; next=none; risks=none")
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+prompt_path = ` + string(promptPathRaw) + `
+argv_path = ` + string(argvPathRaw) + `
+text = ` + string(textRaw) + `
+if len(sys.argv) < 2 or sys.argv[1] != "exec":
+    print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
+    sys.exit(1)
+prompt = sys.stdin.read()
+with open(prompt_path, "w", encoding="utf-8") as f:
+    f.write(prompt)
+with open(argv_path, "w", encoding="utf-8") as f:
+    json.dump(sys.argv[1:], f)
+print(json.dumps({"type":"thread.started","thread_id":"thread_relay_1"}), flush=True)
+print(json.dumps({"type":"item.started","item":{"id":"cmd_test","type":"command_execution","command":"go test ./...","status":"running"}}), flush=True)
+print(json.dumps({"type":"item.completed","item":{"id":"cmd_test","type":"command_execution","command":"go test ./...","status":"completed","exit_code":0,"aggregated_output":"ok ./...\n"}}), flush=True)
 print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
 `
 }

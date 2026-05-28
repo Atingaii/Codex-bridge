@@ -5,7 +5,12 @@ const source = readFileSync(new URL('./src/app/App.tsx', import.meta.url), 'utf8
 
 assert.match(source, /function orchestrationStatusContent\(event: OrchestrationEvent\)/);
 assert.match(source, /if \(\(event\.kind === 'run\.end' \|\| event\.kind === 'run\.error'\) && content\) return content;/);
+assert.match(source, /function isBridgeRelayNotice\(event: Pick<OrchestrationEvent, 'kind' \| 'content'>\)/);
+assert.match(source, /contentfulTurnEnds\.has\(orchestrationTurnKey\(event\)\) && !isBridgeRelayNotice\(event\)/);
 assert.match(source, /const rawContent = item\.content \|\| item\.error \|\| '';/);
+assert.doesNotMatch(source, /unresolvedAcceptanceSummary/);
+assert.doesNotMatch(source, /hasUnresolvedAcceptanceSignal/);
+assert.doesNotMatch(source, /Unmet acceptance|未满足验收/);
 
 function stringsTrim(value) {
   return typeof value === 'string' ? value.trim() : '';

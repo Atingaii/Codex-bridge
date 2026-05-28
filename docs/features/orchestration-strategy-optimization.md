@@ -1,3 +1,10 @@
+> **DEPRECATED - proof-strategy gates replaced by pass-through CLI relay**
+>
+> Current design: [orchestration-pass-through-cli.md](orchestration-pass-through-cli.md).
+> Historical only; do not implement proof-specific Bridge prompt guardrails,
+> final proof assessment gates, or controlled-background Isabelle build
+> requirements from this document.
+
 # Orchestration Strategy Optimization
 
 ## Goal

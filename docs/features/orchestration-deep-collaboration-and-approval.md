@@ -1,3 +1,11 @@
+> **DEPRECATED IN PART - collaboration strategy replaced by pass-through relay**
+>
+> Current orchestration strategy: [orchestration-pass-through-cli.md](orchestration-pass-through-cli.md).
+> The browser approval and capability sections remain historical context for
+> review-required execution, but do not implement the compact collaboration
+> contract, structured handoff state, repeated-blocker stop, or conditional final
+> verifier from this document.
+
 # Orchestration Deep Collaboration And Approval
 
 ## Goal

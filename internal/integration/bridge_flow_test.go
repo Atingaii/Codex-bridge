@@ -702,7 +702,7 @@ func TestWebOrchestrationInitialRequestApprovesAndRemediatesMissingFileChange(t 
 	eventsBody := getJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations/"+url.PathEscape(runID)+"/events", http.StatusOK)
 	events := eventsBody["events"].([]any)
 
-	if streamed.approvals < 2 || streamed.acceptedApprovals < 2 {
+	if streamed.approvals < 1 || streamed.acceptedApprovals < 1 {
 		t.Fatalf("approval was not observed and accepted: %#v", streamed)
 	}
 	if !streamed.sawCodexCommand || !eventsContainCommand(events, "isabelle build -D /root/Isabelle") {
@@ -711,14 +711,14 @@ func TestWebOrchestrationInitialRequestApprovesAndRemediatesMissingFileChange(t 
 	if !streamed.sawUnresolvedRisk || !eventsContainContent(events, "主定理 sorry 仍未消除") {
 		t.Fatalf("unresolved main-goal risk missing; streamed=%#v events=%#v", streamed, events)
 	}
-	if !streamed.sawRemediationCommand || !eventsContainCommand(events, "mkdir -p Isabelle && write Termination.thy") {
-		t.Fatalf("remediation write command missing; streamed=%#v events=%#v", streamed, events)
+	if streamed.sawRemediationCommand || eventsContainCommand(events, "mkdir -p Isabelle && write Termination.thy") {
+		t.Fatalf("pass-through relay should not run hidden remediation; streamed=%#v events=%#v", streamed, events)
 	}
-	if !eventsContainContent(events, "补救轮已写入 Isabelle/Termination.thy") {
-		t.Fatalf("remediation final content missing; streamed=%#v events=%#v", streamed, events)
+	if eventsContainContent(events, "补救轮已写入 Isabelle/Termination.thy") {
+		t.Fatalf("pass-through relay should not synthesize remediation final content; streamed=%#v events=%#v", streamed, events)
 	}
-	if _, err := os.Stat(filepath.Join(tmp, "Isabelle", "Termination.thy")); err != nil {
-		t.Fatalf("remediation file was not created: %v", err)
+	if _, err := os.Stat(filepath.Join(tmp, "Isabelle", "Termination.thy")); err == nil {
+		t.Fatal("pass-through relay unexpectedly created remediation file")
 	}
 	for _, raw := range events {
 		event := raw.(map[string]any)
@@ -998,6 +998,8 @@ func TestCoqTaskWebSmokeWithFakeBridge(t *testing.T) {
 			run := body["run"].(map[string]any)
 			runID := run["id"].(string)
 			assertRunHasFiles(t, run, []string{"Model.thy", "Termination.thy", "ROOT"})
+			ws := dialOrchestrationWS(t, client, cfg.Bridge.HubURL, runID)
+			defer ws.Close()
 
 			env := waitBridgeEnvelope(t, fakeBridge, protocol.TypeOrchestrationStart, "")
 			start, err := protocol.Decode[protocol.OrchestrationStartPayload](env)
@@ -1021,21 +1023,111 @@ func TestCoqTaskWebSmokeWithFakeBridge(t *testing.T) {
 				}
 			}
 
-			failure := "acceptance check failed: 当前 Coq 版本改成 modify_lin_fuel，并用固定 default_fuel 包装；没有证明原递归每步下降、Distance 下降或默认燃料足够模拟原 Isabelle 递归到停止态。"
-			if err := fakeBridge.WriteJSON(protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+			sendFakeOrchestrationEvent(t, fakeBridge, protocol.OrchestrationEventPayload{
+				RunID:   runID,
+				Kind:    "run.start",
+				Status:  store.OrchestrationRunning,
+				Content: "Starting relay orchestration with 2 CLI turns.",
+			})
+			sendFakeOrchestrationEvent(t, fakeBridge, protocol.OrchestrationEventPayload{
+				RunID:   runID,
+				TurnID:  runID + "-01",
+				Kind:    "turn.start",
+				Role:    "implementer",
+				CLI:     "claude",
+				Content: "Prompt sent to claude:\n" + task + "\n\nUploaded files: Model.thy, Termination.thy, ROOT\nYour visible result will be handed to another CLI afterward.",
+			})
+			sendFakeOrchestrationEvent(t, fakeBridge, protocol.OrchestrationEventPayload{
 				RunID:  runID,
-				Kind:   "run.error",
-				Status: store.OrchestrationFailed,
-				Error:  failure,
-			})); err != nil {
-				t.Fatal(err)
+				TurnID: runID + "-01",
+				Kind:   "command.start",
+				Role:   "implementer",
+				CLI:    "claude",
+				Status: "running",
+				Data:   map[string]any{"id": "cmd_claude_write", "command": "mkdir -p /root/tencent/coq-relay-smoke && write Model.v Termination.v"},
+			})
+			sendFakeOrchestrationEvent(t, fakeBridge, protocol.OrchestrationEventPayload{
+				RunID:   runID,
+				TurnID:  runID + "-01",
+				Kind:    "command.end",
+				Role:    "implementer",
+				CLI:     "claude",
+				Status:  "completed",
+				Content: "created coq-relay-smoke",
+				Data:    map[string]any{"id": "cmd_claude_write", "command": "mkdir -p /root/tencent/coq-relay-smoke && write Model.v Termination.v", "output": "created coq-relay-smoke"},
+			})
+			claudeResult := "Claude result: created /root/tencent/coq-relay-smoke and listed changed files.\n\nMsg: to=reviewer; intent=review; need=verify relay\nHandoff: status=needs_next; changed=coq-relay-smoke/Model.v, coq-relay-smoke/Termination.v; verified=none; next=run checks; risks=none"
+			sendFakeOrchestrationEvent(t, fakeBridge, protocol.OrchestrationEventPayload{
+				RunID:   runID,
+				TurnID:  runID + "-01",
+				Kind:    "turn.end",
+				Role:    "implementer",
+				CLI:     "claude",
+				Status:  "success",
+				Content: claudeResult,
+				Data:    map[string]any{"sessionId": "claude-session-smoke", "relayOnly": true},
+			})
+			sendFakeOrchestrationEvent(t, fakeBridge, protocol.OrchestrationEventPayload{
+				RunID:   runID,
+				TurnID:  runID + "-02",
+				Kind:    "turn.start",
+				Role:    "reviewer",
+				CLI:     "codex",
+				Content: "Prompt sent to codex:\nPrevious CLI result and useful command context:\n" + claudeResult + "\n- mkdir -p /root/tencent/coq-relay-smoke && write Model.v Termination.v | completed",
+			})
+			sendFakeOrchestrationEvent(t, fakeBridge, protocol.OrchestrationEventPayload{
+				RunID:  runID,
+				TurnID: runID + "-02",
+				Kind:   "command.end",
+				Role:   "reviewer",
+				CLI:    "codex",
+				Status: "completed",
+				Data:   map[string]any{"id": "cmd_codex_verify", "command": "go test ./...", "output": "ok ./..."},
+			})
+			codexResult := "Codex final: verified fake Bridge relay smoke; frontend should show Claude prompt, command cards, Codex handoff prompt, and this final result."
+			sendFakeOrchestrationEvent(t, fakeBridge, protocol.OrchestrationEventPayload{
+				RunID:   runID,
+				TurnID:  runID + "-02",
+				Kind:    "turn.end",
+				Role:    "reviewer",
+				CLI:     "codex",
+				Status:  "success",
+				Content: codexResult,
+				Data:    map[string]any{"threadId": "thread-smoke", "relayOnly": true},
+			})
+			sendFakeOrchestrationEvent(t, fakeBridge, protocol.OrchestrationEventPayload{
+				RunID:   runID,
+				Kind:    "run.end",
+				Status:  store.OrchestrationCompleted,
+				Content: codexResult,
+				Data:    map[string]any{"claudeSessionId": "claude-session-smoke", "codexThreadId": "thread-smoke", "relayOnly": true},
+			})
+
+			streamedEvents := collectOrchestrationWSUntilTerminal(t, ws, runID)
+			for _, want := range []string{
+				"Prompt sent to claude",
+				task,
+				"Model.thy",
+				"mkdir -p /root/tencent/coq-relay-smoke",
+				"Prompt sent to codex",
+				"Claude result: created /root/tencent/coq-relay-smoke",
+				"Codex final: verified fake Bridge relay smoke",
+			} {
+				if !orchestrationPayloadsContainContent(streamedEvents, want) {
+					t.Fatalf("websocket-visible events missing %q: %#v", want, streamedEvents)
+				}
 			}
-			waitOrchestrationStatus(t, client, cfg.Bridge.HubURL, runID, store.OrchestrationFailed)
+			waitOrchestrationStatus(t, client, cfg.Bridge.HubURL, runID, store.OrchestrationCompleted)
 			eventsBody := getJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations/"+url.PathEscape(runID)+"/events", http.StatusOK)
 			events := eventsBody["events"].([]any)
-			for _, want := range []string{"modify_lin_fuel", "default_fuel", "没有证明"} {
+			for _, want := range []string{"Prompt sent to claude", "Prompt sent to codex", "Codex final: verified fake Bridge relay smoke"} {
 				if !eventsContainContent(events, want) {
 					t.Fatalf("web-visible events missing %q: %#v", want, events)
+				}
+			}
+			for _, bad := range []string{"modify_lin_fuel", "default_fuel", "Formal proof task guardrails", "assessment-remediation"} {
+				if eventsContainContent(events, bad) {
+					t.Fatalf("pass-through smoke should not expose old proof gate %q: %#v", bad, events)
 				}
 			}
 		})
@@ -2099,8 +2191,63 @@ func eventsContainContent(events []any, want string) bool {
 			return true
 		}
 		data, _ := event["data"].(map[string]any)
-		if data != nil && strings.Contains(fmt.Sprint(data["output"]), want) {
+		if data != nil {
+			for _, key := range []string{"command", "output", "id", "sessionId", "threadId", "claudeSessionId", "codexThreadId"} {
+				if strings.Contains(fmt.Sprint(data[key]), want) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func sendFakeOrchestrationEvent(t *testing.T, conn *fakeBridgeConn, payload protocol.OrchestrationEventPayload) {
+	t.Helper()
+	if err := conn.WriteJSON(protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", payload)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func collectOrchestrationWSUntilTerminal(t *testing.T, ws *websocket.Conn, runID string) []protocol.OrchestrationEventPayload {
+	t.Helper()
+	_ = ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer ws.SetReadDeadline(time.Time{})
+	var events []protocol.OrchestrationEventPayload
+	for {
+		var env protocol.Envelope
+		if err := ws.ReadJSON(&env); err != nil {
+			t.Fatal(err)
+		}
+		if env.Type == protocol.TypeHeartbeat || env.Type == protocol.TypeStatus {
+			continue
+		}
+		if env.Type != protocol.TypeOrchestrationEvent {
+			continue
+		}
+		event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.RunID != runID {
+			t.Fatalf("event for wrong run: %#v", event)
+		}
+		events = append(events, event)
+		if event.Kind == "run.end" || event.Kind == "run.error" || event.Kind == "run.cancelled" {
+			return events
+		}
+	}
+}
+
+func orchestrationPayloadsContainContent(events []protocol.OrchestrationEventPayload, want string) bool {
+	for _, event := range events {
+		if strings.Contains(event.Content, want) || strings.Contains(event.Error, want) {
 			return true
+		}
+		for _, key := range []string{"command", "output", "id", "sessionId", "threadId", "claudeSessionId", "codexThreadId"} {
+			if strings.Contains(fmt.Sprint(event.Data[key]), want) {
+				return true
+			}
 		}
 	}
 	return false
@@ -2144,7 +2291,7 @@ func assertTerminationConclusionAfterCommand(t *testing.T, events []any) {
 		}
 		if kind == "turn.end" {
 			content := fmt.Sprint(event["content"])
-			if strings.Contains(content, "最终结论") || strings.Contains(content, "本轮结论") {
+			if strings.TrimSpace(content) != "" {
 				lastConclusionIndex = i
 				lastConclusion = content
 			}
@@ -2154,7 +2301,7 @@ func assertTerminationConclusionAfterCommand(t *testing.T, events []any) {
 		t.Fatalf("events missing command card: %#v", events)
 	}
 	if lastConclusionIndex < 0 {
-		t.Fatalf("events missing readable turn.end conclusion after command: %#v", events)
+		t.Fatalf("events missing relayed turn.end content after command: %#v", events)
 	}
 	if lastConclusionIndex < lastCommandIndex {
 		t.Fatalf("last readable conclusion appears before last command: command=%d conclusion=%d content=%q events=%#v", lastCommandIndex, lastConclusionIndex, lastConclusion, events)

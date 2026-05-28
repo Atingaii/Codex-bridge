@@ -141,18 +141,18 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 
 1. `internal/bridge/orchestration.go:roleForTurn` controls which CLI owns each
    turn.
-2. `internal/bridge/orchestration.go:composeOrchestrationPrompt` controls
-   strategy instructions and the compact `Msg:` / `Handoff:` contracts.
-3. `internal/bridge/orchestration.go:formatCompactPriorTurn` controls how much
-   prior output is sent to the next CLI.
-4. `internal/bridge/orchestration.go:parseHandoffFields` and
-   `composeFinalVerifierPrompt` control structured handoff context and the
-   conditional final verifier turn.
-5. `internal/bridge/orchestration.go:repeatedBlockingHandoff` controls when a
-   repeated blocker stops the run with `run.error`.
+2. `internal/bridge/orchestration.go:composeRelayPrompt` controls the
+   pass-through prompt sent to Claude/Codex and the short Isabelle timeout
+   boundary.
+3. `internal/bridge/orchestration.go:formatRelayPriorTurn` controls how much
+   prior visible output and command context is sent to the next CLI.
+4. `internal/bridge/orchestration.go:runRelayCLI` preserves the per-run Claude
+   session id and Codex thread id when launching the next CLI turn.
+5. `internal/bridge/orchestration.go:relayTerminalContent` controls terminal
+   run content without adding a hidden verifier or remediation turn.
 6. Keep event kinds compatible with `frontend/src/app/App.tsx:visibleOrchestrationEvents`.
 7. Update
-   [docs/features/orchestration-strategy-optimization.md](features/orchestration-strategy-optimization.md).
+   [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
 
 ### Change SQLite Schema
 

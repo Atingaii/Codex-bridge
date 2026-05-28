@@ -309,6 +309,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			CLI:     cli,
 			Content: promptHeader(role, cli, turn),
 		})
+		m.emitIsabelleManualBuildCarryOver(payload.RunID, turnID, role, cli, payload.Prompt, payload.Context, history)
 		content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
 		record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
 		if err != nil {
@@ -399,6 +400,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			CLI:     cli,
 			Content: "final verifier via " + cli,
 		})
+		m.emitIsabelleManualBuildCarryOver(payload.RunID, turnID, role, cli, payload.Prompt, payload.Context, history)
 		content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
 		record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
 		record.Verifier = true
@@ -545,6 +547,7 @@ func (m *OrchestrationManager) runWorkspaceChangeRemediation(ctx context.Context
 		CLI:     cli,
 		Content: "workspace-change remediation via " + cli,
 	})
+	m.emitIsabelleManualBuildCarryOver(payload.RunID, turnID, role, cli, payload.Prompt, payload.Context, history)
 	content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
 	record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
 	if err != nil {
@@ -625,17 +628,22 @@ func shouldRunFinalAssessmentRemediation(userPrompt string, history []orchestrat
 }
 
 func isabelleManualBuildRequired(reason string, history []orchestrationTurn) bool {
-	return isabelleManualBuildSignal(reason) || isabelleManualBuildSignal(proofAssessmentText(history))
+	return isabelleManualBuildSignal(reason) || isabelleManualBuildSignal(isabelleManualBuildCorpus(history))
 }
 
 func isabelleManualBuildReason(userPrompt string, history []orchestrationTurn) string {
 	if strings.TrimSpace(userPrompt) != "" && !looksLikeIsabelleProofTask(userPrompt) {
 		return ""
 	}
-	if !isabelleManualBuildSignal(proofAssessmentText(history)) {
+	if !isabelleManualBuildSignal(isabelleManualBuildCorpus(history)) {
 		return ""
 	}
 	return "Isabelle build requires manual follow-up; a long build timed out or was handed off with a log/manual command, so later CLI turns should not rerun the same build automatically"
+}
+
+func isabelleManualBuildCorpus(history []orchestrationTurn) string {
+	commandText, outputText := proofAssessmentCommandText(history)
+	return strings.Join([]string{proofAssessmentText(history), commandText, outputText}, "\n")
 }
 
 func isabelleManualBuildSignal(text string) bool {
@@ -651,9 +659,31 @@ func isabelleManualBuildSignal(text string) bool {
 	}) {
 		return true
 	}
-	return containsAny(lower, []string{"timed out", "timeout", "超时"}) &&
-		containsAny(lower, []string{"log", "日志"}) &&
-		strings.Contains(lower, "isabelle build")
+	if !strings.Contains(lower, "isabelle build") || !containsAny(lower, []string{"build.log", "log", "日志"}) {
+		return false
+	}
+	if containsAny(lower, []string{
+		"timed out", "timeout expired", "exit 124", "exit code 124", "status=124", "超时",
+		"manual build pending", "build pending", "manual follow-up pending",
+	}) {
+		return true
+	}
+	return containsAny(lower, []string{"canceled", "cancelled", "context canceled", "run.cancelled"}) &&
+		containsAny(lower, []string{"running ", "running linlattice", "build.pid", "build.pgid", "pid stat"})
+}
+
+func (m *OrchestrationManager) emitIsabelleManualBuildCarryOver(runID, turnID, role, cli, userPrompt, contextSummary string, history []orchestrationTurn) {
+	content := isabelleManualBuildVisibleSummary(userPrompt, contextSummary, history)
+	if content == "" {
+		return
+	}
+	m.emit(runID, protocol.OrchestrationEventPayload{
+		Kind:    "turn.delta",
+		TurnID:  turnID,
+		Role:    role,
+		CLI:     cli,
+		Content: content,
+	})
 }
 
 func (m *OrchestrationManager) runFinalAssessmentRemediation(ctx context.Context, payload protocol.OrchestrationStartPayload, mode string, history []orchestrationTurn, changes workspaceChangeReport, reason string) ([]orchestrationTurn, bool) {
@@ -678,6 +708,7 @@ func (m *OrchestrationManager) runFinalAssessmentRemediation(ctx context.Context
 		CLI:     cli,
 		Content: "final-assessment remediation via " + cli,
 	})
+	m.emitIsabelleManualBuildCarryOver(payload.RunID, turnID, role, cli, payload.Prompt, payload.Context, history)
 	content, tools, err := m.runCLI(ctx, payload, turnID, role, cli, prompt)
 	record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
 	if err != nil {
@@ -4956,6 +4987,10 @@ func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume 
 		b.WriteString(proofTask)
 		b.WriteString("\n")
 	}
+	if manualBuild := isabelleManualBuildContinuationNotice(userPrompt, contextSummary, history); manualBuild != "" {
+		b.WriteString(manualBuild)
+		b.WriteString("\n")
+	}
 	b.WriteString("Token budget rules: do not restate the full history, do not quote large files, and keep inter-agent notes compact. Prefer file paths, command names, and exact unresolved blockers.\n")
 	b.WriteString("End your visible response with two compact machine-scannable lines in exactly these shapes:\n")
 	b.WriteString(orchestrationMsgContract)
@@ -5001,6 +5036,10 @@ func composeFinalVerifierPrompt(mode, userPrompt, contextSummary string, resume 
 		b.WriteString(proofTask)
 		b.WriteString("\n")
 	}
+	if manualBuild := isabelleManualBuildContinuationNotice(userPrompt, contextSummary, history); manualBuild != "" {
+		b.WriteString(manualBuild)
+		b.WriteString("\n")
+	}
 	b.WriteString("End your visible response with a concise final conclusion and the same compact lines:\n")
 	b.WriteString(orchestrationMsgContract)
 	b.WriteByte('\n')
@@ -5044,6 +5083,10 @@ func composeWorkspaceChangeRemediationPrompt(mode, userPrompt, contextSummary st
 		b.WriteString(proofTask)
 		b.WriteString("\n")
 	}
+	if manualBuild := isabelleManualBuildContinuationNotice(userPrompt, contextSummary, history); manualBuild != "" {
+		b.WriteString(manualBuild)
+		b.WriteString("\n")
+	}
 	if strings.TrimSpace(contextSummary) != "" {
 		b.WriteString("Compacted context from earlier tasks in this conversation:\n")
 		b.WriteString(trimForPrompt(contextSummary, 14000))
@@ -5083,6 +5126,10 @@ func composeFinalAssessmentRemediationPrompt(mode, userPrompt, contextSummary st
 	}
 	if proofTask := formalProofTaskGuidance(userPrompt, mode, role); proofTask != "" {
 		b.WriteString(proofTask)
+		b.WriteString("\n")
+	}
+	if manualBuild := isabelleManualBuildContinuationNotice(userPrompt, contextSummary, history); manualBuild != "" {
+		b.WriteString(manualBuild)
 		b.WriteString("\n")
 	}
 	b.WriteString("Assessment failure to fix:\n")
@@ -5206,6 +5253,313 @@ func isabelleProofTaskGuidance(userPrompt string) string {
 	b.WriteString("- Isabelle verifier checks: inspect the final ROOT imports, run a source-only scan on deliverable files, confirm the named target fact with thm/thm_oracles when available, and reject any result where termination modify_lin was hidden by changing the function, deleting recursive equations, or leaving a scratch theory imported.\n")
 	b.WriteString("- Isabelle termination rule: for termination modify_lin, prove the original function termination obligation with a concrete measure/relation and branch decrease lemmas; a compile-only framework, weakened theorem, removed recursion, changed function semantics, or remaining sorry is unresolved.\n")
 	return b.String()
+}
+
+func isabelleManualBuildContinuationNotice(userPrompt, contextSummary string, history []orchestrationTurn) string {
+	if !looksLikeIsabelleProofTask(userPrompt) || !isabelleManualBuildContinuationSignal(contextSummary, history) {
+		return ""
+	}
+	manualCommand, logPath, pidPath, pgidPath, exitPath, tail := isabelleManualBuildArtifacts(contextSummary, history)
+	var b strings.Builder
+	b.WriteString("Isabelle manual-build carry-over:\n")
+	b.WriteString("- A prior turn already started, timed out, or handed off a long Isabelle build. Do not rerun the same `isabelle build -D` / `isabelle build -d` automatically in this turn.\n")
+	b.WriteString("- Inspect source files plus existing build artifacts only: tail the log, read PID/PGID/exit files, and report current status. Only run a new full Isabelle build if the user explicitly asks for a fresh build or the existing handoff says the previous build was stopped and should be restarted.\n")
+	b.WriteString("- The final visible answer must tell the user the exact manual command, log path, tail/status command, PID/PGID/exit-file state when known, and that final proof acceptance is pending the user's manual Isabelle build result.\n")
+	if manualCommand != "" || logPath != "" || pidPath != "" || pgidPath != "" || exitPath != "" || tail != "" {
+		b.WriteString("Known manual-build state from prior turns:\n")
+		if manualCommand != "" {
+			b.WriteString("- Manual command: ")
+			b.WriteString(manualCommand)
+			b.WriteByte('\n')
+		}
+		if logPath != "" {
+			b.WriteString("- Log path: ")
+			b.WriteString(logPath)
+			b.WriteByte('\n')
+		}
+		if pidPath != "" || pgidPath != "" || exitPath != "" {
+			b.WriteString("- State files: ")
+			var files []string
+			if pidPath != "" {
+				files = append(files, "pid="+pidPath)
+			}
+			if pgidPath != "" {
+				files = append(files, "pgid="+pgidPath)
+			}
+			if exitPath != "" {
+				files = append(files, "exit="+exitPath)
+			}
+			b.WriteString(strings.Join(files, ", "))
+			b.WriteByte('\n')
+		}
+		if tail != "" {
+			b.WriteString("- Latest visible log/status tail: ")
+			b.WriteString(tail)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+func isabelleManualBuildVisibleSummary(userPrompt, contextSummary string, history []orchestrationTurn) string {
+	if !looksLikeIsabelleProofTask(userPrompt) || !isabelleManualBuildContinuationSignal(contextSummary, history) {
+		return ""
+	}
+	manualCommand, logPath, pidPath, pgidPath, exitPath, tail := isabelleManualBuildArtifacts(contextSummary, history)
+	var b strings.Builder
+	b.WriteString("Isabelle 长时间 build 交接：上一轮已经启动、超时或交给用户手动执行的 Isabelle build，本轮不会自动重复执行同一个 `isabelle build -D` / `isabelle build -d`。")
+	if logPath != "" {
+		b.WriteString("\n日志路径：")
+		b.WriteString(logPath)
+	}
+	if pidPath != "" || pgidPath != "" || exitPath != "" {
+		b.WriteString("\n状态文件：")
+		var files []string
+		if pidPath != "" {
+			files = append(files, "pid="+pidPath)
+		}
+		if pgidPath != "" {
+			files = append(files, "pgid="+pgidPath)
+		}
+		if exitPath != "" {
+			files = append(files, "exit="+exitPath)
+		}
+		b.WriteString(strings.Join(files, ", "))
+	}
+	if tail != "" {
+		b.WriteString("\n当前可见日志/状态摘要：")
+		b.WriteString(tail)
+	}
+	if manualCommand != "" {
+		b.WriteString("\n用户可手动执行：")
+		b.WriteString(manualCommand)
+	}
+	b.WriteString("\n后续 CLI 只读取源码、日志和 PID/PGID/exit 状态；最终验收等待用户的手动 Isabelle build 结果。")
+	return b.String()
+}
+
+func isabelleManualBuildContinuationSignal(contextSummary string, history []orchestrationTurn) bool {
+	return isabelleManualBuildRequired("", history) || isabelleManualBuildSignal(contextSummary)
+}
+
+func isabelleManualBuildArtifacts(contextSummary string, history []orchestrationTurn) (manualCommand, logPath, pidPath, pgidPath, exitPath, tail string) {
+	manualCommand = extractIsabelleManualCommand(contextSummary)
+	contextProjectDir := extractIsabelleBuildProjectDir(contextSummary)
+	logPath = qualifyBuildArtifactPath(extractFirstBuildArtifactPath(contextSummary, "build.log"), contextProjectDir)
+	pidPath = qualifyBuildArtifactPath(extractFirstBuildArtifactPath(contextSummary, "build.pid"), contextProjectDir)
+	pgidPath = qualifyBuildArtifactPath(extractFirstBuildArtifactPath(contextSummary, "build.pgid"), contextProjectDir)
+	exitPath = qualifyBuildArtifactPath(extractFirstBuildArtifactPath(contextSummary, "build.exit"), contextProjectDir)
+	tail = isabelleManualBuildTailFromText(contextSummary)
+	for i := len(history) - 1; i >= 0; i-- {
+		item := history[i]
+		if tail == "" {
+			tail = isabelleManualBuildTailFromTurn(item)
+		}
+		text := strings.Join([]string{
+			item.Content,
+			item.Handoff,
+			item.HandoffFields.Verified,
+			item.HandoffFields.Next,
+			item.HandoffFields.Risks,
+		}, "\n")
+		projectDir := extractIsabelleBuildProjectDir(text)
+		if projectDir == "" {
+			projectDir = contextProjectDir
+		}
+		if manualCommand == "" {
+			manualCommand = extractIsabelleManualCommand(text)
+		}
+		if logPath == "" {
+			logPath = qualifyBuildArtifactPath(extractFirstBuildArtifactPath(text, "build.log"), projectDir)
+		}
+		if pidPath == "" {
+			pidPath = qualifyBuildArtifactPath(extractFirstBuildArtifactPath(text, "build.pid"), projectDir)
+		}
+		if pgidPath == "" {
+			pgidPath = qualifyBuildArtifactPath(extractFirstBuildArtifactPath(text, "build.pgid"), projectDir)
+		}
+		if exitPath == "" {
+			exitPath = qualifyBuildArtifactPath(extractFirstBuildArtifactPath(text, "build.exit"), projectDir)
+		}
+		for _, command := range commandStates([]orchestrationTurn{item}) {
+			combined := command.Command + "\n" + command.Output
+			commandProjectDir := extractIsabelleBuildProjectDir(combined)
+			if commandProjectDir == "" {
+				commandProjectDir = projectDir
+			}
+			if manualCommand == "" {
+				manualCommand = extractIsabelleManualCommand(combined)
+			}
+			if logPath == "" {
+				logPath = qualifyBuildArtifactPath(extractFirstBuildArtifactPath(combined, "build.log"), commandProjectDir)
+			}
+			if pidPath == "" {
+				pidPath = qualifyBuildArtifactPath(extractFirstBuildArtifactPath(combined, "build.pid"), commandProjectDir)
+			}
+			if pgidPath == "" {
+				pgidPath = qualifyBuildArtifactPath(extractFirstBuildArtifactPath(combined, "build.pgid"), commandProjectDir)
+			}
+			if exitPath == "" {
+				exitPath = qualifyBuildArtifactPath(extractFirstBuildArtifactPath(combined, "build.exit"), commandProjectDir)
+			}
+		}
+		if manualCommand != "" && logPath != "" && pidPath != "" && pgidPath != "" && exitPath != "" && tail != "" {
+			break
+		}
+	}
+	return manualCommand, logPath, pidPath, pgidPath, exitPath, tail
+}
+
+func isabelleManualBuildTailFromText(text string) string {
+	var selected []string
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		if strings.Contains(lower, "build.log") || strings.Contains(lower, "running ") || strings.Contains(lower, "timed out") || strings.Contains(lower, "timeout") || strings.Contains(lower, "build.exit") || strings.Contains(lower, "build.pid") {
+			selected = append(selected, trimmed)
+		}
+		if len(selected) >= 4 {
+			break
+		}
+	}
+	if len(selected) == 0 {
+		return ""
+	}
+	return trimForPrompt(oneLine(strings.Join(selected, " ")), 500)
+}
+
+func isabelleManualBuildTailFromTurn(item orchestrationTurn) string {
+	for i := len(item.Tools) - 1; i >= 0; i-- {
+		tool := item.Tools[i]
+		combined := strings.ToLower(tool.Command + "\n" + tool.Output)
+		if !strings.Contains(combined, "isabelle") && !strings.Contains(combined, "build.log") && !strings.Contains(combined, "build.exit") && !strings.Contains(combined, "build.pid") {
+			continue
+		}
+		output := strings.TrimSpace(tool.Output)
+		if output == "" {
+			output = strings.TrimSpace(tool.Command)
+		}
+		if output != "" {
+			return trimForPrompt(oneLine(output), 500)
+		}
+	}
+	return ""
+}
+
+func extractIsabelleManualCommand(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if !strings.Contains(lower, "isabelle build") {
+			continue
+		}
+		if !containsAny(lower, []string{"timeout ", "sh -lc", "isabelle build -d", "isabelle build -D", ">", "|", "tee "}) {
+			continue
+		}
+		if index := strings.IndexAny(trimmed, ":："); index >= 0 && containsAny(strings.ToLower(trimmed[:index]), []string{"manual", "command", "手动", "手工", "命令"}) {
+			trimmed = strings.TrimSpace(trimmed[index+len(string([]rune(trimmed[index:])[0])):])
+		}
+		return trimForPrompt(oneLine(strings.Trim(trimmed, "`")), 500)
+	}
+	return ""
+}
+
+func extractFirstBuildArtifactPath(text, artifact string) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer(
+		"\n", " ",
+		"\r", " ",
+		"\t", " ",
+		"'", " ",
+		`"`, " ",
+		"`", " ",
+		",", " ",
+		";", " ",
+		":", " ",
+		"：", " ",
+		"(", " ",
+		")", " ",
+	)
+	fields := strings.Fields(replacer.Replace(text))
+	fallback := ""
+	for _, field := range fields {
+		field = normalizeBuildArtifactCandidate(strings.Trim(field, `"'`), artifact)
+		if field == "" {
+			continue
+		}
+		if field == artifact {
+			if fallback == "" {
+				fallback = field
+			}
+			continue
+		}
+		if strings.HasSuffix(field, artifact) {
+			return field
+		}
+		if fallback == "" {
+			fallback = field
+		}
+	}
+	return fallback
+}
+
+func normalizeBuildArtifactCandidate(field, artifact string) string {
+	field = strings.TrimSpace(strings.TrimLeft(field, ">"))
+	if field == "" || !strings.Contains(field, artifact) {
+		return ""
+	}
+	if !filepath.IsAbs(field) && strings.Contains(field, "/") {
+		for _, part := range strings.Split(field, "/") {
+			if part == artifact {
+				return artifact
+			}
+		}
+	}
+	if field == artifact || strings.HasSuffix(field, "/"+artifact) {
+		return field
+	}
+	if strings.HasSuffix(field, artifact) && !strings.Contains(field, "/") {
+		return artifact
+	}
+	return ""
+}
+
+func extractIsabelleBuildProjectDir(text string) string {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`cd\s+['"]([^'"]+)['"]\s*&&`),
+		regexp.MustCompile(`cd\s+([^\s;&|]+)\s*&&`),
+	}
+	for _, pattern := range patterns {
+		for _, match := range pattern.FindAllStringSubmatch(text, -1) {
+			if len(match) > 1 && strings.TrimSpace(match[1]) != "" {
+				return strings.TrimSpace(match[1])
+			}
+		}
+	}
+	return ""
+}
+
+func qualifyBuildArtifactPath(path, projectDir string) string {
+	path = strings.TrimSpace(strings.Trim(path, `"'`))
+	path = strings.TrimLeft(path, ">")
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) || strings.HasPrefix(path, "~/") || projectDir == "" {
+		return path
+	}
+	if strings.HasPrefix(path, "./") {
+		path = strings.TrimPrefix(path, "./")
+	}
+	if path == "." || strings.HasPrefix(path, "../") {
+		return path
+	}
+	return filepath.ToSlash(filepath.Join(projectDir, path))
 }
 
 func looksLikeFormalProofTask(text string) bool {

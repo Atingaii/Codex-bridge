@@ -49,10 +49,12 @@ context in the same `runID`.
   `tail -n 80 build.log` and PID/PGID/exit checks. Foreground full-build
   commands are not acceptable for the web smoke path because the browser sees no
   useful log tail until they finish. If the build is handed back to the user,
-  subsequent orchestration turns should render the existing log/tail evidence,
-  stop via the recorded process group when requested, and avoid rerunning the
-  same build automatically; the terminal event must say that acceptance is
-  pending the user's manual build result.
+  Bridge injects a carry-over prompt into subsequent orchestration turns with
+  the known manual command, log path, PID/PGID/exit files, and latest tail. The
+  next CLI should render the existing log/tail evidence, stop via the recorded
+  process group when requested, and avoid rerunning the same build automatically
+  unless the user explicitly asks for a fresh build; the terminal event must say
+  that acceptance is pending the user's manual build result.
 - If a Bridge disconnects or restarts while an orchestration run is active, Hub
   marks that run failed and appends a `run.error` event instead of leaving the
   browser stuck in `running`.

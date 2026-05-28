@@ -187,12 +187,13 @@ of repeating blind automation: it must record the exact manual command, log
 path, elapsed time, PID/PGID/exit-status file when available, and current log
 tail. Once that handoff
 appears, later CLI turns should not rerun the same long Isabelle build
-automatically; they should inspect source files, existing logs, and
-PID/PGID/exit files, and make the final run result say that acceptance is
-pending the user's manual Isabelle build output. A compile-only framework,
-weakened theorem, changed function semantics, remaining fake proof, diagnostic
-leftover, or detached background build whose final output is not captured or
-explicitly handed off cannot satisfy the task.
+automatically; the Bridge inserts an explicit carry-over prompt block that tells
+the next CLI to inspect source files, existing logs, and PID/PGID/exit files
+only, unless the user explicitly asks for a fresh build. The final run result
+must say that acceptance is pending the user's manual Isabelle build output. A
+compile-only framework, weakened theorem, changed function semantics, remaining
+fake proof, diagnostic leftover, or detached background build whose final output
+is not captured or explicitly handed off cannot satisfy the task.
 
 Coq/Rocq conversion tasks get a separate Coq-specific prompt block. The Bridge
 requires a self-contained `_CoqProject`/`Makefile` style project in a visible new

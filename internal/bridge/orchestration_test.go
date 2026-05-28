@@ -1037,6 +1037,160 @@ func TestComposeOrchestrationPromptAddsIsabelleProofGuardrails(t *testing.T) {
 	}
 }
 
+func TestComposePromptCarriesIsabelleManualBuildHandoffToNextCLI(t *testing.T) {
+	exitCode := 124
+	tailExitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_1", "implementer", "claude", strings.Join([]string{
+			"最终结论：Isabelle build 超过本轮窗口，已经交给用户手动执行。",
+			"手动执行：timeout 45m sh -lc 'isabelle build -D /root/tencent/linlattice-isabelle > /root/tencent/linlattice-isabelle/build.log 2>&1'",
+			"日志路径：/root/tencent/linlattice-isabelle/build.log",
+			"状态文件：/root/tencent/linlattice-isabelle/build.pid /root/tencent/linlattice-isabelle/build.pgid /root/tencent/linlattice-isabelle/build.exit",
+			"后续 CLI 不需要执行这个 build，只读取日志和源码。",
+			"",
+			"Msg: to=reviewer; intent=review; need=manual build status",
+			"Handoff: status=needs_next; changed=/root/tencent/linlattice-isabelle; verified=tail build.log; next=user manually run isabelle build; risks=manual build pending",
+		}, "\n"), []RunnerToolEvent{
+			{
+				ID:       "build",
+				Status:   "failed",
+				Command:  `sh -lc 'rm -f build.log build.pid build.pgid build.exit; setsid sh -lc "echo $$ > build.pid; echo $$ > build.pgid; timeout 45m sh -lc '\''isabelle build -D .'\'' >build.log 2>&1; echo $? > build.exit" &'`,
+				Output:   "timed out\n",
+				ExitCode: &exitCode,
+			},
+			{
+				ID:       "tail",
+				Status:   "completed",
+				Command:  `tail -n 80 /root/tencent/linlattice-isabelle/build.log && cat /root/tencent/linlattice-isabelle/build.exit`,
+				Output:   "Running LinLattice ...\n124\n",
+				ExitCode: &tailExitCode,
+			},
+		}),
+	}
+
+	prompt := composeOrchestrationPrompt(
+		"collaboration",
+		"已上传 Model.thy、Termination.thy、ROOT。请在 Isabelle 中补全 termination modify_lin 证明。",
+		"",
+		false,
+		"reviewer",
+		"codex",
+		2,
+		4,
+		history,
+	)
+
+	for _, want := range []string{
+		"Isabelle manual-build carry-over",
+		"Do not rerun the same `isabelle build -D` / `isabelle build -d` automatically",
+		"Inspect source files plus existing build artifacts only",
+		"final proof acceptance is pending the user's manual Isabelle build result",
+		"/root/tencent/linlattice-isabelle/build.log",
+		"/root/tencent/linlattice-isabelle/build.pid",
+		"/root/tencent/linlattice-isabelle/build.pgid",
+		"/root/tencent/linlattice-isabelle/build.exit",
+		"Running LinLattice",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("manual build carry-over prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestComposePromptCarriesIsabelleManualBuildFromResumeContext(t *testing.T) {
+	contextSummary := strings.Join([]string{
+		"Compacted orchestration context from previous work.",
+		"Tool outcomes and commands:",
+		"- sh -lc 'timeout 45m sh -lc '\\''isabelle build -D /root/tencent/linlattice-isabelle'\\'' > /root/tencent/linlattice-isabelle/build.log 2>&1' failed Isabelle build timed out; see /root/tencent/linlattice-isabelle/build.log",
+		"- tail -n 80 /root/tencent/linlattice-isabelle/build.log completed Running LinLattice ...",
+		"Recent agent outputs:",
+		"- 后续 CLI 不需要执行这个build，只读取日志和源码。状态文件 /root/tencent/linlattice-isabelle/build.pid /root/tencent/linlattice-isabelle/build.pgid /root/tencent/linlattice-isabelle/build.exit",
+	}, "\n")
+
+	prompt := composeOrchestrationPrompt(
+		"collaboration",
+		"已上传 Model.thy、Termination.thy、ROOT。继续补全 Isabelle termination modify_lin 证明。",
+		contextSummary,
+		true,
+		"reviewer",
+		"codex",
+		1,
+		2,
+		nil,
+	)
+
+	for _, want := range []string{
+		"Isabelle manual-build carry-over",
+		"Do not rerun the same `isabelle build -D` / `isabelle build -d` automatically",
+		"/root/tencent/linlattice-isabelle/build.log",
+		"/root/tencent/linlattice-isabelle/build.pid",
+		"/root/tencent/linlattice-isabelle/build.pgid",
+		"/root/tencent/linlattice-isabelle/build.exit",
+		"Running LinLattice",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("resume-context manual build prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestIsabelleManualBuildVisibleSummaryMentionsNoRerunAndArtifacts(t *testing.T) {
+	contextSummary := strings.Join([]string{
+		"Compacted orchestration context from previous work.",
+		"- sh -lc 'timeout 45m sh -lc '\\''isabelle build -D /root/tencent/linlattice-isabelle'\\'' > /root/tencent/linlattice-isabelle/build.log 2>&1' failed Isabelle build timed out; see /root/tencent/linlattice-isabelle/build.log",
+		"- tail -n 80 /root/tencent/linlattice-isabelle/build.log completed Running LinLattice ...",
+		"- 状态文件 /root/tencent/linlattice-isabelle/build.pid /root/tencent/linlattice-isabelle/build.pgid /root/tencent/linlattice-isabelle/build.exit",
+	}, "\n")
+
+	summary := isabelleManualBuildVisibleSummary(
+		"已上传 Model.thy、Termination.thy、ROOT。继续补全 Isabelle termination modify_lin 证明。",
+		contextSummary,
+		nil,
+	)
+	for _, want := range []string{
+		"Isabelle 长时间 build 交接",
+		"本轮不会自动重复执行同一个 `isabelle build -D` / `isabelle build -d`",
+		"/root/tencent/linlattice-isabelle/build.log",
+		"/root/tencent/linlattice-isabelle/build.pid",
+		"/root/tencent/linlattice-isabelle/build.pgid",
+		"/root/tencent/linlattice-isabelle/build.exit",
+		"Running LinLattice",
+		"最终验收等待用户的手动 Isabelle build 结果",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("visible summary missing %q:\n%s", want, summary)
+		}
+	}
+}
+
+func TestIsabelleManualBuildVisibleSummaryQualifiesRelativeArtifacts(t *testing.T) {
+	contextSummary := strings.Join([]string{
+		"Compacted orchestration context from previous work.",
+		"- cd '/root/tencent/linlattice_isabelle_termination' && sh -lc 'rm -f build.log build.pid build.pgid build.exit; setsid sh -lc \"echo $$ > build.pid; echo $$ > build.pgid; timeout 45m sh -lc '\\''isabelle build -D .'\\'' >build.log 2>&1; echo $? > build.exit\" &' | in_progress",
+		"- cd '/root/tencent/linlattice_isabelle_termination' && tail -n 80 build.log completed Running LinLattice ...",
+		"- run.cancelled context canceled while build.pid/build.pgid existed",
+	}, "\n")
+
+	summary := isabelleManualBuildVisibleSummary(
+		"已上传 Model.thy、Termination.thy、ROOT。继续补全 Isabelle termination modify_lin 证明。",
+		contextSummary,
+		nil,
+	)
+	for _, want := range []string{
+		"日志路径：/root/tencent/linlattice_isabelle_termination/build.log",
+		"pid=/root/tencent/linlattice_isabelle_termination/build.pid",
+		"pgid=/root/tencent/linlattice_isabelle_termination/build.pgid",
+		"exit=/root/tencent/linlattice_isabelle_termination/build.exit",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("relative artifact summary missing %q:\n%s", want, summary)
+		}
+	}
+	if strings.Contains(summary, "日志路径：>build.log") {
+		t.Fatalf("summary kept shell redirection as log path:\n%s", summary)
+	}
+}
+
 func TestForbiddenForegroundIsabelleBuildError(t *testing.T) {
 	err := forbiddenForegroundIsabelleBuildError(
 		"已上传 Model.thy、Termination.thy、ROOT。请在 Isabelle 中补全 termination modify_lin 证明。",
@@ -1671,6 +1825,52 @@ func TestIsabelleManualBuildHandoffSkipsAssessmentRemediation(t *testing.T) {
 	}
 	if shouldRunFinalAssessmentRemediation(prompt, history, reason) && !isabelleManualBuildRequired(reason, history) {
 		t.Fatal("manual Isabelle build handoff must not trigger another automatic assessment remediation build")
+	}
+}
+
+func TestIsabelleManualBuildSignalIncludesCommandOutput(t *testing.T) {
+	exitCode := 124
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_1", "implementer", "claude", "本轮只有命令输出记录，没有显式手动 build 段落。\n\nHandoff: status=needs_next; changed=linlattice-isabelle; verified=tail build.log; next=inspect log; risks=build pending", []RunnerToolEvent{
+			{
+				ID:       "build",
+				Status:   "failed",
+				Command:  `sh -lc 'timeout 45m sh -lc '\''isabelle build -D /root/tencent/linlattice-isabelle'\'' > /root/tencent/linlattice-isabelle/build.log 2>&1'`,
+				Output:   "Isabelle build timed out; see /root/tencent/linlattice-isabelle/build.log\n",
+				ExitCode: &exitCode,
+			},
+		}),
+	}
+
+	if !isabelleManualBuildRequired("", history) {
+		t.Fatal("manual Isabelle build signal should include command/output text")
+	}
+	reason, unresolved := unresolvedFinalRun(
+		"已上传 Model.thy、Termination.thy、ROOT。请补全 Isabelle termination modify_lin 证明。",
+		history,
+		workspaceChangeReport{Available: true, Changed: []string{"linlattice-isabelle/Model.thy"}},
+	)
+	if !unresolved || !strings.Contains(reason, "manual follow-up") {
+		t.Fatalf("expected manual-follow-up unresolved reason, got unresolved=%v reason=%q", unresolved, reason)
+	}
+}
+
+func TestIsabelleManualBuildSignalDoesNotTreatTimeoutWrapperAsTimedOut(t *testing.T) {
+	exitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_1", "implementer", "claude", "启动受控后台 Isabelle build，等待日志轮询。\n\nHandoff: status=needs_next; changed=linlattice-isabelle; verified=tail build.log; next=poll build; risks=build running", []RunnerToolEvent{
+			{
+				ID:       "build",
+				Status:   "completed",
+				Command:  `sh -lc 'rm -f build.log build.pid build.pgid build.exit; setsid sh -lc "echo $$ > build.pid; echo $$ > build.pgid; timeout 45m sh -lc '\''isabelle build -D .'\'' >build.log 2>&1; echo $? > build.exit" &'`,
+				Output:   "(Bash completed with no output)",
+				ExitCode: &exitCode,
+			},
+		}),
+	}
+
+	if isabelleManualBuildRequired("", history) {
+		t.Fatal("timeout wrapper in a controlled background command should not by itself trigger manual-build carry-over")
 	}
 }
 

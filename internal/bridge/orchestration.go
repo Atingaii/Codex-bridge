@@ -87,6 +87,13 @@ type workspaceChangeReport struct {
 
 var safeOrchestrationFileName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
+const orchestrationCLIIdleTimeout = 2 * time.Minute
+
+type jsonlLineResult struct {
+	line []byte
+	err  error
+}
+
 func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
 	return &OrchestrationManager{
 		cfg:       cfg,
@@ -476,7 +483,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		workspaceChanges = diffWorkspaceSnapshots(workspaceBefore, workspaceAfter)
 	}
 	if reason, ok := unresolvedFinalRun(originalPrompt, history, workspaceChanges); ok {
-		if shouldRunFinalAssessmentRemediation(originalPrompt, history, reason) {
+		if shouldRunFinalAssessmentRemediation(originalPrompt, history, reason) && !isabelleManualBuildRequired(reason, history) {
 			var stop bool
 			history, stop = m.runFinalAssessmentRemediation(ctx, payload, mode, history, workspaceChanges, reason)
 			if stop {
@@ -615,6 +622,38 @@ func shouldRunFinalAssessmentRemediation(userPrompt string, history []orchestrat
 		return false
 	}
 	return userTaskRequiresWorkspaceChange(userPrompt) || looksLikeFormalProofTask(userPrompt) || strings.Contains(lower, "acceptance")
+}
+
+func isabelleManualBuildRequired(reason string, history []orchestrationTurn) bool {
+	return isabelleManualBuildSignal(reason) || isabelleManualBuildSignal(proofAssessmentText(history))
+}
+
+func isabelleManualBuildReason(userPrompt string, history []orchestrationTurn) string {
+	if strings.TrimSpace(userPrompt) != "" && !looksLikeIsabelleProofTask(userPrompt) {
+		return ""
+	}
+	if !isabelleManualBuildSignal(proofAssessmentText(history)) {
+		return ""
+	}
+	return "Isabelle build requires manual follow-up; a long build timed out or was handed off with a log/manual command, so later CLI turns should not rerun the same build automatically"
+}
+
+func isabelleManualBuildSignal(text string) bool {
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "isabelle") {
+		return false
+	}
+	if containsAny(lower, []string{
+		"manual build", "manual follow-up", "manual command", "run manually",
+		"do not rerun", "do not repeat", "skip rerunning", "skip the build",
+		"手动执行", "手工执行", "用户手动", "不要重复", "不需要执行这个build",
+		"无需重复执行", "不要再跑", "跳过重复 build",
+	}) {
+		return true
+	}
+	return containsAny(lower, []string{"timed out", "timeout", "超时"}) &&
+		containsAny(lower, []string{"log", "日志"}) &&
+		strings.Contains(lower, "isabelle build")
 }
 
 func (m *OrchestrationManager) runFinalAssessmentRemediation(ctx context.Context, payload protocol.OrchestrationStartPayload, mode string, history []orchestrationTurn, changes workspaceChangeReport, reason string) ([]orchestrationTurn, bool) {
@@ -3104,16 +3143,57 @@ func isCCBWatchMetadataLine(line string) bool {
 func (m *OrchestrationManager) runCLI(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, prompt string) (string, []RunnerToolEvent, error) {
 	switch cli {
 	case "claude":
-		return m.runClaude(ctx, payload, turnID, role, prompt)
+		content, tools, err := m.runClaude(ctx, payload, turnID, role, prompt)
+		return content, tools, forbiddenForegroundIsabelleBuildError(payload.Prompt, tools, err)
 	default:
-		return m.runCodex(ctx, payload, turnID, role, prompt)
+		content, tools, err := m.runCodex(ctx, payload, turnID, role, prompt)
+		return content, tools, forbiddenForegroundIsabelleBuildError(payload.Prompt, tools, err)
 	}
+}
+
+func forbiddenForegroundIsabelleBuildError(userPrompt string, tools []RunnerToolEvent, existing error) error {
+	if existing != nil || !looksLikeIsabelleProofTask(userPrompt) {
+		return existing
+	}
+	for _, tool := range tools {
+		if !isForbiddenForegroundIsabelleBuild(tool.Command) {
+			continue
+		}
+		return fmt.Errorf("foreground Isabelle build is not allowed for this web-visible proof smoke; use controlled background build.log/build.pid/build.exit polling instead: %s", trimForPrompt(tool.Command, 240))
+	}
+	return nil
+}
+
+func isForbiddenForegroundIsabelleBuild(command string) bool {
+	lower := strings.ToLower(command)
+	if !strings.Contains(lower, "isabelle build") {
+		return false
+	}
+	if !hasIsabelleBuildDirectoryOption(lower) {
+		return false
+	}
+	if strings.Contains(lower, "setsid") && strings.Contains(lower, "build.pid") && strings.Contains(lower, "build.pgid") && strings.Contains(lower, "build.exit") && strings.Contains(lower, "build.log") && strings.Contains(lower, "&") {
+		return false
+	}
+	return true
+}
+
+func hasIsabelleBuildDirectoryOption(lowerCommand string) bool {
+	for _, field := range strings.Fields(lowerCommand) {
+		field = strings.Trim(field, `'"`)
+		if field == "-d" || strings.HasPrefix(field, "-d.") || strings.HasPrefix(field, "-d/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, []RunnerToolEvent, error) {
 	if m.shouldRunCodexAppServer() {
 		return m.runCodexAppServer(ctx, payload, turnID, role, prompt)
 	}
+	cmdCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	args := []string{"exec", "--json", "--color", "never", "--skip-git-repo-check"}
 	if m.cfg.Bridge.Model != "" {
 		args = append(args, "--model", m.cfg.Bridge.Model)
@@ -3132,7 +3212,8 @@ func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.Or
 	}
 	args = append(args, "-")
 
-	cmd := exec.CommandContext(ctx, m.codexPath(), args...)
+	cmd := exec.CommandContext(cmdCtx, m.codexPath(), args...)
+	configureManagedCommand(cmd)
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -3153,7 +3234,13 @@ func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.Or
 	_ = stdin.Close()
 
 	content, tools, scanErr := m.scanCodexJSONL(stdout, payload.RunID, turnID, role)
+	if scanErr != nil {
+		cancel()
+	}
 	waitErr := cmd.Wait()
+	if err := ctx.Err(); err != nil {
+		return content, tools, err
+	}
 	if scanErr != nil {
 		return content, tools, scanErr
 	}
@@ -3210,11 +3297,14 @@ func (m *OrchestrationManager) runClaude(ctx context.Context, payload protocol.O
 		return "", nil, err
 	}
 	defer cleanup()
+	cmdCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	args := m.claudeArgs(payload, prompt)
 	if approvalServer != nil {
 		args = m.withClaudeApprovalArgs(args, approvalServer.configPath)
 	}
-	cmd := exec.CommandContext(ctx, m.claudePath(), args...)
+	cmd := exec.CommandContext(cmdCtx, m.claudePath(), args...)
+	configureManagedCommand(cmd)
 	if cwd := m.cwd(payload); cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -3229,7 +3319,13 @@ func (m *OrchestrationManager) runClaude(ctx context.Context, payload protocol.O
 		return "", nil, err
 	}
 	content, tools, scanErr := m.scanClaudeJSONL(stdout, payload.RunID, turnID, role)
+	if scanErr != nil {
+		cancel()
+	}
 	waitErr := cmd.Wait()
+	if err := ctx.Err(); err != nil {
+		return content, tools, err
+	}
 	if scanErr != nil {
 		return content, tools, scanErr
 	}
@@ -3569,21 +3665,59 @@ func runningAsRoot() bool {
 }
 
 func (m *OrchestrationManager) scanCodexJSONL(stdout io.Reader, runID, turnID, role string) (string, []RunnerToolEvent, error) {
+	return m.scanCodexJSONLWithIdleTimeout(stdout, runID, turnID, role, orchestrationCLIIdleTimeout)
+}
+
+func (m *OrchestrationManager) scanCodexJSONLWithIdleTimeout(stdout io.Reader, runID, turnID, role string, idleTimeout time.Duration) (string, []RunnerToolEvent, error) {
 	reader := bufio.NewReaderSize(stdout, 64*1024)
+	lines := make(chan jsonlLineResult, 1)
+	go func() {
+		for {
+			line, err := readJSONLLine(reader, 32*1024*1024)
+			lines <- jsonlLineResult{line: line, err: err}
+			if err != nil {
+				return
+			}
+		}
+	}()
 	var content strings.Builder
 	var eventErr string
 	var tools []RunnerToolEvent
 	toolStarts := make(map[string]time.Time)
+	openTools := make(map[string]struct{})
+	lastActivity := time.Now()
 	emitCodexTool := func(tool *RunnerToolEvent) {
 		if tool == nil {
 			return
 		}
 		stampToolTiming(tool, toolStarts)
+		if tool.ID != "" {
+			if isRunningToolStatus(tool.Status) {
+				openTools[tool.ID] = struct{}{}
+			} else {
+				delete(openTools, tool.ID)
+			}
+		}
+		lastActivity = time.Now()
 		tools = append(tools, *tool)
 		m.emitTool(runID, turnID, role, "codex", tool)
 	}
 	for {
-		line, err := readJSONLLine(reader, 32*1024*1024)
+		var result jsonlLineResult
+		if idleTimeout > 0 && len(openTools) == 0 {
+			idleFor := time.Since(lastActivity)
+			if idleFor >= idleTimeout {
+				return strings.TrimSpace(content.String()), tools, fmt.Errorf("codex orchestration turn idle for %s after all command events completed", idleTimeout)
+			}
+			select {
+			case result = <-lines:
+			case <-time.After(idleTimeout - idleFor):
+				return strings.TrimSpace(content.String()), tools, fmt.Errorf("codex orchestration turn idle for %s after all command events completed", idleTimeout)
+			}
+		} else {
+			result = <-lines
+		}
+		line, err := result.line, result.err
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
@@ -3608,6 +3742,7 @@ func (m *OrchestrationManager) scanCodexJSONL(stdout io.Reader, runID, turnID, r
 		case "item.agent_message.delta", "item.agentMessage.delta", "agent_message.delta", "agentMessage.delta", "response.output_text.delta":
 			if delta := extractDelta(msg); delta != "" {
 				content.WriteString(delta)
+				lastActivity = time.Now()
 				m.emit(runID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: delta})
 			}
 		case "item.completed":
@@ -3616,6 +3751,7 @@ func (m *OrchestrationManager) scanCodexJSONL(stdout io.Reader, runID, turnID, r
 			if itemType == "agent_message" || itemType == "agentMessage" {
 				if text := agentMessageText(item); text != "" {
 					if delta := appendAgentMessageContent(&content, text); delta != "" {
+						lastActivity = time.Now()
 						m.emit(runID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: delta})
 					}
 				}
@@ -4984,7 +5120,7 @@ func formalProofTaskGuidance(userPrompt, mode, role string) string {
 	b.WriteString("Formal proof task guardrails:\n")
 	b.WriteString("- Work spec-first: identify the exact theorem/function obligation before changing code, name the target fact, and keep a short mapping from the uploaded source constructs to the proof-assistant definitions you create.\n")
 	b.WriteString("- Treat build success as a smoke check only. The acceptance criterion is the requested proof obligation, not merely compiling.\n")
-	b.WriteString("- Run proof-assistant commands serially and wait for each result before starting the next one. Do not launch parallel or detached tool calls for Coq/Isabelle builds, version checks, scans, or proof probes; stale in-progress commands make the browser smoke result unverifiable.\n")
+	b.WriteString("- Run proof-assistant commands serially and wait for each result before starting the next one. Do not launch parallel or detached tool calls for Coq/Isabelle builds, version checks, scans, or proof probes; stale in-progress commands make the browser smoke result unverifiable. The only exception is the controlled Isabelle long-build log workflow below, where later commands may only poll/tail that same build and must not start other proof probes or a second build.\n")
 	b.WriteString("- Use explicit timeouts for every proof-assistant/toolchain command. Quick probes such as coqc --version, rocq --version, isabelle version, command -v, and rg scans should use timeout 10s to 60s; full builds may use longer documented timeouts. If a required tool is missing or a probe times out, stop and report a visible needs_next/blocked ledger instead of hanging the run.\n")
 	b.WriteString("- Do not weaken theorem statements, change the target definition's semantics, move the obligation elsewhere, or add trust assumptions such as Axiom, Parameter, Conjecture, Admitted, admit, Abort, sorry, quick_and_dirty, Guard Checking changes, bypass_check, TODO, or placeholders.\n")
 	b.WriteString("- If you introduce a bounded/fuel wrapper or default fuel for a recursive function, you must also prove equivalence to the original recursive semantics, the required termination/decrease measure, and that the default fuel is sufficient for every intended input. Otherwise report status=needs_next or blocked.\n")
@@ -5032,7 +5168,7 @@ func formalProofVerifierGuidance(userPrompt, mode string) string {
 	}
 	if looksLikeIsabelleUploadProofBenchmark(userPrompt) {
 		lines = append(lines,
-			"- This task matches the Isabelle upload benchmark with Model.thy, Termination.thy, and ROOT. Your visible final conclusion must explicitly assess: Model.thy/Termination.thy/ROOT were used, a new Isabelle project folder was written under the requested cwd, the ROOT layout was preserved or deliberately remapped, timeout-aware isabelle build passed with no detached/background build left unresolved, source-only scan found no sorry/quick_and_dirty/oops/sketch/admit/placeholders and no diagnostic leftovers such as Repro.thy or *_original.thy, Isabelle thm_oracles or oracle-free audit was run for the target facts, and termination modify_lin was actually proved with branch-decrease evidence rather than replaced by a compile-only framework.",
+			"- This task matches the Isabelle upload benchmark with Model.thy, Termination.thy, and ROOT. Your visible final conclusion must explicitly assess: Model.thy/Termination.thy/ROOT were used, a new Isabelle project folder was written under the requested cwd, the ROOT layout was preserved or deliberately remapped, timeout-aware isabelle build passed with no detached/background build left unresolved, source-only scan found no sorry/quick_and_dirty/oops/sketch/admit/placeholders and no diagnostic leftovers such as Repro.thy or *_original.thy, Isabelle thm_oracles or oracle-free audit was run for the target facts, and termination modify_lin was actually proved with branch-decrease evidence rather than replaced by a compile-only framework. If an Isabelle build was too long and handed off for manual execution, do not rerun that same build automatically; report the manual command, build log path, current tail/exit status, and that final acceptance is pending the user's manual build result.",
 		)
 	}
 	if mode == "debate" {
@@ -5061,10 +5197,11 @@ func isabelleProofTaskGuidance(userPrompt string) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("- Isabelle workflow: keep the uploaded ROOT/Model.thy/Termination.thy semantics intact unless the user explicitly asks for a new session; when ROOT names subdirectories such as directories \"HWQ-U\", either recreate that layout or minimally adjust ROOT to the visible project layout before proving, and document the mapping. Write any new proof project under the requested cwd and run isabelle build -D <project> or isabelle build -d <parent> <session> with a long timeout when needed. Do not start long Isabelle builds as detached/background jobs unless you also wait for completion and capture the final output in the same turn.\n")
+	b.WriteString("- Isabelle workflow: keep the uploaded ROOT/Model.thy/Termination.thy semantics intact unless the user explicitly asks for a new session; when ROOT names subdirectories such as directories \"HWQ-U\", either recreate that layout or minimally adjust ROOT to the visible project layout before proving, and document the mapping. Write any new proof project under the requested cwd. For any full `isabelle build -D` / `isabelle build -d` check, use the controlled background build template below instead of a foreground build command.\n")
 	b.WriteString("- Isabelle scratch discipline: use a scratch directory or temporary theory outside the final ROOT session for extracting generated subgoals. Scratch probes must not use sorry/quick_and_dirty/oops/sketch/admit as fake proof steps; obtain subgoals by running an incomplete candidate proof and capturing Isabelle's failure output. If you create Repro.thy, *_original.thy, scratch theories, or diagnostic ROOT imports, remove them from the final project and restore ROOT before the final source scan/build. The final source scan must cover only deliverable ROOT/.thy files and must not report leftovers from failed attempts.\n")
 	b.WriteString("- Isabelle audit: scan source-only deliverable files for sorry, quick_and_dirty, oops, sketch, admit, TODO, placeholder, disabled checks, Repro.thy, *_original.thy, and scratch leftovers; inspect ROOT for quick_and_dirty and diagnostic imports; run thm_oracles or an equivalent oracle audit on the target theorem(s) and report the result.\n")
-	b.WriteString("- Isabelle long-build rule: use timeout 30m or timeout 45m for full isabelle build checks when the session is slow, and do not report success from a still-running or detached build. Capture the exact final command and exit result in the same visible turn.\n")
+	b.WriteString("- Isabelle full-build visibility rule: every full `isabelle build -D` or `isabelle build -d` check must use controlled background execution so the browser sees progress. Do not run `timeout ... isabelle build ...`, `isabelle build ... -v`, or `isabelle build ... | tee build.log` as one foreground command. Use this pattern from the project directory, adapting only the timeout and session path: `sh -lc 'rm -f build.log build.pid build.pgid build.exit; setsid sh -lc \"echo \\$\\$ > build.pid; echo \\$\\$ > build.pgid; timeout 45m sh -lc '\\''isabelle build -D .'\\'' >build.log 2>&1; echo \\$? > build.exit\" &'`. Then run separate short polling commands: `tail -n 80 build.log` and `sh -lc 'test -f build.exit && cat build.exit || ps -p \"$(cat build.pid)\" -o pid,stat,etime,cmd'`. To stop or hand off a still-running build, run `sh -lc 'test -f build.exit || kill -- -\"$(cat build.pgid)\"'` and then tail the log plus print build.pid/build.pgid/build.exit state. Stop polling after a bounded wait and either report the final exit code or hand off the manual command/log/PID/PGID/exit state. Controlled background is only for this one Isabelle build; do not start other proof probes or a second build while it is active.\n")
+	b.WriteString("- Isabelle manual-build handoff rule: if a full isabelle build exceeds the turn's practical waiting window or must be left for the user, stop the build or leave a clearly named log/PID/exit-status file, then end with status=needs_next or blocked. The visible final answer must tell the user the exact manual command, log path, how to tail the log, and whether a PID/exit file exists. Later CLI turns must not rerun the same long isabelle build automatically; they should inspect source, existing logs, PID/exit files, and summarize the manual follow-up instead.\n")
 	b.WriteString("- Isabelle termination workflow: first extract the generated termination subgoals in scratch, then restore the final project and try Isabelle's lexicographic_order once, followed by at most two concrete relation/measure/measures attempts; before using guessed simp facts such as *_def rules, confirm them with find_theorems name:<pattern> or thm <fact>. After the bounded attempts, summarize the exact recursive calls, undefined facts, and failed decrease goals instead of continuing blind search.\n")
 	b.WriteString("- Isabelle verifier checks: inspect the final ROOT imports, run a source-only scan on deliverable files, confirm the named target fact with thm/thm_oracles when available, and reject any result where termination modify_lin was hidden by changing the function, deleting recursive equations, or leaving a scratch theory imported.\n")
 	b.WriteString("- Isabelle termination rule: for termination modify_lin, prove the original function termination obligation with a concrete measure/relation and branch decrease lemmas; a compile-only framework, weakened theorem, removed recursion, changed function semantics, or remaining sorry is unresolved.\n")
@@ -5482,6 +5619,9 @@ func unresolvedFinalRun(userPrompt string, history []orchestrationTurn, changes 
 		}
 		return "last turn still needs next action", true
 	}
+	if reason := isabelleManualBuildReason(userPrompt, history); reason != "" {
+		return reason, true
+	}
 	if failedCommandCount(history) > 0 {
 		if failure, ok := latestBlocker(history); ok {
 			return failure, true
@@ -5688,6 +5828,9 @@ func isabelleUploadProofAssessmentGap(history []orchestrationTurn, changes works
 		return "formal proof assessment failed: tautological/reflexivity theorem does not discharge the original termination/modify_lin obligation", true
 	}
 	if len(missing) > 0 {
+		if reason := isabelleManualBuildReason("", history); reason != "" {
+			return reason, true
+		}
 		return "formal proof assessment incomplete: " + strings.Join(missing, "; "), true
 	}
 	return "", false

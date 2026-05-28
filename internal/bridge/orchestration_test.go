@@ -3,10 +3,14 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -684,6 +688,74 @@ func TestOrchestrationScanCodexJSONLNormalizesCamelCaseToolStatus(t *testing.T) 
 	}
 }
 
+func TestOrchestrationScanCodexJSONLReturnsIdleErrorAfterCompletedCommands(t *testing.T) {
+	reader, writer := io.Pipe()
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 16)
+	manager.AttachOut(out)
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := manager.scanCodexJSONLWithIdleTimeout(reader, "orc_test", "turn_1", "reviewer", 20*time.Millisecond)
+		done <- err
+	}()
+
+	_, err := writer.Write([]byte(`{"type":"item.started","item":{"id":"cmd_1","type":"command_execution","command":"true","status":"inProgress"}}` + "\n" +
+		`{"type":"item.completed","item":{"id":"cmd_1","type":"command_execution","command":"true","status":"completed","exit_code":0}}` + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "idle") {
+			t.Fatalf("scan error = %v, want idle error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scan did not return after completed command became idle")
+	}
+}
+
+func TestOrchestrationCancelKillsCodexProcessGroup(t *testing.T) {
+	tmp := t.TempDir()
+	marker := filepath.Join(tmp, "grandchild.pid")
+	codexPath := filepath.Join(tmp, "codex")
+	script := "#!/usr/bin/env bash\n" +
+		"if [ \"${1:-}\" = exec ]; then shift; fi\n" +
+		"(trap 'exit 0' TERM INT; echo $BASHPID > " + shellQuote(marker) + "; while true; do sleep 1; done) &\n" +
+		"wait\n"
+	if err := os.WriteFile(codexPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := manager.runCodex(ctx, protocol.OrchestrationStartPayload{RunID: "orc_cancel", CWD: tmp}, "turn_cancel", "reviewer", "stop")
+		done <- err
+	}()
+
+	pid := waitForPIDFile(t, marker)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("runCodex error = %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runCodex did not return after cancellation")
+	}
+	waitForProcessExit(t, pid)
+}
+
 func TestOrchestrationScanClaudeJSONLSuppressesEmptyPagesReadFailure(t *testing.T) {
 	input := strings.NewReader(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_1","name":"Read","input":{"file_path":"/tmp/Model.thy","pages":""}}]}}
 {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_1","is_error":true,"content":"<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>"}]}}
@@ -917,8 +989,8 @@ func TestComposeOrchestrationPromptAddsIsabelleProofGuardrails(t *testing.T) {
 		"Formal proof task guardrails",
 		"Isabelle workflow",
 		"directories \"HWQ-U\"",
-		"isabelle build -D <project>",
-		"detached/background jobs",
+		"full `isabelle build -D` / `isabelle build -d` check",
+		"foreground build command",
 		"Isabelle scratch discipline",
 		"scratch directory",
 		"Scratch probes must not use sorry/quick_and_dirty/oops/sketch/admit",
@@ -929,8 +1001,24 @@ func TestComposeOrchestrationPromptAddsIsabelleProofGuardrails(t *testing.T) {
 		"Isabelle audit",
 		"thm_oracles",
 		"quick_and_dirty",
-		"Isabelle long-build rule",
-		"timeout 30m or timeout 45m",
+		"Isabelle full-build visibility rule",
+		"every full `isabelle build -D` or `isabelle build -d` check must use controlled background execution",
+		"controlled background build",
+		"build.log",
+		"build.pid",
+		"build.pgid",
+		"build.exit",
+		"rm -f build.log build.pid build.pgid build.exit",
+		"setsid sh -lc",
+		"echo \\$\\$ > build.pid",
+		"echo \\$\\$ > build.pgid",
+		"tail -n 80 build.log",
+		"test -f build.exit && cat build.exit",
+		"kill -- -\"$(cat build.pgid)\"",
+		"Do not run `timeout ... isabelle build ...`",
+		"`isabelle build ... | tee build.log`",
+		"Isabelle manual-build handoff rule",
+		"Later CLI turns must not rerun the same long isabelle build automatically",
 		"Isabelle termination workflow",
 		"generated subgoals",
 		"lexicographic_order once",
@@ -946,6 +1034,35 @@ func TestComposeOrchestrationPromptAddsIsabelleProofGuardrails(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("Isabelle proof prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestForbiddenForegroundIsabelleBuildError(t *testing.T) {
+	err := forbiddenForegroundIsabelleBuildError(
+		"已上传 Model.thy、Termination.thy、ROOT。请在 Isabelle 中补全 termination modify_lin 证明。",
+		[]RunnerToolEvent{{Command: "timeout 60s sh -lc 'cd /root/tencent/linlattice_formal && isabelle build -D . -v'"}},
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "foreground Isabelle build is not allowed") {
+		t.Fatalf("foreground Isabelle build error = %v", err)
+	}
+
+	err = forbiddenForegroundIsabelleBuildError(
+		"已上传 Model.thy、Termination.thy、ROOT。请在 Isabelle 中补全 termination modify_lin 证明。",
+		[]RunnerToolEvent{{Command: `sh -lc 'rm -f build.log build.pid build.pgid build.exit; setsid sh -lc "echo $$ > build.pid; echo $$ > build.pgid; timeout 45m sh -lc '\''isabelle build -D .'\'' >build.log 2>&1; echo $? > build.exit" &'`}},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("controlled background Isabelle build was rejected: %v", err)
+	}
+
+	err = forbiddenForegroundIsabelleBuildError(
+		"已上传 Model.thy、Termination.thy、ROOT。请在 Isabelle 中补全 termination modify_lin 证明。",
+		[]RunnerToolEvent{{Command: `sh -lc 'rm -f build.log build.pid build.exit; (timeout 45m sh -lc "isabelle build -D ." >build.log 2>&1; echo $? > build.exit) & echo $! > build.pid'`}},
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "foreground Isabelle build is not allowed") {
+		t.Fatalf("background build without PGID should be rejected: %v", err)
 	}
 }
 
@@ -1519,6 +1636,41 @@ func TestResolvedIsabelleUploadRunWithFullAssessmentPasses(t *testing.T) {
 	reason, unresolved := unresolvedFinalRun("已上传 Model.thy、Termination.thy、ROOT。请补全 Isabelle 中 termination modify_lin 的证明，不能用 sorry/quick_and_dirty。", history, workspaceChangeReport{Available: true, Changed: []string{"isabelle-proof-smoke/Model.thy", "isabelle-proof-smoke/Termination.thy", "isabelle-proof-smoke/ROOT"}})
 	if unresolved {
 		t.Fatalf("full Isabelle upload assessment should pass: %q", reason)
+	}
+}
+
+func TestIsabelleManualBuildHandoffSkipsAssessmentRemediation(t *testing.T) {
+	exitCode := 124
+	tailExitCode := 0
+	history := []orchestrationTurn{
+		newOrchestrationTurnRecord("turn_1", "implementer", "claude", strings.Join([]string{
+			"最终结论：Isabelle build 超时，已转为用户手动执行。",
+			"手动执行：timeout 45m sh -lc 'isabelle build -D /root/tencent/isabelle-proof-smoke 2>&1 | tee /root/tencent/isabelle-proof-smoke/build.log'",
+			"日志路径：/root/tencent/isabelle-proof-smoke/build.log",
+			"后续 CLI 不需要执行这个build，只读取日志和源码。",
+			"",
+			"Msg: to=user; intent=final; need=manual build",
+			"Handoff: status=needs_next; changed=/root/tencent/isabelle-proof-smoke; verified=tail build.log; next=user manually run isabelle build; risks=manual build pending",
+		}, "\n"), []RunnerToolEvent{
+			{ID: "build", Status: "failed", Command: "timeout 45m sh -lc 'isabelle build -D /root/tencent/isabelle-proof-smoke 2>&1 | tee /root/tencent/isabelle-proof-smoke/build.log'", Output: "timed out\n", ExitCode: &exitCode},
+			{ID: "tail", Status: "completed", Command: "tail -n 80 /root/tencent/isabelle-proof-smoke/build.log", Output: "Running HOL\n", ExitCode: &tailExitCode},
+		}),
+	}
+	prompt := "已上传 Model.thy、Termination.thy、ROOT。请补全 Isabelle 中 termination modify_lin 的证明，不能用 sorry/quick_and_dirty。"
+
+	reason, unresolved := unresolvedFinalRun(
+		prompt,
+		history,
+		workspaceChangeReport{Available: true, Changed: []string{"isabelle-proof-smoke/Model.thy", "isabelle-proof-smoke/Termination.thy", "isabelle-proof-smoke/ROOT"}},
+	)
+	if !unresolved || !strings.Contains(reason, "manual follow-up") {
+		t.Fatalf("manual Isabelle build should be unresolved with manual-follow-up reason: unresolved=%v reason=%q", unresolved, reason)
+	}
+	if !isabelleManualBuildRequired(reason, history) {
+		t.Fatal("manual Isabelle build signal was not detected")
+	}
+	if shouldRunFinalAssessmentRemediation(prompt, history, reason) && !isabelleManualBuildRequired(reason, history) {
+		t.Fatal("manual Isabelle build handoff must not trigger another automatic assessment remediation build")
 	}
 }
 
@@ -2350,6 +2502,41 @@ text = ` + string(raw) + `
 print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
 print(json.dumps({"type":"result","result":text}), flush=True)
 `
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func waitForPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if err != nil {
+				t.Fatalf("parse pid file %s: %v", path, err)
+			}
+			return pid
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for pid file %s", path)
+	return 0
+}
+
+func waitForProcessExit(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("process %d still exists after cancellation", pid)
 }
 
 func fakeCodexExecScript(text string) string {

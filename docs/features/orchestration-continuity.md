@@ -43,9 +43,26 @@ context in the same `runID`.
 - Command events include timing metadata so long-running checks such as
   Isabelle, Coq, and Lean builds show when the command started and how long it
   has been running or took to finish.
+- Isabelle proof runs must monitor full `isabelle build -D` / `isabelle build
+  -d` checks through a controlled background command that writes `build.log`,
+  `build.pid`, `build.pgid`, and `build.exit`, then emits short
+  `tail -n 80 build.log` and PID/PGID/exit checks. Foreground full-build
+  commands are not acceptable for the web smoke path because the browser sees no
+  useful log tail until they finish. If the build is handed back to the user,
+  subsequent orchestration turns should render the existing log/tail evidence,
+  stop via the recorded process group when requested, and avoid rerunning the
+  same build automatically; the terminal event must say that acceptance is
+  pending the user's manual build result.
 - If a Bridge disconnects or restarts while an orchestration run is active, Hub
   marks that run failed and appends a `run.error` event instead of leaving the
   browser stuck in `running`.
+- Bridge-launched Codex and Claude CLI turns run in managed process groups.
+  Canceling a run cancels the direct CLI process and its child process tree so
+  Hub can receive `run.cancelled` instead of leaving the page in `canceling`.
+- Direct Codex JSONL orchestration has an idle guard after all command events
+  have ended. If Codex emits no assistant text or new tool events for the guard
+  window while no command is active, Bridge ends that turn with an error and the
+  run reaches a browser-visible terminal state.
 - The frontend must render persisted `turn.delta` and `command.*` events as
   visible timeline entries. Detailed content that reaches `/events` must not be
   hidden behind only `turn.start` status cards.
@@ -144,6 +161,12 @@ state.
     `Handoff:` contract lines.
 17. Only open `/ws/orchestrations` for active runs; terminal runs should use
     persisted events and show an idle event stream.
+18. Manage CLI subprocess groups and detect idle direct-Codex JSONL turns after
+    command completion so cancellation and stalled final responses become
+    terminal, visible events.
+19. For Isabelle manual-build handoffs, keep the manual command/log path visible
+    in the final timeline and do not let automatic remediation rerun the same
+    long build.
 
 ## Exit Gates
 
@@ -170,6 +193,13 @@ state.
   selected-run files remain visible in the side panel after send.
 - Active orchestration runs do not remain permanently `running` after their
   Bridge disconnects or restarts.
+- Canceling an active orchestration kills the CLI process tree and eventually
+  persists `run.cancelled`.
+- A direct Codex turn that has completed its command events but stops emitting
+  JSONL produces a visible turn error and terminal run status instead of
+  remaining `running`.
+- A timed-out or handed-off Isabelle build leaves a browser-visible manual
+  command and log path, and later turns do not repeat that build automatically.
 - Continuing a run without new uploads keeps the original uploaded files visible
   in the selected-run side panel.
 - A final response carried on `turn.end.content` is visible in the timeline

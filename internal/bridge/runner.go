@@ -101,8 +101,11 @@ func (r *CodexExecRunner) Name() string { return "codex-exec" }
 func (r *CodexExecRunner) Close() {}
 
 func (r *CodexExecRunner) Prompt(ctx context.Context, req RunnerRequest, onUpdate func(update RunnerUpdate)) (RunnerResult, error) {
+	cmdCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	args := r.args(req)
-	cmd := exec.CommandContext(ctx, r.codexPath(), args...)
+	cmd := exec.CommandContext(cmdCtx, r.codexPath(), args...)
+	configureManagedCommand(cmd)
 	if r.cfg.Bridge.CWD != "" {
 		cmd.Dir = expandHome(r.cfg.Bridge.CWD)
 	}
@@ -123,7 +126,13 @@ func (r *CodexExecRunner) Prompt(ctx context.Context, req RunnerRequest, onUpdat
 	_ = stdin.Close()
 
 	result, scanErr := r.scanJSONL(stdout, req.RemoteThreadID, onUpdate)
+	if scanErr != nil {
+		cancel()
+	}
 	waitErr := cmd.Wait()
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if scanErr != nil {
 		return result, scanErr
 	}

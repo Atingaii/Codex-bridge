@@ -173,9 +173,26 @@ fact failures in the obligation ledger. Deliverable projects may not keep
 `Repro.thy`, `*_original.thy`, scratch theories, or diagnostic-only `ROOT`
 imports. Full Isabelle builds for slow sessions should use an explicit long
 timeout, such as 30m or 45m, and the final output must be captured in the same
-turn. A compile-only framework, weakened theorem, changed function semantics,
-remaining fake proof, diagnostic leftover, or detached background build whose
-final output is not captured in the same turn cannot satisfy the task.
+turn when possible. Because Isabelle builds can legitimately run for tens of
+minutes and a single foreground command does not stream useful output into the
+browser timeline, build visibility is part of the workflow: every full
+`isabelle build -D` or `isabelle build -d` check must start with one short
+controlled-background command that writes `build.log`, `build.pid`, and
+`build.pgid`, and `build.exit`, then periodically emit separate short
+`tail -n 80 build.log` and PID/PGID/exit-status checks. Foreground full-build
+commands such as `timeout ... isabelle build ...` or `isabelle build ... | tee
+build.log` do not satisfy the web-visible smoke path. If the build exceeds the
+practical turn window, the worker may hand the build back to the user instead
+of repeating blind automation: it must record the exact manual command, log
+path, elapsed time, PID/PGID/exit-status file when available, and current log
+tail. Once that handoff
+appears, later CLI turns should not rerun the same long Isabelle build
+automatically; they should inspect source files, existing logs, and
+PID/PGID/exit files, and make the final run result say that acceptance is
+pending the user's manual Isabelle build output. A compile-only framework,
+weakened theorem, changed function semantics, remaining fake proof, diagnostic
+leftover, or detached background build whose final output is not captured or
+explicitly handed off cannot satisfy the task.
 
 Coq/Rocq conversion tasks get a separate Coq-specific prompt block. The Bridge
 requires a self-contained `_CoqProject`/`Makefile` style project in a visible new
@@ -238,6 +255,16 @@ When a run reports changed files, unresolved risks, turn errors, or failed tool
 commands, the Bridge adds one lightweight final verifier turn. It is skipped for
 clean resolved runs with verification, so successful no-change runs do not pay a
 fixed extra model call.
+
+Direct Codex CLI turns also have a runtime guard outside the prompt strategy.
+The Bridge puts spawned CLI commands in a managed process group and cancels that
+group when the run is canceled or the turn fails. For direct Codex JSONL, if all
+command events have completed and no assistant text or new tool event arrives
+within the idle guard window, Bridge turns the stall into a visible turn error
+and terminal run status. Long-running proof commands remain allowed while their
+`command.start` is active; the guard targets the post-command idle case where
+the browser would otherwise show completed command cards but a permanently
+running orchestration.
 
 After the final verifier and before emitting `run.end`, the Bridge performs a
 post-test result assessment from recorded turns, tool events, handoffs, and the

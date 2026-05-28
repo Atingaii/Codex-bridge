@@ -146,6 +146,10 @@ Then install the systemd units from `deploy/` and reload Caddy. With Cloudflare 
 review-required profile uses the `codex app-server` JSON-RPC runner so approval
 requests can round-trip through Hub and the browser for both chat and Codex
 orchestration.
+Run setup/repair commands from the same shell where Codex and Claude credentials
+work; the generated background service preserves common model credential
+variables such as `OPENAI_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` in its private
+0600 env file.
 
 ## Project Workflow
 

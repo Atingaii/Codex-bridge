@@ -71,13 +71,15 @@ before starting, stops any existing same-directory user service, refuses to
 continue unless `codex` and `claude` are resolvable in the shell that runs the
 command, and only prints `codex-bridge connected` after the Bridge logs
 `[bridge] connected`; otherwise it prints recent log lines for diagnosis. It
-preserves `PATH`, resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, and
-common proxy environment variables in
-`~/.codex-bridge/services/<cwd-hash>.env` so background services keep the same
-CLI and Hub connectivity as the shell that ran the setup command. Generated
-user services include `OOMPolicy=continue`; if a heavy child process is killed
-by the kernel OOM killer, systemd should keep the Bridge service up so Hub can
-surface the command/run status instead of seeing a Bridge restart.
+preserves `PATH`, resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, common
+model credential variables such as `OPENAI_API_KEY`,
+`CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_API_KEY`, and common proxy
+environment variables in `~/.codex-bridge/services/<cwd-hash>.env` so
+background services keep the same CLI, local model credentials, and Hub
+connectivity as the shell that ran the setup command. Generated user services
+include `OOMPolicy=continue`; if a heavy child process is killed by the kernel
+OOM killer, systemd should keep the Bridge service up so Hub can surface the
+command/run status instead of seeing a Bridge restart.
 
 The settings UI exposes two permission profiles:
 

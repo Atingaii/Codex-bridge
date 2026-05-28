@@ -35,7 +35,7 @@ token 由网页生成，默认 24 小时内有效。一个 token 绑定一个 CL
 
 ## 普通用户前置条件
 
-在 WSL2/Linux CLI 端需要先准备好 Codex CLI，并在该终端完成 OpenAI/Codex 的本地认证。Hub 不会接触你的 `OPENAI_API_KEY`。
+在 WSL2/Linux CLI 端需要先准备好 Codex CLI，并在该终端完成 OpenAI/Codex 的本地认证。Hub 不会接触你的 `OPENAI_API_KEY`。请在同一个已完成认证的 shell 里运行网页生成的安装/修复命令；后台服务会把常见模型凭据环境变量（如 `OPENAI_API_KEY`、`CLAUDE_CODE_OAUTH_TOKEN`）保存到本机 0600 权限的 service env 文件中。
 
 最短接入路径不需要 clone 仓库，也不需要本地编译：
 

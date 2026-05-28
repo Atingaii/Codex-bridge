@@ -54,6 +54,8 @@ func TestLinkStartScriptUsesProfileAndPinnedMachineID(t *testing.T) {
 func TestWriteLinkFilesWritesDetectedPathsAndProxyEnv(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HTTP_PROXY", "http://proxy.example")
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-test")
 	opts := linkOptions{
 		HubURL:     "https://hub.example",
 		Token:      "tok",
@@ -91,6 +93,8 @@ func TestWriteLinkFilesWritesDetectedPathsAndProxyEnv(t *testing.T) {
 		"BRIDGE_CLAUDE_PATH='/usr/bin/claude'",
 		"BRIDGE_CCB_PATH='/usr/bin/ccb'",
 		"HTTP_PROXY='http://proxy.example'",
+		"OPENAI_API_KEY='sk-test'",
+		"CLAUDE_CODE_OAUTH_TOKEN='oauth-test'",
 	} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("env missing %q:\n%s", want, env)

@@ -406,12 +406,39 @@ func linkEnvFile(opts linkOptions) string {
 	writeEnvAssignment(&b, "BRIDGE_CODEX_PATH", opts.CodexPath)
 	writeEnvAssignment(&b, "BRIDGE_CLAUDE_PATH", opts.ClaudePath)
 	writeEnvAssignment(&b, "BRIDGE_CCB_PATH", opts.CCBPath)
-	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
+	for _, name := range linkPreservedEnvNames() {
 		if value := os.Getenv(name); value != "" {
 			writeEnvAssignment(&b, name, value)
 		}
 	}
 	return b.String()
+}
+
+func linkPreservedEnvNames() []string {
+	return []string{
+		"OPENAI_API_KEY",
+		"OPENAI_BASE_URL",
+		"OPENAI_ORG_ID",
+		"OPENAI_PROJECT",
+		"ANTHROPIC_API_KEY",
+		"CLAUDE_API_KEY",
+		"CLAUDE_CODE_OAUTH_TOKEN",
+		"CODEX_API_KEY",
+		"AZURE_OPENAI_API_KEY",
+		"AZURE_OPENAI_ENDPOINT",
+		"AZURE_OPENAI_API_VERSION",
+		"GEMINI_API_KEY",
+		"GOOGLE_API_KEY",
+		"OPENROUTER_API_KEY",
+		"HTTP_PROXY",
+		"HTTPS_PROXY",
+		"ALL_PROXY",
+		"NO_PROXY",
+		"http_proxy",
+		"https_proxy",
+		"all_proxy",
+		"no_proxy",
+	}
 }
 
 func linkPathWithLocalBin(home string) string {

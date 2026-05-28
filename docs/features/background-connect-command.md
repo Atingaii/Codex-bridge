@@ -40,12 +40,13 @@ for manual recovery.
 - Refuses to continue unless `codex` and `claude` resolve in the shell that
   runs the setup command, so the endpoint does not register with unusable
   orchestration CLIs.
-- Captures `PATH`, resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, and
-  common proxy variables from the shell that runs the setup command
-  (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and lowercase
-  variants) into `~/.codex-bridge/services/<cwd-hash>.env`. The start script
-  loads that file before dialing the Hub so user systemd does not lose the
-  WSL/Linux CLI or proxy environment.
+- Captures `PATH`, resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, common
+  model credential variables such as `OPENAI_API_KEY`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_API_KEY`, plus common proxy
+  variables from the shell that runs the setup command into
+  `~/.codex-bridge/services/<cwd-hash>.env`. The start script loads that 0600
+  file before dialing the Hub so user systemd does not lose the WSL/Linux CLI,
+  local model credentials, or proxy environment.
 - If `systemctl --user` is available, stops any existing service for the same
   working-directory hash, writes
   `~/.config/systemd/user/codex-bridge-<cwd-hash>.service` and a matching

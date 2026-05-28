@@ -87,6 +87,7 @@ type OrchestrationRun = {
   agentId: string;
   title: string;
   mode: 'collaboration' | 'debate';
+  firstCli?: 'claude' | 'codex';
   prompt: string;
   cwd?: string;
   maxTurns: number;
@@ -260,6 +261,7 @@ type PublicOrchestrationRun = {
   id: string;
   title: string;
   mode: 'collaboration' | 'debate';
+  firstCli?: 'claude' | 'codex';
   prompt: string;
   cwd?: string;
   maxTurns: number;
@@ -452,6 +454,7 @@ const uiText = {
     coordinateClaudeCodex: 'Coordinate Claude Code and Codex',
     startCollaborationHint: 'Start a collaboration or debate run from the panel on the right.',
     mode: 'Mode',
+    firstCli: 'First CLI',
     collaborate: 'Collaborate',
     debate: 'Debate',
     task: 'Task',
@@ -624,6 +627,7 @@ const uiText = {
     coordinateClaudeCodex: '协同 Claude Code 与 Codex',
     startCollaborationHint: '从右侧面板启动协作或辩论运行。',
     mode: '模式',
+    firstCli: '首轮 CLI',
     collaborate: '协作',
     debate: '辩论',
     task: '任务',
@@ -3041,6 +3045,7 @@ function OrchestrationWorkspace({
   const [events, setEvents] = useState<OrchestrationEvent[]>([]);
   const [approvals, setApprovals] = useState<ApprovalItemState[]>([]);
   const [mode, setMode] = useState<'collaboration' | 'debate'>('collaboration');
+  const [firstCli, setFirstCli] = useState<'claude' | 'codex'>('claude');
   const [prompt, setPrompt] = useState('');
   const [cwd, setCwd] = useState('');
   const [maxTurns, setMaxTurns] = useState(4);
@@ -3276,6 +3281,7 @@ function OrchestrationWorkspace({
     setEvents((current) => current.filter((event) => event.runId === run.id));
     setApprovals((current) => current.filter((item) => item.approval.runId === run.id));
     setMode(run.mode === 'debate' ? 'debate' : 'collaboration');
+    setFirstCli(run.firstCli === 'codex' ? 'codex' : 'claude');
     setCwd(run.cwd || '');
     setMaxTurns(run.maxTurns || 4);
     stickToBottomRef.current = true;
@@ -3462,6 +3468,7 @@ function OrchestrationWorkspace({
         method: 'POST',
         body: JSON.stringify({
           mode,
+          firstCli,
           prompt: task,
           title: titleFromPrompt(task, t),
           cwd: cwd.trim(),
@@ -3739,6 +3746,18 @@ function OrchestrationWorkspace({
                     </button>
                     <button className={cn("h-8 rounded-md text-xs font-medium", mode === 'debate' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setMode('debate')}>
                       {t.debate}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.firstCli}</label>
+                  <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1">
+                    <button className={cn("h-8 rounded-md text-xs font-medium", firstCli === 'claude' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setFirstCli('claude')} disabled={creating || isRunning}>
+                      Claude
+                    </button>
+                    <button className={cn("h-8 rounded-md text-xs font-medium", firstCli === 'codex' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setFirstCli('codex')} disabled={creating || isRunning}>
+                      Codex
                     </button>
                   </div>
                 </div>

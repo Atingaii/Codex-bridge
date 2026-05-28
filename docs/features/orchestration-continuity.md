@@ -11,7 +11,8 @@ context in the same `runID`.
 
 - Do not merge orchestration runs with chat sessions.
 - Do not introduce Redis, a queue, or a second database.
-- Do not change `internal/protocol.Envelope` unless a future runner requires it.
+- Do not add new `internal/protocol.Envelope` frame kinds unless a future
+  runner requires it.
 - Do not redefine permission prompts; review-required approval behavior is
   covered by
   `docs/features/orchestration-deep-collaboration-and-approval.md`.
@@ -30,6 +31,9 @@ context in the same `runID`.
 - Follow-up prompts stay on the run's original `agentId`; switching CLI
   endpoint requires an explicit new run so the compacted context is not handed
   to a different machine unexpectedly.
+- Follow-up prompts also preserve the run's persisted `firstCli` value unless a
+  request explicitly changes it, so the visible relay schedule after refresh
+  matches the originally selected first-turn CLI.
 - While a follow-up is active, the frontend must surface `turn.start`,
   `command.start`, and run status events instead of leaving the user message as
   the only visible item.
@@ -64,7 +68,10 @@ context in the same `runID`.
 - Turn-to-turn strategy now uses the pass-through relay documented in
   [orchestration-pass-through-cli.md](orchestration-pass-through-cli.md);
   the next CLI receives the previous visible result plus useful command context
-  without Bridge adding a proof strategy.
+  without Bridge adding a hidden proof verdict. Formal-proof-looking prompts
+  receive lightweight, browser-visible proof workflow reminders up front so the
+  CLI records target obligations, build/scan/audit evidence, and blockers in
+  its normal result.
 - Uploaded orchestration file contents are sent to the Bridge with the current
   prompt, while `user.message` events persist only file metadata in
   `event.data.files` so the timeline can show what was attached without
@@ -124,7 +131,7 @@ state.
 
 1. Keep Hub continue semantics in `handleContinueOrchestration`.
 2. Keep Bridge start payloads carrying `RunID`, `Context`, `Resume`, and
-   `PromptSeq`.
+   `PromptSeq`, plus the persisted `FirstCLI` selection when present.
 3. Make the frontend restore the last selected run from local storage.
 4. Make the frontend update mode/cwd/max-turn controls from the selected run.
 5. Preserve the explicit New Run action as the only way to clear run selection.
@@ -157,6 +164,8 @@ state.
     terminal, visible events.
 19. For Isabelle-looking tasks, keep the prompt-level timeout boundary visible
     and leave execution strategy to the CLI.
+20. Preserve first-turn CLI selection across create, refresh, and continue so a
+    Codex-first smoke remains Codex-first.
 
 ## Exit Gates
 
@@ -197,6 +206,8 @@ state.
 - A turn that ends with only command output still leaves those command events
   visible and the run reaches a terminal browser-visible state.
 - Selecting a completed run does not show the browser event stream as connected.
+- Continuing a Codex-first run sends `FirstCLI=codex` in the resumed
+  `orchestration_start` payload unless the user intentionally changes it.
 
 ## Reviewer Q&A
 

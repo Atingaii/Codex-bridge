@@ -73,6 +73,7 @@ func (r *CodexAppServerRunner) Prompt(ctx context.Context, req RunnerRequest, on
 
 func (r *CodexAppServerRunner) start(ctx context.Context, req RunnerRequest) (*appServerClient, error) {
 	cmd := exec.CommandContext(ctx, r.codexPath(), "app-server", "--listen", "stdio://")
+	configureManagedCommand(cmd)
 	if cwd := r.cwd(req); cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -477,6 +478,9 @@ func (c *appServerClient) close() {
 	c.closed = true
 	_ = c.stdin.Close()
 	c.mu.Unlock()
+	if c.cmd != nil && c.cmd.Process != nil {
+		_ = terminateProcessGroup(c.cmd.Process.Pid)
+	}
 	_ = c.cmd.Wait()
 }
 

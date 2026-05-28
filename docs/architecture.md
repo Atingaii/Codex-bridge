@@ -35,15 +35,15 @@ Codex CLI / Claude CLI
 
 The Bridge keeps orchestration deterministic and low overhead: it still spawns
 one CLI process per turn, and uses `codex app-server` for Codex turns when
-browser approval is required. Direct orchestration is a pass-through relay:
-Claude receives the browser task first as a real user instruction, Bridge
-streams the prompt, CLI deltas, command events, and terminal status to the
-browser, and Codex receives the previous CLI's visible result plus useful
-command context on the next turn. Bridge preserves a stable Claude session id
-and Codex thread id where each CLI supports resume. It does not add hidden proof
-strategy gates, automatic verifier turns, or remediation turns; the only
-proof-related boundary in prompt text is an Isabelle timeout instruction for
-long builds. The relay contract is documented in
+browser approval is required. Direct orchestration is a pass-through relay: the
+run's persisted `first_cli` selection decides whether Claude or Codex receives
+the browser task first, Bridge streams the prompt, CLI deltas, command events,
+and terminal status to the browser, and the next CLI receives the previous
+CLI's visible result plus useful command context. Bridge preserves a stable
+Claude session id and Codex thread id where each CLI supports resume. It does
+not add hidden proof strategy gates, automatic verifier turns, or remediation
+turns; the only proof-related boundary in prompt text is an Isabelle timeout
+instruction for long builds. The relay contract is documented in
 [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
 
 Review-required Claude orchestration uses Claude Code's
@@ -133,7 +133,8 @@ Orchestration continuity:
 1. New tasks create an `orchestration_runs` row.
 2. Follow-up tasks call `/api/orchestrations/{runID}/prompts` and stay on the
    run's original `agentId`; switching CLI endpoint requires an explicit new
-   run.
+   run. The same persisted `first_cli` value is reused unless the request
+   explicitly changes it.
 3. Hub compacts prior `orchestration_events` into context.
 4. Bridge receives the same `runID` with `Resume=true`.
 5. The frontend stores the last selected run id locally and restores it on
@@ -157,7 +158,8 @@ SQLite tables:
 - `messages`
 - `runs`
 - `enroll_tokens`
-- `orchestration_runs`
+- `orchestration_runs` (including persisted mode, `first_cli`, cwd, max turns,
+  status, and uploaded file metadata)
 - `orchestration_events`
 - `conversation_shares`
 

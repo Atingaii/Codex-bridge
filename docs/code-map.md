@@ -127,7 +127,8 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 
 1. `internal/hub/orchestration.go:handleCreateOrchestration` creates a new run.
 2. `internal/hub/orchestration.go:handleContinueOrchestration` appends a prompt
-   to the same run and compacts previous events into context.
+   to the same run, preserves or updates persisted settings such as `firstCli`,
+   and compacts previous events into context.
 3. `internal/bridge/orchestration.go:run` executes turns
    using the prompt plus compacted context.
 4. `frontend/src/app/App.tsx:OrchestrationWorkspace` must keep selecting the
@@ -139,19 +140,23 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 
 ### Change Orchestration Strategy
 
-1. `internal/bridge/orchestration.go:roleForTurn` controls which CLI owns each
-   turn.
-2. `internal/bridge/orchestration.go:composeRelayPrompt` controls the
+1. `internal/hub/orchestration.go:normalizeOrchestrationFirstCLI`,
+   `internal/store/store.go:OrchestrationRun`, and
+   `internal/protocol.OrchestrationStartPayload` carry the persisted first-turn
+   CLI selection.
+2. `internal/bridge/orchestration.go:roleForTurnWithFirstCLI` controls which
+   CLI owns each turn.
+3. `internal/bridge/orchestration.go:composeRelayPrompt` controls the
    pass-through prompt sent to Claude/Codex and the short Isabelle timeout
    boundary.
-3. `internal/bridge/orchestration.go:formatRelayPriorTurn` controls how much
+4. `internal/bridge/orchestration.go:formatRelayPriorTurn` controls how much
    prior visible output and command context is sent to the next CLI.
-4. `internal/bridge/orchestration.go:runRelayCLI` preserves the per-run Claude
+5. `internal/bridge/orchestration.go:runRelayCLI` preserves the per-run Claude
    session id and Codex thread id when launching the next CLI turn.
-5. `internal/bridge/orchestration.go:relayTerminalContent` controls terminal
+6. `internal/bridge/orchestration.go:relayTerminalContent` controls terminal
    run content without adding a hidden verifier or remediation turn.
-6. Keep event kinds compatible with `frontend/src/app/App.tsx:visibleOrchestrationEvents`.
-7. Update
+7. Keep event kinds compatible with `frontend/src/app/App.tsx:visibleOrchestrationEvents`.
+8. Update
    [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
 
 ### Change SQLite Schema

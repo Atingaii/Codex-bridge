@@ -49,7 +49,10 @@ for manual recovery.
 - If `systemctl --user` is available, stops any existing service for the same
   working-directory hash, writes
   `~/.config/systemd/user/codex-bridge-<cwd-hash>.service` and a matching
-  start script, then runs `systemctl --user enable` and `restart`.
+  start script, then runs `systemctl --user enable` and `restart`. The generated
+  user service sets `OOMPolicy=continue` so a memory-heavy child process such as
+  a proof-assistant build being killed by the kernel does not by itself restart
+  the Bridge parent and erase the active browser timeline.
 - Clears the per-directory log before starting so diagnostics describe the
   current setup attempt.
 - After a successful `restart`, waits briefly and checks
@@ -100,7 +103,8 @@ binary.
 7. Add Bridge-side connection-attempt logging that does not include the enroll
    token.
 8. Preserve proxy environment variables for background services.
-9. Update user-facing setup docs.
+9. Keep generated systemd user services alive when child processes hit OOM.
+10. Update user-facing setup docs.
 
 ## Exit Gates
 

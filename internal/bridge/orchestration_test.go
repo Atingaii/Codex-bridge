@@ -79,6 +79,25 @@ func TestOrchestrationClaudeStreamInputArgsKeepSessionAndOmitPromptArg(t *testin
 	}
 }
 
+func TestRoleForTurnSupportsCodexFirst(t *testing.T) {
+	role, cli := roleForTurnWithFirstCLI("collaboration", "codex", 1)
+	if role != "reviewer" || cli != "codex" {
+		t.Fatalf("turn 1 = %s/%s, want reviewer/codex", role, cli)
+	}
+	role, cli = roleForTurnWithFirstCLI("collaboration", "codex", 2)
+	if role != "implementer" || cli != "claude" {
+		t.Fatalf("turn 2 = %s/%s, want implementer/claude", role, cli)
+	}
+	role, cli = roleForTurnWithFirstCLI("debate", "codex", 1)
+	if role != "critic" || cli != "codex" {
+		t.Fatalf("debate turn 1 = %s/%s, want critic/codex", role, cli)
+	}
+	role, cli = nextRoleCLIWithFirstCLI("debate", "codex", 1)
+	if role != "proposer" || cli != "claude" {
+		t.Fatalf("debate next turn = %s/%s, want proposer/claude", role, cli)
+	}
+}
+
 func TestWriteClaudeStreamUserMessageUsesClaudeJSONShape(t *testing.T) {
 	var buf bytes.Buffer
 	if err := writeClaudeStreamUserMessage(&buf, "继续处理"); err != nil {
@@ -623,8 +642,8 @@ func TestOrchestrationRelayRunEmitsFrontendVisiblePromptsCommandsAndSessionState
 		t.Fatalf("run.end did not relay final Codex content: %#v", events)
 	}
 	for _, event := range events {
-		if event.Kind == "turn.start" && (strings.Contains(event.Content, "Formal proof task guardrails") || strings.Contains(event.Content, "modify_lin_fuel") || strings.Contains(event.Content, "default_fuel")) {
-			t.Fatalf("relay prompt leaked old proof guardrail: %#v", event)
+		if event.Kind == "turn.start" && strings.Contains(event.Content, "Formal proof task guardrails") {
+			t.Fatalf("relay prompt leaked old proof gate label: %#v", event)
 		}
 		if strings.Contains(event.TurnID, "verifier") || strings.Contains(event.TurnID, "remediation") {
 			t.Fatalf("pass-through relay should not schedule hidden verifier/remediation turn: %#v", event)
@@ -1052,6 +1071,42 @@ func TestOrchestrationCancelKillsCodexProcessGroup(t *testing.T) {
 	waitForProcessExit(t, pid)
 }
 
+func TestOrchestrationCancelKillsCCBProcessGroup(t *testing.T) {
+	tmp := t.TempDir()
+	marker := filepath.Join(tmp, "ccb-grandchild.pid")
+	ccbPath := filepath.Join(tmp, "ccb")
+	script := "#!/usr/bin/env bash\n" +
+		"(trap 'exit 0' TERM INT; echo $BASHPID > " + shellQuote(marker) + "; while true; do sleep 1; done) &\n" +
+		"wait\n"
+	if err := os.WriteFile(ccbPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Bridge.CCBPath = ccbPath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.runCCBCommandStreaming(ctx, protocol.OrchestrationStartPayload{RunID: "orc_ccb_cancel", CWD: tmp}, "", nil, nil, "run")
+		done <- err
+	}()
+
+	pid := waitForPIDFile(t, marker)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) && err == nil {
+			t.Fatalf("runCCBCommandStreaming error = %v, want cancellation error", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runCCBCommandStreaming did not return after cancellation")
+	}
+	waitForProcessExit(t, pid)
+}
+
 func TestOrchestrationScanClaudeJSONLSuppressesEmptyPagesReadFailure(t *testing.T) {
 	input := strings.NewReader(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_1","name":"Read","input":{"file_path":"/tmp/Model.thy","pages":""}}]}}
 {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_1","is_error":true,"content":"<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>"}]}}
@@ -1218,6 +1273,9 @@ func TestComposeRelayPromptKeepsCoqUploadTaskPassThrough(t *testing.T) {
 		"Treat this as a real user instruction",
 		"You are the first CLI handling the user's task",
 		"visible result will be handed to another CLI afterward",
+		"Formal proof relay guidance",
+		"Coq upload benchmark",
+		"Print Assumptions",
 		"User task:",
 		"Model.thy Termination.thy ROOT",
 		"termination modify_lin",
@@ -1228,14 +1286,10 @@ func TestComposeRelayPromptKeepsCoqUploadTaskPassThrough(t *testing.T) {
 	}
 	for _, bad := range []string{
 		"Formal proof task guardrails",
-		"Print Assumptions",
-		"modify_lin_fuel",
-		"default_fuel",
 		"controlled background",
-		"Coq upload benchmark",
 	} {
 		if strings.Contains(prompt, bad) {
-			t.Fatalf("relay prompt should not inject proof guardrail %q:\n%s", bad, prompt)
+			t.Fatalf("relay prompt should not inject old proof gate %q:\n%s", bad, prompt)
 		}
 	}
 }
@@ -1257,6 +1311,8 @@ func TestComposeRelayPromptAddsOnlyIsabelleTimeoutBoundary(t *testing.T) {
 		"choose and use an explicit timeout",
 		"If that timeout is exceeded, stop the build and report the command",
 		"Bridge otherwise does not constrain how you run the CLI task",
+		"Formal proof relay guidance",
+		"thm_oracles",
 		"User task:",
 		"termination modify_lin",
 	} {
@@ -1270,7 +1326,6 @@ func TestComposeRelayPromptAddsOnlyIsabelleTimeoutBoundary(t *testing.T) {
 		"controlled background",
 		"Do not run `timeout ... isabelle build ...`",
 		"build.pid",
-		"thm_oracles",
 	} {
 		if strings.Contains(prompt, bad) {
 			t.Fatalf("Isabelle relay prompt should not inject old guardrail %q:\n%s", bad, prompt)
@@ -1515,6 +1570,9 @@ func TestComposeRelayDebatePromptDoesNotInjectProofFalsificationStrategy(t *test
 		"Treat this as a real user instruction",
 		"Mode: debate",
 		"Current CLI: critic/codex",
+		"Formal proof relay guidance",
+		"Debate critic focus",
+		"fuel/default_fuel shortcuts",
 		"补全 Coq theorem",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -1524,11 +1582,9 @@ func TestComposeRelayDebatePromptDoesNotInjectProofFalsificationStrategy(t *test
 	for _, bad := range []string{
 		"Formal proof task guardrails",
 		"Debate proof workflow",
-		"fuel/default_fuel shortcuts",
-		"missing equivalence lemmas",
 	} {
 		if strings.Contains(prompt, bad) {
-			t.Fatalf("debate relay prompt should not inject proof strategy %q:\n%s", bad, prompt)
+			t.Fatalf("debate relay prompt should not inject old proof strategy %q:\n%s", bad, prompt)
 		}
 	}
 }
@@ -2464,7 +2520,7 @@ func TestComposeFinalVerifierPromptUsesStructuredState(t *testing.T) {
 	}
 }
 
-func TestComposeFinalVerifierPromptDoesNotAddFormalProofGuardrails(t *testing.T) {
+func TestComposeFinalVerifierPromptDoesNotAddFormalProofRelayGuidance(t *testing.T) {
 	prompt := composeFinalVerifierPrompt("collaboration", "补全 Coq termination modify_lin 证明，不能用占位符", "", false, "verifier", "codex", []orchestrationTurn{{
 		Role:          "implementer",
 		CLI:           "claude",
@@ -2533,7 +2589,7 @@ func TestComposeFinalVerifierPromptDoesNotRequireIsabelleUploadAssessment(t *tes
 	}
 }
 
-func TestCCBPromptRelaysWithoutFormalProofAssessmentGuardrails(t *testing.T) {
+func TestCCBPromptAddsFormalProofRelayGuidanceWithoutAssessmentGate(t *testing.T) {
 	cfg := config.Default()
 	manager := NewOrchestrationManager(&cfg)
 	prompt := manager.ccbPrompt(protocol.OrchestrationStartPayload{
@@ -2544,6 +2600,9 @@ func TestCCBPromptRelaysWithoutFormalProofAssessmentGuardrails(t *testing.T) {
 		"Use only the local CCB Codex and Claude Code agents",
 		"Codex Bridge is only relaying this task and the final CCB result",
 		"Return a final user-visible conclusion",
+		"Formal proof relay guidance",
+		"Coq upload benchmark",
+		"Print Assumptions",
 		orchestrationMsgContract,
 		orchestrationHandoffContract,
 	} {
@@ -2551,7 +2610,7 @@ func TestCCBPromptRelaysWithoutFormalProofAssessmentGuardrails(t *testing.T) {
 			t.Fatalf("CCB prompt missing %q:\n%s", want, prompt)
 		}
 	}
-	for _, bad := range []string{"Formal proof task guardrails", "Formal proof final verifier guardrails", "Coq upload benchmark", "modify_lin_fuel/default_fuel"} {
+	for _, bad := range []string{"Formal proof task guardrails", "Formal proof final verifier guardrails", "Current terminal assessment before remediation"} {
 		if strings.Contains(prompt, bad) {
 			t.Fatalf("CCB prompt should not inject proof assessment %q:\n%s", bad, prompt)
 		}

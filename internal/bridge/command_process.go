@@ -11,7 +11,7 @@ func configureManagedCommand(cmd *exec.Cmd) {
 	if cmd == nil {
 		return
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = managedCommandSysProcAttr()
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {

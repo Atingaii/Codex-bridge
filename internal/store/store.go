@@ -135,6 +135,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			agent_id TEXT NOT NULL,
 			title TEXT NOT NULL,
 			mode TEXT NOT NULL CHECK(mode IN ('collaboration','debate')),
+			first_cli TEXT CHECK(first_cli IN ('claude','codex')),
 			prompt TEXT NOT NULL,
 			cwd TEXT,
 			max_turns INTEGER NOT NULL,
@@ -147,6 +148,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			FOREIGN KEY (user_id) REFERENCES users(id),
 			FOREIGN KEY (agent_id) REFERENCES agents(id)
 		);`,
+		`ALTER TABLE orchestration_runs ADD COLUMN first_cli TEXT CHECK(first_cli IN ('claude','codex'));`,
 		`CREATE INDEX IF NOT EXISTS idx_orchestration_runs_user_updated ON orchestration_runs(user_id, updated_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS orchestration_events (
 			id TEXT PRIMARY KEY,
@@ -247,7 +249,7 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, prompt, COALESCE(cwd,''), max_turns, status,
+		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), prompt, COALESCE(cwd,''), max_turns, status,
 			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE agent_id = ? AND status IN (?, ?)
@@ -1054,6 +1056,7 @@ type OrchestrationRun struct {
 	AgentID    string              `json:"agentId"`
 	Title      string              `json:"title"`
 	Mode       string              `json:"mode"`
+	FirstCLI   string              `json:"firstCli,omitempty"`
 	Prompt     string              `json:"prompt"`
 	CWD        string              `json:"cwd,omitempty"`
 	MaxTurns   int                 `json:"maxTurns"`
@@ -1085,6 +1088,7 @@ type CreateOrchestrationRunParams struct {
 	AgentID  string
 	Title    string
 	Mode     string
+	FirstCLI string
 	Prompt   string
 	CWD      string
 	MaxTurns int
@@ -1190,6 +1194,7 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 	if params.Mode != "collaboration" && params.Mode != "debate" {
 		return OrchestrationRun{}, errors.New("mode must be collaboration or debate")
 	}
+	params.FirstCLI = normalizeOrchestrationFirstCLI(params.FirstCLI)
 	params.Prompt = strings.TrimSpace(params.Prompt)
 	if params.Prompt == "" {
 		return OrchestrationRun{}, errors.New("prompt is required")
@@ -1218,6 +1223,7 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 		AgentID:   params.AgentID,
 		Title:     params.Title,
 		Mode:      params.Mode,
+		FirstCLI:  params.FirstCLI,
 		Prompt:    params.Prompt,
 		CWD:       params.CWD,
 		MaxTurns:  params.MaxTurns,
@@ -1228,9 +1234,9 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO orchestration_runs
-			(id, user_id, agent_id, title, mode, prompt, cwd, max_turns, status, files_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, run.ID, run.UserID, run.AgentID, run.Title, run.Mode, run.Prompt, nullString(run.CWD), run.MaxTurns, run.Status, string(filesJSON), now, now)
+			(id, user_id, agent_id, title, mode, first_cli, prompt, cwd, max_turns, status, files_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, run.ID, run.UserID, run.AgentID, run.Title, run.Mode, run.FirstCLI, run.Prompt, nullString(run.CWD), run.MaxTurns, run.Status, string(filesJSON), now, now)
 	if err != nil {
 		return OrchestrationRun{}, err
 	}
@@ -1239,7 +1245,7 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 
 func (s *Store) OrchestrationRunByID(ctx context.Context, id, userID string) (OrchestrationRun, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, prompt, COALESCE(cwd,''), max_turns, status,
+		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), prompt, COALESCE(cwd,''), max_turns, status,
 			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE id = ? AND user_id = ?
@@ -1249,7 +1255,7 @@ func (s *Store) OrchestrationRunByID(ctx context.Context, id, userID string) (Or
 
 func (s *Store) OrchestrationRunByIDAnyUser(ctx context.Context, id string) (OrchestrationRun, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, prompt, COALESCE(cwd,''), max_turns, status,
+		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), prompt, COALESCE(cwd,''), max_turns, status,
 			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE id = ?
@@ -1262,7 +1268,7 @@ func (s *Store) ListOrchestrationRuns(ctx context.Context, userID string, limit 
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, prompt, COALESCE(cwd,''), max_turns, status,
+		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), prompt, COALESCE(cwd,''), max_turns, status,
 			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE user_id = ?
@@ -1298,13 +1304,14 @@ func (s *Store) UpdateOrchestrationRunStatus(ctx context.Context, id, status, er
 	return err
 }
 
-func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID, mode, cwd string, maxTurns int, files []OrchestrationFile) error {
+func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID, mode, firstCLI, cwd string, maxTurns int, files []OrchestrationFile) error {
 	if id == "" || agentID == "" {
 		return errors.New("run id and agent id are required")
 	}
 	if mode != "collaboration" && mode != "debate" {
 		return errors.New("mode must be collaboration or debate")
 	}
+	firstCLI = normalizeOrchestrationFirstCLI(firstCLI)
 	if maxTurns <= 0 {
 		maxTurns = 4
 	}
@@ -1318,9 +1325,9 @@ func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID,
 	now := time.Now().Unix()
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE orchestration_runs
-		SET agent_id = ?, mode = ?, cwd = ?, max_turns = ?, files_json = ?, finished_at = NULL, updated_at = ?
+		SET agent_id = ?, mode = ?, first_cli = ?, cwd = ?, max_turns = ?, files_json = ?, finished_at = NULL, updated_at = ?
 		WHERE id = ?
-	`, agentID, mode, nullString(cwd), maxTurns, string(filesJSON), now, id)
+	`, agentID, mode, firstCLI, nullString(cwd), maxTurns, string(filesJSON), now, id)
 	return err
 }
 
@@ -1406,7 +1413,7 @@ func (s *Store) ListOrchestrationEvents(ctx context.Context, runID string, limit
 func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (OrchestrationRun, error) {
 	var run OrchestrationRun
 	var filesJSON string
-	if err := row.Scan(&run.ID, &run.UserID, &run.AgentID, &run.Title, &run.Mode, &run.Prompt, &run.CWD,
+	if err := row.Scan(&run.ID, &run.UserID, &run.AgentID, &run.Title, &run.Mode, &run.FirstCLI, &run.Prompt, &run.CWD,
 		&run.MaxTurns, &run.Status, &run.Error, &filesJSON, &run.CreatedAt, &run.UpdatedAt, &run.FinishedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return OrchestrationRun{}, ErrNotFound
@@ -1416,7 +1423,17 @@ func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (Orchestrati
 	if strings.TrimSpace(filesJSON) != "" {
 		_ = json.Unmarshal([]byte(filesJSON), &run.Files)
 	}
+	run.FirstCLI = normalizeOrchestrationFirstCLI(run.FirstCLI)
 	return run, nil
+}
+
+func normalizeOrchestrationFirstCLI(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "codex":
+		return "codex"
+	default:
+		return "claude"
+	}
 }
 
 func scanOrchestrationEvent(row interface{ Scan(dest ...any) error }) (OrchestrationEvent, error) {

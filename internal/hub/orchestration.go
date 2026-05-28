@@ -20,6 +20,7 @@ type orchestrationCreateRequest struct {
 	AgentID  string                       `json:"agentId"`
 	Title    string                       `json:"title"`
 	Mode     string                       `json:"mode"`
+	FirstCLI string                       `json:"firstCli"`
 	Prompt   string                       `json:"prompt"`
 	CWD      string                       `json:"cwd"`
 	MaxTurns int                          `json:"maxTurns"`
@@ -30,6 +31,7 @@ type orchestrationStartRequest struct {
 	AgentID  string
 	Title    string
 	Mode     string
+	FirstCLI string
 	Prompt   string
 	CWD      string
 	MaxTurns int
@@ -56,6 +58,7 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		AgentID:  req.AgentID,
 		Title:    req.Title,
 		Mode:     req.Mode,
+		FirstCLI: req.FirstCLI,
 		Prompt:   req.Prompt,
 		CWD:      req.CWD,
 		MaxTurns: req.MaxTurns,
@@ -84,6 +87,7 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		AgentID:  agentID,
 		Title:    normalized.Title,
 		Mode:     normalized.Mode,
+		FirstCLI: normalized.FirstCLI,
 		Prompt:   normalized.Prompt,
 		CWD:      normalized.CWD,
 		MaxTurns: normalized.MaxTurns,
@@ -126,6 +130,7 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		AgentID:  req.AgentID,
 		Title:    req.Title,
 		Mode:     req.Mode,
+		FirstCLI: req.FirstCLI,
 		Prompt:   req.Prompt,
 		CWD:      req.CWD,
 		MaxTurns: req.MaxTurns,
@@ -140,6 +145,9 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 	}
 	if startReq.Mode == "" {
 		startReq.Mode = run.Mode
+	}
+	if startReq.FirstCLI == "" {
+		startReq.FirstCLI = run.FirstCLI
 	}
 	if startReq.CWD == "" {
 		startReq.CWD = run.CWD
@@ -173,12 +181,13 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	contextSummary := compactOrchestrationContext(run, events)
-	if err := s.store.UpdateOrchestrationRunSettings(r.Context(), run.ID, agentID, normalized.Mode, normalized.CWD, normalized.MaxTurns, files); err != nil {
+	if err := s.store.UpdateOrchestrationRunSettings(r.Context(), run.ID, agentID, normalized.Mode, normalized.FirstCLI, normalized.CWD, normalized.MaxTurns, files); err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to update orchestration run")
 		return
 	}
 	run.AgentID = agentID
 	run.Mode = normalized.Mode
+	run.FirstCLI = normalized.FirstCLI
 	run.CWD = normalized.CWD
 	run.MaxTurns = normalized.MaxTurns
 	run.Files = files
@@ -209,6 +218,7 @@ func (s *Server) normalizeOrchestrationStart(w http.ResponseWriter, req orchestr
 		serverutil.WriteError(w, http.StatusBadRequest, "BAD_MODE", "mode must be collaboration or debate")
 		return req, false
 	}
+	req.FirstCLI = normalizeOrchestrationFirstCLI(req.FirstCLI)
 	if req.MaxTurns <= 0 {
 		req.MaxTurns = 4
 	}
@@ -241,6 +251,7 @@ func (s *Server) startOrchestration(ctx context.Context, run store.Orchestration
 	payload := protocol.OrchestrationStartPayload{
 		RunID:     run.ID,
 		Mode:      req.Mode,
+		FirstCLI:  req.FirstCLI,
 		Prompt:    req.Prompt,
 		Context:   strings.Join(cleanContextParts(contextParts), "\n\n"),
 		Resume:    resume,
@@ -323,6 +334,15 @@ func cliDisplayName(cli string) string {
 		return "Codex"
 	default:
 		return cli
+	}
+}
+
+func normalizeOrchestrationFirstCLI(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "codex":
+		return "codex"
+	default:
+		return "claude"
 	}
 }
 

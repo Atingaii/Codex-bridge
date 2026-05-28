@@ -165,11 +165,15 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 		AgentID:  agent.ID,
 		Title:    "active orchestration",
 		Mode:     "collaboration",
+		FirstCLI: "codex",
 		Prompt:   "prove it",
 		MaxTurns: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if orchestration.FirstCLI != "codex" {
+		t.Fatalf("orchestration first cli = %q, want codex", orchestration.FirstCLI)
 	}
 	if err := st.UpdateOrchestrationRunStatus(ctx, orchestration.ID, OrchestrationRunning, ""); err != nil {
 		t.Fatal(err)
@@ -278,6 +282,7 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 		AgentID:  agent.ID,
 		Title:    "Debate",
 		Mode:     "debate",
+		FirstCLI: "codex",
 		Prompt:   "prove a theorem",
 		MaxTurns: 2,
 		Files:    []OrchestrationFile{{Name: "A.v", MimeType: "text/plain", Size: 10}},
@@ -285,7 +290,7 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.Status != OrchestrationQueued || run.Mode != "debate" || len(run.Files) != 1 {
+	if run.Status != OrchestrationQueued || run.Mode != "debate" || run.FirstCLI != "codex" || len(run.Files) != 1 {
 		t.Fatalf("unexpected run: %+v", run)
 	}
 	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "turn.start", Role: "proposer", CLI: "claude"}); err != nil {
@@ -311,7 +316,7 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	if loaded.Status != OrchestrationCompleted || loaded.FinishedAt == 0 {
 		t.Fatalf("unexpected loaded run: %+v", loaded)
 	}
-	if err := st.UpdateOrchestrationRunSettings(ctx, run.ID, agent.ID, run.Mode, run.CWD, run.MaxTurns, run.Files); err != nil {
+	if err := st.UpdateOrchestrationRunSettings(ctx, run.ID, agent.ID, run.Mode, "claude", run.CWD, run.MaxTurns, run.Files); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, OrchestrationRunning, ""); err != nil {
@@ -323,6 +328,9 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	}
 	if loaded.Status != OrchestrationRunning || loaded.FinishedAt != 0 {
 		t.Fatalf("resumed run kept terminal state: %+v", loaded)
+	}
+	if loaded.FirstCLI != "claude" {
+		t.Fatalf("resumed first cli = %q, want claude", loaded.FirstCLI)
 	}
 }
 

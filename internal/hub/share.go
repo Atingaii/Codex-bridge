@@ -36,6 +36,7 @@ type publicOrchestrationRunResponse struct {
 	ID         string                    `json:"id"`
 	Title      string                    `json:"title"`
 	Mode       string                    `json:"mode"`
+	FirstCLI   string                    `json:"firstCli,omitempty"`
 	Prompt     string                    `json:"prompt"`
 	CWD        string                    `json:"cwd,omitempty"`
 	MaxTurns   int                       `json:"maxTurns"`
@@ -204,6 +205,7 @@ func publicOrchestrationRun(run store.OrchestrationRun) publicOrchestrationRunRe
 		ID:         run.ID,
 		Title:      run.Title,
 		Mode:       run.Mode,
+		FirstCLI:   run.FirstCLI,
 		Prompt:     run.Prompt,
 		CWD:        run.CWD,
 		MaxTurns:   run.MaxTurns,

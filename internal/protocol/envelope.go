@@ -173,6 +173,7 @@ type ApprovalResponsePayload struct {
 type OrchestrationStartPayload struct {
 	RunID     string              `json:"runId"`
 	Mode      string              `json:"mode"`
+	FirstCLI  string              `json:"firstCli,omitempty"`
 	Prompt    string              `json:"prompt"`
 	Context   string              `json:"context,omitempty"`
 	Resume    bool                `json:"resume,omitempty"`

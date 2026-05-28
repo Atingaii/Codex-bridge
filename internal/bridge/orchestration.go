@@ -292,6 +292,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	if mode != "collaboration" && mode != "debate" {
 		mode = "collaboration"
 	}
+	firstCLI := normalizeRelayFirstCLI(payload.FirstCLI)
 	maxTurns := payload.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 2
@@ -309,6 +310,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		Data: map[string]any{
 			"cwd":       m.cwd(payload),
 			"mode":      mode,
+			"firstCli":  firstCLI,
 			"maxTurns":  maxTurns,
 			"promptSeq": payload.PromptSeq,
 		},
@@ -324,12 +326,12 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			})
 			return
 		}
-		role, cli := roleForTurn(mode, turn)
+		role, cli := roleForTurnWithFirstCLI(mode, firstCLI, turn)
 		turnID := fmt.Sprintf("%s-%02d", payload.RunID, turn)
 		if payload.PromptSeq > 0 {
 			turnID = fmt.Sprintf("%s-p%03d-%02d", payload.RunID, payload.PromptSeq, turn)
 		}
-		prompt := composeRelayPrompt(mode, payload.Prompt, payload.Context, payload.Resume, role, cli, turn, maxTurns, history)
+		prompt := composeRelayPromptWithFirstCLI(mode, firstCLI, payload.Prompt, payload.Context, payload.Resume, role, cli, turn, maxTurns, history)
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:    "turn.start",
 			TurnID:  turnID,
@@ -2185,6 +2187,7 @@ func (m *OrchestrationManager) runCCBCommand(ctx context.Context, payload protoc
 
 func (m *OrchestrationManager) runCCBCommandStreaming(ctx context.Context, payload protocol.OrchestrationStartPayload, stdin string, onLine func(ccbWatchStreamEvent), streamState *ccbWatchStreamState, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, m.ccbPath(), args...)
+	configureManagedCommand(cmd)
 	if cwd := m.cwd(payload); cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -2412,6 +2415,11 @@ func (m *OrchestrationManager) ccbPrompt(payload protocol.OrchestrationStartPayl
 	if boundary := isabelleTimeoutBoundary(payload.Prompt); boundary != "" {
 		b.WriteString("\n")
 		b.WriteString(boundary)
+		b.WriteString("\n")
+	}
+	if guidance := formalProofRelayGuidance(payload.Prompt, payload.Mode, "coordinator"); guidance != "" {
+		b.WriteString("\n")
+		b.WriteString(guidance)
 		b.WriteString("\n")
 	}
 	b.WriteString("End the final answer with the compact lines:\n")
@@ -4209,6 +4217,22 @@ func (m *OrchestrationManager) claudePath() string {
 }
 
 func roleForTurn(mode string, turn int) (string, string) {
+	return roleForTurnWithFirstCLI(mode, "claude", turn)
+}
+
+func roleForTurnWithFirstCLI(mode, firstCLI string, turn int) (string, string) {
+	if normalizeRelayFirstCLI(firstCLI) == "codex" {
+		if mode == "debate" {
+			if turn%2 == 1 {
+				return "critic", "codex"
+			}
+			return "proposer", "claude"
+		}
+		if turn%2 == 1 {
+			return "reviewer", "codex"
+		}
+		return "implementer", "claude"
+	}
 	if mode == "debate" {
 		if turn%2 == 1 {
 			return "proposer", "claude"
@@ -4226,16 +4250,20 @@ func promptHeader(role, cli string, turn int) string {
 }
 
 func nextRoleCLI(mode string, turn int) (string, string) {
-	if mode == "debate" {
-		if turn%2 == 1 {
-			return "critic", "codex"
-		}
-		return "proposer", "claude"
+	return nextRoleCLIWithFirstCLI(mode, "claude", turn)
+}
+
+func nextRoleCLIWithFirstCLI(mode, firstCLI string, turn int) (string, string) {
+	return roleForTurnWithFirstCLI(mode, firstCLI, turn+1)
+}
+
+func normalizeRelayFirstCLI(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "codex":
+		return "codex"
+	default:
+		return "claude"
 	}
-	if turn%2 == 1 {
-		return "reviewer", "codex"
-	}
-	return "implementer", "claude"
 }
 
 func newOrchestrationTurnRecord(turnID, role, cli, content string, tools []RunnerToolEvent) orchestrationTurn {
@@ -5128,6 +5156,10 @@ func composePassThroughPrompt(userPrompt, contextSummary string, resume bool) st
 		b.WriteString(boundary)
 		b.WriteString("\n")
 	}
+	if guidance := formalProofRelayGuidance(userPrompt, "", ""); guidance != "" {
+		b.WriteString(guidance)
+		b.WriteString("\n")
+	}
 	b.WriteString("User task:\n")
 	b.WriteString(strings.TrimSpace(userPrompt))
 	b.WriteString("\n")
@@ -5135,6 +5167,10 @@ func composePassThroughPrompt(userPrompt, contextSummary string, resume bool) st
 }
 
 func composeRelayPrompt(mode, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {
+	return composeRelayPromptWithFirstCLI(mode, "claude", userPrompt, contextSummary, resume, role, cli, turn, maxTurns, history)
+}
+
+func composeRelayPromptWithFirstCLI(mode, firstCLI, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {
 	var b strings.Builder
 	b.WriteString("Codex Bridge is relaying this browser orchestration like a human handoff between local CLIs. Treat this as a real user instruction, use your normal capabilities, and do not wait for Bridge to validate strategy or proof choices.\n\n")
 	b.WriteString(orchestrationLanguageRule)
@@ -5156,7 +5192,11 @@ func composeRelayPrompt(mode, userPrompt, contextSummary string, resume bool, ro
 		b.WriteString(boundary)
 		b.WriteString("\n")
 	}
-	b.WriteString(fmt.Sprintf("Relay turn: %d of %d. Mode: %s. Current CLI: %s/%s.\n\n", turn, maxTurns, mode, role, cli))
+	if guidance := formalProofRelayGuidance(userPrompt, mode, role); guidance != "" {
+		b.WriteString(guidance)
+		b.WriteString("\n")
+	}
+	b.WriteString(fmt.Sprintf("Relay turn: %d of %d. Mode: %s. First CLI: %s. Current CLI: %s/%s.\n\n", turn, maxTurns, mode, normalizeRelayFirstCLI(firstCLI), role, cli))
 	if len(history) > 0 {
 		b.WriteString("Previous CLI result and useful command context:\n")
 		for _, item := range history {
@@ -5229,6 +5269,57 @@ func isabelleTimeoutBoundary(userPrompt string) string {
 		return ""
 	}
 	return "Isabelle timeout boundary: if you run a full Isabelle build or long Isabelle compilation, choose and use an explicit timeout appropriate to the task. If that timeout is exceeded, stop the build and report the command, elapsed time, timeout value, and latest output or log. Bridge otherwise does not constrain how you run the CLI task.\n"
+}
+
+func formalProofRelayGuidance(userPrompt, mode, role string) string {
+	if !looksLikeFormalProofTask(userPrompt) {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Formal proof relay guidance:\n")
+	b.WriteString("- Start spec-first: identify the exact theorem/function obligation, name the target fact, map uploaded source constructs to the proof-assistant definitions, and treat build success as a smoke check rather than proof completion.\n")
+	b.WriteString("- Use explicit timeouts for proof-assistant commands. Run proof probes serially; do not leave detached or stale Coq/Isabelle/Lean jobs unless you report their PID/log/exit status in the visible answer.\n")
+	b.WriteString("- Do not weaken theorem statements, change the target definition's semantics, move the obligation to a helper-only statement, or rely on trust shortcuts such as Axiom, Parameter, Conjecture, Admitted, admit, Abort, sorry, quick_and_dirty, Guard Checking changes, bypass_check, TODO, or placeholders.\n")
+	b.WriteString("- For recursive or termination obligations, state the measure/relation or semantic-equivalence obligation before coding. If you use bounded/fuel wrappers, fixed default fuel, or structurally recursive helper functions, also prove equivalence to the original semantics plus decrease/well-foundedness and fuel sufficiency; otherwise report needs_next or blocked.\n")
+	b.WriteString("- Include audit evidence when available: source-only shortcut scans, the project build command, Coq/Rocq Print Assumptions or equivalent dependency audit, Lean #print axioms, Isabelle thm_oracles/oracle-free audit, and the named target theorem/fact.\n")
+	b.WriteString("- Keep handoffs falsifiable: target theorem/fact, uploaded-source mapping, branch/decrease obligation, semantic constraints, attempted proof path, exact blocker, commands run, and remaining risks.\n")
+	if coqGuidance := coqProofRelayGuidance(userPrompt); coqGuidance != "" {
+		b.WriteString(coqGuidance)
+	}
+	if isabelleGuidance := isabelleProofRelayGuidance(userPrompt); isabelleGuidance != "" {
+		b.WriteString(isabelleGuidance)
+	}
+	if mode == "debate" {
+		if role == "critic" {
+			b.WriteString("- Debate critic focus: first try to falsify the proof by checking weakened statements, hidden assumptions, fuel/default_fuel shortcuts, missing equivalence lemmas, and obligations that were moved rather than discharged.\n")
+		} else {
+			b.WriteString("- Debate proposer focus: leave a falsifiable proof claim with named audit commands and explain why it preserves the original obligation without fuel shortcuts or added assumptions.\n")
+		}
+	}
+	return b.String()
+}
+
+func coqProofRelayGuidance(userPrompt string) string {
+	if !looksLikeCoqProofTask(userPrompt) {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("- Coq/Rocq workflow: create a self-contained _CoqProject/Makefile style project when converting uploaded files, run make or coqc from the project root, and keep a traceable mapping from Isabelle names such as modify_lin to Coq definitions/theorems.\n")
+	b.WriteString("- Coq/Rocq audit: scan deliverable .v files for proof shortcuts, run Print Assumptions on the named target theorem, and require Closed under the global context before claiming a completed proof.\n")
+	if looksLikeCoqUploadProofBenchmark(userPrompt) {
+		b.WriteString("- Coq upload benchmark: for Model.thy, Termination.thy, and ROOT, the visible result should account for all three uploads, write a new Coq project under the requested cwd, pass make/coqc, run a source-only shortcut scan, run Print Assumptions on a named modify_lin target, and audit the original termination modify_lin obligation. modify_lin_fuel/default_fuel or fixed-fuel translations remain unresolved unless equivalence, decrease, and fuel sufficiency are proved.\n")
+	}
+	return b.String()
+}
+
+func isabelleProofRelayGuidance(userPrompt string) string {
+	if !looksLikeIsabelleProofTask(userPrompt) {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("- Isabelle workflow: preserve or deliberately remap the uploaded ROOT/session layout, keep scratch theories out of the final project, scan deliverable .thy/ROOT files for fake proofs or diagnostic leftovers, and audit target facts with thm_oracles or an equivalent oracle-free check when available.\n")
+	b.WriteString("- Isabelle termination workflow: for termination modify_lin, prove the original function's termination with a concrete measure/relation and branch decrease evidence. Do not hide the obligation by changing recursive equations, deleting recursion, importing scratch files, or leaving sorry/quick_and_dirty/oops/sketch/admit.\n")
+	return b.String()
 }
 
 func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {

@@ -21,6 +21,8 @@ best-effort 开启 linger；在 user systemd 和 linger 可用时，机器重启
 如果当前环境没有 user systemd，会退回 `nohup` 后台启动，但 `nohup` 不能跨机器重启。
 日志写到 `~/.codex-bridge/logs/<当前目录hash>.log`。命令会把当前 shell 的常见代理
 环境变量保存给后台服务，避免 WSL/Linux 里前台能联网、`systemd --user` 后台直连超时。
+生成的 user service 会设置 `OOMPolicy=continue`，避免 Isabelle/Coq 这类重型子进程被
+OOM kill 时把 Bridge 父进程一起重启，导致网页端运行链路中断。
 `connect` 默认连接
 `https://sparkapi.tech`，默认使用当前目录作为工作目录，默认 runner 是 `codex`。
 如果要前台调试，可以手动执行：

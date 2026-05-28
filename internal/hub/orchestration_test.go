@@ -512,6 +512,106 @@ func TestCreateOrchestrationPersistsUserMessageFileMetadata(t *testing.T) {
 	}
 }
 
+func TestCreateOrchestrationForwardsFirstCLI(t *testing.T) {
+	t.Parallel()
+
+	s, _, userID, agentID := newOrchestrationTestServer(t)
+	conn := &BridgeConn{
+		agentID: agentID,
+		capabilities: &protocol.BridgeCapabilities{
+			Sandbox:        "danger-full-access",
+			ApprovalPolicy: "never",
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: true},
+				"codex":  {Available: true},
+			},
+		},
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 2),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	body := createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId":  agentID,
+		"prompt":   "run visible proof smoke",
+		"firstCli": "codex",
+		"maxTurns": 2,
+	}, http.StatusCreated)
+	run := body["run"].(map[string]any)
+	if run["firstCli"] != "codex" {
+		t.Fatalf("run firstCli = %#v", run["firstCli"])
+	}
+
+	env := <-conn.send
+	payload, err := protocol.Decode[protocol.OrchestrationStartPayload](env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.FirstCLI != "codex" {
+		t.Fatalf("payload first cli = %q", payload.FirstCLI)
+	}
+}
+
+func TestContinueOrchestrationDefaultsFirstCLIFromRun(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run, err := st.CreateOrchestrationRun(ctx, store.CreateOrchestrationRunParams{
+		UserID:   userID,
+		AgentID:  agentID,
+		Title:    "termination",
+		Mode:     "collaboration",
+		FirstCLI: "codex",
+		Prompt:   "prove termination",
+		MaxTurns: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := &BridgeConn{
+		agentID: agentID,
+		capabilities: &protocol.BridgeCapabilities{
+			Sandbox:        "danger-full-access",
+			ApprovalPolicy: "never",
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: true},
+				"codex":  {Available: true},
+			},
+		},
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 2),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	body := continueOrchestration(t, s, userID, run.ID, map[string]any{
+		"prompt":   "continue proof smoke",
+		"maxTurns": 2,
+	}, http.StatusOK)
+	loaded := body["run"].(map[string]any)
+	if loaded["firstCli"] != "codex" {
+		t.Fatalf("continued run firstCli = %#v", loaded["firstCli"])
+	}
+	env := <-conn.send
+	payload, err := protocol.Decode[protocol.OrchestrationStartPayload](env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.FirstCLI != "codex" {
+		t.Fatalf("continued payload first cli = %q", payload.FirstCLI)
+	}
+}
+
 func TestContinueOrchestrationPreservesExistingRunFiles(t *testing.T) {
 	t.Parallel()
 

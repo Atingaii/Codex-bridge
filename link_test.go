@@ -105,6 +105,24 @@ func TestWriteLinkFilesWritesDetectedPathsAndProxyEnv(t *testing.T) {
 	}
 }
 
+func TestLinkSystemdUnitKeepsBridgeAliveOnChildOOM(t *testing.T) {
+	opts := linkOptions{
+		CWD:       "/repo",
+		StartPath: "/home/user/.codex-bridge/services/abc123.sh",
+		LogPath:   "/home/user/.codex-bridge/logs/abc123.log",
+	}
+	unit := linkSystemdUnit(opts)
+	for _, want := range []string{
+		"Restart=always",
+		"OOMPolicy=continue",
+		"ExecStart=/home/user/.codex-bridge/services/abc123.sh",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("systemd unit missing %q:\n%s", want, unit)
+		}
+	}
+}
+
 func TestInstallCCBRootWrapperLinksSourceEntrypoint(t *testing.T) {
 	tmp := t.TempDir()
 	srcDir := filepath.Join(tmp, "src")

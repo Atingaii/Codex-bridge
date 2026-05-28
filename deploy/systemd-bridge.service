@@ -12,6 +12,8 @@ Environment=OPENAI_API_KEY=
 ExecStart=/usr/local/bin/codex-bridge bridge
 Restart=always
 RestartSec=5
+# Keep the Bridge parent connected when an expensive child build is OOM-killed.
+OOMPolicy=continue
 NoNewPrivileges=true
 
 [Install]

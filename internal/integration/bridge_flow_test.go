@@ -835,8 +835,6 @@ func TestOrchestrationEndToEndWithFakeCLIs(t *testing.T) {
 }
 
 func TestOrchestrationIsabellePromptStreamsUsefulCommandEvents(t *testing.T) {
-	t.Parallel()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1566,8 +1564,6 @@ func TestOrchestrationContinueReusesRunAndSendsContext(t *testing.T) {
 }
 
 func TestTerminationFrameworkOrchestrationFullSnapshotFlow(t *testing.T) {
-	t.Parallel()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1998,7 +1994,7 @@ func waitRunStatus(t *testing.T, client *http.Client, baseURL, sid, runID, want 
 
 func waitOrchestrationStatus(t *testing.T, client *http.Client, baseURL, runID, want string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		body := getJSON(t, client, baseURL+"/api/orchestrations/"+url.PathEscape(runID), http.StatusOK)
 		run := body["run"].(map[string]any)

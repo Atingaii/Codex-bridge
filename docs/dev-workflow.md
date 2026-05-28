@@ -74,7 +74,10 @@ command, and only prints `codex-bridge connected` after the Bridge logs
 preserves `PATH`, resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, and
 common proxy environment variables in
 `~/.codex-bridge/services/<cwd-hash>.env` so background services keep the same
-CLI and Hub connectivity as the shell that ran the setup command.
+CLI and Hub connectivity as the shell that ran the setup command. Generated
+user services include `OOMPolicy=continue`; if a heavy child process is killed
+by the kernel OOM killer, systemd should keep the Bridge service up so Hub can
+surface the command/run status instead of seeing a Bridge restart.
 
 The settings UI exposes two permission profiles:
 

@@ -548,6 +548,7 @@ Type=simple
 ExecStart=%s
 Restart=always
 RestartSec=5
+OOMPolicy=continue
 StandardOutput=append:%s
 StandardError=append:%s
 

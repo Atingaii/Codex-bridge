@@ -2093,6 +2093,36 @@ func TestPrepareOrchestrationPromptFilesUsesRunCWD(t *testing.T) {
 	}
 }
 
+func TestPrepareOrchestrationPromptFilesWritesArchiveUploads(t *testing.T) {
+	cfg := config.Default()
+	runCWD := t.TempDir()
+	raw := []byte("PK\x03\x04archive fixture")
+
+	prompt, metas, err := PrepareOrchestrationPromptFiles(&cfg, runCWD, "orc_archive", "inspect archive", []protocol.AttachmentPayload{{
+		Name:     "project bundle.zip",
+		MimeType: "application/zip",
+		Size:     int64(len(raw)),
+		Data:     base64.StdEncoding.EncodeToString(raw),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 1 || metas[0].Name != "project bundle.zip" || metas[0].MimeType != "application/zip" || metas[0].Size != int64(len(raw)) {
+		t.Fatalf("metas = %#v", metas)
+	}
+	wantPath := filepath.Join(runCWD, ".codex-bridge", "orchestrations", "orc_archive", "01-project-bundle.zip")
+	got, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("archive upload not written: %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("archive bytes = %q, want %q", got, raw)
+	}
+	if !strings.Contains(prompt, wantPath) {
+		t.Fatalf("prompt missing archive path %q:\n%s", wantPath, prompt)
+	}
+}
+
 func TestFinalVerifierDisabledForPassThroughRelay(t *testing.T) {
 	manager := NewOrchestrationManager(&config.Config{})
 	clean := []orchestrationTurn{{

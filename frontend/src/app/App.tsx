@@ -7,7 +7,7 @@ import {
   RefreshCw, Check, Clipboard,
   Menu, X, Server, Activity, Command,
   Trash2, Edit2, GitBranch, Swords, UsersRound, ArrowLeft,
-  FileUp, FileText, FolderInput, ShieldQuestion, Wrench, Share2
+  FileUp, FileText, FileArchive, FolderInput, ShieldQuestion, Wrench, Share2
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -1685,7 +1685,7 @@ function readUploadAttachment(file: File): Promise<UploadAttachment> {
       resolve({
         id: newID('file'),
         name: file.name,
-        mimeType: file.type || 'application/octet-stream',
+        mimeType: inferredUploadMimeType(file),
         size: file.size,
         data: comma === -1 ? value : value.slice(comma + 1),
       });
@@ -1700,6 +1700,58 @@ function formatBytes(size: number) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+const orchestrationArchiveMimeTypes = new Set([
+  'application/zip',
+  'application/x-zip-compressed',
+  'application/x-tar',
+  'application/gzip',
+  'application/x-gzip',
+  'application/x-bzip2',
+  'application/x-xz',
+  'application/x-7z-compressed',
+  'application/vnd.rar',
+  'application/x-rar-compressed',
+]);
+
+const orchestrationArchiveExtensions = [
+  '.zip',
+  '.tar',
+  '.tar.gz',
+  '.tgz',
+  '.gz',
+  '.bz2',
+  '.xz',
+  '.7z',
+  '.rar',
+];
+
+const orchestrationUploadAccept = [
+  ...orchestrationArchiveExtensions,
+  ...Array.from(orchestrationArchiveMimeTypes),
+  '*/*',
+].join(',');
+
+function inferredUploadMimeType(file: File) {
+  const browserType = stringsTrim(file.type);
+  if (browserType && browserType !== 'application/octet-stream') return browserType;
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.tar.gz') || name.endsWith('.tgz')) return 'application/gzip';
+  if (name.endsWith('.zip')) return 'application/zip';
+  if (name.endsWith('.tar')) return 'application/x-tar';
+  if (name.endsWith('.gz')) return 'application/gzip';
+  if (name.endsWith('.bz2')) return 'application/x-bzip2';
+  if (name.endsWith('.xz')) return 'application/x-xz';
+  if (name.endsWith('.7z')) return 'application/x-7z-compressed';
+  if (name.endsWith('.rar')) return 'application/vnd.rar';
+  return browserType || 'application/octet-stream';
+}
+
+function isArchiveUpload(file: Pick<OrchestrationFile, 'name' | 'mimeType'>) {
+  const mimeType = stringsTrim(file.mimeType).toLowerCase();
+  const name = file.name.toLowerCase();
+  return orchestrationArchiveMimeTypes.has(mimeType) || orchestrationArchiveExtensions.some((ext) => name.endsWith(ext));
+}
+
 function OrchestrationFileList({ files, label, compact = false }: { files: OrchestrationFile[]; label?: string; compact?: boolean }) {
   if (!files.length) return null;
   return (
@@ -1711,7 +1763,7 @@ function OrchestrationFileList({ files, label, compact = false }: { files: Orche
             "min-w-0 rounded-md border border-border bg-muted/25 px-2 py-1.5 text-xs",
             compact ? "flex items-center gap-2" : "inline-flex max-w-full items-center gap-2"
           )}>
-            <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            {isArchiveUpload(file) ? <FileArchive className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
             <span className="min-w-0 truncate">{file.name}</span>
             <span className="shrink-0 text-[10px] text-muted-foreground">{formatBytes(file.size)}</span>
             {file.mimeType && <span className="hidden shrink-0 rounded border border-border px-1 py-0.5 text-[10px] text-muted-foreground sm:inline">{file.mimeType}</span>}
@@ -3734,7 +3786,7 @@ function OrchestrationWorkspace({
                 </label>
               </div>
 
-              <div className="min-h-0 flex flex-1 flex-col gap-2">
+              <div className="flex min-h-0 shrink-0 flex-col gap-2">
                 <div className="flex shrink-0 items-center justify-between">
                   <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.files}</span>
                   <Button variant="ghost" size="sm" className="h-7 gap-1.5" onClick={() => fileInputRef.current?.click()} disabled={creating || isRunning}>
@@ -3742,8 +3794,8 @@ function OrchestrationWorkspace({
                     {t.add}
                   </Button>
                 </div>
-                <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(event) => addFiles(event.target.files).catch((err) => setError(err.message))} />
-                <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-1 elegant-scrollbar">
+                <input ref={fileInputRef} type="file" multiple accept={orchestrationUploadAccept} className="hidden" onChange={(event) => addFiles(event.target.files).catch((err) => setError(err.message))} />
+                <div className="max-h-36 min-h-[3rem] space-y-1.5 overflow-y-auto rounded-md border border-border/70 bg-background/40 p-1.5 elegant-scrollbar">
                   {files.length === 0 ? (
                     activeRunFiles.length > 0 ? (
                       <OrchestrationFileList files={activeRunFiles} label={t.currentRunFiles} compact />
@@ -3751,11 +3803,11 @@ function OrchestrationWorkspace({
                       <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">{t.uploadProofFiles}</div>
                     )
                   ) : files.map((file) => (
-                    <div key={file.id} className="flex items-center gap-2 rounded-md border border-border bg-muted/20 px-2 py-1.5">
-                      <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                      <span className="min-w-0 flex-1 truncate text-xs">{file.name}</span>
-                      <span className="text-[10px] text-muted-foreground">{formatBytes(file.size)}</span>
-                      <button className="text-muted-foreground hover:text-foreground" onClick={() => removeFile(file.id)} aria-label={`${t.removeFile} ${file.name}`}>
+                    <div key={file.id} className="grid h-8 grid-cols-[16px_minmax(0,1fr)_max-content_24px] items-center gap-2 rounded-md border border-border bg-muted/20 px-2">
+                      {isArchiveUpload(file) ? <FileArchive className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+                      <span className="min-w-0 truncate text-xs" title={file.name}>{file.name}</span>
+                      <span className="whitespace-nowrap text-[10px] text-muted-foreground">{formatBytes(file.size)}</span>
+                      <button className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => removeFile(file.id)} aria-label={`${t.removeFile} ${file.name}`}>
                         <X className="h-3.5 w-3.5" />
                       </button>
                     </div>

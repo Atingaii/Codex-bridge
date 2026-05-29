@@ -105,8 +105,11 @@ Codex orchestration uses `internal/bridge/orchestration.go:runCodexAppServer`
 when the selected endpoint is not auto-execute. The app-server runner emits
 `approval_request` with `payload.runId` and the orchestration turn id in
 `payload.promptId`, and the browser response is routed back to the same Bridge
-run. Hub rejects review-required orchestration if the online Bridge does not
-advertise browser approval support for both Claude and Codex.
+run. It also normalizes turn input to valid UTF-8 before `turn/start`, matching
+the `codex exec` runner's prompt handling so relay handoffs cannot fail before a
+visible CLI response because of invalid bytes. Hub rejects review-required
+orchestration if the online Bridge does not advertise browser approval support
+for both Claude and Codex.
 
 ## Implementation Steps
 

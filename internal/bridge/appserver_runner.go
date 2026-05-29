@@ -29,6 +29,7 @@ func (r *CodexAppServerRunner) Name() string { return "codex-app-server" }
 func (r *CodexAppServerRunner) Close() {}
 
 func (r *CodexAppServerRunner) Prompt(ctx context.Context, req RunnerRequest, onUpdate func(update RunnerUpdate)) (RunnerResult, error) {
+	req.Content = sanitizePromptText(req.Content)
 	client, err := r.start(ctx, req)
 	if err != nil {
 		return RunnerResult{}, err

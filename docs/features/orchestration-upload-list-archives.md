@@ -5,8 +5,8 @@
 - Keep the orchestration file picker usable when many files are attached.
 - Make the attached-file area independently scrollable so it cannot overlap the
   task controls or run button.
-- Explicitly support archive uploads such as `.zip`, `.tar`, `.tar.gz`, `.tgz`,
-  `.gz`, `.bz2`, `.xz`, and `.7z`.
+- Explicitly recognize archive uploads such as `.zip`, `.tar`, `.tar.gz`,
+  `.tgz`, `.gz`, `.bz2`, `.xz`, and `.7z` without restricting the file picker.
 
 ## Non-Goals
 
@@ -24,8 +24,8 @@ already accept binary base64 payloads.
 
 ## Implementation Steps
 
-1. Add archive extensions and common archive MIME types to the orchestration
-   file input `accept` list.
+1. Keep the orchestration file input unrestricted so source files, logs,
+   screenshots, and archives can all be selected.
 2. Normalize missing or generic browser MIME values for known archive
    extensions so the UI and run metadata identify them as archives.
 3. Render pending files in a bounded, scrollable list with stable row sizing and
@@ -37,6 +37,6 @@ already accept binary base64 payloads.
 
 - [x] Multiple pending files can be scrolled inside the file picker area.
 - [x] File names truncate without overlapping size labels or remove buttons.
-- [x] Archive uploads are accepted by the frontend picker and survive Bridge
-      preparation as local files.
+- [x] Archive uploads are accepted by the unrestricted frontend picker and
+      survive Bridge preparation as local files.
 - [x] `npm run build` refreshes `internal/web/static/`.

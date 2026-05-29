@@ -535,8 +535,11 @@ const uiText = {
     files: 'Files',
     attachedFiles: 'Attached files',
     currentRunFiles: 'Run files',
+    pendingFiles: 'Pending files',
+    uploadedFileStatus: 'Uploaded',
+    pendingFileStatus: 'Pending',
     add: 'Add',
-    uploadProofFiles: 'Upload Coq, Lean, Isabelle, source, logs, or screenshots.',
+    uploadProofFiles: 'Upload source, logs, screenshots, archives, or any other file type.',
     stopRun: 'Stop Run',
     start: 'Start',
     noOrchestrationRuns: 'No orchestration runs',
@@ -711,8 +714,11 @@ const uiText = {
     files: '文件',
     attachedFiles: '已上传文件',
     currentRunFiles: '本轮文件',
+    pendingFiles: '待发送文件',
+    uploadedFileStatus: '已上传',
+    pendingFileStatus: '待发送',
     add: '添加',
-    uploadProofFiles: '上传 Coq、Lean、Isabelle、源码、日志或截图。',
+    uploadProofFiles: '可上传源码、日志、截图、压缩包或任何其他类型文件。',
     stopRun: '停止运行',
     start: '开始',
     noOrchestrationRuns: '暂无编排运行',
@@ -1725,12 +1731,6 @@ const orchestrationArchiveExtensions = [
   '.rar',
 ];
 
-const orchestrationUploadAccept = [
-  ...orchestrationArchiveExtensions,
-  ...Array.from(orchestrationArchiveMimeTypes),
-  '*/*',
-].join(',');
-
 function inferredUploadMimeType(file: File) {
   const browserType = stringsTrim(file.type);
   if (browserType && browserType !== 'application/octet-stream') return browserType;
@@ -1752,22 +1752,48 @@ function isArchiveUpload(file: Pick<OrchestrationFile, 'name' | 'mimeType'>) {
   return orchestrationArchiveMimeTypes.has(mimeType) || orchestrationArchiveExtensions.some((ext) => name.endsWith(ext));
 }
 
-function OrchestrationFileList({ files, label, compact = false }: { files: OrchestrationFile[]; label?: string; compact?: boolean }) {
+function OrchestrationFileRow({ file, status, onRemove, removeLabel }: {
+  file: OrchestrationFile;
+  status?: string;
+  onRemove?: () => void;
+  removeLabel?: string;
+}) {
+  return (
+    <div className={cn(
+      "grid h-8 min-w-0 items-center gap-2 rounded-md border border-border bg-muted/20 px-2 text-xs",
+      onRemove ? "grid-cols-[16px_minmax(0,1fr)_max-content_max-content_24px]" : "grid-cols-[16px_minmax(0,1fr)_max-content_max-content]"
+    )}>
+      {isArchiveUpload(file) ? <FileArchive className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+      <span className="min-w-0 truncate" title={file.name}>{file.name}</span>
+      {status && <span className="whitespace-nowrap rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
+      <span className="whitespace-nowrap text-[10px] text-muted-foreground">{formatBytes(file.size)}</span>
+      {onRemove && (
+        <button className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" onClick={onRemove} aria-label={removeLabel || file.name}>
+          <X className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function OrchestrationFileList({ files, label, compact = false, status }: { files: OrchestrationFile[]; label?: string; compact?: boolean; status?: string }) {
   if (!files.length) return null;
   return (
     <div className={cn("space-y-1.5", label && "mt-2")}>
       {label && <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</div>}
       <div className={cn(compact ? "space-y-1.5" : "flex flex-wrap gap-1.5")}>
         {files.map((file, index) => (
-          <div key={`${file.name}-${file.size}-${index}`} className={cn(
-            "min-w-0 rounded-md border border-border bg-muted/25 px-2 py-1.5 text-xs",
-            compact ? "flex items-center gap-2" : "inline-flex max-w-full items-center gap-2"
-          )}>
-            {isArchiveUpload(file) ? <FileArchive className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
-            <span className="min-w-0 truncate">{file.name}</span>
-            <span className="shrink-0 text-[10px] text-muted-foreground">{formatBytes(file.size)}</span>
-            {file.mimeType && <span className="hidden shrink-0 rounded border border-border px-1 py-0.5 text-[10px] text-muted-foreground sm:inline">{file.mimeType}</span>}
-          </div>
+          compact ? (
+            <OrchestrationFileRow key={`${file.name}-${file.size}-${index}`} file={file} status={status} />
+          ) : (
+            <div key={`${file.name}-${file.size}-${index}`} className="inline-flex max-w-full min-w-0 items-center gap-2 rounded-md border border-border bg-muted/25 px-2 py-1.5 text-xs">
+              {isArchiveUpload(file) ? <FileArchive className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+              <span className="min-w-0 truncate" title={file.name}>{file.name}</span>
+              {status && <span className="shrink-0 rounded border border-border px-1 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
+              <span className="shrink-0 text-[10px] text-muted-foreground">{formatBytes(file.size)}</span>
+              {file.mimeType && <span className="hidden shrink-0 rounded border border-border px-1 py-0.5 text-[10px] text-muted-foreground sm:inline">{file.mimeType}</span>}
+            </div>
+          )
         ))}
       </div>
     </div>
@@ -3686,8 +3712,8 @@ function OrchestrationWorkspace({
             )}
           </div>
 
-          <aside className="min-h-0 border-t lg:border-t-0 lg:border-l border-border bg-background/95 p-4 overflow-y-auto lg:overflow-hidden elegant-scrollbar">
-            <div className="flex min-h-full flex-col gap-3 lg:h-full lg:min-h-0">
+          <aside className="min-h-0 border-t border-border bg-background/95 p-4 overflow-y-auto elegant-scrollbar lg:border-l lg:border-t-0">
+            <div className="flex min-h-full flex-col gap-3">
               <div className="space-y-3">
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.mode}</label>
@@ -3786,7 +3812,7 @@ function OrchestrationWorkspace({
                 </label>
               </div>
 
-              <div className="flex min-h-0 shrink-0 flex-col gap-2">
+              <div className="flex shrink-0 flex-col gap-2">
                 <div className="flex shrink-0 items-center justify-between">
                   <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.files}</span>
                   <Button variant="ghost" size="sm" className="h-7 gap-1.5" onClick={() => fileInputRef.current?.click()} disabled={creating || isRunning}>
@@ -3794,24 +3820,42 @@ function OrchestrationWorkspace({
                     {t.add}
                   </Button>
                 </div>
-                <input ref={fileInputRef} type="file" multiple accept={orchestrationUploadAccept} className="hidden" onChange={(event) => addFiles(event.target.files).catch((err) => setError(err.message))} />
-                <div className="max-h-36 min-h-[3rem] space-y-1.5 overflow-y-auto rounded-md border border-border/70 bg-background/40 p-1.5 elegant-scrollbar">
-                  {files.length === 0 ? (
-                    activeRunFiles.length > 0 ? (
-                      <OrchestrationFileList files={activeRunFiles} label={t.currentRunFiles} compact />
-                    ) : (
-                      <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">{t.uploadProofFiles}</div>
-                    )
-                  ) : files.map((file) => (
-                    <div key={file.id} className="grid h-8 grid-cols-[16px_minmax(0,1fr)_max-content_24px] items-center gap-2 rounded-md border border-border bg-muted/20 px-2">
-                      {isArchiveUpload(file) ? <FileArchive className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
-                      <span className="min-w-0 truncate text-xs" title={file.name}>{file.name}</span>
-                      <span className="whitespace-nowrap text-[10px] text-muted-foreground">{formatBytes(file.size)}</span>
-                      <button className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => removeFile(file.id)} aria-label={`${t.removeFile} ${file.name}`}>
-                        <X className="h-3.5 w-3.5" />
-                      </button>
+                <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(event) => addFiles(event.target.files).catch((err) => setError(err.message))} />
+                <div className="space-y-2">
+                  <section className="rounded-md border border-border/70 bg-background/40">
+                    <div className="flex h-7 items-center justify-between border-b border-border/70 px-2">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{t.currentRunFiles}</span>
+                      {activeRunFiles.length > 0 && <span className="text-[10px] text-muted-foreground">{activeRunFiles.length}</span>}
                     </div>
-                  ))}
+                    <div className="max-h-32 min-h-[3rem] space-y-1.5 overflow-y-auto p-1.5 elegant-scrollbar">
+                      {activeRunFiles.length > 0 ? (
+                        activeRunFiles.map((file, index) => (
+                          <OrchestrationFileRow key={`${file.name}-${file.size}-${index}`} file={file} status={t.uploadedFileStatus} />
+                        ))
+                      ) : (
+                        <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">{t.uploadProofFiles}</div>
+                      )}
+                    </div>
+                  </section>
+                  {files.length > 0 && (
+                    <section className="rounded-md border border-border/70 bg-background/40">
+                      <div className="flex h-7 items-center justify-between border-b border-border/70 px-2">
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{t.pendingFiles}</span>
+                        <span className="text-[10px] text-muted-foreground">{files.length}</span>
+                      </div>
+                      <div className="max-h-36 space-y-1.5 overflow-y-auto p-1.5 elegant-scrollbar">
+                        {files.map((file) => (
+                          <OrchestrationFileRow
+                            key={file.id}
+                            file={file}
+                            status={t.pendingFileStatus}
+                            onRemove={() => removeFile(file.id)}
+                            removeLabel={`${t.removeFile} ${file.name}`}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  )}
                 </div>
               </div>
 

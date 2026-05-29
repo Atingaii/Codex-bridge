@@ -4,10 +4,12 @@
 
 - Persist a user-readable orchestration failure reason when the verifier
   explains why acceptance failed.
+- Keep terminal `run.end` / `run.error` content visible as an explicit summary
+  in the browser timeline when it differs from the last turn.
 - Prevent terminal orchestration runs from showing stale command cards as still
   running.
 - Keep an online Bridge endpoint's `workingDirs` list fresh while the reverse
-  WebSocket stays connected.
+  WebSocket stays connected, including removal of paths that no longer exist.
 
 ## Non-Goals
 
@@ -28,7 +30,8 @@
 - Older Bridges that send heartbeat payloads without `workingDirs` continue to
   only refresh `agents.last_seen_at`.
 - Orchestration event shape is unchanged. The frontend derives non-running
-  display state for unclosed command events when the selected run is terminal.
+  display state for unclosed command events when the selected run is terminal
+  and renders terminal run content as a visible summary message when useful.
 
 ## Implementation Steps
 
@@ -44,6 +47,10 @@
    rendering so unpaired `command.start` events do not remain active forever.
 6. Poll `/api/agents` quietly while the browser is visible so refreshed working
    directories reach the selector without a reconnect.
+7. Render terminal `run.end` / `run.error` content as a timeline summary unless
+   it duplicates an already visible turn conclusion.
+8. Filter discovered working directories through `os.Stat` so deleted paths do
+   not remain advertised after the next Bridge heartbeat.
 
 ## Exit Gates
 
@@ -51,6 +58,8 @@
   stored `run.error` reason instead of the raw shell command used to check it.
 - A failed, completed, or canceled run does not render any command as still
   running when no matching `command.end` was recorded.
+- The final CLI/run result is visible in the orchestration timeline when
+  `run.end` or `run.error` carries a user-readable conclusion.
 - Creating and deleting a first-level workspace directory under the Bridge CWD
   is reflected in `GET /api/agents` after a heartbeat.
 - `cd frontend && npm run build`

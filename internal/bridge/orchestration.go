@@ -5183,6 +5183,10 @@ func composeRelayPromptWithFirstCLI(mode, firstCLI, userPrompt, contextSummary s
 	b.WriteString("Codex Bridge is relaying this browser orchestration like a human handoff between local CLIs. Treat this as a real user instruction, use your normal capabilities, and do not wait for Bridge to validate strategy or proof choices.\n\n")
 	b.WriteString(orchestrationLanguageRule)
 	b.WriteString("\n\n")
+	if turn == 1 && looksLikeFormalProofTask(userPrompt) && maxTurns >= 4 {
+		b.WriteString(initialFormalProofOrchestrationStrategy(mode, firstCLI, userPrompt))
+		b.WriteString("\n")
+	}
 	if turn == 1 {
 		b.WriteString("You are the first CLI handling the user's task. Your visible result will be handed to another CLI afterward, so include the important files changed, commands run, blockers, and useful next context in your final response.\n\n")
 	} else {
@@ -5291,6 +5295,7 @@ func formalProofRelayGuidance(userPrompt, mode, role string) string {
 	b.WriteString("- For recursive or termination obligations, state the measure/relation or semantic-equivalence obligation before coding. If you use bounded/fuel wrappers, fixed default fuel, or structurally recursive helper functions, also prove equivalence to the original semantics plus decrease/well-foundedness and fuel sufficiency; otherwise report needs_next or blocked.\n")
 	b.WriteString("- Include audit evidence when available: source-only shortcut scans, the project build command, Coq/Rocq Print Assumptions or equivalent dependency audit, Lean #print axioms, Isabelle thm_oracles/oracle-free audit, and the named target theorem/fact.\n")
 	b.WriteString("- Keep handoffs falsifiable: target theorem/fact, uploaded-source mapping, branch/decrease obligation, semantic constraints, attempted proof path, exact blocker, commands run, and remaining risks.\n")
+	b.WriteString("- Browser-visible result rule: the final answer must include a concise Chinese \"最终测试结果/最终结论\" section that says whether the original user requirement is satisfied, lists the exact build/audit commands, and names any unmet proof obligation. Do not leave the user to infer the result only from command logs.\n")
 	if coqGuidance := coqProofRelayGuidance(userPrompt); coqGuidance != "" {
 		b.WriteString(coqGuidance)
 	}
@@ -5307,6 +5312,28 @@ func formalProofRelayGuidance(userPrompt, mode, role string) string {
 	return b.String()
 }
 
+func initialFormalProofOrchestrationStrategy(mode, firstCLI, userPrompt string) string {
+	if !looksLikeFormalProofTask(userPrompt) {
+		return ""
+	}
+	firstCLI = normalizeRelayFirstCLI(firstCLI)
+	var b strings.Builder
+	b.WriteString("Initial orchestration strategy for this formal-proof task:\n")
+	if mode == "debate" {
+		b.WriteString("- Use proposer/critic flow. The proposer makes one falsifiable proof claim or patch with named checks; the critic first tries to refute it by inspecting statements, definitions, trust assumptions, and build/audit output.\n")
+	} else {
+		b.WriteString("- Use implementer/reviewer flow. The implementer builds the smallest faithful project and proof-obligation ledger; the reviewer independently falsifies completion claims before any resolved handoff.\n")
+	}
+	if firstCLI == "codex" {
+		b.WriteString("- Because Codex starts first, use it as the verifier/planner first: identify the original obligation, expected target theorem/fact, forbidden shortcuts, and exact evidence the next turn must produce before broad proof search.\n")
+	} else {
+		b.WriteString("- Because Claude starts first, use it as the builder first: create the visible project and ledger before attempting long proof search, then hand the audit checklist to the next CLI.\n")
+	}
+	b.WriteString("- Stop blind proof search after three failed strategies or one long proof-assistant attempt. Hand off a ledger instead of repeating similar measure guesses.\n")
+	b.WriteString("- Acceptance is not compile-only: the visible final result must say whether the original theorem/termination obligation is discharged, not merely whether a generated project builds.\n")
+	return b.String()
+}
+
 func coqProofRelayGuidance(userPrompt string) string {
 	if !looksLikeCoqProofTask(userPrompt) {
 		return ""
@@ -5316,6 +5343,7 @@ func coqProofRelayGuidance(userPrompt string) string {
 	b.WriteString("- Coq/Rocq audit: scan deliverable .v files for proof shortcuts, run Print Assumptions on the named target theorem, and require Closed under the global context before claiming a completed proof.\n")
 	if looksLikeCoqUploadProofBenchmark(userPrompt) {
 		b.WriteString("- Coq upload benchmark: for Model.thy, Termination.thy, and ROOT, the visible result should account for all three uploads, write a new Coq project under the requested cwd, pass make/coqc, run a source-only shortcut scan, run Print Assumptions on a named modify_lin target, and audit the original termination modify_lin obligation. modify_lin_fuel/default_fuel or fixed-fuel translations remain unresolved unless equivalence, decrease, and fuel sufficiency are proved.\n")
+		b.WriteString("- Coq upload benchmark final checklist: explicitly report uploaded files used, new project path, target theorem name, make/coqc result, shortcut scan result, Print Assumptions result, final modify_lin definition inspection, original-obligation/decrease/equivalence evidence, and remaining risks.\n")
 	}
 	return b.String()
 }

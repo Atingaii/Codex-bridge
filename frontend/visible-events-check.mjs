@@ -5,6 +5,8 @@ const source = readFileSync(new URL('./src/app/App.tsx', import.meta.url), 'utf8
 
 assert.match(source, /function orchestrationStatusContent\(event: OrchestrationEvent\)/);
 assert.match(source, /if \(\(event\.kind === 'run\.end' \|\| event\.kind === 'run\.error'\) && content\) return content;/);
+assert.match(source, /if \(event\.kind === 'run\.end' \|\| event\.kind === 'run\.error'\)/);
+assert.match(source, /role: 'summary'/);
 assert.match(source, /function isBridgeRelayNotice\(event: Pick<OrchestrationEvent, 'kind' \| 'content'>\)/);
 assert.match(source, /contentfulTurnEnds\.has\(orchestrationTurnKey\(event\)\) && !isBridgeRelayNotice\(event\)/);
 assert.match(source, /const rawContent = item\.content \|\| item\.error \|\| '';/);
@@ -42,3 +44,28 @@ const commandError = orchestrationStatusContent({
 });
 
 assert.equal(commandError, 'command failed');
+
+function visibleTerminalSummary(events) {
+  const visible = [];
+  events.forEach((event, index) => {
+    if (event.kind === 'turn.end' && stringsTrim(event.content)) {
+      visible.push({ kind: event.kind, content: event.content, key: `turn:${index}` });
+      return;
+    }
+    if (event.kind === 'run.end' || event.kind === 'run.error') {
+      const content = orchestrationStatusContent(event);
+      const duplicate = visible.some((item) => stringsTrim(item.content) === stringsTrim(content));
+      if (content && !duplicate) visible.push({ kind: event.kind, role: 'summary', content, key: `run:${index}` });
+    }
+  });
+  return visible;
+}
+
+const visible = visibleTerminalSummary([
+  { kind: 'turn.end', content: '本轮结论：构建通过，但 modify_lin 仍未证明。' },
+  { kind: 'run.end', status: 'completed', content: '最终测试结果：未满足用户要求，缺少 modify_lin 原始终止性证明。' },
+]);
+
+assert.equal(visible.length, 2);
+assert.equal(visible[1].role, 'summary');
+assert.ok(visible[1].content.includes('最终测试结果'));

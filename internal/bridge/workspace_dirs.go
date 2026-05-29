@@ -24,7 +24,7 @@ func DiscoverWorkingDirs(cfg *config.Config) []string {
 	dirs := []string{base}
 	entries, err := os.ReadDir(base)
 	if err != nil {
-		return dirs
+		return existingUniqueSortedWorkingDirs(dirs)
 	}
 	children := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -43,7 +43,7 @@ func DiscoverWorkingDirs(cfg *config.Config) []string {
 		}
 		dirs = append(dirs, child)
 	}
-	return uniqueSortedWorkingDirs(dirs)
+	return existingUniqueSortedWorkingDirs(dirs)
 }
 
 func cleanWorkingDirPath(path string) string {
@@ -76,4 +76,23 @@ func uniqueSortedWorkingDirs(dirs []string) []string {
 	}
 	sort.Strings(children)
 	return append([]string{base}, children...)
+}
+
+func existingUniqueSortedWorkingDirs(dirs []string) []string {
+	if len(dirs) == 0 {
+		return nil
+	}
+	existing := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		dir = cleanWorkingDirPath(dir)
+		if dir == "" {
+			continue
+		}
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		existing = append(existing, dir)
+	}
+	return uniqueSortedWorkingDirs(existing)
 }

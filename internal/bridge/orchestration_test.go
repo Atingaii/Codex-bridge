@@ -1319,10 +1319,16 @@ func TestComposeRelayPromptKeepsCoqUploadTaskPassThrough(t *testing.T) {
 	for _, want := range []string{
 		"Codex Bridge is relaying this browser orchestration like a human handoff",
 		"Treat this as a real user instruction",
+		"Initial orchestration strategy for this formal-proof task",
+		"implementer/reviewer flow",
+		"Acceptance is not compile-only",
 		"You are the first CLI handling the user's task",
 		"visible result will be handed to another CLI afterward",
 		"Formal proof relay guidance",
+		"Browser-visible result rule",
+		"最终测试结果/最终结论",
 		"Coq upload benchmark",
+		"Coq upload benchmark final checklist",
 		"Print Assumptions",
 		"User task:",
 		"Model.thy Termination.thy ROOT",
@@ -1338,6 +1344,33 @@ func TestComposeRelayPromptKeepsCoqUploadTaskPassThrough(t *testing.T) {
 	} {
 		if strings.Contains(prompt, bad) {
 			t.Fatalf("relay prompt should not inject old proof gate %q:\n%s", bad, prompt)
+		}
+	}
+}
+
+func TestComposeRelayPromptUsesCodexFirstProofStrategy(t *testing.T) {
+	prompt := composeRelayPromptWithFirstCLI(
+		"debate",
+		"codex",
+		"把 Model.thy Termination.thy ROOT 做成 Coq 项目，补全 termination modify_lin 的证明，不能用占位符。",
+		"",
+		false,
+		"critic",
+		"codex",
+		1,
+		4,
+		nil,
+	)
+	for _, want := range []string{
+		"Initial orchestration strategy for this formal-proof task",
+		"Use proposer/critic flow",
+		"Because Codex starts first",
+		"verifier/planner first",
+		"Stop blind proof search after three failed strategies",
+		"First CLI: codex",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("codex-first proof prompt missing %q:\n%s", want, prompt)
 		}
 	}
 }

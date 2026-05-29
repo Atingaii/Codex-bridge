@@ -147,15 +147,16 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 2. `internal/bridge/orchestration.go:roleForTurnWithFirstCLI` controls which
    CLI owns each turn.
 3. `internal/bridge/orchestration.go:composeRelayPrompt` controls the
-   pass-through prompt sent to Claude/Codex and the short Isabelle timeout
-   boundary.
+   pass-through prompt sent to Claude/Codex, first-turn formal-proof strategy
+   guidance, and the short Isabelle timeout boundary.
 4. `internal/bridge/orchestration.go:formatRelayPriorTurn` controls how much
    prior visible output and command context is sent to the next CLI.
 5. `internal/bridge/orchestration.go:runRelayCLI` preserves the per-run Claude
    session id and Codex thread id when launching the next CLI turn.
 6. `internal/bridge/orchestration.go:relayTerminalContent` controls terminal
    run content without adding a hidden verifier or remediation turn.
-7. Keep event kinds compatible with `frontend/src/app/App.tsx:visibleOrchestrationEvents`.
+7. Keep event kinds compatible with `frontend/src/app/App.tsx:visibleOrchestrationEvents`,
+   including terminal run summary rendering for `run.end` / `run.error`.
 8. Update
    [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
 

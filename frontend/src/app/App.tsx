@@ -1070,22 +1070,48 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
       return;
     }
 
+    if (event.kind === 'run.end' || event.kind === 'run.error') {
+      const content = cleanOrchestrationDisplayContent(orchestrationStatusContent(event));
+      const hasEquivalentVisibleConclusion = visible
+        .slice(segmentVisibleStart)
+        .some((item) => item.type === 'message' && stringsTrim(item.content) === stringsTrim(content));
+      if (content && !isRawCCBObserverDump(content) && !hasEquivalentVisibleConclusion) {
+        visible.push({
+          type: 'message',
+          key: orchestrationEventKey(event, index),
+          runId: event.runId,
+          kind: event.kind,
+          role: 'summary',
+          cli: event.cli,
+          turnId: event.turnId,
+          content,
+          status: event.status,
+          error: event.error,
+          createdAt: event.createdAt,
+          commands: [],
+        });
+      } else if (shouldShowOrchestrationStatus(event)) {
+        visible.push(statusVisibleEvent(event, index));
+      }
+      if (event.kind === 'run.end') {
+        const fallback = finalOrchestrationConclusionFallback(
+          ordered.slice(segmentStartIndex, index + 1),
+          visible.slice(segmentVisibleStart),
+          runId,
+          run,
+          t
+        );
+        if (fallback) visible.push(fallback);
+        segmentStartIndex = index + 1;
+        segmentVisibleStart = visible.length;
+      }
+      return;
+    }
+
     if (shouldShowOrchestrationStatus(event)) {
       visible.push(statusVisibleEvent(event, index));
     }
 
-    if (event.kind === 'run.end') {
-      const fallback = finalOrchestrationConclusionFallback(
-        ordered.slice(segmentStartIndex, index + 1),
-        visible.slice(segmentVisibleStart),
-        runId,
-        run,
-        t
-      );
-      if (fallback) visible.push(fallback);
-      segmentStartIndex = index + 1;
-      segmentVisibleStart = visible.length;
-    }
   });
   return visible;
 }

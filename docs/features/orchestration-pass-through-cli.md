@@ -65,6 +65,14 @@ Bridge prompt construction keeps mostly generic orchestration context:
   a new Coq project, run make/coqc, scan for shortcuts, run `Print Assumptions`
   on a named `modify_lin` target, and treat `modify_lin_fuel`/`default_fuel` as
   unresolved unless equivalence, decrease, and fuel sufficiency are proved.
+  First-turn formal-proof prompts also declare the chosen orchestration
+  strategy: collaboration uses an implementer/reviewer split, debate uses a
+  proposer/critic split, and `firstCli=codex` starts with verifier/planner
+  duties before broad proof search. The prompt tells the CLI to stop blind proof
+  search after bounded failed attempts and to put a Chinese
+  `最终测试结果` / `最终结论` section in the visible final answer so the browser
+  timeline carries the test result directly instead of requiring the user to
+  infer it from command logs.
 
 The run may choose `firstCli=claude` or `firstCli=codex`. The selected value is
 shown in the run start event, sent in the existing `orchestration_start`
@@ -154,7 +162,8 @@ an OOM-killed child build does not by itself restart the Bridge parent.
   files, and lightweight proof workflow reminders for scans, `Print
   Assumptions`, named `modify_lin` obligations, and fuel-wrapper risks; they do
   not include controlled-background Isabelle templates or hidden Bridge proof
-  gates.
+  gates. First-turn prompts also show the selected strategy and require a
+  visible final test-result section.
 - Isabelle-looking prompts include only the explicit-timeout stop/report
   boundary and do not ban foreground builds. Coq conversion prompts with
   uploaded Isabelle files do not enter the Isabelle stream-input/nudge path.

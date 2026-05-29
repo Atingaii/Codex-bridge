@@ -42,8 +42,9 @@ and terminal status to the browser, and the next CLI receives the previous
 CLI's visible result plus useful command context. Bridge preserves a stable
 Claude session id and Codex thread id where each CLI supports resume. It does
 not add hidden proof strategy gates, automatic verifier turns, or remediation
-turns; the only proof-related boundary in prompt text is an Isabelle timeout
-instruction for long builds. The relay contract is documented in
+turns; formal-proof-looking prompts only add visible workflow guidance such as
+the implementer/reviewer or proposer/critic strategy, proof audit reminders, and
+an Isabelle timeout instruction for long builds. The relay contract is documented in
 [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
 
 Review-required Claude orchestration uses Claude Code's

@@ -29,23 +29,27 @@ Browser UI
 Hub (SQLite orchestration_runs + orchestration_events)
   | reverse WSS orchestration_start / orchestration_event
 Bridge
-  | spawn per turn
+  | run-scoped native CLI sessions
 Codex CLI / Claude CLI
 ```
 
-The Bridge keeps orchestration deterministic and low overhead: it still spawns
-one CLI process per turn, and uses `codex app-server` for Codex turns when
-browser approval is required. Direct orchestration is a pass-through relay: the
-run's persisted `first_cli` selection decides whether Claude or Codex receives
-the browser task first, Bridge streams CLI deltas, typed command events, and
-terminal status to the browser, and the next CLI receives the previous CLI's
-visible result plus useful command context. Bridge preserves a stable Claude
-session id and Codex thread id where each CLI supports resume. It does not add
-hidden proof strategy gates, automatic verifier turns, or remediation turns.
-Formal-proof guidance is opt-in through the persisted `profile=formal-proof`
-run setting selected in the orchestration UI; the default profile does not
-activate proof guidance based on prompt keywords. The relay contract is
-documented in
+The Bridge keeps orchestration deterministic while preserving native CLI
+continuity. For each active orchestration run, Bridge keeps one long-lived
+Codex app-server thread and one long-lived Claude Code stream-json session,
+then sends later turns for the same run back into those native conversations.
+Direct orchestration is a pass-through relay: the run's persisted `first_cli`
+selection decides whether Claude or Codex receives the browser task first,
+Bridge streams CLI deltas, typed command events, and terminal status to the
+browser, and the next CLI receives the previous CLI's visible result plus
+useful command context. Bridge persists the Codex thread id and stable Claude
+session id so follow-up prompts can resume native history after a Bridge
+restart where the CLI supports it. It does not add hidden proof strategy gates,
+automatic verifier turns, or remediation turns. Formal-proof guidance is opt-in
+through the persisted `profile=formal-proof` run setting selected in the
+orchestration UI; the default profile does not activate proof guidance based on
+prompt keywords. The native-session design is documented in
+[docs/features/native-interactive-orchestration.md](features/native-interactive-orchestration.md),
+and the relay contract is documented in
 [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
 Profile-specific prompt fragments, assessments, manual-build carry-over, and
 command fingerprint policy live behind `internal/bridge/profiles/registry` and
@@ -72,17 +76,19 @@ Bridge said.
 
 Review-required Claude orchestration uses Claude Code's
 `--permission-prompt-tool` support. `internal/bridge/orchestration.go:runClaude`
-writes a temporary MCP config, runs `codex-bridge claude-approval-mcp` as a
-stdio MCP server, and forwards MCP permission prompts back to the parent Bridge
-over a Unix socket. Hub then reuses existing `approval_request` and
-`approval_response` frames with `payload.runId` for browser approval on the
-orchestration timeline.
+and `internal/bridge/orchestration.go:runClaudeInteractive` write a temporary
+MCP config, run `codex-bridge claude-approval-mcp` as a stdio MCP server, and
+forward MCP permission prompts back to the parent Bridge over a Unix socket.
+Hub then reuses existing `approval_request` and `approval_response` frames with
+`payload.runId` for browser approval on the orchestration timeline.
 
-Review-required Codex orchestration reuses
-`internal/bridge/appserver_runner.go:Prompt`. App-server
-approval callbacks are mapped to run-scoped `approval_request` frames with
+Codex orchestration uses `codex app-server --listen stdio://` through
+`internal/bridge/orchestration.go:runCodexInteractive`. App-server approval
+callbacks are mapped to run-scoped `approval_request` frames with
 `payload.runId`, and browser decisions return as `approval_response` frames to
-the owning Bridge.
+the owning Bridge. The standalone `internal/bridge/appserver_runner.go:Prompt`
+path remains the Codex app-server runner for chat and non-orchestration runner
+uses.
 
 CCB is not an active orchestration backend for new Hub-managed runs. Historical
 CCB helper code and event rendering remain in place, but current orchestration
@@ -152,7 +158,9 @@ Chat continuity:
 1. Hub loads `sessions.remote_thread_id`.
 2. Hub sends it in `open_session`.
 3. Bridge stores it in the live session.
-4. `codex exec resume <thread-id> -` is used for follow-up prompts.
+4. The saved `remote_thread_id` is passed to the configured runner for
+   follow-up prompts. Codex app-server runner paths use `thread/resume`; Codex
+   exec runner paths use `codex exec resume <thread-id> -`.
 5. Hub persists the latest returned thread id on `prompt_complete`.
 
 Orchestration continuity:
@@ -166,9 +174,10 @@ Orchestration continuity:
 4. Hub also restores native CLI state from `orchestration_runs`: the latest
    Codex thread id, whether Claude reached a successful turn, and the locked
    absolute run cwd reported by Bridge.
-5. Bridge receives the same `runID` with `Resume=true`, can resume Codex and
-   Claude where supported, and materializes new uploads under the locked run
-   cwd.
+5. Bridge receives the same `runID` with `Resume=true`, reuses any live
+   run-scoped native sessions, can resume Codex and Claude by persisted native
+   ids after restart where supported, and materializes new uploads under the
+   locked run cwd.
 6. The frontend stores the last selected run id locally and restores it on
    `/orchestrate`.
 

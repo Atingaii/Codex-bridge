@@ -171,8 +171,12 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    `internal/bridge/profiles/formalproof/`.
 6. `internal/bridge/orchestration.go:formatRelayPriorTurn` controls how much
    prior visible output and command context is sent to the next CLI.
-7. `internal/bridge/orchestration.go:runRelayCLI` preserves the per-run Claude
-   session id and Codex thread id when launching the next CLI turn.
+7. `internal/bridge/orchestration.go:runRelayCLI`,
+   `internal/bridge/orchestration.go:runCodexInteractive`, and
+   `internal/bridge/orchestration.go:runClaudeInteractive` preserve the
+   run-scoped native Codex app-server thread, Claude stream-json process,
+   stable Claude session id, and Codex thread id when launching the next CLI
+   turn.
 8. `internal/bridge/orchestration.go:cwd` locks resumed runs to the absolute
    run cwd reported by Bridge, and
    `internal/bridge/orchestration.go:PrepareOrchestrationPromptFiles` writes

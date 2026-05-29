@@ -37,8 +37,11 @@ func (r *CodexAppServerRunner) Prompt(ctx context.Context, req RunnerRequest, on
 	defer client.close()
 
 	if _, err := client.request(ctx, "initialize", map[string]any{
-		"clientInfo":   map[string]string{"name": "codex-bridge", "version": "dev"},
-		"capabilities": nil,
+		"clientInfo": map[string]string{"name": "codex-bridge", "title": "Codex Bridge", "version": "dev"},
+		"capabilities": map[string]any{
+			"experimentalApi":    true,
+			"requestAttestation": false,
+		},
 	}); err != nil {
 		return RunnerResult{}, err
 	}
@@ -106,12 +109,12 @@ func (r *CodexAppServerRunner) start(ctx context.Context, req RunnerRequest) (*a
 
 func (r *CodexAppServerRunner) threadStartParams(req ...RunnerRequest) map[string]any {
 	params := map[string]any{
-		"cwd":                    r.cwd(req...),
-		"approvalPolicy":         r.approvalPolicy(),
-		"approvalsReviewer":      "user",
-		"sandbox":                r.sandbox(),
-		"experimentalRawEvents":  false,
-		"persistExtendedHistory": false,
+		"cwd":                   r.cwd(req...),
+		"approvalPolicy":        r.approvalPolicy(),
+		"approvalsReviewer":     "user",
+		"sandbox":               r.sandbox(),
+		"experimentalRawEvents": false,
+		"threadSource":          "user",
 	}
 	if r.cfg.Bridge.Model != "" {
 		params["model"] = r.cfg.Bridge.Model
@@ -121,12 +124,11 @@ func (r *CodexAppServerRunner) threadStartParams(req ...RunnerRequest) map[strin
 
 func (r *CodexAppServerRunner) threadResumeParams(threadID string, req ...RunnerRequest) map[string]any {
 	params := map[string]any{
-		"threadId":               threadID,
-		"cwd":                    r.cwd(req...),
-		"approvalPolicy":         r.approvalPolicy(),
-		"approvalsReviewer":      "user",
-		"sandbox":                r.sandbox(),
-		"persistExtendedHistory": false,
+		"threadId":          threadID,
+		"cwd":               r.cwd(req...),
+		"approvalPolicy":    r.approvalPolicy(),
+		"approvalsReviewer": "user",
+		"sandbox":           r.sandbox(),
 	}
 	if r.cfg.Bridge.Model != "" {
 		params["model"] = r.cfg.Bridge.Model
@@ -215,6 +217,10 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 			if !ok {
 				if text.Len() > 0 {
 					result.Content = text.String()
+				}
+				if strings.TrimSpace(result.Content) != "" {
+					done <- appServerTurnResult{result: result}
+					return
 				}
 				done <- appServerTurnResult{result: result, err: errors.New("codex app-server exited")}
 				return
@@ -379,6 +385,7 @@ type appServerClient struct {
 	pending map[int64]chan appServerResponse
 	events  chan appServerMessage
 	closed  bool
+	wait    sync.Once
 }
 
 type appServerMessage struct {
@@ -402,6 +409,10 @@ type jsonRPCError struct {
 
 func (c *appServerClient) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, errors.New("codex app-server exited")
+	}
 	c.nextID++
 	id := c.nextID
 	ch := make(chan appServerResponse, 1)
@@ -437,12 +448,25 @@ func (c *appServerClient) respond(id any, result any) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return errors.New("codex app-server exited")
+	}
 	_, err = c.stdin.Write(append(b, '\n'))
 	return err
 }
 
 func (c *appServerClient) read(stdout io.Reader) {
-	defer close(c.events)
+	defer func() {
+		c.mu.Lock()
+		pending := c.pending
+		c.pending = make(map[int64]chan appServerResponse)
+		c.closed = true
+		c.mu.Unlock()
+		for _, ch := range pending {
+			ch <- appServerResponse{err: errors.New("codex app-server exited")}
+		}
+		close(c.events)
+	}()
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
 	for scanner.Scan() {
@@ -472,17 +496,18 @@ func (c *appServerClient) read(stdout io.Reader) {
 
 func (c *appServerClient) close() {
 	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return
+	terminate := !c.closed
+	if terminate {
+		c.closed = true
+		_ = c.stdin.Close()
 	}
-	c.closed = true
-	_ = c.stdin.Close()
 	c.mu.Unlock()
-	if c.cmd != nil && c.cmd.Process != nil {
+	if terminate && c.cmd != nil && c.cmd.Process != nil {
 		_ = terminateProcessGroup(c.cmd.Process.Pid)
 	}
-	_ = c.cmd.Wait()
+	if c.cmd != nil {
+		c.wait.Do(func() { _ = c.cmd.Wait() })
+	}
 }
 
 func idInt(value any) (int64, bool) {

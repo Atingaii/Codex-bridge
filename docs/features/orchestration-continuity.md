@@ -42,9 +42,10 @@ context in the same `runID`.
   the Codex thread id reported by Bridge because it is non-deterministic, stores
   whether Claude reached a successful `turn.end`, and records the absolute run
   cwd reported by `run.start`. Resumed `orchestration_start` payloads send those
-  values back so Bridge can use `codex exec resume`, choose Claude `--resume`
-  only for an actually started session, and keep all later turns in the locked
-  absolute working directory.
+  values back so Bridge can reuse live run-scoped native sessions while it is
+  running, resume the saved Codex app-server thread after restart where
+  possible, choose Claude `--resume` only for an actually started session, and
+  keep all later turns in the locked absolute working directory.
 - Native CLI resume is best-effort. Bridge always keeps Hub's compacted
   context in the prompt as the required continuity fallback, exposes the chosen
   resume path through `event.data.resumeMode`, retries Codex fresh when resume
@@ -247,7 +248,7 @@ state.
   `orchestration_start` payload unless the user intentionally changes it.
 - A resumed run sends the saved Codex thread id, Claude-started state, and
   locked absolute run cwd to Bridge.
-- The first Codex turn in a resumed run uses `codex exec resume <thread-id>`
+- The first Codex turn in a resumed run uses Codex app-server `thread/resume`
   when Hub has a saved thread id; the first Claude turn uses `--resume` only
   after a prior Claude turn reached `turn.end`.
 - If Codex returns a different thread id while Bridge expected a resume target,
@@ -271,12 +272,13 @@ A: The run is the user-visible work container and the only event stream the UI
 can replay. Reusing it keeps context, status, and history in one place. A new
 run is still available through the explicit New Run action.
 
-**Q2 (trade-off): Why compact context instead of persisting a native Codex thread
-for orchestration?**
+**Q2 (trade-off): Why compact context if native CLI sessions are also
+preserved?**
 
-A: Orchestration alternates CLIs and roles, so a single Codex thread is not the
-whole conversation. Compacting events gives both Codex and Claude a shared
-handoff format without changing Hub/Bridge protocol.
+A: Codex and Claude keep separate native histories, and either native process
+can be lost on Bridge restart. Compacting events gives both CLIs a shared
+handoff format and remains the continuity fallback when native resume is not
+available.
 
 **Q3 (boundary): What happens if the selected run is still active?**
 

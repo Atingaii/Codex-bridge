@@ -1045,11 +1045,7 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
       .filter((event) => !isEmptyPagesReadFailureEvent(event))
       .map((event) => terminalRun ? finalizeTerminalCommandEvent(event, run?.status) : event)
   );
-  const contentfulTurnEnds = new Set(
-    ordered
-      .filter((event) => event.kind === 'turn.end' && stringsTrim(event.content))
-      .map(orchestrationTurnKey)
-  );
+  const turnDeltaContent = orchestrationTurnDeltaContentByKey(ordered);
   const visible: OrchestrationVisibleEvent[] = [];
   let segmentVisibleStart = 0;
 
@@ -1076,7 +1072,6 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
     }
 
     if (event.kind === 'turn.delta') {
-      if (contentfulTurnEnds.has(orchestrationTurnKey(event)) && !isBridgeRelayNotice(event)) return;
       const content = cleanOrchestrationDisplayContent(event.content);
       if (!content) return;
       visible.push({
@@ -1119,7 +1114,10 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
     }
 
     if (event.kind === 'turn.end') {
-      const content = cleanOrchestrationDisplayContent(event.content);
+      const content = turnEndDisplayContent(
+        cleanOrchestrationDisplayContent(event.content),
+        turnDeltaContent.get(orchestrationTurnKey(event)) || ''
+      );
       if (content) {
         visible.push({
           type: 'message',
@@ -1231,7 +1229,6 @@ function commandEventFailed(event: OrchestrationEvent) {
 
 function mergeOrchestrationDeltaEvents(events: OrchestrationEvent[]): OrchestrationEvent[] {
   const merged: OrchestrationEvent[] = [];
-  const deltaIndexes = new Map<string, number>();
   events.forEach((event) => {
     if (event.kind !== 'turn.delta') {
       merged.push(event);
@@ -1243,15 +1240,12 @@ function mergeOrchestrationDeltaEvents(events: OrchestrationEvent[]): Orchestrat
       merged.push({ ...event, content });
       return;
     }
-    const key = orchestrationTurnKey(event);
-    const index = deltaIndexes.get(key);
-    if (typeof index !== 'number') {
-      deltaIndexes.set(key, merged.length);
+    const previous = merged[merged.length - 1];
+    if (!canMergeAdjacentOrchestrationDelta(previous, event)) {
       merged.push({ ...event, content });
       return;
     }
-    const previous = merged[index];
-    merged[index] = {
+    merged[merged.length - 1] = {
       ...previous,
       content: mergeDeltaContent(previous.content || '', content),
       status: event.status || previous.status,
@@ -1263,12 +1257,37 @@ function mergeOrchestrationDeltaEvents(events: OrchestrationEvent[]): Orchestrat
   return merged;
 }
 
+function canMergeAdjacentOrchestrationDelta(previous: OrchestrationEvent | undefined, event: OrchestrationEvent) {
+  if (!previous || previous.kind !== 'turn.delta') return false;
+  return orchestrationTurnKey(previous) === orchestrationTurnKey(event)
+    && isBridgeRelayNotice(previous) === isBridgeRelayNotice(event);
+}
+
 function mergeDeltaContent(previous: string, next: string) {
   if (!previous) return next;
   if (!next) return previous;
   if (next.startsWith(previous)) return next;
   if (previous.endsWith(next)) return previous;
   return previous + next;
+}
+
+function orchestrationTurnDeltaContentByKey(events: OrchestrationEvent[]) {
+  const out = new Map<string, string>();
+  events.forEach((event) => {
+    if (event.kind !== 'turn.delta' || isBridgeRelayNotice(event)) return;
+    const content = cleanOrchestrationDisplayContent(event.content);
+    if (!content) return;
+    const key = orchestrationTurnKey(event);
+    out.set(key, mergeDeltaContent(out.get(key) || '', content));
+  });
+  return out;
+}
+
+function turnEndDisplayContent(content: string, deltaContent: string) {
+  const value = stringsTrim(content);
+  const deltas = stringsTrim(deltaContent);
+  if (!value || !deltas) return value;
+  return '';
 }
 
 function cleanOrchestrationDisplayContent(content?: string) {

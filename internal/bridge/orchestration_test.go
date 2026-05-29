@@ -183,6 +183,18 @@ func TestOrchestrationClaudeApprovalArgsAttachMCPBeforePrompt(t *testing.T) {
 	}
 }
 
+func TestOrchestrationClaudeStreamApprovalArgsAppendWithoutPrompt(t *testing.T) {
+	args := NewOrchestrationManager(&config.Config{}).withClaudeStreamApprovalArgs(
+		[]string{"--print", "--input-format=stream-json", "--output-format=stream-json", "--name", "Bridge"},
+		"/tmp/codex-bridge-mcp.json",
+	)
+	assertArgPair(t, args, "--name", "Bridge")
+	assertArgPair(t, args, "--mcp-config", "/tmp/codex-bridge-mcp.json")
+	if args[len(args)-1] != "mcp__codex_bridge__browser_approval" {
+		t.Fatalf("stream approval args should append after --name value: %#v", args)
+	}
+}
+
 func TestOrchestrationCodexUsesAppServerWhenApprovalIsRequired(t *testing.T) {
 	tmp := t.TempDir()
 	codexPath := filepath.Join(tmp, "codex")
@@ -720,18 +732,15 @@ func TestOrchestrationRelayRunEmitsFrontendVisiblePromptsCommandsAndSessionState
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(claudeArgv), "--session-id") {
+	if !strings.Contains(string(claudeArgv), "--session-id") || !strings.Contains(string(claudeArgv), "--input-format=stream-json") {
 		t.Fatalf("Claude was not started with stable session id: %s", claudeArgv)
-	}
-	if strings.Contains(string(claudeArgv), "--input-format=stream-json") {
-		t.Fatalf("Coq upload relay should not use Isabelle stream-input mode: %s", claudeArgv)
 	}
 	codexArgv, err := os.ReadFile(codexArgvPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(codexArgv), "exec") || !strings.Contains(string(codexArgv), "--cd") {
-		t.Fatalf("Codex initial exec args did not include cwd/thread setup: %s", codexArgv)
+	if !strings.Contains(string(codexArgv), "app-server") || !strings.Contains(string(codexArgv), "--listen") {
+		t.Fatalf("Codex initial args did not use app-server: %s", codexArgv)
 	}
 }
 
@@ -801,11 +810,138 @@ func TestOrchestrationResumeRestoresCLIStateAndLockedCWD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(codexArgv), "resume") || !strings.Contains(string(codexArgv), "thread_saved") {
-		t.Fatalf("Codex resume args incorrect: %s", codexArgv)
+	if !strings.Contains(string(codexArgv), "app-server") {
+		t.Fatalf("Codex resume should use app-server args: %s", codexArgv)
 	}
-	if strings.Contains(string(codexArgv), "--cd") {
-		t.Fatalf("Codex resume should rely on locked cmd.Dir, not a fresh --cd: %s", codexArgv)
+}
+
+func TestOrchestrationReusesNativeInteractiveSessionsAcrossSameCLITurns(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	claudeLogPath := filepath.Join(tmp, "claude_log.jsonl")
+	codexLogPath := filepath.Join(tmp, "codex_log.jsonl")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeInteractiveRelayScript(claudeLogPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexInteractiveRelayScript(codexLogPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "workspace-write"
+	cfg.Bridge.ApprovalPolicy = "untrusted"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 256)
+	manager.AttachOut(out)
+	defer manager.CloseAll()
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_native_reuse",
+		Mode:     "collaboration",
+		Prompt:   "finish native session reuse",
+		MaxTurns: 4,
+		CWD:      tmp,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	var codexThreadIDs []string
+	var claudeSessionIDs []string
+	var codexStartModes []string
+	var claudeStartModes []string
+	for _, event := range events {
+		if event.Kind == "turn.start" {
+			switch event.CLI {
+			case "codex":
+				codexStartModes = append(codexStartModes, stringMapValue(event.Data, "resumeMode"))
+			case "claude":
+				claudeStartModes = append(claudeStartModes, stringMapValue(event.Data, "resumeMode"))
+			}
+		}
+		if event.Kind != "turn.end" {
+			continue
+		}
+		switch event.CLI {
+		case "codex":
+			codexThreadIDs = append(codexThreadIDs, stringMapValue(event.Data, "codexThreadId"))
+		case "claude":
+			claudeSessionIDs = append(claudeSessionIDs, stringMapValue(event.Data, "sessionId"))
+		}
+	}
+	if len(codexThreadIDs) != 2 || codexThreadIDs[0] != "thr_native" || codexThreadIDs[1] != "thr_native" {
+		t.Fatalf("codex thread ids = %#v", codexThreadIDs)
+	}
+	wantClaudeSessionID := stableOrchestrationSessionID("orc_native_reuse", "claude")
+	if len(claudeSessionIDs) != 2 || claudeSessionIDs[0] != wantClaudeSessionID || claudeSessionIDs[1] != wantClaudeSessionID {
+		t.Fatalf("claude session ids = %#v, want %q", claudeSessionIDs, wantClaudeSessionID)
+	}
+	if got := strings.Join(codexStartModes, ","); got != "codex-interactive-thread,codex-interactive-thread" {
+		t.Fatalf("codex turn.start modes = %q", got)
+	}
+	if got := strings.Join(claudeStartModes, ","); got != "claude-interactive-session,claude-interactive-session" {
+		t.Fatalf("claude turn.start modes = %q", got)
+	}
+
+	codexRecords := readJSONLines(t, codexLogPath)
+	var codexStarts, codexTurns, codexNames int
+	var codexPrompts []string
+	for _, record := range codexRecords {
+		switch record["event"] {
+		case "process_start":
+			codexStarts++
+		case "thread_start":
+			codexStartsForThread, _ := record["threadId"].(string)
+			if codexStartsForThread != "thr_native" {
+				t.Fatalf("codex thread_start id = %#v", record)
+			}
+		case "thread_name":
+			codexNames++
+			if got, _ := record["name"].(string); got != nativeSessionDisplayName("orc_native_reuse", "codex") {
+				t.Fatalf("codex native name = %q", got)
+			}
+		case "turn_start":
+			codexTurns++
+			codexPrompts = append(codexPrompts, stringFromNestedText(record["params"]))
+			if got, _ := record["threadId"].(string); got != "thr_native" {
+				t.Fatalf("codex turn thread = %#v", record)
+			}
+		}
+	}
+	if codexStarts != 1 || codexTurns != 2 || codexNames != 1 {
+		t.Fatalf("codex log starts=%d turns=%d names=%d records=%#v", codexStarts, codexTurns, codexNames, codexRecords)
+	}
+	if len(codexPrompts) != 2 || !strings.Contains(codexPrompts[1], "same native codex conversation") {
+		t.Fatalf("second codex prompt missing same-native notice: %#v", codexPrompts)
+	}
+
+	claudeRecords := readJSONLines(t, claudeLogPath)
+	var claudeStarts, claudeMessages int
+	var claudePrompts []string
+	for _, record := range claudeRecords {
+		switch record["event"] {
+		case "process_start":
+			claudeStarts++
+			args, _ := record["argv"].([]any)
+			if !sliceContainsArgPrefix(args, "--input-format") || !sliceContainsString(args, "--session-id") || !sliceContainsString(args, "--name") {
+				t.Fatalf("claude process args missing stream session/name: %#v", record)
+			}
+		case "user_message":
+			claudeMessages++
+			if got, _ := record["sessionId"].(string); got != wantClaudeSessionID {
+				t.Fatalf("claude message session = %#v", record)
+			}
+			if prompt, _ := record["prompt"].(string); prompt != "" {
+				claudePrompts = append(claudePrompts, prompt)
+			}
+		}
+	}
+	if claudeStarts != 1 || claudeMessages != 2 {
+		t.Fatalf("claude log starts=%d messages=%d records=%#v", claudeStarts, claudeMessages, claudeRecords)
+	}
+	if len(claudePrompts) != 2 || !strings.Contains(claudePrompts[1], "same native claude conversation") {
+		t.Fatalf("second claude prompt missing same-native notice: %#v", claudePrompts)
 	}
 }
 
@@ -939,9 +1075,25 @@ func TestOrchestrationCodexTailDisconnectAfterFinalContentCompletes(t *testing.T
 import json
 import sys
 
+text = "最终结果已经输出。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=needs_next; changed=none; verified=none; next=none; risks=仍有证明义务"
+if sys.argv[1] == "app-server":
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        params = msg.get("params") or {}
+        if method == "initialize":
+            print(json.dumps({"id":msg["id"],"result":{"userAgent":"fake","codexHome":"/tmp","platformFamily":"unix","platformOs":"linux"}}), flush=True)
+        elif method == "thread/start":
+            print(json.dumps({"id":msg["id"],"result":{"thread":{"id":"thr_tail"}}}), flush=True)
+        elif method == "thread/name/set":
+            print(json.dumps({"id":msg["id"],"result":{}}), flush=True)
+        elif method == "turn/start":
+            print(json.dumps({"id":msg["id"],"result":{"turn":{"id":"turn_tail","status":"inProgress"}}}), flush=True)
+            print(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":"thr_tail","turnId":"turn_tail","delta":text}}), flush=True)
+            break
+    raise SystemExit(0)
 if len(sys.argv) < 2 or sys.argv[1] != "exec":
     sys.exit(1)
-text = "最终结果已经输出。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=needs_next; changed=none; verified=none; next=none; risks=仍有证明义务"
 print(json.dumps({"type":"thread.started","thread_id":"thr_tail"}), flush=True)
 print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
 print(json.dumps({"type":"error","message":"Reconnecting... 1/5 (stream disconnected before completion: stream closed before response.completed)"}), flush=True)
@@ -3614,12 +3766,69 @@ func assertArgPair(t *testing.T, args []string, key, value string) {
 	t.Fatalf("args missing %s %q: %#v", key, value, args)
 }
 
+func readJSONLines(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode %s line %q: %v", path, line, err)
+		}
+		out = append(out, record)
+	}
+	return out
+}
+
+func stringFromNestedText(value any) string {
+	params, _ := value.(map[string]any)
+	input, _ := params["input"].([]any)
+	if len(input) == 0 {
+		return ""
+	}
+	first, _ := input[0].(map[string]any)
+	text, _ := first["text"].(string)
+	return text
+}
+
+func sliceContainsString(values []any, want string) bool {
+	for _, value := range values {
+		if got, _ := value.(string); got == want {
+			return true
+		}
+	}
+	return false
+}
+
+func sliceContainsArgPrefix(values []any, want string) bool {
+	for _, value := range values {
+		got, _ := value.(string)
+		if got == want || strings.HasPrefix(got, want+"=") {
+			return true
+		}
+	}
+	return false
+}
+
 func fakeClaudePrintScript(text string) string {
 	raw, _ := json.Marshal(text)
 	return `#!/usr/bin/env python3
 import json
+import sys
 
 text = ` + string(raw) + `
+if "--input-format=stream-json" in sys.argv:
+    for line in sys.stdin:
+        print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
+        print(json.dumps({"type":"result","result":text}), flush=True)
+    raise SystemExit(0)
 print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
 print(json.dumps({"type":"result","result":text}), flush=True)
 `
@@ -3705,6 +3914,30 @@ import json
 import sys
 
 text = ` + string(raw) + `
+if len(sys.argv) >= 2 and sys.argv[1] == "app-server":
+    turn_count = 0
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        params = msg.get("params") or {}
+        if method == "initialize":
+            print(json.dumps({"id":msg["id"],"result":{"userAgent":"fake","codexHome":"/tmp","platformFamily":"unix","platformOs":"linux"}}), flush=True)
+        elif method == "thread/start":
+            print(json.dumps({"id":msg["id"],"result":{"thread":{"id":"thread_fake"}}}), flush=True)
+        elif method == "thread/resume":
+            print(json.dumps({"id":msg["id"],"result":{"thread":{"id":params.get("threadId") or "thread_fake"}}}), flush=True)
+        elif method == "thread/name/set":
+            print(json.dumps({"id":msg["id"],"result":{}}), flush=True)
+        elif method == "turn/start":
+            turn_count += 1
+            thread_id = params.get("threadId") or "thread_fake"
+            turn_id = "turn_%d" % turn_count
+            print(json.dumps({"id":msg["id"],"result":{"turn":{"id":turn_id,"status":"inProgress"}}}), flush=True)
+            print(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":thread_id,"turnId":turn_id,"delta":text}}), flush=True)
+            print(json.dumps({"method":"turn/completed","params":{"threadId":thread_id,"turn":{"id":turn_id,"status":"completed"}}}), flush=True)
+            if turn_count >= 3:
+                break
+    raise SystemExit(0)
 if len(sys.argv) < 2 or sys.argv[1] != "exec":
     print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
     sys.exit(1)
@@ -3723,14 +3956,38 @@ import sys
 prompt_path = ` + string(promptPathRaw) + `
 argv_path = ` + string(argvPathRaw) + `
 text = ` + string(textRaw) + `
+with open(argv_path, "w", encoding="utf-8") as f:
+    json.dump(sys.argv[1:], f)
+if len(sys.argv) >= 2 and sys.argv[1] == "app-server":
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        params = msg.get("params") or {}
+        if method == "initialize":
+            print(json.dumps({"id":msg["id"],"result":{"userAgent":"fake","codexHome":"/tmp","platformFamily":"unix","platformOs":"linux"}}), flush=True)
+        elif method == "thread/start":
+            print(json.dumps({"id":msg["id"],"result":{"thread":{"id":"thread_relay_1"}}}), flush=True)
+        elif method == "thread/resume":
+            print(json.dumps({"id":msg["id"],"result":{"thread":{"id":params.get("threadId") or "thread_relay_1"}}}), flush=True)
+        elif method == "thread/name/set":
+            print(json.dumps({"id":msg["id"],"result":{}}), flush=True)
+        elif method == "turn/start":
+            prompt = (params.get("input") or [{}])[0].get("text", "")
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write(prompt)
+            print(json.dumps({"id":msg["id"],"result":{"turn":{"id":"turn_1","status":"inProgress"}}}), flush=True)
+            print(json.dumps({"method":"item/started","params":{"item":{"id":"cmd_test","type":"commandExecution","command":"go test ./...","status":"running"}}}), flush=True)
+            print(json.dumps({"method":"item/completed","params":{"item":{"id":"cmd_test","type":"commandExecution","command":"go test ./...","status":"completed","exitCode":0,"aggregatedOutput":"ok ./...\n"}}}), flush=True)
+            print(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":"thread_relay_1","turnId":"turn_1","delta":text}}), flush=True)
+            print(json.dumps({"method":"turn/completed","params":{"threadId":"thread_relay_1","turn":{"id":"turn_1","status":"completed"}}}), flush=True)
+            break
+    raise SystemExit(0)
 if len(sys.argv) < 2 or sys.argv[1] != "exec":
     print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
     sys.exit(1)
 prompt = sys.stdin.read()
 with open(prompt_path, "w", encoding="utf-8") as f:
     f.write(prompt)
-with open(argv_path, "w", encoding="utf-8") as f:
-    json.dump(sys.argv[1:], f)
 print(json.dumps({"type":"thread.started","thread_id":"thread_relay_1"}), flush=True)
 print(json.dumps({"type":"item.started","item":{"id":"cmd_test","type":"command_execution","command":"go test ./...","status":"running"}}), flush=True)
 print(json.dumps({"type":"item.completed","item":{"id":"cmd_test","type":"command_execution","command":"go test ./...","status":"completed","exit_code":0,"aggregated_output":"ok ./...\n"}}), flush=True)
@@ -3752,6 +4009,91 @@ if len(sys.argv) >= 3 and sys.argv[1:3] == ["exec", "resume"]:
     sys.exit(1)
 print(json.dumps({"type":"thread.started","thread_id":"thread_fresh"}), flush=True)
 print(json.dumps({"type":"item.agent_message.delta","delta":"fresh result"}), flush=True)
+`
+}
+
+func fakeCodexInteractiveRelayScript(logPath string) string {
+	logPathRaw, _ := json.Marshal(logPath)
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+log_path = ` + string(logPathRaw) + `
+thread_id = "thr_native"
+turn_count = 0
+
+def log(obj):
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+def emit(obj):
+    print(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+if len(sys.argv) < 2 or sys.argv[1] != "app-server":
+    print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
+    sys.exit(1)
+
+log({"event": "process_start", "argv": sys.argv[1:]})
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
+    elif method == "thread/start":
+        log({"event": "thread_start", "threadId": thread_id})
+        emit({"id": msg["id"], "result": {"thread": {"id": thread_id}}})
+    elif method == "thread/resume":
+        log({"event": "thread_resume", "threadId": params.get("threadId")})
+        emit({"id": msg["id"], "result": {"thread": {"id": params.get("threadId") or thread_id}}})
+    elif method == "thread/name/set":
+        log({"event": "thread_name", "threadId": params.get("threadId"), "name": params.get("name")})
+        emit({"id": msg["id"], "result": {}})
+    elif method == "turn/start":
+        turn_count += 1
+        log({"event": "turn_start", "threadId": params.get("threadId"), "params": params})
+        text = "Codex native turn %d\n\nMsg: to=implementer; intent=continue; need=next\nHandoff: status=needs_next; changed=none; verified=codex native; next=continue; risks=none" % turn_count
+        if turn_count >= 2:
+            text = "Codex native final\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=codex native reused; next=none; risks=none"
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_%d" % turn_count, "status": "inProgress"}}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": params.get("threadId"), "turnId": "turn_%d" % turn_count, "delta": text}})
+        emit({"method": "turn/completed", "params": {"threadId": params.get("threadId"), "turn": {"id": "turn_%d" % turn_count, "status": "completed"}}})
+`
+}
+
+func fakeClaudeInteractiveRelayScript(logPath string) string {
+	logPathRaw, _ := json.Marshal(logPath)
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+log_path = ` + string(logPathRaw) + `
+
+def log(obj):
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+def prompt_text(payload):
+    return payload.get("message", {}).get("content", [{}])[0].get("text", "")
+
+session_id = ""
+for flag in ("--session-id", "--resume"):
+    if flag in sys.argv:
+        idx = sys.argv.index(flag)
+        if idx + 1 < len(sys.argv):
+            session_id = sys.argv[idx + 1]
+            break
+
+log({"event": "process_start", "argv": sys.argv[1:], "sessionId": session_id})
+for idx, line in enumerate(sys.stdin, start=1):
+    payload = json.loads(line)
+    prompt = prompt_text(payload)
+    log({"event": "user_message", "index": idx, "sessionId": session_id, "prompt": prompt})
+    text = "Claude native turn %d\n\nMsg: to=reviewer; intent=review; need=continue\nHandoff: status=needs_next; changed=none; verified=claude native; next=review; risks=none" % idx
+    if idx >= 2:
+        text = "Claude native turn 2\n\nMsg: to=reviewer; intent=final-check; need=finish\nHandoff: status=needs_next; changed=none; verified=claude native reused; next=finish; risks=none"
+    print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}, ensure_ascii=False), flush=True)
+    print(json.dumps({"type": "result", "result": text}, ensure_ascii=False), flush=True)
 `
 }
 
@@ -3800,28 +4142,70 @@ import sys
 
 text = ` + string(raw) + `
 remediation = ` + string(remediationRaw) + `
+def run_turn(prompt, appserver=False, msg_id=None, thread_id="thread_coq"):
+    os.makedirs("coq-proj", exist_ok=True)
+    for name in ["Model.v", "Termination.v", "Makefile"]:
+        with open(os.path.join("coq-proj", name), "w", encoding="utf-8") as f:
+            f.write("(* generated smoke proof file *)\n")
+    use_remediation = "final-assessment remediation" in prompt or "Assessment failure to fix" in prompt
+    if appserver:
+        print(json.dumps({"id":msg_id,"result":{"turn":{"id":"turn_coq","status":"inProgress"}}}), flush=True)
+        if use_remediation:
+            with open(os.path.join("coq-proj", "AssumptionsCheck.v"), "w", encoding="utf-8") as f:
+                f.write("Print Assumptions modify_lin_termination.\n")
+            print(json.dumps({"method":"item/started","params":{"item":{"id":"assumptions","type":"commandExecution","command":"coqtop -quiet -Q coq-proj LinLattice < coq-proj/AssumptionsCheck.v","status":"running"}}}), flush=True)
+            print(json.dumps({"method":"item/completed","params":{"item":{"id":"assumptions","type":"commandExecution","command":"coqtop -quiet -Q coq-proj LinLattice < coq-proj/AssumptionsCheck.v","status":"completed","exitCode":0,"aggregatedOutput":"Print Assumptions modify_lin_termination.\nClosed under the global context\n"}}}), flush=True)
+            print(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":thread_id,"turnId":"turn_coq","delta":remediation}}), flush=True)
+        else:
+            print(json.dumps({"method":"item/started","params":{"item":{"id":"write","type":"commandExecution","command":"mkdir -p coq-proj && write Model.v Termination.v Makefile","status":"running"}}}), flush=True)
+            print(json.dumps({"method":"item/completed","params":{"item":{"id":"write","type":"commandExecution","command":"mkdir -p coq-proj && write Model.v Termination.v Makefile","status":"completed","exitCode":0,"aggregatedOutput":"created coq-proj\n"}}}), flush=True)
+            print(json.dumps({"method":"item/started","params":{"item":{"id":"build","type":"commandExecution","command":"make -C coq-proj","status":"running"}}}), flush=True)
+            print(json.dumps({"method":"item/completed","params":{"item":{"id":"build","type":"commandExecution","command":"make -C coq-proj","status":"completed","exitCode":0,"aggregatedOutput":"COQC Model.v\nCOQC Termination.v\n"}}}), flush=True)
+            print(json.dumps({"method":"item/started","params":{"item":{"id":"scan","type":"commandExecution","command":"rg -n \"Axiom|Parameter|Conjecture|Admitted|admit|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check\" coq-proj","status":"running"}}}), flush=True)
+            print(json.dumps({"method":"item/completed","params":{"item":{"id":"scan","type":"commandExecution","command":"rg -n \"Axiom|Parameter|Conjecture|Admitted|admit|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check\" coq-proj","status":"completed","exitCode":0,"aggregatedOutput":""}}}), flush=True)
+            print(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":thread_id,"turnId":"turn_coq","delta":text}}), flush=True)
+        print(json.dumps({"method":"turn/completed","params":{"threadId":thread_id,"turn":{"id":"turn_coq","status":"completed"}}}), flush=True)
+        return
+    if use_remediation:
+        with open(os.path.join("coq-proj", "AssumptionsCheck.v"), "w", encoding="utf-8") as f:
+            f.write("Print Assumptions modify_lin_termination.\n")
+        print(json.dumps({"type":"item.started","item":{"id":"assumptions","type":"command_execution","command":"coqtop -quiet -Q coq-proj LinLattice < coq-proj/AssumptionsCheck.v","status":"running"}}), flush=True)
+        print(json.dumps({"type":"item.completed","item":{"id":"assumptions","type":"command_execution","command":"coqtop -quiet -Q coq-proj LinLattice < coq-proj/AssumptionsCheck.v","status":"completed","exit_code":0,"aggregated_output":"Print Assumptions modify_lin_termination.\nClosed under the global context\n"}}), flush=True)
+        print(json.dumps({"type":"item.agent_message.delta","delta":remediation}), flush=True)
+        return
+    print(json.dumps({"type":"item.started","item":{"id":"write","type":"command_execution","command":"mkdir -p coq-proj && write Model.v Termination.v Makefile","status":"running"}}), flush=True)
+    print(json.dumps({"type":"item.completed","item":{"id":"write","type":"command_execution","command":"mkdir -p coq-proj && write Model.v Termination.v Makefile","status":"completed","exit_code":0,"aggregated_output":"created coq-proj\n"}}), flush=True)
+    print(json.dumps({"type":"item.started","item":{"id":"build","type":"command_execution","command":"make -C coq-proj","status":"running"}}), flush=True)
+    print(json.dumps({"type":"item.completed","item":{"id":"build","type":"command_execution","command":"make -C coq-proj","status":"completed","exit_code":0,"aggregated_output":"COQC Model.v\nCOQC Termination.v\n"}}), flush=True)
+    print(json.dumps({"type":"item.started","item":{"id":"scan","type":"command_execution","command":"rg -n \"Axiom|Parameter|Conjecture|Admitted|admit|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check\" coq-proj","status":"running"}}), flush=True)
+    print(json.dumps({"type":"item.completed","item":{"id":"scan","type":"command_execution","command":"rg -n \"Axiom|Parameter|Conjecture|Admitted|admit|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check\" coq-proj","status":"completed","exit_code":0,"aggregated_output":""}}), flush=True)
+    print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
+
+if len(sys.argv) >= 2 and sys.argv[1] == "app-server":
+    thread_id = "thread_coq"
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        params = msg.get("params") or {}
+        if method == "initialize":
+            print(json.dumps({"id":msg["id"],"result":{"userAgent":"fake","codexHome":"/tmp","platformFamily":"unix","platformOs":"linux"}}), flush=True)
+        elif method == "thread/start":
+            print(json.dumps({"id":msg["id"],"result":{"thread":{"id":thread_id}}}), flush=True)
+        elif method == "thread/resume":
+            thread_id = params.get("threadId") or thread_id
+            print(json.dumps({"id":msg["id"],"result":{"thread":{"id":thread_id}}}), flush=True)
+        elif method == "thread/name/set":
+            print(json.dumps({"id":msg["id"],"result":{}}), flush=True)
+        elif method == "turn/start":
+            prompt = (params.get("input") or [{}])[0].get("text", "")
+            run_turn(prompt, appserver=True, msg_id=msg["id"], thread_id=thread_id)
+            break
+    raise SystemExit(0)
 if len(sys.argv) < 2 or sys.argv[1] != "exec":
     print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
     sys.exit(1)
 prompt = sys.stdin.read()
-os.makedirs("coq-proj", exist_ok=True)
-for name in ["Model.v", "Termination.v", "Makefile"]:
-    with open(os.path.join("coq-proj", name), "w", encoding="utf-8") as f:
-        f.write("(* generated smoke proof file *)\n")
-if "final-assessment remediation" in prompt or "Assessment failure to fix" in prompt:
-    with open(os.path.join("coq-proj", "AssumptionsCheck.v"), "w", encoding="utf-8") as f:
-        f.write("Print Assumptions modify_lin_termination.\n")
-    print(json.dumps({"type":"item.started","item":{"id":"assumptions","type":"command_execution","command":"coqtop -quiet -Q coq-proj LinLattice < coq-proj/AssumptionsCheck.v","status":"running"}}), flush=True)
-    print(json.dumps({"type":"item.completed","item":{"id":"assumptions","type":"command_execution","command":"coqtop -quiet -Q coq-proj LinLattice < coq-proj/AssumptionsCheck.v","status":"completed","exit_code":0,"aggregated_output":"Print Assumptions modify_lin_termination.\nClosed under the global context\n"}}), flush=True)
-    print(json.dumps({"type":"item.agent_message.delta","delta":remediation}), flush=True)
-    raise SystemExit(0)
-print(json.dumps({"type":"item.started","item":{"id":"write","type":"command_execution","command":"mkdir -p coq-proj && write Model.v Termination.v Makefile","status":"running"}}), flush=True)
-print(json.dumps({"type":"item.completed","item":{"id":"write","type":"command_execution","command":"mkdir -p coq-proj && write Model.v Termination.v Makefile","status":"completed","exit_code":0,"aggregated_output":"created coq-proj\n"}}), flush=True)
-print(json.dumps({"type":"item.started","item":{"id":"build","type":"command_execution","command":"make -C coq-proj","status":"running"}}), flush=True)
-print(json.dumps({"type":"item.completed","item":{"id":"build","type":"command_execution","command":"make -C coq-proj","status":"completed","exit_code":0,"aggregated_output":"COQC Model.v\nCOQC Termination.v\n"}}), flush=True)
-print(json.dumps({"type":"item.started","item":{"id":"scan","type":"command_execution","command":"rg -n \"Axiom|Parameter|Conjecture|Admitted|admit|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check\" coq-proj","status":"running"}}), flush=True)
-print(json.dumps({"type":"item.completed","item":{"id":"scan","type":"command_execution","command":"rg -n \"Axiom|Parameter|Conjecture|Admitted|admit|Abort|sorry|TODO|placeholder|quick_and_dirty|Guard Checking|bypass_check\" coq-proj","status":"completed","exit_code":0,"aggregated_output":""}}), flush=True)
-print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
+run_turn(prompt)
 `
 }
 

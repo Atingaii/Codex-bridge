@@ -2355,45 +2355,32 @@ func assertTerminationConclusionAfterCommand(t *testing.T, events []any) {
 }
 
 func fakeCodexScript() string {
-	return `#!/bin/sh
-cat >/dev/null
-printf '%s\n' '{"type":"thread.started","thread_id":"fake-thread"}'
-printf '%s\n' '{"type":"item.agent_message.delta","delta":"fake codex reviewed the previous turn."}'
-printf '%s\n' '{"type":"turn.completed","usage":{"output_tokens":6}}'
-`
+	return fakeCodexAppServerScript("fake-thread", nil, nil, []string{"fake codex reviewed the previous turn."})
 }
 
 func fakeClaudeScript() string {
-	return `#!/bin/sh
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"fake claude implemented the first turn."}]}}'
-printf '%s\n' '{"type":"result","result":"fake claude implemented the first turn."}'
-`
+	return fakeClaudeStreamScript([]string{"fake claude implemented the first turn."}, nil)
 }
 
 func fakeTerminationCodexScript() string {
-	return `#!/bin/sh
-cat >/dev/null
-printf '%s\n' 'theory Termination_Generated imports Main begin lemma generated_framework: True sorry end' > Termination_Generated.thy
-printf '%s\n' '{"type":"thread.started","thread_id":"termination-thread"}'
-printf '%s\n' '{"type":"item.started","item":{"id":"cmd_1","type":"command_execution","command":"isabelle build -c -D /home/zy/os/termination_framework","status":"running"}}'
-printf '%s\n' '{"type":"item.completed","item":{"id":"cmd_1","type":"command_execution","command":"isabelle build -c -D /home/zy/os/termination_framework","status":"completed","exit_code":0,"aggregated_output":"Build completed successfully.\n"}}'
-printf '%s\n' '{"type":"item.agent_message.delta","delta":"Msg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=Termination_Generated.thy; verified=isabelle build -c -D /home/zy/os/termination_framework; next=prove remaining sorry placeholders; risks=proof framework still contains sorry placeholders"}'
-printf '%s\n' '{"type":"turn.completed","usage":{"output_tokens":32}}'
-`
+	return fakeCodexAppServerScript("termination-thread", map[string]string{
+		"Termination_Generated.thy": "theory Termination_Generated imports Main begin lemma generated_framework: True sorry end\n",
+	}, []map[string]any{
+		{
+			"id":       "cmd_1",
+			"command":  "isabelle build -c -D /home/zy/os/termination_framework",
+			"exitCode": 0,
+			"output":   "Build completed successfully.\n",
+		},
+	}, []string{"Msg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=Termination_Generated.thy; verified=isabelle build -c -D /home/zy/os/termination_framework; next=prove remaining sorry placeholders; risks=proof framework still contains sorry placeholders"})
 }
 
 func fakeTerminationClaudeScript() string {
-	return `#!/bin/sh
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"我会先整理 Termination.thy 的可编译证明框架，并让下一轮独立验证。"}]}}'
-printf '%s\n' '{"type":"result","result":"我会先整理 Termination.thy 的可编译证明框架，并让下一轮独立验证。"}'
-`
+	return fakeClaudeStreamScript([]string{"我会先整理 Termination.thy 的可编译证明框架，并让下一轮独立验证。"}, nil)
 }
 
 func fakeUnresolvedSorryClaudeScript() string {
-	return `#!/bin/sh
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"结论：我只确认了当前项目状态，主定理 sorry 尚未消除，下一轮必须直接处理该验收标准。\n\nMsg: to=reviewer; intent=review; need=verify main theorem sorry removal\nHandoff: status=needs_next; changed=none; verified=none; next=remove main theorem sorry; risks=主定理 sorry 仍未消除"}]}}'
-printf '%s\n' '{"type":"result","result":"结论：我只确认了当前项目状态，主定理 sorry 尚未消除，下一轮必须直接处理该验收标准。\n\nMsg: to=reviewer; intent=review; need=verify main theorem sorry removal\nHandoff: status=needs_next; changed=none; verified=none; next=remove main theorem sorry; risks=主定理 sorry 仍未消除"}'
-`
+	return fakeClaudeStreamScript([]string{"结论：我只确认了当前项目状态，主定理 sorry 尚未消除，下一轮必须直接处理该验收标准。\n\nMsg: to=reviewer; intent=review; need=verify main theorem sorry removal\nHandoff: status=needs_next; changed=none; verified=none; next=remove main theorem sorry; risks=主定理 sorry 仍未消除"}, nil)
 }
 
 func fakeCCBTerminalApprovalScript() string {
@@ -2573,6 +2560,10 @@ for line in sys.stdin:
         emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
     elif method == "thread/start":
         emit({"id": msg["id"], "result": {"thread": {"id": "thr_web_approval"}}})
+    elif method == "thread/resume":
+        emit({"id": msg["id"], "result": {"thread": {"id": msg.get("params", {}).get("threadId") or "thr_web_approval"}}})
+    elif method == "thread/name/set":
+        emit({"id": msg["id"], "result": {}})
     elif method == "turn/start":
         emit({"id": msg["id"], "result": {"turn": {"id": "turn_web_approval", "items": [], "itemsView": "notLoaded", "status": "inProgress", "error": None, "startedAt": None, "completedAt": None, "durationMs": None}}})
         input_text = " ".join(part.get("text", "") for part in msg.get("params", {}).get("input", []) if isinstance(part, dict))
@@ -2616,6 +2607,188 @@ func terminationFrameworkPrompt() string {
 }
 
 func fakeIsabelleCodexScript() string {
+	return fakeCodexAppServerScript("isabelle-thread", map[string]string{
+		"isabelle_bridge_demo/BridgeDemo.thy": `theory BridgeDemo
+imports Main
+begin
+
+lemma append_nil_right:
+  "xs @ [] = (xs :: 'a list)"
+  by simp
+
+lemma rev_snoc:
+  "rev (xs @ [x]) = x # rev xs"
+  by simp
+
+lemma map_append_demo:
+  "map f (xs @ ys) = map f xs @ map f ys"
+  by simp
+
+end
+`,
+	}, []map[string]any{
+		{
+			"id":       "cmd_1",
+			"command":  "mkdir -p isabelle_bridge_demo",
+			"exitCode": 0,
+			"output":   "",
+		},
+		{
+			"id":       "cmd_2",
+			"command":  "isabelle build -D isabelle_bridge_demo",
+			"exitCode": 0,
+			"output":   "Finished BridgeDemo\n0:00:01 elapsed time\n",
+		},
+		{
+			"id":       "cmd_3",
+			"command":  `rg -n "sorry|quick_and_dirty|placeholder" isabelle_bridge_demo`,
+			"exitCode": 0,
+			"output":   "",
+		},
+		{
+			"id":       "cmd_4",
+			"command":  `isabelle process -T BridgeDemo -e "thm_oracles append_nil_right rev_snoc map_append_demo filter_append_demo" -d isabelle_bridge_demo`,
+			"exitCode": 0,
+			"output":   "no oracles\n",
+		},
+	}, []string{"Final conclusion: Created isabelle_bridge_demo/BridgeDemo.thy and verified with isabelle build. Placeholder scan found no sorry/quick_and_dirty/placeholder tokens, and Isabelle thm_oracles reported no oracles.\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=isabelle_bridge_demo/BridgeDemo.thy; verified=isabelle build -D isabelle_bridge_demo; rg placeholder scan; isabelle thm_oracles; next=none; risks=none"})
+}
+
+func fakeClaudeStreamScript(texts []string, toolBatches [][]map[string]any) string {
+	if texts == nil {
+		texts = []string{}
+	}
+	if toolBatches == nil {
+		toolBatches = [][]map[string]any{}
+	}
+	textsRaw, _ := json.Marshal(texts)
+	toolBatchesRaw, _ := json.Marshal(toolBatches)
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+texts = ` + string(textsRaw) + ` or []
+tool_batches = ` + string(toolBatchesRaw) + ` or []
+
+def emit(obj):
+    print(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+def text_for_turn(index):
+    if not texts:
+        return ""
+    if index < len(texts):
+        return texts[index]
+    return texts[-1]
+
+for idx, line in enumerate(sys.stdin, start=0):
+    if not line.strip():
+        continue
+    try:
+        json.loads(line)
+    except Exception:
+        pass
+    if idx < len(tool_batches):
+        for tool in tool_batches[idx]:
+            command = tool.get("command", "")
+            tool_id = tool.get("id", "tool_%d" % (idx + 1))
+            emit({"type":"assistant","message":{"content":[{"type":"tool_use","id":tool_id,"name":"Bash","input":{"command":command}}]}})
+            emit({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tool_id,"content":tool.get("output", "")}]}})
+    text = text_for_turn(idx)
+    emit({"type":"assistant","message":{"content":[{"type":"text","text":text}]}})
+    emit({"type":"result","result":text})
+`
+}
+
+func fakeCodexAppServerScript(threadID string, files map[string]string, tools []map[string]any, texts []string) string {
+	if files == nil {
+		files = map[string]string{}
+	}
+	if tools == nil {
+		tools = []map[string]any{}
+	}
+	if texts == nil {
+		texts = []string{}
+	}
+	threadIDRaw, _ := json.Marshal(threadID)
+	filesRaw, _ := json.Marshal(files)
+	toolsRaw, _ := json.Marshal(tools)
+	textsRaw, _ := json.Marshal(texts)
+	return `#!/usr/bin/env python3
+import json
+import os
+import sys
+
+thread_id = ` + string(threadIDRaw) + `
+files = ` + string(filesRaw) + ` or {}
+tools = ` + string(toolsRaw) + ` or []
+texts = ` + string(textsRaw) + ` or []
+turn_count = 0
+
+def emit(obj):
+    print(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+def write_files():
+    for path, content in files.items():
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+def text_for_turn(index):
+    if not texts:
+        return ""
+    if index < len(texts):
+        return texts[index]
+    return texts[-1]
+
+if len(sys.argv) < 2 or sys.argv[1] != "app-server":
+    print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
+    sys.exit(1)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": thread_id}}})
+    elif method == "thread/resume":
+        emit({"id": msg["id"], "result": {"thread": {"id": params.get("threadId") or thread_id}}})
+    elif method == "thread/name/set":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "turn/start":
+        turn_count += 1
+        current_thread = params.get("threadId") or thread_id
+        turn_id = "turn_%d" % turn_count
+        write_files()
+        emit({"id": msg["id"], "result": {"turn": {"id": turn_id, "status": "inProgress"}}})
+        for tool in tools:
+            tool_id = tool.get("id", "cmd")
+            command = tool.get("command", "")
+            output = tool.get("output", "")
+            exit_code = int(tool.get("exitCode", 0))
+            emit({"method": "item/started", "params": {"item": {"id": tool_id, "type": "commandExecution", "command": command, "status": "running"}}})
+            emit({"method": "item/completed", "params": {"item": {"id": tool_id, "type": "commandExecution", "command": command, "status": "completed", "exitCode": exit_code, "aggregatedOutput": output}}})
+        text = text_for_turn(turn_count - 1)
+        if text:
+            emit({"method": "item/agentMessage/delta", "params": {"threadId": current_thread, "turnId": turn_id, "delta": text}})
+        emit({"method": "turn/completed", "params": {"threadId": current_thread, "turn": {"id": turn_id, "status": "completed"}}})
+`
+}
+
+func fakeIsabelleClaudeScript() string {
+	return fakeClaudeStreamScript([]string{"I will create the Isabelle theory in isabelle_bridge_demo and leave verification to the reviewer."}, [][]map[string]any{{
+		{
+			"id":      "tool_1",
+			"command": "mkdir -p isabelle_bridge_demo",
+			"output":  "created\n",
+		},
+	}})
+}
+
+func legacyFakeIsabelleCodexScript() string {
 	return `#!/bin/sh
 cat >/dev/null
 printf '%s\n' '{"type":"item.started","item":{"id":"cmd_1","type":"command_execution","command":"mkdir -p isabelle_bridge_demo","status":"running"}}'
@@ -2651,7 +2824,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"output_tokens":12}}'
 `
 }
 
-func fakeIsabelleClaudeScript() string {
+func legacyFakeIsabelleClaudeScript() string {
 	return `#!/bin/sh
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_1","name":"Bash","input":{"command":"mkdir -p isabelle_bridge_demo"}}]}}'
 printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_1","content":"created\n"}]}}'

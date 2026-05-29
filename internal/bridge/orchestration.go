@@ -35,7 +35,8 @@ import (
 type OrchestrationManager struct {
 	cfg         *config.Config
 	mu          sync.Mutex
-	runs        map[string]context.CancelFunc
+	runs        map[string]*orchestrationRunHandle
+	sessions    map[string]*orchestrationNativeSession
 	output      chan<- protocol.Envelope
 	pending     []protocol.Envelope
 	approvals   map[string]orchestrationApproval
@@ -45,6 +46,10 @@ type OrchestrationManager struct {
 type orchestrationApproval struct {
 	runID string
 	ch    chan protocol.ApprovalResponsePayload
+}
+
+type orchestrationRunHandle struct {
+	cancel context.CancelFunc
 }
 
 type orchestrationTurn struct {
@@ -74,7 +79,33 @@ type orchestrationSessionState struct {
 	ClaudeSessionStarted bool
 	CodexResumeMode      string
 	ClaudeResumeMode     string
+	NativeSession        *orchestrationNativeSession
 	CommandFingerprints  map[string]bridgeprofiles.CommandFingerprint
+}
+
+type orchestrationNativeSession struct {
+	runID  string
+	cwd    string
+	mu     sync.Mutex
+	codex  *orchestrationCodexSession
+	claude *orchestrationClaudeSession
+}
+
+type orchestrationCodexSession struct {
+	client   *appServerClient
+	threadID string
+	mode     string
+}
+
+type orchestrationClaudeSession struct {
+	cmd            *exec.Cmd
+	stdin          io.WriteCloser
+	stdout         *bufio.Reader
+	stderr         *bytes.Buffer
+	sessionID      string
+	mode           string
+	approvalServer *claudeApprovalServer
+	release        func()
 }
 
 const defaultLongCommandObserverAfter = 2 * time.Minute
@@ -90,6 +121,7 @@ type claudeScanOptions struct {
 	CanNudge            bool
 	NudgeAfter          time.Duration
 	IdleCloseAfter      time.Duration
+	ReturnAfterResult   bool
 	LongCommandObserver longCommandObserverConfig
 }
 
@@ -133,7 +165,8 @@ type codexScanResult struct {
 func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
 	return &OrchestrationManager{
 		cfg:         cfg,
-		runs:        make(map[string]context.CancelFunc),
+		runs:        make(map[string]*orchestrationRunHandle),
+		sessions:    make(map[string]*orchestrationNativeSession),
 		approvals:   make(map[string]orchestrationApproval),
 		conclusions: make(map[string]bool),
 	}
@@ -168,20 +201,32 @@ func (m *OrchestrationManager) Start(parent context.Context, payload protocol.Or
 	}
 	ctx, cancel := context.WithCancel(parent)
 	m.mu.Lock()
+	var oldSession *orchestrationNativeSession
 	if old := m.runs[payload.RunID]; old != nil {
-		old()
+		old.cancel()
+		oldSession = m.sessions[payload.RunID]
+		delete(m.sessions, payload.RunID)
 	}
-	m.runs[payload.RunID] = cancel
+	handle := &orchestrationRunHandle{cancel: cancel}
+	m.runs[payload.RunID] = handle
 	delete(m.conclusions, payload.RunID)
 	m.mu.Unlock()
+	if oldSession != nil {
+		oldSession.close()
+	}
 
 	go func() {
 		defer func() {
 			cancel()
 			m.mu.Lock()
-			delete(m.runs, payload.RunID)
+			current := m.runs[payload.RunID]
+			if m.runs[payload.RunID] == handle {
+				delete(m.runs, payload.RunID)
+			}
 			m.mu.Unlock()
-			m.cancelApprovals(payload.RunID)
+			if current == handle {
+				m.cancelApprovals(payload.RunID)
+			}
 		}()
 		m.run(ctx, payload)
 	}()
@@ -189,11 +234,12 @@ func (m *OrchestrationManager) Start(parent context.Context, payload protocol.Or
 
 func (m *OrchestrationManager) Cancel(runID string) {
 	m.mu.Lock()
-	cancel := m.runs[runID]
+	handle := m.runs[runID]
 	m.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if handle != nil {
+		handle.cancel()
 	}
+	m.closeNativeSession(runID)
 	m.cancelApprovals(runID)
 }
 
@@ -201,17 +247,77 @@ func (m *OrchestrationManager) CloseAll() {
 	m.mu.Lock()
 	var cancels []context.CancelFunc
 	runIDs := make([]string, 0, len(m.runs))
-	for runID, cancel := range m.runs {
-		cancels = append(cancels, cancel)
+	for runID, handle := range m.runs {
+		if handle != nil {
+			cancels = append(cancels, handle.cancel)
+		}
 		runIDs = append(runIDs, runID)
 		delete(m.runs, runID)
+	}
+	var sessions []*orchestrationNativeSession
+	for runID, session := range m.sessions {
+		sessions = append(sessions, session)
+		delete(m.sessions, runID)
 	}
 	m.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
 	}
+	for _, session := range sessions {
+		session.close()
+	}
 	for _, runID := range runIDs {
 		m.cancelApprovals(runID)
+	}
+}
+
+func (m *OrchestrationManager) nativeSession(runID, cwd string) *orchestrationNativeSession {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sessions == nil {
+		m.sessions = make(map[string]*orchestrationNativeSession)
+	}
+	session := m.sessions[runID]
+	if session == nil {
+		session = &orchestrationNativeSession{runID: runID, cwd: cwd}
+		m.sessions[runID] = session
+	} else if cwd != "" {
+		session.cwd = cwd
+	}
+	return session
+}
+
+func (m *OrchestrationManager) closeNativeSession(runID string) {
+	m.mu.Lock()
+	session := m.sessions[runID]
+	delete(m.sessions, runID)
+	m.mu.Unlock()
+	if session != nil {
+		session.close()
+	}
+}
+
+func (s *orchestrationNativeSession) close() {
+	s.mu.Lock()
+	codex := s.codex
+	claude := s.claude
+	s.codex = nil
+	s.claude = nil
+	s.mu.Unlock()
+	if codex != nil && codex.client != nil {
+		codex.client.close()
+	}
+	if claude != nil {
+		_ = claude.stdin.Close()
+		if claude.cmd != nil && claude.cmd.Process != nil {
+			_ = terminateProcessGroup(claude.cmd.Process.Pid)
+		}
+		if claude.cmd != nil {
+			_ = claude.cmd.Wait()
+		}
+		if claude.release != nil {
+			claude.release()
+		}
 	}
 }
 
@@ -325,6 +431,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	profile := normalizeOrchestrationProfile(payload.Profile)
 	sessionState := orchestrationSessionState{
 		ClaudeSessionID:     stableOrchestrationSessionID(payload.RunID, "claude"),
+		NativeSession:       m.nativeSession(payload.RunID, runCWD),
 		CommandFingerprints: map[string]bridgeprofiles.CommandFingerprint{},
 	}
 	if payload.Resume {
@@ -545,8 +652,16 @@ func orchestrationTurnStartContent(cli string, state *orchestrationSessionState,
 		label = fmt.Sprintf("%s turn %d/%d", label, turn, maxTurns)
 	}
 	switch {
+	case cli == "codex" && mode == "codex-interactive-resume":
+		return "Starting " + label + " in the saved native Codex thread."
+	case cli == "codex" && mode == "codex-interactive-thread":
+		return "Starting " + label + " in a native Codex thread."
 	case cli == "codex" && mode == "codex-thread-resume":
 		return "Starting " + label + " with the saved native thread when available."
+	case cli == "claude" && mode == "claude-interactive-resume":
+		return "Starting " + label + " in the saved native Claude session."
+	case cli == "claude" && mode == "claude-interactive-session":
+		return "Starting " + label + " in a native Claude session."
 	case cli == "claude" && mode == "claude-resume":
 		return "Starting " + label + " with the saved native session when available."
 	case cli == "claude" && mode == "claude-new":
@@ -575,11 +690,35 @@ func cliDisplay(cli string) string {
 func plannedRelayResumeMode(cli string, state orchestrationSessionState) string {
 	switch cli {
 	case "codex":
+		if state.CodexResumeMode != "" {
+			return state.CodexResumeMode
+		}
+		if state.NativeSession != nil && state.NativeSession.codex != nil && state.NativeSession.codex.mode != "" {
+			return state.NativeSession.codex.mode
+		}
+		if state.NativeSession != nil {
+			if state.CodexThreadID != "" {
+				return "codex-interactive-resume"
+			}
+			return "codex-interactive-thread"
+		}
 		if state.CodexThreadID != "" {
 			return "codex-thread-resume"
 		}
 		return "codex-fresh"
 	case "claude":
+		if state.ClaudeResumeMode != "" {
+			return state.ClaudeResumeMode
+		}
+		if state.NativeSession != nil && state.NativeSession.claude != nil && state.NativeSession.claude.mode != "" {
+			return state.NativeSession.claude.mode
+		}
+		if state.NativeSession != nil {
+			if state.ClaudeSessionStarted {
+				return "claude-interactive-resume"
+			}
+			return "claude-interactive-session"
+		}
 		if state.ClaudeSessionStarted {
 			return "claude-resume"
 		}
@@ -670,6 +809,18 @@ func stableOrchestrationSessionID(runID, cli string) string {
 	raw[8] = (raw[8] & 0x3f) | 0x80
 	encoded := hex.EncodeToString(raw)
 	return encoded[:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
+}
+
+func nativeSessionDisplayName(runID, cli string) string {
+	cli = strings.TrimSpace(cli)
+	if cli == "" {
+		cli = "cli"
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return "Codex Bridge " + cli
+	}
+	return "Codex Bridge " + cli + " " + runID
 }
 
 func (m *OrchestrationManager) shouldDeferRepeatedBlockerForWorkspaceRemediation(payload protocol.OrchestrationStartPayload, userPrompt string, history []orchestrationTurn, before workspaceSnapshot) bool {
@@ -3344,7 +3495,7 @@ func (m *OrchestrationManager) runRelayCLI(ctx context.Context, payload protocol
 		if state == nil {
 			return m.runClaude(ctx, payload, turnID, role, prompt)
 		}
-		content, tools, resumeMode, err := m.runClaudeWithSession(ctx, payload, turnID, role, prompt, state.ClaudeSessionID, state.ClaudeSessionStarted)
+		content, tools, resumeMode, err := m.runClaudeInteractive(ctx, payload, turnID, role, prompt, state)
 		state.ClaudeResumeMode = resumeMode
 		if err == nil {
 			state.ClaudeSessionStarted = true
@@ -3354,7 +3505,7 @@ func (m *OrchestrationManager) runRelayCLI(ctx context.Context, payload protocol
 		if state == nil {
 			return m.runCodex(ctx, payload, turnID, role, prompt)
 		}
-		content, tools, threadID, resumeMode, err := m.runCodexWithThread(ctx, payload, turnID, role, prompt, state.CodexThreadID)
+		content, tools, threadID, resumeMode, err := m.runCodexInteractive(ctx, payload, turnID, role, prompt, state)
 		state.CodexResumeMode = resumeMode
 		if threadID != "" {
 			state.CodexThreadID = threadID
@@ -3379,6 +3530,113 @@ func forbiddenDomainForegroundBuildError(userPrompt string, tools []RunnerToolEv
 func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, []RunnerToolEvent, error) {
 	content, tools, _, _, err := m.runCodexWithThread(ctx, payload, turnID, role, prompt, "")
 	return content, tools, err
+}
+
+func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, string, string, error) {
+	if state == nil || state.NativeSession == nil {
+		return m.runCodexWithThread(ctx, payload, turnID, role, prompt, "")
+	}
+	session := state.NativeSession
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	codex, err := m.ensureCodexInteractiveSessionLocked(ctx, payload, state)
+	if err != nil {
+		return "", nil, firstNonEmpty(state.CodexThreadID, ""), "codex-interactive-error", err
+	}
+	req := RunnerRequest{
+		Content:        prompt,
+		RemoteThreadID: codex.threadID,
+		RunID:          payload.RunID,
+		PromptID:       turnID,
+		CWD:            m.cwd(payload),
+		Approvals: orchestrationApprovalRequester{
+			manager: m,
+			runID:   payload.RunID,
+			turnID:  turnID,
+			role:    role,
+			cli:     "codex",
+			cwd:     m.cwd(payload),
+		},
+	}
+	var tools []RunnerToolEvent
+	toolStarts := make(map[string]time.Time)
+	done := make(chan appServerTurnResult, 1)
+	go NewCodexAppServerRunner(m.cfg).readEvents(ctx, codex.client, req, codex.threadID, func(update RunnerUpdate) {
+		if update.Delta != "" {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: update.Delta})
+		}
+		if update.Content != "" {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: update.Content})
+		}
+		if update.Tool != nil {
+			stampToolTiming(update.Tool, toolStarts)
+			tools = append(tools, *update.Tool)
+			m.emitTool(payload.RunID, turnID, role, "codex", update.Tool)
+		}
+	}, done)
+	if _, err := codex.client.request(ctx, "turn/start", NewCodexAppServerRunner(m.cfg).turnStartParams(codex.threadID, prompt, req)); err != nil {
+		return "", tools, codex.threadID, codex.mode, err
+	}
+	select {
+	case result := <-done:
+		return strings.TrimSpace(result.result.Content), tools, codex.threadID, codex.mode, result.err
+	case <-ctx.Done():
+		return "", tools, codex.threadID, codex.mode, ctx.Err()
+	}
+}
+
+func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.Context, payload protocol.OrchestrationStartPayload, state *orchestrationSessionState) (*orchestrationCodexSession, error) {
+	session := state.NativeSession
+	if session.codex != nil && session.codex.client != nil && session.codex.threadID != "" {
+		state.CodexThreadID = session.codex.threadID
+		return session.codex, nil
+	}
+	runner := NewCodexAppServerRunner(m.cfg)
+	req := RunnerRequest{
+		RemoteThreadID: state.CodexThreadID,
+		RunID:          payload.RunID,
+		CWD:            m.cwd(payload),
+	}
+	client, err := runner.start(context.Background(), req)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := client.request(ctx, "initialize", map[string]any{
+		"clientInfo": map[string]string{"name": "codex-bridge", "title": "Codex Bridge", "version": "dev"},
+		"capabilities": map[string]any{
+			"experimentalApi":    true,
+			"requestAttestation": false,
+		},
+	}); err != nil {
+		client.close()
+		return nil, err
+	}
+	threadID := strings.TrimSpace(state.CodexThreadID)
+	mode := "codex-interactive-thread"
+	if threadID == "" {
+		res, err := client.request(ctx, "thread/start", runner.threadStartParams(req))
+		if err != nil {
+			client.close()
+			return nil, err
+		}
+		threadID = nestedString(appServerResultMap(res), "thread", "id")
+		if threadID == "" {
+			client.close()
+			return nil, errors.New("codex app-server did not return a thread id")
+		}
+		_, _ = client.request(ctx, "thread/name/set", map[string]any{
+			"threadId": threadID,
+			"name":     nativeSessionDisplayName(payload.RunID, "codex"),
+		})
+	} else if _, err := client.request(ctx, "thread/resume", runner.threadResumeParams(threadID, req)); err != nil {
+		client.close()
+		return nil, err
+	} else {
+		mode = "codex-interactive-resume"
+	}
+	session.codex = &orchestrationCodexSession{client: client, threadID: threadID, mode: mode}
+	state.CodexThreadID = threadID
+	return session.codex, nil
 }
 
 func (m *OrchestrationManager) runCodexWithThread(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt, threadID string) (string, []RunnerToolEvent, string, string, error) {
@@ -3614,6 +3872,94 @@ func (m *OrchestrationManager) runClaude(ctx context.Context, payload protocol.O
 	return content, tools, err
 }
 
+func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, string, error) {
+	if state == nil || state.NativeSession == nil {
+		return m.runClaudeWithSession(ctx, payload, turnID, role, prompt, "", false)
+	}
+	session := state.NativeSession
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	claude, err := m.ensureClaudeInteractiveSessionLocked(ctx, payload, state)
+	if err != nil {
+		return "", nil, "claude-interactive-error", err
+	}
+	if err := writeClaudeStreamUserMessage(claude.stdin, prompt); err != nil {
+		return "", nil, claude.mode, err
+	}
+	if claude.approvalServer != nil {
+		claude.approvalServer.updateTurn(turnID, role)
+	}
+	observer := m.longCommandObserverConfig()
+	content, tools, err := m.scanClaudeJSONLWithOptions(claude.stdout, payload.RunID, turnID, role, claudeScanOptions{
+		Input:               claude.stdin,
+		CanNudge:            observer.Enabled && observerAppliesTo(observer, "claude"),
+		LongCommandObserver: observer,
+		NudgeAfter:          observer.After,
+		ReturnAfterResult:   true,
+	})
+	if err != nil && claude.stderr != nil {
+		msg := strings.TrimSpace(claude.stderr.String())
+		if msg != "" {
+			err = errors.New(msg)
+		}
+	}
+	return content, tools, claude.mode, err
+}
+
+func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.Context, payload protocol.OrchestrationStartPayload, state *orchestrationSessionState) (*orchestrationClaudeSession, error) {
+	session := state.NativeSession
+	if session.claude != nil && session.claude.stdin != nil && session.claude.stdout != nil {
+		return session.claude, nil
+	}
+	resume := state.ClaudeSessionStarted
+	args := m.claudeArgsWithStreamInput(payload, state.ClaudeSessionID, resume)
+	args = append(args, "--name", nativeSessionDisplayName(payload.RunID, "claude"))
+	approvalServer, releaseApprovalServer, err := m.prepareClaudeApprovalServer(ctx, payload, "", "")
+	if err != nil {
+		return nil, err
+	}
+	if approvalServer != nil {
+		args = m.withClaudeStreamApprovalArgs(args, approvalServer.configPath)
+	}
+	cmd := exec.CommandContext(context.Background(), m.claudePath(), args...)
+	configureManagedCommand(cmd)
+	if cwd := m.cwd(payload); cwd != "" {
+		cmd.Dir = cwd
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		releaseApprovalServer()
+		return nil, err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		releaseApprovalServer()
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		releaseApprovalServer()
+		return nil, err
+	}
+	mode := "claude-interactive-session"
+	if resume {
+		mode = "claude-interactive-resume"
+	}
+	claude := &orchestrationClaudeSession{
+		cmd:            cmd,
+		stdin:          stdin,
+		stdout:         bufio.NewReaderSize(stdout, 64*1024),
+		stderr:         &stderr,
+		sessionID:      state.ClaudeSessionID,
+		mode:           mode,
+		approvalServer: approvalServer,
+		release:        releaseApprovalServer,
+	}
+	session.claude = claude
+	return claude, nil
+}
+
 func (m *OrchestrationManager) runClaudeWithSession(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt, sessionID string, resume bool) (string, []RunnerToolEvent, string, error) {
 	approvalServer, releaseApprovalServer, err := m.prepareClaudeApprovalServer(ctx, payload, turnID, role)
 	if err != nil {
@@ -3736,6 +4082,8 @@ func isClaudeMissingSessionError(err error) bool {
 
 type claudeApprovalServer struct {
 	configPath string
+	mu         sync.Mutex
+	requester  orchestrationApprovalRequester
 }
 
 func (m *OrchestrationManager) prepareClaudeApprovalServer(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role string) (*claudeApprovalServer, func(), error) {
@@ -3764,7 +4112,8 @@ func (m *OrchestrationManager) prepareClaudeApprovalServer(ctx context.Context, 
 		cli:     "claude",
 		cwd:     m.cwd(payload),
 	}
-	go serveClaudeApprovalSocket(serverCtx, listener, requester)
+	server := &claudeApprovalServer{requester: requester}
+	go serveClaudeApprovalSocket(serverCtx, listener, server)
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -3796,11 +4145,22 @@ func (m *OrchestrationManager) prepareClaudeApprovalServer(ctx context.Context, 
 		releaseTempDir()
 		return nil, nil, fmt.Errorf("write claude approval mcp config: %w", err)
 	}
-	return &claudeApprovalServer{configPath: configPath}, func() {
+	server.configPath = configPath
+	return server, func() {
 		cancel()
 		listener.Close()
 		releaseTempDir()
 	}, nil
+}
+
+func (s *claudeApprovalServer) updateTurn(turnID, role string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.requester.turnID = turnID
+	s.requester.role = role
+	s.mu.Unlock()
 }
 
 func (m *OrchestrationManager) claudeArgs(payload protocol.OrchestrationStartPayload, prompt string) []string {
@@ -3890,6 +4250,21 @@ func (m *OrchestrationManager) withClaudeApprovalArgs(args []string, configPath 
 	return next
 }
 
+func (m *OrchestrationManager) withClaudeStreamApprovalArgs(args []string, configPath string) []string {
+	if configPath == "" {
+		return args
+	}
+	extra := []string{
+		"--permission-mode", "default",
+		"--mcp-config", configPath,
+		"--permission-prompt-tool", "mcp__codex_bridge__browser_approval",
+	}
+	next := make([]string, 0, len(args)+len(extra))
+	next = append(next, args...)
+	next = append(next, extra...)
+	return next
+}
+
 func (m *OrchestrationManager) bypassApprovalsAndSandbox() bool {
 	return strings.EqualFold(m.cfg.Bridge.ApprovalPolicy, "never") &&
 		strings.EqualFold(m.cfg.Bridge.Sandbox, "danger-full-access")
@@ -3962,7 +4337,7 @@ type claudeApprovalSocketResponse struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func serveClaudeApprovalSocket(ctx context.Context, listener net.Listener, requester orchestrationApprovalRequester) {
+func serveClaudeApprovalSocket(ctx context.Context, listener net.Listener, server *claudeApprovalServer) {
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
@@ -3976,11 +4351,11 @@ func serveClaudeApprovalSocket(ctx context.Context, listener net.Listener, reque
 			slog.Warn("[bridge] claude approval socket accept failed", "error", err)
 			return
 		}
-		go handleClaudeApprovalSocketConn(ctx, conn, requester)
+		go handleClaudeApprovalSocketConn(ctx, conn, server)
 	}
 }
 
-func handleClaudeApprovalSocketConn(ctx context.Context, conn net.Conn, requester orchestrationApprovalRequester) {
+func handleClaudeApprovalSocketConn(ctx context.Context, conn net.Conn, server *claudeApprovalServer) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Minute))
 	var req claudeApprovalSocketRequest
@@ -4009,12 +4384,22 @@ func handleClaudeApprovalSocketConn(ctx context.Context, conn net.Conn, requeste
 	if payload.Reason == "" {
 		payload.Reason = claudeApprovalReason(raw)
 	}
+	requester := server.requesterForPayload()
 	res, err := requester.RequestApproval(ctx, payload)
 	if err != nil {
 		_ = json.NewEncoder(conn).Encode(claudeApprovalSocketResponse{RequestID: payload.RequestID, Decision: "cancel", Error: err.Error()})
 		return
 	}
 	_ = json.NewEncoder(conn).Encode(claudeApprovalSocketResponse{RequestID: res.RequestID, Decision: res.Decision})
+}
+
+func (s *claudeApprovalServer) requesterForPayload() orchestrationApprovalRequester {
+	if s == nil {
+		return orchestrationApprovalRequester{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requester
 }
 
 func claudeApprovalCommand(toolName string, raw json.RawMessage) string {
@@ -4203,8 +4588,15 @@ func (m *OrchestrationManager) scanClaudeJSONL(stdout io.Reader, runID, turnID, 
 }
 
 func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runID, turnID, role string, options claudeScanOptions) (string, []RunnerToolEvent, error) {
-	reader := bufio.NewReaderSize(stdout, 64*1024)
+	if options.ReturnAfterResult && options.IdleCloseAfter == 0 {
+		options.IdleCloseAfter = -1
+	}
+	reader, ok := stdout.(*bufio.Reader)
+	if !ok {
+		reader = bufio.NewReaderSize(stdout, 64*1024)
+	}
 	var content strings.Builder
+	receivedResult := false
 	var tools []RunnerToolEvent
 	toolCommands := make(map[string]string)
 	toolStarts := make(map[string]time.Time)
@@ -4214,6 +4606,9 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 	var idleCloseCancel context.CancelFunc
 	streamInputClosed := false
 	closeStreamInput := func(reason string) {
+		if options.ReturnAfterResult {
+			return
+		}
 		if streamInputClosed {
 			return
 		}
@@ -4366,7 +4761,7 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 				emitClaudeTool(tool)
 			}
 		case "result":
-			closeStreamInput("")
+			receivedResult = true
 			if isErr, _ := msg["is_error"].(bool); isErr {
 				if text := firstString(msg, "result", "error"); text != "" {
 					return content.String(), tools, errors.New(text)
@@ -4377,12 +4772,19 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 				content.WriteString(text)
 				m.emit(runID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "claude", Content: text})
 			}
+			if options.ReturnAfterResult {
+				return strings.TrimSpace(content.String()), tools, nil
+			}
+			closeStreamInput("")
 		case "error":
 			if message := eventErrorMessage(msg); message != "" {
 				return content.String(), tools, errors.New(message)
 			}
 		}
 		scheduleIdleClose()
+	}
+	if options.ReturnAfterResult && !receivedResult {
+		return strings.TrimSpace(content.String()), tools, errors.New("claude stream ended before result")
 	}
 	return strings.TrimSpace(content.String()), tools, nil
 }
@@ -5754,6 +6156,9 @@ func composeRelayPromptWithFirstCLI(mode, firstCLI, profile, userPrompt, context
 	b.WriteString("Codex Bridge is relaying this browser orchestration like a human handoff between local CLIs. Treat this as a real user instruction, use your normal capabilities, and do not wait for Bridge to validate strategy choices.\n\n")
 	b.WriteString(orchestrationLanguageRule)
 	b.WriteString("\n\n")
+	if priorSameCLITurns(history, cli) > 0 {
+		b.WriteString("You are receiving this message in the same native " + cli + " conversation used for your earlier turn(s) in this orchestration run. Keep using your existing local context and remembered work from that native session. Do not assume shell process state persists unless your CLI explicitly preserves it between turns.\n\n")
+	}
 	if turn == 1 && profileActive && maxTurns >= 4 {
 		b.WriteString(registry.InitialStrategy(profile, mode, firstCLI, userPrompt))
 		b.WriteString("\n")
@@ -5845,6 +6250,16 @@ func relayCommandSummaries(tools []RunnerToolEvent, max int) []string {
 		}
 	}
 	return out
+}
+
+func priorSameCLITurns(history []orchestrationTurn, cli string) int {
+	count := 0
+	for _, item := range history {
+		if strings.EqualFold(item.CLI, cli) {
+			count++
+		}
+	}
+	return count
 }
 
 func composeOrchestrationPrompt(mode, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {

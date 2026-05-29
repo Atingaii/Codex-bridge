@@ -361,12 +361,12 @@ func TestCCBCompletionItemTextPrefersReadableDelta(t *testing.T) {
 }
 
 func TestSanitizeCCBConsoleLinesRedactsSecretsAndANSI(t *testing.T) {
-	lines := sanitizeCCBConsoleLines("\x1b[31mOPENAI_API_KEY=sk-test\nAuthorization: Bearer abc.def\nplain\x1b[0m\n", 10)
+	lines := sanitizeCCBConsoleLines("\x1b[31mOPENAI_API_KEY=sk-test\nAuthorization: Bearer abc.def\nenr_secret-token_123\nplain\x1b[0m\n", 10)
 	got := strings.Join(lines, "\n")
-	if strings.Contains(got, "\x1b") || strings.Contains(got, "sk-test") || strings.Contains(got, "abc.def") {
+	if strings.Contains(got, "\x1b") || strings.Contains(got, "sk-test") || strings.Contains(got, "abc.def") || strings.Contains(got, "enr_secret-token_123") {
 		t.Fatalf("console was not sanitized:\n%s", got)
 	}
-	if !strings.Contains(got, "OPENAI_API_KEY=[REDACTED]") || !strings.Contains(got, "[REDACTED]") || !strings.Contains(got, "plain") {
+	if !strings.Contains(got, "OPENAI_API_KEY=[REDACTED]") || !strings.Contains(got, "enr_[REDACTED]") || !strings.Contains(got, "plain") {
 		t.Fatalf("console redaction lost expected text:\n%s", got)
 	}
 }

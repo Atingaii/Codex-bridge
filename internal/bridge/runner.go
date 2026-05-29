@@ -295,7 +295,7 @@ func (r *CodexExecRunner) scanJSONL(stdout io.Reader, fallbackThreadID string, o
 			}
 		}
 	}
-	if eventErr != "" {
+	if eventErr != "" && !codexTailErrorAfterContent(eventErr, result.Content) {
 		return result, errors.New(eventErr)
 	}
 	return result, nil
@@ -481,4 +481,17 @@ func eventErrorMessage(msg map[string]any) string {
 		}
 	}
 	return ""
+}
+
+func codexTailErrorAfterContent(message, content string) bool {
+	if strings.TrimSpace(content) == "" {
+		return false
+	}
+	value := strings.ToLower(strings.TrimSpace(stripANSI(message)))
+	if value == "" {
+		return false
+	}
+	return strings.Contains(value, "reconnecting") ||
+		strings.Contains(value, "stream disconnected before completion") ||
+		strings.Contains(value, "stream closed before response.completed")
 }

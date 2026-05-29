@@ -3802,7 +3802,7 @@ func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, tur
 			}
 		}
 	}
-	if eventErr != "" {
+	if eventErr != "" && !codexTailErrorAfterContent(eventErr, content.String()) {
 		return codexScanResult{Content: content.String(), Tools: tools, ThreadID: threadID}, errors.New(eventErr)
 	}
 	return codexScanResult{Content: strings.TrimSpace(content.String()), Tools: tools, ThreadID: threadID}, nil

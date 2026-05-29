@@ -725,6 +725,54 @@ func TestRelayCLIErrorIsFrontendVisibleAndRedacted(t *testing.T) {
 	}
 }
 
+func TestOrchestrationCodexTailDisconnectAfterFinalContentCompletes(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(`#!/usr/bin/env python3
+import json
+import sys
+
+if len(sys.argv) < 2 or sys.argv[1] != "exec":
+    sys.exit(1)
+text = "最终结果已经输出。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=needs_next; changed=none; verified=none; next=none; risks=仍有证明义务"
+print(json.dumps({"type":"thread.started","thread_id":"thr_tail"}), flush=True)
+print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
+print(json.dumps({"type":"error","message":"Reconnecting... 1/5 (stream disconnected before completion: stream closed before response.completed)"}), flush=True)
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_tail_disconnect",
+		Mode:     "collaboration",
+		FirstCLI: "codex",
+		Prompt:   "只跑 codex",
+		MaxTurns: 1,
+		CWD:      tmp,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.end", "codex", "最终结果已经输出") {
+		t.Fatalf("final turn content missing: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "run.end", "", "最终结果已经输出") {
+		t.Fatalf("run.end missing final content: %#v", events)
+	}
+	for _, event := range events {
+		if event.Kind == "run.error" {
+			t.Fatalf("tail disconnect after final content should not fail run: %#v", event)
+		}
+	}
+}
+
 func TestClaudeIsabelleLongCommandNudgeWritesToSameStreamAndEmitsEvent(t *testing.T) {
 	manager := NewOrchestrationManager(&config.Config{})
 	out := make(chan protocol.Envelope, 16)

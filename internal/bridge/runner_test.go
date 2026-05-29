@@ -156,6 +156,33 @@ func TestCodexExecScanJSONLErrorEvent(t *testing.T) {
 	}
 }
 
+func TestCodexExecScanJSONLIgnoresRecoverableTailErrorAfterContent(t *testing.T) {
+	input := strings.NewReader(`{"type":"thread.started","thread_id":"thr_tail"}
+{"type":"item.agent_message.delta","delta":"最终可见结果"}
+{"type":"error","message":"Reconnecting... 1/5 (stream disconnected before completion: stream closed before response.completed)"}
+`)
+	got, err := (&CodexExecRunner{}).scanJSONL(input, "", func(update RunnerUpdate) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Content != "最终可见结果" {
+		t.Fatalf("content = %q", got.Content)
+	}
+	if got.RemoteThreadID != "thr_tail" {
+		t.Fatalf("thread id = %q", got.RemoteThreadID)
+	}
+}
+
+func TestCodexExecScanJSONLReportsTailErrorWithoutContent(t *testing.T) {
+	input := strings.NewReader(`{"type":"thread.started","thread_id":"thr_tail"}
+{"type":"error","message":"Reconnecting... 1/5 (stream disconnected before completion: stream closed before response.completed)"}
+`)
+	_, err := (&CodexExecRunner{}).scanJSONL(input, "", func(update RunnerUpdate) {})
+	if err == nil || !strings.Contains(err.Error(), "stream disconnected") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestCodexExecScanJSONLLongLine(t *testing.T) {
 	long := strings.Repeat("x", 5*1024*1024)
 	input := strings.NewReader(`{"type":"item.completed","item":{"type":"agent_message","text":"` + long + `"}}

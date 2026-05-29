@@ -1706,7 +1706,7 @@ func TestParseHandoffFieldsAndCompactPromptAvoidsRawTranscript(t *testing.T) {
 func TestPrepareOrchestrationPromptFilesProvidesLocalPathsOnly(t *testing.T) {
 	cfg := config.Default()
 	cfg.Bridge.CWD = t.TempDir()
-	prompt, metas, err := PrepareOrchestrationPromptFiles(&cfg, "orc_pdf", "read this", []protocol.AttachmentPayload{{
+	prompt, metas, err := PrepareOrchestrationPromptFiles(&cfg, "", "orc_pdf", "read this", []protocol.AttachmentPayload{{
 		Name:     "paper.pdf",
 		MimeType: "application/pdf",
 		Size:     int64(len("pdf")),
@@ -1727,6 +1727,31 @@ func TestPrepareOrchestrationPromptFilesProvidesLocalPathsOnly(t *testing.T) {
 		if strings.Contains(prompt, bad) {
 			t.Fatalf("prompt should not inject file-tool policy %q:\n%s", bad, prompt)
 		}
+	}
+}
+
+func TestPrepareOrchestrationPromptFilesUsesRunCWD(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.CWD = filepath.Join(t.TempDir(), "configured")
+	runCWD := filepath.Join(t.TempDir(), "actual-run")
+	prompt, _, err := PrepareOrchestrationPromptFiles(&cfg, runCWD, "orc_cwd", "read this", []protocol.AttachmentPayload{{
+		Name:     "Model.thy",
+		MimeType: "application/octet-stream",
+		Size:     int64(len("thy")),
+		Data:     "dGh5",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDir := filepath.Join(runCWD, ".codex-bridge", "orchestrations", "orc_cwd")
+	if !strings.Contains(prompt, wantDir) {
+		t.Fatalf("prompt should contain upload path under run cwd %q:\n%s", wantDir, prompt)
+	}
+	if strings.Contains(prompt, cfg.Bridge.CWD) {
+		t.Fatalf("prompt should not use configured cwd %q when run cwd is set:\n%s", cfg.Bridge.CWD, prompt)
+	}
+	if _, err := os.Stat(filepath.Join(wantDir, "01-Model.thy")); err != nil {
+		t.Fatalf("uploaded file not written under run cwd: %v", err)
 	}
 }
 

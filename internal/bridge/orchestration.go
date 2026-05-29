@@ -278,7 +278,7 @@ func (m *OrchestrationManager) cancelApprovals(runID string) {
 }
 
 func (m *OrchestrationManager) run(ctx context.Context, payload protocol.OrchestrationStartPayload) {
-	preparedPrompt, _, err := PrepareOrchestrationPromptFiles(m.cfg, payload.RunID, payload.Prompt, payload.Files)
+	preparedPrompt, _, err := PrepareOrchestrationPromptFiles(m.cfg, payload.CWD, payload.RunID, payload.Prompt, payload.Files)
 	if err != nil {
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:   "run.error",
@@ -688,7 +688,7 @@ func (m *OrchestrationManager) runFinalAssessmentRemediation(ctx context.Context
 }
 
 func (m *OrchestrationManager) runCCB(ctx context.Context, payload protocol.OrchestrationStartPayload) {
-	preparedPrompt, _, err := PrepareOrchestrationPromptFiles(m.cfg, payload.RunID, payload.Prompt, payload.Files)
+	preparedPrompt, _, err := PrepareOrchestrationPromptFiles(m.cfg, payload.CWD, payload.RunID, payload.Prompt, payload.Files)
 	if err != nil {
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:   "run.error",
@@ -7535,14 +7535,17 @@ func claudeToolResultContent(value any) string {
 	}
 }
 
-func PrepareOrchestrationPromptFiles(cfg *config.Config, runID, prompt string, files []protocol.AttachmentPayload) (string, []store.OrchestrationFile, error) {
+func PrepareOrchestrationPromptFiles(cfg *config.Config, runCWD, runID, prompt string, files []protocol.AttachmentPayload) (string, []store.OrchestrationFile, error) {
 	if len(files) == 0 {
 		return strings.TrimSpace(prompt), nil, nil
 	}
 	if len(files) > 12 {
 		return "", nil, errors.New("at most 12 files can be uploaded")
 	}
-	baseDir := cfg.Bridge.CWD
+	baseDir := runCWD
+	if baseDir == "" {
+		baseDir = cfg.Bridge.CWD
+	}
 	if baseDir == "" {
 		baseDir = "."
 	}

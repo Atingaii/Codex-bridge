@@ -35,6 +35,8 @@ should list names and point here for detail.
 | `BRIDGE_MODEL` | Model argument for Codex runner | config `bridge.model` |
 | `BRIDGE_SANDBOX` | Codex sandbox policy | config `bridge.sandbox` |
 | `BRIDGE_APPROVAL_POLICY` | Codex approval policy | config `bridge.approval_policy` |
+| `BRIDGE_LONG_COMMAND_OBSERVER_ENABLED` | Enables Bridge long-command observer notes during orchestration | config `bridge.long_command_observer.enabled` |
+| `BRIDGE_LONG_COMMAND_OBSERVER_AFTER` | Duration before a matching long command is observed, for example `2m` | config `bridge.long_command_observer.after` |
 | `LOG_LEVEL` | `debug`, `info`, `warn`, `error` | config `observability.log_level` |
 | `LOG_FORMAT` | `console` or `json` | config `observability.log_format` |
 
@@ -108,6 +110,24 @@ bridge:
   cwd: /path/to/workspace
   sandbox: danger-full-access
   approval_policy: never
+```
+
+Orchestration long-command observation is opt-in. When enabled, commands whose
+text matches `command_patterns` produce explicit Bridge-note rows after the
+configured delay. Claude Code can receive a tagged stream-input note when the
+stream-input side channel is active; Codex currently records the same note in
+the browser timeline without injecting stdin.
+
+```yaml
+bridge:
+  long_command_observer:
+    enabled: true
+    after: 2m
+    command_patterns:
+      - "python -m slow_build"
+    applies_to:
+      - claude
+      - codex
 ```
 
 ## Frontend Build

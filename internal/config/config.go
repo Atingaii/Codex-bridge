@@ -39,28 +39,36 @@ type HubConfig struct {
 }
 
 type BridgeConfig struct {
-	HubURL              string   `yaml:"hub_url"`
-	Token               string   `yaml:"token"`
-	TokenFile           string   `yaml:"token_file"`
-	Name                string   `yaml:"name"`
-	MachineIDFile       string   `yaml:"machine_id_file"`
-	CWD                 string   `yaml:"cwd"`
-	Runner              string   `yaml:"runner"`
-	OrchestrationRunner string   `yaml:"orchestration_runner"`
-	CodexPath           string   `yaml:"codex_path"`
-	ClaudePath          string   `yaml:"claude_path"`
-	CCBPath             string   `yaml:"ccb_path"`
-	CCBTarget           string   `yaml:"ccb_target"`
-	CCBTimeout          Duration `yaml:"ccb_timeout"`
-	ClaudeModel         string   `yaml:"claude_model"`
-	ClaudeEffort        string   `yaml:"claude_effort"`
-	Model               string   `yaml:"model"`
-	Sandbox             string   `yaml:"sandbox"`
-	ApprovalPolicy      string   `yaml:"approval_policy"`
-	ReconnectMin        Duration `yaml:"reconnect_min"`
-	ReconnectMax        Duration `yaml:"reconnect_max"`
-	HeartbeatInterval   Duration `yaml:"heartbeat_interval"`
-	MaxSessions         int      `yaml:"max_sessions"`
+	HubURL              string                    `yaml:"hub_url"`
+	Token               string                    `yaml:"token"`
+	TokenFile           string                    `yaml:"token_file"`
+	Name                string                    `yaml:"name"`
+	MachineIDFile       string                    `yaml:"machine_id_file"`
+	CWD                 string                    `yaml:"cwd"`
+	Runner              string                    `yaml:"runner"`
+	OrchestrationRunner string                    `yaml:"orchestration_runner"`
+	CodexPath           string                    `yaml:"codex_path"`
+	ClaudePath          string                    `yaml:"claude_path"`
+	CCBPath             string                    `yaml:"ccb_path"`
+	CCBTarget           string                    `yaml:"ccb_target"`
+	CCBTimeout          Duration                  `yaml:"ccb_timeout"`
+	ClaudeModel         string                    `yaml:"claude_model"`
+	ClaudeEffort        string                    `yaml:"claude_effort"`
+	Model               string                    `yaml:"model"`
+	Sandbox             string                    `yaml:"sandbox"`
+	ApprovalPolicy      string                    `yaml:"approval_policy"`
+	ReconnectMin        Duration                  `yaml:"reconnect_min"`
+	ReconnectMax        Duration                  `yaml:"reconnect_max"`
+	HeartbeatInterval   Duration                  `yaml:"heartbeat_interval"`
+	MaxSessions         int                       `yaml:"max_sessions"`
+	LongCommandObserver LongCommandObserverConfig `yaml:"long_command_observer"`
+}
+
+type LongCommandObserverConfig struct {
+	Enabled         bool     `yaml:"enabled"`
+	After           Duration `yaml:"after"`
+	CommandPatterns []string `yaml:"command_patterns"`
+	AppliesTo       []string `yaml:"applies_to"`
 }
 
 type AuthConfig struct {
@@ -122,6 +130,12 @@ func Default() Config {
 			ReconnectMax:        Duration{Duration: 30_000_000_000},
 			HeartbeatInterval:   Duration{Duration: 15_000_000_000},
 			MaxSessions:         8,
+			LongCommandObserver: LongCommandObserverConfig{
+				Enabled:         false,
+				After:           Duration{Duration: 2 * 60 * 1_000_000_000},
+				CommandPatterns: []string{"python -m slow_build"},
+				AppliesTo:       []string{"claude", "codex"},
+			},
 		},
 		Auth: AuthConfig{
 			JWTSecret:         "dev-only-change-me-32-byte-minimum-secret",

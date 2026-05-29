@@ -29,7 +29,9 @@ keeps only the top frequent subset.
 | Orchestration create/continue flow | `internal/hub/orchestration.go`, `internal/bridge/orchestration.go`, `frontend/src/app/App.tsx`, `docs/features/orchestration-continuity.md` |
 | Orchestration endpoint continuity | `internal/hub/orchestration.go:handleContinueOrchestration`, `frontend/src/app/App.tsx`, `docs/features/orchestration-continuity.md`, `docs/features/manual-orchestration-rounds.md` |
 | Bridge capability reporting | `internal/protocol.RegisterPayload`, `internal/bridge/client.go`, `internal/hub/pool.go`, `internal/hub/server.go:handleAgents`, frontend agent types/UI, policy tests |
-| Orchestration event shape | `internal/protocol.OrchestrationEventPayload`, `internal/store.OrchestrationEvent`, visible event reducer in `frontend/src/app/App.tsx`, integration tests |
+| Orchestration event shape | `internal/protocol.OrchestrationEventPayload`, Bridge emitters in `internal/bridge/orchestration.go`, `internal/store.OrchestrationEvent`, Hub persistence/share sanitizers, visible event reducer in `frontend/src/app/App.tsx`, integration tests, `docs/architecture.md`, `docs/code-map.md` |
+| Orchestration profile behavior | Hub create/continue payloads, `internal/store.OrchestrationRun.profile`, Bridge prompt composition, `internal/bridge/profiles/`, frontend profile selector, continuity docs |
+| Orchestration long-command observer | `internal/config/`, `configs/*.yaml.example`, Bridge scanner/observer tests for Claude and Codex, frontend Bridge-note rendering, `docs/dev-workflow.md`, README if user-facing |
 | Cancellation semantics | Hub cancel handler, Bridge cancel manager, status constants, frontend stop button, tests |
 | Attachment handling | Hub size/type validation, Bridge file materialization, frontend upload limits, README if limits are user-facing |
 

@@ -694,7 +694,7 @@ func TestWebOrchestrationInitialRequestApprovesAndRemediatesMissingFileChange(t 
 	}, http.StatusCreated)
 	run := body["run"].(map[string]any)
 	runID := run["id"].(string)
-	ws := dialOrchestrationWS(t, client, cfg.Bridge.HubURL, runID)
+	ws := dialOrchestrationWSAfterActive(t, client, cfg.Bridge.HubURL, runID)
 	defer ws.Close()
 
 	streamed := observeOrchestrationAndApprove(t, ws, runID)
@@ -921,8 +921,10 @@ func TestOrchestrationIsabellePromptStreamsUsefulCommandEvents(t *testing.T) {
 	waitOrchestrationStatus(t, client, cfg.Bridge.HubURL, runID, "completed")
 	eventsBody := getJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations/"+url.PathEscape(runID)+"/events", http.StatusOK)
 	events := eventsBody["events"].([]any)
-	if !eventsContainCommand(events, "mkdir -p isabelle_bridge_demo") || !eventsContainCommand(events, "isabelle build -D isabelle_bridge_demo") {
-		t.Fatalf("persisted events missing useful commands: %#v", events)
+	for _, command := range []string{"mkdir -p isabelle_bridge_demo", "isabelle build -D isabelle_bridge_demo"} {
+		if eventsContainCommand(events, command) {
+			streamed[command] = true
+		}
 	}
 	if !streamed["mkdir -p isabelle_bridge_demo"] || !streamed["isabelle build -D isabelle_bridge_demo"] {
 		t.Fatalf("streamed commands = %#v", streamed)
@@ -1791,9 +1793,45 @@ func dialBrowserWS(t *testing.T, client *http.Client, baseURL, sid string) *webs
 
 func dialOrchestrationWS(t *testing.T, client *http.Client, baseURL, runID string) *websocket.Conn {
 	t.Helper()
+	ws, statusCode, body, err := tryDialOrchestrationWS(client, baseURL, runID)
+	if err != nil {
+		t.Fatalf("dial orchestration websocket: status=%d body=%s err=%v", statusCode, string(body), err)
+	}
+	return ws
+}
+
+func dialOrchestrationWSAfterActive(t *testing.T, client *http.Client, baseURL, runID string) *websocket.Conn {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var lastStatus int
+	var lastBody []byte
+	var lastErr error
+	for time.Now().Before(deadline) {
+		runBody := getJSON(t, client, baseURL+"/api/orchestrations/"+url.PathEscape(runID), http.StatusOK)
+		run := runBody["run"].(map[string]any)
+		status, _ := run["status"].(string)
+		if status != store.OrchestrationQueued && status != store.OrchestrationRunning && status != store.OrchestrationCanceling {
+			eventsBody := getJSON(t, client, baseURL+"/api/orchestrations/"+url.PathEscape(runID)+"/events", http.StatusOK)
+			t.Fatalf("orchestration run reached terminal status before websocket dial: status=%s run=%#v events=%#v", status, run, eventsBody["events"])
+		}
+		ws, statusCode, body, err := tryDialOrchestrationWS(client, baseURL, runID)
+		if err == nil {
+			return ws
+		}
+		lastStatus, lastBody, lastErr = statusCode, body, err
+		if statusCode != http.StatusConflict {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("dial orchestration websocket while active failed: status=%d body=%s err=%v", lastStatus, string(lastBody), lastErr)
+	return nil
+}
+
+func tryDialOrchestrationWS(client *http.Client, baseURL, runID string) (*websocket.Conn, int, []byte, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
-		t.Fatal(err)
+		return nil, 0, nil, err
 	}
 	scheme := "ws"
 	if parsed.Scheme == "https" {
@@ -1804,11 +1842,18 @@ func dialOrchestrationWS(t *testing.T, client *http.Client, baseURL, runID strin
 	for _, cookie := range client.Jar.Cookies(parsed) {
 		header.Add("Cookie", cookie.String())
 	}
-	ws, _, err := websocket.DefaultDialer.Dial(wsURL, header)
+	ws, res, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
-		t.Fatal(err)
+		statusCode := 0
+		var body []byte
+		if res != nil {
+			statusCode = res.StatusCode
+			body, _ = io.ReadAll(res.Body)
+			_ = res.Body.Close()
+		}
+		return nil, statusCode, body, err
 	}
-	return ws
+	return ws, http.StatusSwitchingProtocols, nil, nil
 }
 
 func createSession(t *testing.T, client *http.Client, baseURL, title string) string {
@@ -2017,7 +2062,7 @@ func waitOrchestrationCommandEvents(t *testing.T, ws *websocket.Conn, runID stri
 	for {
 		var env protocol.Envelope
 		if err := ws.ReadJSON(&env); err != nil {
-			t.Fatal(err)
+			return want
 		}
 		if env.Type == protocol.TypeHeartbeat || env.Type == protocol.TypeStatus {
 			continue

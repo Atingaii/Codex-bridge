@@ -34,6 +34,22 @@ context in the same `runID`.
 - Follow-up prompts also preserve the run's persisted `firstCli` value unless a
   request explicitly changes it, so the visible relay schedule after refresh
   matches the originally selected first-turn CLI.
+- Follow-up prompts preserve the run's persisted orchestration `profile`.
+  `default` is the generic relay profile; `formal-proof` is explicit opt-in for
+  proof-assistant guidance. The default profile does not silently enable formal
+  proof instructions based on keywords in the user prompt.
+- Follow-up prompts restore native CLI continuity where possible. Hub persists
+  the Codex thread id reported by Bridge because it is non-deterministic, stores
+  whether Claude reached a successful `turn.end`, and records the absolute run
+  cwd reported by `run.start`. Resumed `orchestration_start` payloads send those
+  values back so Bridge can use `codex exec resume`, choose Claude `--resume`
+  only for an actually started session, and keep all later turns in the locked
+  absolute working directory.
+- Native CLI resume is best-effort. Bridge always keeps Hub's compacted
+  context in the prompt as the required continuity fallback, exposes the chosen
+  resume path through `event.data.resumeMode`, retries Codex fresh when resume
+  clearly misses the local thread data, and retries Claude once with
+  `--session-id` if `--resume` reports a missing session.
 - While a follow-up is active, the frontend must surface `turn.start`,
   `command.start`, and run status events instead of leaving the user message as
   the only visible item.
@@ -47,12 +63,16 @@ context in the same `runID`.
 - Command events include timing metadata so long-running checks such as
   Isabelle, Coq, and Lean builds show when the command started and how long it
   has been running or took to finish.
-- Isabelle-looking proof runs receive only a prompt-level timeout boundary:
-  when a CLI chooses to run a full Isabelle build or long Isabelle compilation,
-  it should choose an explicit timeout and report the command, elapsed time,
-  timeout value, and latest output/log if the timeout is exceeded. Bridge does
-  not require a controlled background build template and does not reject the
-  CLI's foreground build choice after the fact.
+- `command.*` events carry typed `CommandData`; frontend command cards use that
+  typed payload as the source of truth for command text, output, status,
+  exit-code, and timing. Bridge-originated notes use `source=bridge` and
+  optional `severity`, so they do not count as CLI command failures.
+- Bridge emits one structured `run.conclusion` event before every terminal run
+  event. The frontend renders that event as the final conclusion card instead
+  of guessing from keywords in `run.end.content`.
+- Formal-proof profile runs can receive prompt-level proof-assistant guidance.
+  Generic default-profile runs do not get that guidance based only on prompt
+  wording.
 - If a Bridge disconnects or restarts while an orchestration run is active, Hub
   marks that run failed and appends a `run.error` event instead of leaving the
   browser stuck in `running`.
@@ -90,10 +110,11 @@ The selected orchestration run id is stored in browser local storage so a page
 refresh or returning to `/orchestrate` restores the same run when it still
 exists. The New Run button clears that selection intentionally.
 
-`turn.start` is rendered as a lightweight status item. User message event status
-is not shown as an authoritative processing state because the persisted
-`queued` marker only records submission, not whether later turns are already
-running.
+`turn.start` is rendered as a lightweight status item and carries diagnostic
+metadata such as `resumeMode` in typed `TurnStartData`; it must not echo the
+full internal relay prompt as visible content. User message event status is not
+shown as an authoritative processing state because the persisted `queued`
+marker only records submission, not whether later turns are already running.
 
 Event cards display their precise clock time down to seconds. The orchestration
 sidebar shows the run calendar date beside status so history can be scanned
@@ -117,6 +138,9 @@ Follow-up prompts preserve previously uploaded run file metadata even when no
 new files are attached. New follow-up uploads are merged into the run-level
 metadata while each `user.message` event still records only that prompt's
 attachments.
+Bridge materializes new follow-up uploads under the locked absolute run cwd
+when Hub has one, so attached file paths match the CLI execution directory
+across follow-up prompts and Bridge reconnects.
 Successful turn-end events carry the final turn content so the UI can show the
 CLI answer after command events instead of visually ending on the last
 `command.end` card. Bridge does not append proof-specific acceptance summaries
@@ -147,7 +171,7 @@ state.
     button when the user has scrolled up.
 11. Persist uploaded file metadata on `user.message` orchestration events and
     render that metadata in the timeline and selected-run side panel.
-12. Include command timing metadata in Bridge-emitted command events and show
+12. Include typed command metadata in Bridge-emitted command events and show
     active runtime or completed duration in the frontend timeline.
 13. Mark active orchestration runs failed with a visible `run.error` event when
     their Bridge connection disconnects or restarts.
@@ -166,6 +190,13 @@ state.
     and leave execution strategy to the CLI.
 20. Preserve first-turn CLI selection across create, refresh, and continue so a
     Codex-first smoke remains Codex-first.
+21. Persist Codex thread id, Claude-started state, and absolute run cwd from
+    Bridge events, then include them in resumed `orchestration_start` payloads.
+22. Materialize uploaded files under the locked absolute run cwd when a run is
+    resumed.
+23. Preserve the orchestration profile across create, refresh, and continue.
+24. Emit and render structured `run.conclusion` events for completed, failed,
+    and canceled runs.
 
 ## Exit Gates
 
@@ -186,6 +217,10 @@ state.
   visible in the timeline, with token-sized deltas merged into one turn entry.
 - Running command cards show elapsed time, and completed command cards show
   total duration.
+- Command cards read command details from typed `CommandData`; the frontend
+  does not inspect free-form `Data` for command fields.
+- Bridge-originated notes are distinguished by `source=bridge`, not content
+  string prefixes, and do not inflate command failure counts.
 - Scrolling up in the orchestration timeline exposes a jump-to-bottom button,
   and clicking it returns to the latest event.
 - Uploaded files appear beside the user message that submitted them, and prior
@@ -208,6 +243,24 @@ state.
 - Selecting a completed run does not show the browser event stream as connected.
 - Continuing a Codex-first run sends `FirstCLI=codex` in the resumed
   `orchestration_start` payload unless the user intentionally changes it.
+- Continuing a formal-proof run sends `Profile=formal-proof` in the resumed
+  `orchestration_start` payload unless the user intentionally changes it.
+- A resumed run sends the saved Codex thread id, Claude-started state, and
+  locked absolute run cwd to Bridge.
+- The first Codex turn in a resumed run uses `codex exec resume <thread-id>`
+  when Hub has a saved thread id; the first Claude turn uses `--resume` only
+  after a prior Claude turn reached `turn.end`.
+- If Codex returns a different thread id while Bridge expected a resume target,
+  the browser timeline shows a warning and Hub stores the returned thread id for
+  later follow-ups.
+- If Codex resume clearly misses the local thread data or Claude `--resume`
+  reports a missing session, Bridge emits a warning, keeps the compacted context
+  fallback, and continues with a fresh native CLI session/thread.
+- `turn.start.content` does not contain the full relay prompt or compacted
+  context; the full prompt is carried only in typed `TurnStartData.PromptText`
+  for authenticated local diagnostics and is stripped from public shares.
+- Every terminal run has one `run.conclusion` event and one rendered final
+  conclusion card.
 
 ## Reviewer Q&A
 

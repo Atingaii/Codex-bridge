@@ -42,7 +42,7 @@
 3. Decode Bridge heartbeat payloads in `internal/hub/ws_bridge.go` and refresh
    working directories when present.
 4. Prefer verifier prose over raw acceptance-check command text in
-   `internal/bridge/orchestration.go:acceptanceFailureInTurn`.
+   `internal/bridge/profiles/formalproof:AcceptanceFailure`.
 5. In `frontend/src/app/App.tsx`, fold terminal run status into command event
    rendering so unpaired `command.start` events do not remain active forever.
 6. Poll `/api/agents` quietly while the browser is visible so refreshed working

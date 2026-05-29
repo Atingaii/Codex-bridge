@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/tencent/codex-bridge/internal/protocol"
 	"github.com/tencent/codex-bridge/internal/serverutil"
 	"github.com/tencent/codex-bridge/internal/store"
 )
@@ -37,6 +38,7 @@ type publicOrchestrationRunResponse struct {
 	Title      string                    `json:"title"`
 	Mode       string                    `json:"mode"`
 	FirstCLI   string                    `json:"firstCli,omitempty"`
+	Profile    string                    `json:"profile,omitempty"`
 	Prompt     string                    `json:"prompt"`
 	CWD        string                    `json:"cwd,omitempty"`
 	MaxTurns   int                       `json:"maxTurns"`
@@ -49,18 +51,24 @@ type publicOrchestrationRunResponse struct {
 }
 
 type publicOrchestrationEventResponse struct {
-	ID        string         `json:"id"`
-	RunID     string         `json:"runId"`
-	Seq       int64          `json:"seq"`
-	Kind      string         `json:"kind"`
-	Role      string         `json:"role,omitempty"`
-	CLI       string         `json:"cli,omitempty"`
-	TurnID    string         `json:"turnId,omitempty"`
-	Content   string         `json:"content,omitempty"`
-	Status    string         `json:"status,omitempty"`
-	Error     string         `json:"error,omitempty"`
-	Data      map[string]any `json:"data,omitempty"`
-	CreatedAt int64          `json:"createdAt"`
+	ID            string                  `json:"id"`
+	RunID         string                  `json:"runId"`
+	Seq           int64                   `json:"seq"`
+	Kind          string                  `json:"kind"`
+	Source        string                  `json:"source,omitempty"`
+	Role          string                  `json:"role,omitempty"`
+	CLI           string                  `json:"cli,omitempty"`
+	TurnID        string                  `json:"turnId,omitempty"`
+	Content       string                  `json:"content,omitempty"`
+	Status        string                  `json:"status,omitempty"`
+	Error         string                  `json:"error,omitempty"`
+	CommandData   *protocol.CommandData   `json:"commandData,omitempty"`
+	RunStartData  *protocol.RunStartData  `json:"runStartData,omitempty"`
+	TurnStartData *protocol.TurnStartData `json:"turnStartData,omitempty"`
+	RunEndData    *protocol.RunEndData    `json:"runEndData,omitempty"`
+	RunConclusion *protocol.RunConclusion `json:"runConclusion,omitempty"`
+	Data          map[string]any          `json:"data,omitempty"`
+	CreatedAt     int64                   `json:"createdAt"`
 }
 
 func (s *Server) handleShareSession(w http.ResponseWriter, r *http.Request, uid string) {
@@ -206,6 +214,7 @@ func publicOrchestrationRun(run store.OrchestrationRun) publicOrchestrationRunRe
 		Title:      run.Title,
 		Mode:       run.Mode,
 		FirstCLI:   run.FirstCLI,
+		Profile:    run.Profile,
 		Prompt:     run.Prompt,
 		CWD:        run.CWD,
 		MaxTurns:   run.MaxTurns,
@@ -234,22 +243,80 @@ func publicMessages(messages []store.Message) []publicMessageResponse {
 func publicOrchestrationEvents(events []store.OrchestrationEvent) []publicOrchestrationEventResponse {
 	out := make([]publicOrchestrationEventResponse, 0, len(events))
 	for _, event := range events {
+		if publicOrchestrationEventHidden(event) {
+			continue
+		}
 		out = append(out, publicOrchestrationEventResponse{
-			ID:        event.ID,
-			RunID:     event.RunID,
-			Seq:       event.Seq,
-			Kind:      event.Kind,
-			Role:      event.Role,
-			CLI:       event.CLI,
-			TurnID:    event.TurnID,
-			Content:   event.Content,
-			Status:    event.Status,
-			Error:     event.Error,
-			Data:      publicOrchestrationEventData(event.Data),
-			CreatedAt: event.CreatedAt,
+			ID:            event.ID,
+			RunID:         event.RunID,
+			Seq:           event.Seq,
+			Kind:          event.Kind,
+			Source:        publicOrchestrationEventSource(event),
+			Role:          event.Role,
+			CLI:           event.CLI,
+			TurnID:        event.TurnID,
+			Content:       event.Content,
+			Status:        event.Status,
+			Error:         event.Error,
+			CommandData:   publicCommandData(event.CommandData),
+			RunStartData:  publicRunStartData(event.RunStartData),
+			TurnStartData: publicTurnStartData(event.TurnStartData),
+			RunEndData:    event.RunEndData,
+			RunConclusion: event.RunConclusion,
+			Data:          publicOrchestrationEventData(event.Data),
+			CreatedAt:     event.CreatedAt,
 		})
 	}
 	return out
+}
+
+func publicOrchestrationEventHidden(event store.OrchestrationEvent) bool {
+	if event.Severity != "" {
+		return true
+	}
+	if event.Source == "bridge" && event.Kind != "run.start" && event.Kind != "turn.start" && event.Kind != "run.end" && event.Kind != "run.error" && event.Kind != "run.cancelled" && event.Kind != "run.conclusion" {
+		return true
+	}
+	return false
+}
+
+func publicOrchestrationEventSource(event store.OrchestrationEvent) string {
+	if event.Source == "cli" || event.Source == "bridge" || event.Source == "user" {
+		return event.Source
+	}
+	switch event.Kind {
+	case "user.message":
+		return "user"
+	case "run.start", "turn.start", "run.end", "run.error", "run.cancelled", "run.conclusion":
+		return "bridge"
+	default:
+		return "cli"
+	}
+}
+
+func publicCommandData(data *protocol.CommandData) *protocol.CommandData {
+	if data == nil {
+		return nil
+	}
+	copy := *data
+	return &copy
+}
+
+func publicRunStartData(data *protocol.RunStartData) *protocol.RunStartData {
+	if data == nil {
+		return nil
+	}
+	copy := *data
+	return &copy
+}
+
+func publicTurnStartData(data *protocol.TurnStartData) *protocol.TurnStartData {
+	if data == nil {
+		return nil
+	}
+	copy := *data
+	copy.PromptText = ""
+	return &copy
 }
 
 func publicOrchestrationEventData(data map[string]any) map[string]any {

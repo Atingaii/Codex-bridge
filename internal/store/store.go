@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tencent/codex-bridge/internal/protocol"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
@@ -136,8 +137,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 			title TEXT NOT NULL,
 			mode TEXT NOT NULL CHECK(mode IN ('collaboration','debate')),
 			first_cli TEXT CHECK(first_cli IN ('claude','codex')),
+			profile TEXT NOT NULL DEFAULT 'default',
 			prompt TEXT NOT NULL,
 			cwd TEXT,
+			run_cwd TEXT DEFAULT '',
+			codex_thread_id TEXT DEFAULT '',
+			claude_started INTEGER NOT NULL DEFAULT 0,
 			max_turns INTEGER NOT NULL,
 			status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','canceled','canceling')),
 			error TEXT,
@@ -149,12 +154,18 @@ func (s *Store) Migrate(ctx context.Context) error {
 			FOREIGN KEY (agent_id) REFERENCES agents(id)
 		);`,
 		`ALTER TABLE orchestration_runs ADD COLUMN first_cli TEXT CHECK(first_cli IN ('claude','codex'));`,
+		`ALTER TABLE orchestration_runs ADD COLUMN profile TEXT NOT NULL DEFAULT 'default';`,
+		`ALTER TABLE orchestration_runs ADD COLUMN run_cwd TEXT DEFAULT '';`,
+		`ALTER TABLE orchestration_runs ADD COLUMN codex_thread_id TEXT DEFAULT '';`,
+		`ALTER TABLE orchestration_runs ADD COLUMN claude_started INTEGER NOT NULL DEFAULT 0;`,
 		`CREATE INDEX IF NOT EXISTS idx_orchestration_runs_user_updated ON orchestration_runs(user_id, updated_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS orchestration_events (
 			id TEXT PRIMARY KEY,
 			run_id TEXT NOT NULL,
 			seq INTEGER NOT NULL,
 			kind TEXT NOT NULL,
+			source TEXT,
+			severity TEXT,
 			role TEXT,
 			cli TEXT,
 			turn_id TEXT,
@@ -166,6 +177,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 			UNIQUE(run_id, seq),
 			FOREIGN KEY (run_id) REFERENCES orchestration_runs(id) ON DELETE CASCADE
 		);`,
+		`ALTER TABLE orchestration_events ADD COLUMN source TEXT;`,
+		`ALTER TABLE orchestration_events ADD COLUMN severity TEXT;`,
 		`CREATE INDEX IF NOT EXISTS idx_orchestration_events_run_seq ON orchestration_events(run_id, seq);`,
 		`CREATE TABLE IF NOT EXISTS conversation_shares (
 			id TEXT PRIMARY KEY,
@@ -249,7 +262,8 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), prompt, COALESCE(cwd,''), max_turns, status,
+		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), max_turns, status,
 			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE agent_id = ? AND status IN (?, ?)
@@ -287,13 +301,24 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 		}
 		eventContent := orchestrationDisconnectRunErrorContent(tx, runs[i].ID, reason)
 		event := OrchestrationEvent{
-			ID:        NewID("evt"),
-			RunID:     runs[i].ID,
-			Kind:      "run.error",
-			Content:   eventContent,
-			Status:    OrchestrationFailed,
-			Error:     reason,
+			ID:       NewID("evt"),
+			RunID:    runs[i].ID,
+			Kind:     "run.error",
+			Source:   "bridge",
+			Severity: "error",
+			Content:  eventContent,
+			Status:   OrchestrationFailed,
+			Error:    reason,
+			RunConclusion: &protocol.RunConclusion{
+				Outcome:          "errored",
+				Summary:          eventContent,
+				UnmetObligations: []string{"Bridge disconnected before the orchestration could finish."},
+			},
 			CreatedAt: now,
+		}
+		dataJSON, err := orchestrationEventDataJSON(event)
+		if err != nil {
+			return nil, err
 		}
 		row := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) + 1 FROM orchestration_events WHERE run_id = ?`, event.RunID)
 		if err := row.Scan(&event.Seq); err != nil {
@@ -301,11 +326,11 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO orchestration_events
-				(id, run_id, seq, kind, role, cli, turn_id, content, status, error, data_json, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, event.ID, event.RunID, event.Seq, event.Kind, nullString(event.Role), nullString(event.CLI),
+				(id, run_id, seq, kind, source, severity, role, cli, turn_id, content, status, error, data_json, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, event.ID, event.RunID, event.Seq, event.Kind, nullString(event.Source), nullString(event.Severity), nullString(event.Role), nullString(event.CLI),
 			nullString(event.TurnID), nullString(event.Content), nullString(event.Status), nullString(event.Error),
-			nullString(""), now); err != nil {
+			nullString(dataJSON), now); err != nil {
 			return nil, err
 		}
 	}
@@ -1051,36 +1076,48 @@ type OrchestrationFile struct {
 }
 
 type OrchestrationRun struct {
-	ID         string              `json:"id"`
-	UserID     string              `json:"userId"`
-	AgentID    string              `json:"agentId"`
-	Title      string              `json:"title"`
-	Mode       string              `json:"mode"`
-	FirstCLI   string              `json:"firstCli,omitempty"`
-	Prompt     string              `json:"prompt"`
-	CWD        string              `json:"cwd,omitempty"`
-	MaxTurns   int                 `json:"maxTurns"`
-	Status     string              `json:"status"`
-	Error      string              `json:"error,omitempty"`
-	Files      []OrchestrationFile `json:"files,omitempty"`
-	CreatedAt  int64               `json:"createdAt"`
-	UpdatedAt  int64               `json:"updatedAt"`
-	FinishedAt int64               `json:"finishedAt,omitempty"`
+	ID            string              `json:"id"`
+	UserID        string              `json:"userId"`
+	AgentID       string              `json:"agentId"`
+	Title         string              `json:"title"`
+	Mode          string              `json:"mode"`
+	FirstCLI      string              `json:"firstCli,omitempty"`
+	Profile       string              `json:"profile"`
+	Prompt        string              `json:"prompt"`
+	CWD           string              `json:"cwd,omitempty"`
+	RunCWD        string              `json:"runCwd,omitempty"`
+	CodexThreadID string              `json:"codexThreadId,omitempty"`
+	ClaudeStarted bool                `json:"claudeStarted,omitempty"`
+	MaxTurns      int                 `json:"maxTurns"`
+	Status        string              `json:"status"`
+	Error         string              `json:"error,omitempty"`
+	Files         []OrchestrationFile `json:"files,omitempty"`
+	CreatedAt     int64               `json:"createdAt"`
+	UpdatedAt     int64               `json:"updatedAt"`
+	FinishedAt    int64               `json:"finishedAt,omitempty"`
 }
 
 type OrchestrationEvent struct {
-	ID        string         `json:"id"`
-	RunID     string         `json:"runId"`
-	Seq       int64          `json:"seq"`
-	Kind      string         `json:"kind"`
-	Role      string         `json:"role,omitempty"`
-	CLI       string         `json:"cli,omitempty"`
-	TurnID    string         `json:"turnId,omitempty"`
-	Content   string         `json:"content,omitempty"`
-	Status    string         `json:"status,omitempty"`
-	Error     string         `json:"error,omitempty"`
-	Data      map[string]any `json:"data,omitempty"`
-	CreatedAt int64          `json:"createdAt"`
+	ID             string                   `json:"id"`
+	RunID          string                   `json:"runId"`
+	Seq            int64                    `json:"seq"`
+	Kind           string                   `json:"kind"`
+	Source         string                   `json:"source,omitempty"`
+	Severity       string                   `json:"severity,omitempty"`
+	Role           string                   `json:"role,omitempty"`
+	CLI            string                   `json:"cli,omitempty"`
+	TurnID         string                   `json:"turnId,omitempty"`
+	Content        string                   `json:"content,omitempty"`
+	Status         string                   `json:"status,omitempty"`
+	Error          string                   `json:"error,omitempty"`
+	CommandData    *protocol.CommandData    `json:"commandData,omitempty"`
+	RunStartData   *protocol.RunStartData   `json:"runStartData,omitempty"`
+	TurnStartData  *protocol.TurnStartData  `json:"turnStartData,omitempty"`
+	RunEndData     *protocol.RunEndData     `json:"runEndData,omitempty"`
+	BridgeNoteData *protocol.BridgeNoteData `json:"bridgeNoteData,omitempty"`
+	RunConclusion  *protocol.RunConclusion  `json:"runConclusion,omitempty"`
+	Data           map[string]any           `json:"data,omitempty"`
+	CreatedAt      int64                    `json:"createdAt"`
 }
 
 type CreateOrchestrationRunParams struct {
@@ -1089,6 +1126,7 @@ type CreateOrchestrationRunParams struct {
 	Title    string
 	Mode     string
 	FirstCLI string
+	Profile  string
 	Prompt   string
 	CWD      string
 	MaxTurns int
@@ -1212,6 +1250,7 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 	if params.MaxTurns > 12 {
 		params.MaxTurns = 12
 	}
+	params.Profile = normalizeOrchestrationProfile(params.Profile)
 	filesJSON, err := json.Marshal(params.Files)
 	if err != nil {
 		return OrchestrationRun{}, err
@@ -1224,6 +1263,7 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 		Title:     params.Title,
 		Mode:      params.Mode,
 		FirstCLI:  params.FirstCLI,
+		Profile:   params.Profile,
 		Prompt:    params.Prompt,
 		CWD:       params.CWD,
 		MaxTurns:  params.MaxTurns,
@@ -1234,9 +1274,9 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO orchestration_runs
-			(id, user_id, agent_id, title, mode, first_cli, prompt, cwd, max_turns, status, files_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, run.ID, run.UserID, run.AgentID, run.Title, run.Mode, run.FirstCLI, run.Prompt, nullString(run.CWD), run.MaxTurns, run.Status, string(filesJSON), now, now)
+			(id, user_id, agent_id, title, mode, first_cli, profile, prompt, cwd, max_turns, status, files_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, run.ID, run.UserID, run.AgentID, run.Title, run.Mode, run.FirstCLI, run.Profile, run.Prompt, nullString(run.CWD), run.MaxTurns, run.Status, string(filesJSON), now, now)
 	if err != nil {
 		return OrchestrationRun{}, err
 	}
@@ -1245,7 +1285,8 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 
 func (s *Store) OrchestrationRunByID(ctx context.Context, id, userID string) (OrchestrationRun, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), prompt, COALESCE(cwd,''), max_turns, status,
+		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), max_turns, status,
 			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE id = ? AND user_id = ?
@@ -1255,7 +1296,8 @@ func (s *Store) OrchestrationRunByID(ctx context.Context, id, userID string) (Or
 
 func (s *Store) OrchestrationRunByIDAnyUser(ctx context.Context, id string) (OrchestrationRun, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), prompt, COALESCE(cwd,''), max_turns, status,
+		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), max_turns, status,
 			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE id = ?
@@ -1268,7 +1310,8 @@ func (s *Store) ListOrchestrationRuns(ctx context.Context, userID string, limit 
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), prompt, COALESCE(cwd,''), max_turns, status,
+		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), max_turns, status,
 			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE user_id = ?
@@ -1304,7 +1347,7 @@ func (s *Store) UpdateOrchestrationRunStatus(ctx context.Context, id, status, er
 	return err
 }
 
-func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID, mode, firstCLI, cwd string, maxTurns int, files []OrchestrationFile) error {
+func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID, mode, firstCLI, profile, cwd string, maxTurns int, files []OrchestrationFile) error {
 	if id == "" || agentID == "" {
 		return errors.New("run id and agent id are required")
 	}
@@ -1318,6 +1361,7 @@ func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID,
 	if maxTurns > 12 {
 		maxTurns = 12
 	}
+	profile = normalizeOrchestrationProfile(profile)
 	filesJSON, err := json.Marshal(files)
 	if err != nil {
 		return err
@@ -1325,9 +1369,23 @@ func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID,
 	now := time.Now().Unix()
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE orchestration_runs
-		SET agent_id = ?, mode = ?, first_cli = ?, cwd = ?, max_turns = ?, files_json = ?, finished_at = NULL, updated_at = ?
+		SET agent_id = ?, mode = ?, first_cli = ?, profile = ?, cwd = ?, max_turns = ?, files_json = ?, finished_at = NULL, updated_at = ?
 		WHERE id = ?
-	`, agentID, mode, firstCLI, nullString(cwd), maxTurns, string(filesJSON), now, id)
+	`, agentID, mode, firstCLI, profile, nullString(cwd), maxTurns, string(filesJSON), now, id)
+	return err
+}
+
+func (s *Store) UpdateOrchestrationRunSession(ctx context.Context, id, codexThreadID string, claudeStarted bool, runCWD string) error {
+	if id == "" {
+		return errors.New("run id is required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE orchestration_runs
+		SET codex_thread_id = CASE WHEN ? <> '' THEN ? ELSE codex_thread_id END,
+			claude_started = CASE WHEN ? = 1 THEN 1 ELSE claude_started END,
+			run_cwd = CASE WHEN ? <> '' AND run_cwd = '' THEN ? ELSE run_cwd END
+		WHERE id = ?
+	`, codexThreadID, codexThreadID, boolInt(claudeStarted), runCWD, runCWD, id)
 	return err
 }
 
@@ -1340,13 +1398,16 @@ func (s *Store) AddOrchestrationEvent(ctx context.Context, event OrchestrationEv
 		event.ID = NewID("evt")
 	}
 	event.CreatedAt = now
-	dataJSON := ""
-	if event.Data != nil {
-		if b, err := json.Marshal(event.Data); err == nil {
-			dataJSON = string(b)
-		} else {
-			return OrchestrationEvent{}, err
+	event.Source = normalizeOrchestrationEventSource(event.Source, event.Kind)
+	if event.Severity == "" {
+		event.Severity = severityFromLegacyStatus(event.Status)
+		if event.Severity != "" {
+			event.Status = ""
 		}
+	}
+	dataJSON, err := orchestrationEventDataJSON(event)
+	if err != nil {
+		return OrchestrationEvent{}, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1361,9 +1422,9 @@ func (s *Store) AddOrchestrationEvent(ctx context.Context, event OrchestrationEv
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO orchestration_events
-			(id, run_id, seq, kind, role, cli, turn_id, content, status, error, data_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, event.ID, event.RunID, event.Seq, event.Kind, nullString(event.Role), nullString(event.CLI),
+			(id, run_id, seq, kind, source, severity, role, cli, turn_id, content, status, error, data_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, event.ID, event.RunID, event.Seq, event.Kind, nullString(event.Source), nullString(event.Severity), nullString(event.Role), nullString(event.CLI),
 		nullString(event.TurnID), nullString(event.Content), nullString(event.Status), nullString(event.Error),
 		nullString(dataJSON), now); err != nil {
 		return OrchestrationEvent{}, err
@@ -1384,10 +1445,10 @@ func (s *Store) ListOrchestrationEvents(ctx context.Context, runID string, limit
 		limit = 10000
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, run_id, seq, kind, COALESCE(role,''), COALESCE(cli,''), COALESCE(turn_id,''),
+		SELECT id, run_id, seq, kind, COALESCE(source,''), COALESCE(severity,''), COALESCE(role,''), COALESCE(cli,''), COALESCE(turn_id,''),
 			COALESCE(content,''), COALESCE(status,''), COALESCE(error,''), COALESCE(data_json,''), created_at
 		FROM (
-			SELECT id, run_id, seq, kind, role, cli, turn_id, content, status, error, data_json, created_at
+			SELECT id, run_id, seq, kind, source, severity, role, cli, turn_id, content, status, error, data_json, created_at
 			FROM orchestration_events
 			WHERE run_id = ?
 			ORDER BY seq DESC
@@ -1413,8 +1474,9 @@ func (s *Store) ListOrchestrationEvents(ctx context.Context, runID string, limit
 func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (OrchestrationRun, error) {
 	var run OrchestrationRun
 	var filesJSON string
-	if err := row.Scan(&run.ID, &run.UserID, &run.AgentID, &run.Title, &run.Mode, &run.FirstCLI, &run.Prompt, &run.CWD,
-		&run.MaxTurns, &run.Status, &run.Error, &filesJSON, &run.CreatedAt, &run.UpdatedAt, &run.FinishedAt); err != nil {
+	var claudeStarted int
+	if err := row.Scan(&run.ID, &run.UserID, &run.AgentID, &run.Title, &run.Mode, &run.FirstCLI, &run.Profile, &run.Prompt, &run.CWD,
+		&run.RunCWD, &run.CodexThreadID, &claudeStarted, &run.MaxTurns, &run.Status, &run.Error, &filesJSON, &run.CreatedAt, &run.UpdatedAt, &run.FinishedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return OrchestrationRun{}, ErrNotFound
 		}
@@ -1424,7 +1486,16 @@ func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (Orchestrati
 		_ = json.Unmarshal([]byte(filesJSON), &run.Files)
 	}
 	run.FirstCLI = normalizeOrchestrationFirstCLI(run.FirstCLI)
+	run.Profile = normalizeOrchestrationProfile(run.Profile)
+	run.ClaudeStarted = claudeStarted != 0
 	return run, nil
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func normalizeOrchestrationFirstCLI(value string) string {
@@ -1436,10 +1507,21 @@ func normalizeOrchestrationFirstCLI(value string) string {
 	}
 }
 
+func normalizeOrchestrationProfile(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "default":
+		return "default"
+	case "formal-proof":
+		return "formal-proof"
+	default:
+		return "default"
+	}
+}
+
 func scanOrchestrationEvent(row interface{ Scan(dest ...any) error }) (OrchestrationEvent, error) {
 	var event OrchestrationEvent
 	var dataJSON string
-	if err := row.Scan(&event.ID, &event.RunID, &event.Seq, &event.Kind, &event.Role, &event.CLI, &event.TurnID,
+	if err := row.Scan(&event.ID, &event.RunID, &event.Seq, &event.Kind, &event.Source, &event.Severity, &event.Role, &event.CLI, &event.TurnID,
 		&event.Content, &event.Status, &event.Error, &dataJSON, &event.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return OrchestrationEvent{}, ErrNotFound
@@ -1448,8 +1530,89 @@ func scanOrchestrationEvent(row interface{ Scan(dest ...any) error }) (Orchestra
 	}
 	if strings.TrimSpace(dataJSON) != "" {
 		_ = json.Unmarshal([]byte(dataJSON), &event.Data)
+		var typed struct {
+			Extra          map[string]any           `json:"extra,omitempty"`
+			CommandData    *protocol.CommandData    `json:"commandData,omitempty"`
+			RunStartData   *protocol.RunStartData   `json:"runStartData,omitempty"`
+			TurnStartData  *protocol.TurnStartData  `json:"turnStartData,omitempty"`
+			RunEndData     *protocol.RunEndData     `json:"runEndData,omitempty"`
+			BridgeNoteData *protocol.BridgeNoteData `json:"bridgeNoteData,omitempty"`
+			RunConclusion  *protocol.RunConclusion  `json:"runConclusion,omitempty"`
+		}
+		if err := json.Unmarshal([]byte(dataJSON), &typed); err == nil && (typed.Extra != nil ||
+			typed.CommandData != nil || typed.RunStartData != nil || typed.TurnStartData != nil ||
+			typed.RunEndData != nil || typed.BridgeNoteData != nil || typed.RunConclusion != nil) {
+			event.Data = typed.Extra
+			event.CommandData = typed.CommandData
+			event.RunStartData = typed.RunStartData
+			event.TurnStartData = typed.TurnStartData
+			event.RunEndData = typed.RunEndData
+			event.BridgeNoteData = typed.BridgeNoteData
+			event.RunConclusion = typed.RunConclusion
+		}
+	}
+	event.Source = normalizeOrchestrationEventSource(event.Source, event.Kind)
+	if event.Severity == "" {
+		event.Severity = severityFromLegacyStatus(event.Status)
+		if event.Severity != "" {
+			event.Status = ""
+		}
 	}
 	return event, nil
+}
+
+func orchestrationEventDataJSON(event OrchestrationEvent) (string, error) {
+	if event.CommandData == nil && event.RunStartData == nil && event.TurnStartData == nil &&
+		event.RunEndData == nil && event.BridgeNoteData == nil && event.RunConclusion == nil {
+		if event.Data == nil {
+			return "", nil
+		}
+		b, err := json.Marshal(event.Data)
+		return string(b), err
+	}
+	typed := struct {
+		Extra          map[string]any           `json:"extra,omitempty"`
+		CommandData    *protocol.CommandData    `json:"commandData,omitempty"`
+		RunStartData   *protocol.RunStartData   `json:"runStartData,omitempty"`
+		TurnStartData  *protocol.TurnStartData  `json:"turnStartData,omitempty"`
+		RunEndData     *protocol.RunEndData     `json:"runEndData,omitempty"`
+		BridgeNoteData *protocol.BridgeNoteData `json:"bridgeNoteData,omitempty"`
+		RunConclusion  *protocol.RunConclusion  `json:"runConclusion,omitempty"`
+	}{
+		Extra:          event.Data,
+		CommandData:    event.CommandData,
+		RunStartData:   event.RunStartData,
+		TurnStartData:  event.TurnStartData,
+		RunEndData:     event.RunEndData,
+		BridgeNoteData: event.BridgeNoteData,
+		RunConclusion:  event.RunConclusion,
+	}
+	b, err := json.Marshal(typed)
+	return string(b), err
+}
+
+func normalizeOrchestrationEventSource(source, kind string) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "cli", "bridge", "user":
+		return strings.ToLower(strings.TrimSpace(source))
+	}
+	switch kind {
+	case "user.message":
+		return "user"
+	case "run.start", "run.error", "run.canceling", "run.cancelled":
+		return "bridge"
+	default:
+		return "cli"
+	}
+}
+
+func severityFromLegacyStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "info", "warning", "error":
+		return strings.ToLower(strings.TrimSpace(status))
+	default:
+		return ""
+	}
 }
 
 func scanRun(row interface{ Scan(dest ...any) error }) (Run, error) {

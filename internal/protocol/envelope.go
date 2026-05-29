@@ -171,16 +171,21 @@ type ApprovalResponsePayload struct {
 }
 
 type OrchestrationStartPayload struct {
-	RunID     string              `json:"runId"`
-	Mode      string              `json:"mode"`
-	FirstCLI  string              `json:"firstCli,omitempty"`
-	Prompt    string              `json:"prompt"`
-	Context   string              `json:"context,omitempty"`
-	Resume    bool                `json:"resume,omitempty"`
-	PromptSeq int64               `json:"promptSeq,omitempty"`
-	MaxTurns  int                 `json:"maxTurns,omitempty"`
-	CWD       string              `json:"cwd,omitempty"`
-	Files     []AttachmentPayload `json:"files,omitempty"`
+	RunID             string              `json:"runId"`
+	Mode              string              `json:"mode"`
+	FirstCLI          string              `json:"firstCli,omitempty"`
+	Prompt            string              `json:"prompt"`
+	Context           string              `json:"context,omitempty"`
+	Resume            bool                `json:"resume,omitempty"`
+	PromptSeq         int64               `json:"promptSeq,omitempty"`
+	MaxTurns          int                 `json:"maxTurns,omitempty"`
+	MaxTurnsRequested int                 `json:"maxTurnsRequested,omitempty"`
+	CWD               string              `json:"cwd,omitempty"`
+	Files             []AttachmentPayload `json:"files,omitempty"`
+	CodexThreadID     string              `json:"codexThreadId,omitempty"`
+	ClaudeStarted     bool                `json:"claudeStarted,omitempty"`
+	RunCWD            string              `json:"runCwd,omitempty"`
+	Profile           string              `json:"profile,omitempty"`
 }
 
 type OrchestrationCancelPayload struct {
@@ -188,18 +193,26 @@ type OrchestrationCancelPayload struct {
 }
 
 type OrchestrationEventPayload struct {
-	ID        string         `json:"id,omitempty"`
-	RunID     string         `json:"runId"`
-	Seq       int64          `json:"seq,omitempty"`
-	TurnID    string         `json:"turnId,omitempty"`
-	Kind      string         `json:"kind"`
-	Role      string         `json:"role,omitempty"`
-	CLI       string         `json:"cli,omitempty"`
-	Content   string         `json:"content,omitempty"`
-	Status    string         `json:"status,omitempty"`
-	Error     string         `json:"error,omitempty"`
-	Data      map[string]any `json:"data,omitempty"`
-	CreatedAt int64          `json:"createdAt,omitempty"`
+	ID             string          `json:"id,omitempty"`
+	RunID          string          `json:"runId"`
+	Seq            int64           `json:"seq,omitempty"`
+	TurnID         string          `json:"turnId,omitempty"`
+	Kind           string          `json:"kind"`
+	Source         string          `json:"source,omitempty"`
+	Severity       string          `json:"severity,omitempty"`
+	Role           string          `json:"role,omitempty"`
+	CLI            string          `json:"cli,omitempty"`
+	Content        string          `json:"content,omitempty"`
+	Status         string          `json:"status,omitempty"`
+	Error          string          `json:"error,omitempty"`
+	CommandData    *CommandData    `json:"commandData,omitempty"`
+	RunStartData   *RunStartData   `json:"runStartData,omitempty"`
+	TurnStartData  *TurnStartData  `json:"turnStartData,omitempty"`
+	RunEndData     *RunEndData     `json:"runEndData,omitempty"`
+	BridgeNoteData *BridgeNoteData `json:"bridgeNoteData,omitempty"`
+	RunConclusion  *RunConclusion  `json:"runConclusion,omitempty"`
+	Data           map[string]any  `json:"data,omitempty"`
+	CreatedAt      int64           `json:"createdAt,omitempty"`
 }
 
 type ToolEvent struct {
@@ -208,4 +221,59 @@ type ToolEvent struct {
 	Command  string `json:"command,omitempty"`
 	Output   string `json:"output,omitempty"`
 	ExitCode *int   `json:"exitCode,omitempty"`
+}
+
+type CommandData struct {
+	ID                    string `json:"id,omitempty"`
+	Command               string `json:"command,omitempty"`
+	Input                 string `json:"input,omitempty"`
+	Output                string `json:"output,omitempty"`
+	Name                  string `json:"name,omitempty"`
+	Status                string `json:"status,omitempty"`
+	ExitCode              *int   `json:"exitCode,omitempty"`
+	StartedAt             int64  `json:"startedAt,omitempty"`
+	CompletedAt           int64  `json:"completedAt,omitempty"`
+	DurationMs            int64  `json:"durationMs,omitempty"`
+	PID                   int    `json:"pid,omitempty"`
+	PGID                  int    `json:"pgid,omitempty"`
+	WillSuppressOnFailure bool   `json:"willSuppressOnFailure,omitempty"`
+}
+
+type RunStartData struct {
+	CWD               string `json:"cwd,omitempty"`
+	Mode              string `json:"mode,omitempty"`
+	FirstCLI          string `json:"firstCli,omitempty"`
+	MaxTurnsRequested int    `json:"maxTurnsRequested,omitempty"`
+	MaxTurnsApplied   int    `json:"maxTurnsApplied,omitempty"`
+	PromptSeq         int64  `json:"promptSeq,omitempty"`
+	Profile           string `json:"profile,omitempty"`
+}
+
+type TurnStartData struct {
+	CLI        string `json:"cli,omitempty"`
+	Turn       int    `json:"turn,omitempty"`
+	MaxTurns   int    `json:"maxTurns,omitempty"`
+	PromptText string `json:"promptText,omitempty"`
+	Profile    string `json:"profile,omitempty"`
+	ResumeMode string `json:"resumeMode,omitempty"`
+}
+
+type RunEndData struct {
+	CodexThreadID   string `json:"codexThreadId,omitempty"`
+	ClaudeSessionID string `json:"claudeSessionId,omitempty"`
+}
+
+type BridgeNoteData struct {
+	Category     string `json:"category,omitempty"`
+	Command      string `json:"command,omitempty"`
+	AfterSeconds int    `json:"afterSeconds,omitempty"`
+	InjectedText string `json:"injectedText,omitempty"`
+}
+
+type RunConclusion struct {
+	Outcome              string   `json:"outcome"`
+	Summary              string   `json:"summary"`
+	BuildOrAuditCommands []string `json:"buildOrAuditCommands,omitempty"`
+	UnmetObligations     []string `json:"unmetObligations,omitempty"`
+	EvidenceRefs         []string `json:"evidenceRefs,omitempty"`
 }

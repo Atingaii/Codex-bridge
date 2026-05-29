@@ -45,13 +45,14 @@ type RunnerUpdate struct {
 }
 
 type RunnerToolEvent struct {
-	ID          string
-	Status      string
-	Command     string
-	Output      string
-	ExitCode    *int
-	StartedAt   time.Time
-	CompletedAt time.Time
+	ID                    string
+	Status                string
+	Command               string
+	Output                string
+	ExitCode              *int
+	StartedAt             time.Time
+	CompletedAt           time.Time
+	WillSuppressOnFailure bool
 }
 
 type ApprovalRequester interface {

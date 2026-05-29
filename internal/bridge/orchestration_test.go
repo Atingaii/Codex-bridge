@@ -18,9 +18,56 @@ import (
 	"time"
 	"unicode/utf8"
 
+	bridgeprofiles "github.com/tencent/codex-bridge/internal/bridge/profiles"
+	"github.com/tencent/codex-bridge/internal/bridge/profiles/formalproof"
+	"github.com/tencent/codex-bridge/internal/bridge/profiles/registry"
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
 )
+
+func looksLikeIsabelleProofTask(text string) bool {
+	return registry.LooksLikeSystemBTask(text)
+}
+
+func looksLikeCoqProofTask(text string) bool {
+	return registry.LooksLikeSystemATask(text)
+}
+
+func isabelleManualBuildVisibleSummary(userPrompt, contextSummary string, history []orchestrationTurn) string {
+	return registry.ManualBuildVisibleSummary(userPrompt, contextSummary, profileTurns(history), nil)
+}
+
+func forbiddenForegroundIsabelleBuildError(userPrompt string, tools []RunnerToolEvent, existing error) error {
+	return forbiddenDomainForegroundBuildError(userPrompt, tools, existing)
+}
+
+func placeholderScanEvidence(commandText, outputText, proseText string) bool {
+	return registry.PlaceholderScanEvidence(commandText, outputText, proseText)
+}
+
+func placeholderScanFoundForbiddenOutput(outputText string) bool {
+	return formalproof.PlaceholderScanFoundForbiddenOutputForTest(outputText)
+}
+
+func placeholderScanEvidenceForHistory(history []orchestrationTurn, proseText string) bool {
+	return registry.PlaceholderScanEvidenceForHistory(profileTurns(history), proseText)
+}
+
+func collectProofAssessmentEvidence(history []orchestrationTurn, changes workspaceChangeReport) formalproof.Evidence {
+	return registry.CollectEvidence(profileTurns(history), profileChanges(changes))
+}
+
+func isabelleManualBuildRequired(reason string, history []orchestrationTurn) bool {
+	return domainManualBuildRequired(reason, history)
+}
+
+func isabelleManualBuildRequiredWithState(reason string, history []orchestrationTurn, state *orchestrationSessionState) bool {
+	return domainManualBuildRequiredWithState(reason, history, state)
+}
+
+func cleanOrchestrationTurnContent(content string) string {
+	return scrubOrchestrationTurnContent(content)
+}
 
 func TestOrchestrationClaudeArgsGrantSelectedCWDAndBypassPermissions(t *testing.T) {
 	cfg := config.Default()
@@ -626,17 +673,23 @@ func TestOrchestrationRelayRunEmitsFrontendVisiblePromptsCommandsAndSessionState
 		}
 		events = append(events, event)
 	}
-	if !orchestrationEventsContain(events, "turn.start", "claude", task) ||
-		!orchestrationEventsContain(events, "turn.start", "claude", "Prompt sent to claude") {
-		t.Fatalf("Claude prompt was not frontend-visible: %#v", events)
+	if !orchestrationEventsContain(events, "turn.start", "claude", "Starting Claude") {
+		t.Fatalf("Claude turn start was not frontend-visible: %#v", events)
+	}
+	for _, event := range events {
+		if event.Kind == "turn.start" && (strings.Contains(event.Content, task) || strings.Contains(event.Content, "Prompt sent to")) {
+			t.Fatalf("turn.start leaked internal relay prompt: %#v", event)
+		}
 	}
 	if !orchestrationEventsContain(events, "command.start", "claude", "mkdir -p coq-relay") ||
 		!orchestrationEventsContain(events, "command.end", "codex", "go test ./...") {
 		t.Fatalf("command events were not frontend-visible: %#v", events)
 	}
-	if !orchestrationEventsContain(events, "turn.start", "codex", "Claude result: wrote Model.v") ||
-		!orchestrationEventsContain(events, "turn.start", "codex", "mkdir -p coq-relay") {
-		t.Fatalf("Codex handoff prompt did not include Claude result and command context: %#v", events)
+	if !orchestrationEventsContain(events, "turn.start", "codex", "Starting Codex") {
+		t.Fatalf("Codex turn start was not frontend-visible: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "run.conclusion", "", "Codex final: verified relay result") {
+		t.Fatalf("run.conclusion did not relay final structured conclusion: %#v", events)
 	}
 	if !orchestrationEventsContain(events, "run.end", "", "Codex final: verified relay result") {
 		t.Fatalf("run.end did not relay final Codex content: %#v", events)
@@ -679,6 +732,160 @@ func TestOrchestrationRelayRunEmitsFrontendVisiblePromptsCommandsAndSessionState
 	}
 	if !strings.Contains(string(codexArgv), "exec") || !strings.Contains(string(codexArgv), "--cd") {
 		t.Fatalf("Codex initial exec args did not include cwd/thread setup: %s", codexArgv)
+	}
+}
+
+func TestOrchestrationResumeRestoresCLIStateAndLockedCWD(t *testing.T) {
+	tmp := t.TempDir()
+	runCWD := filepath.Join(tmp, "locked")
+	if err := os.MkdirAll(runCWD, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	claudeArgvPath := filepath.Join(tmp, "claude_argv.json")
+	codexArgvPath := filepath.Join(tmp, "codex_argv.json")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeRelayScript(filepath.Join(tmp, "claude_prompt.txt"), claudeArgvPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexRelayScript(filepath.Join(tmp, "codex_prompt.txt"), codexArgvPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = filepath.Join(tmp, "ignored")
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:         "orc_resume",
+		Mode:          "collaboration",
+		Prompt:        "continue",
+		Resume:        true,
+		MaxTurns:      2,
+		RunCWD:        runCWD,
+		CodexThreadID: "thread_saved",
+		ClaudeStarted: true,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	var runStart protocol.OrchestrationEventPayload
+	var codexEnd protocol.OrchestrationEventPayload
+	for _, event := range events {
+		if event.Kind == "run.start" {
+			runStart = event
+		}
+		if event.Kind == "turn.end" && event.CLI == "codex" {
+			codexEnd = event
+		}
+	}
+	if got := stringMapValue(runStart.Data, "cwd"); got != runCWD {
+		t.Fatalf("run.start cwd = %q, want %q", got, runCWD)
+	}
+	if got := stringMapValue(codexEnd.Data, "codexThreadId"); got == "" {
+		t.Fatalf("codex turn.end missing thread id: %#v", codexEnd)
+	}
+
+	claudeArgv, err := os.ReadFile(claudeArgvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(claudeArgv), "--resume") || strings.Contains(string(claudeArgv), "--session-id") || !strings.Contains(string(claudeArgv), runCWD) {
+		t.Fatalf("Claude resume args incorrect: %s", claudeArgv)
+	}
+	codexArgv, err := os.ReadFile(codexArgvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(codexArgv), "resume") || !strings.Contains(string(codexArgv), "thread_saved") {
+		t.Fatalf("Codex resume args incorrect: %s", codexArgv)
+	}
+	if strings.Contains(string(codexArgv), "--cd") {
+		t.Fatalf("Codex resume should rely on locked cmd.Dir, not a fresh --cd: %s", codexArgv)
+	}
+}
+
+func TestOrchestrationCodexResumeMissingThreadRetriesFresh(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	argvPath := filepath.Join(tmp, "codex_argv.jsonl")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexResumeMissThenFreshScript(argvPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+
+	content, _, threadID, resumeMode, err := manager.runCodexWithThread(context.Background(), protocol.OrchestrationStartPayload{
+		RunID: "orc_codex_retry",
+		CWD:   tmp,
+	}, "turn_1", "reviewer", "continue", "thread_missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "fresh result" || threadID != "thread_fresh" || resumeMode != "codex-fresh-after-resume-miss" {
+		t.Fatalf("codex retry result content=%q thread=%q mode=%q", content, threadID, resumeMode)
+	}
+	raw, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "resume") || !strings.Contains(lines[0], "thread_missing") || strings.Contains(lines[1], "resume") {
+		t.Fatalf("codex retry argv log unexpected:\n%s", raw)
+	}
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "codex", "fresh Codex thread") {
+		t.Fatalf("missing codex resume warning event: %#v", events)
+	}
+}
+
+func TestOrchestrationClaudeResumeMissingSessionRetriesSessionID(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	argvPath := filepath.Join(tmp, "claude_argv.jsonl")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeResumeMissThenSessionScript(argvPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+
+	content, _, resumeMode, err := manager.runClaudeWithSession(context.Background(), protocol.OrchestrationStartPayload{
+		RunID: "orc_claude_retry",
+		CWD:   tmp,
+	}, "turn_1", "implementer", "continue", "11111111-1111-5111-8111-111111111111", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "claude fresh session result" || resumeMode != "claude-new-after-resume-miss" {
+		t.Fatalf("claude retry result content=%q mode=%q", content, resumeMode)
+	}
+	raw, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "--resume") || !strings.Contains(lines[1], "--session-id") {
+		t.Fatalf("claude retry argv log unexpected:\n%s", raw)
+	}
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "claude", "retry once") {
+		t.Fatalf("missing claude resume warning event: %#v", events)
 	}
 }
 
@@ -773,7 +980,7 @@ print(json.dumps({"type":"error","message":"Reconnecting... 1/5 (stream disconne
 	}
 }
 
-func TestClaudeIsabelleLongCommandNudgeWritesToSameStreamAndEmitsEvent(t *testing.T) {
+func TestLongCommandObserverWritesToSameClaudeStreamAndEmitsBridgeNote(t *testing.T) {
 	manager := NewOrchestrationManager(&config.Config{})
 	out := make(chan protocol.Envelope, 16)
 	manager.AttachOut(out)
@@ -790,12 +997,17 @@ func TestClaudeIsabelleLongCommandNudgeWritesToSameStreamAndEmitsEvent(t *testin
 			Input:      &stdin,
 			CanNudge:   true,
 			NudgeAfter: 10 * time.Millisecond,
+			LongCommandObserver: longCommandObserverConfig{
+				Enabled:         true,
+				CommandPatterns: []string{"python -m slow_build"},
+				AppliesTo:       []string{"claude", "codex"},
+			},
 		})
 	}()
 
-	fmt.Fprintln(stdoutWriter, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_build","name":"Bash","input":{"command":"isabelle build -D isabelle_bridge_demo"}}]}}`)
+	fmt.Fprintln(stdoutWriter, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_build","name":"Bash","input":{"command":"python -m slow_build --workspace demo"}}]}}`)
 	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && !strings.Contains(stdin.String(), "Bridge observer note") {
+	for time.Now().Before(deadline) && !strings.Contains(stdin.String(), "Codex Bridge observer note") {
 		time.Sleep(10 * time.Millisecond)
 	}
 	fmt.Fprintln(stdoutWriter, `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_build","content":"Finished\n"}]}}`)
@@ -813,12 +1025,69 @@ func TestClaudeIsabelleLongCommandNudgeWritesToSameStreamAndEmitsEvent(t *testin
 	if len(tools) != 2 {
 		t.Fatalf("tools = %#v", tools)
 	}
-	if got := stdin.String(); !strings.Contains(got, "Bridge observer note") || !strings.Contains(got, "isabelle build -D isabelle_bridge_demo") {
+	if got := stdin.String(); !strings.Contains(got, "Codex Bridge observer note") || !strings.Contains(got, "python -m slow_build --workspace demo") {
 		t.Fatalf("nudge was not written to Claude stream: %s", got)
 	}
-	if !orchestrationEventsContain(drainOrchestrationEvents(t, out), "turn.delta", "claude", "Bridge sent Claude an Isabelle timeout nudge") {
-		t.Fatal("frontend-visible nudge event was not emitted")
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "claude", "Bridge sent a long-command observer note") {
+		t.Fatal("frontend-visible observer event was not emitted")
 	}
+	for _, event := range events {
+		if event.Kind == "turn.delta" && event.Source == "bridge" && event.BridgeNoteData != nil && event.BridgeNoteData.InjectedText != "" {
+			return
+		}
+	}
+	t.Fatalf("observer event did not carry structured injected text: %#v", events)
+}
+
+func TestLongCommandObserverEmitsCodexBridgeNoteWithoutSideChannel(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.LongCommandObserver.Enabled = true
+	cfg.Bridge.LongCommandObserver.After.Duration = 10 * time.Millisecond
+	cfg.Bridge.LongCommandObserver.CommandPatterns = []string{"python -m slow_build"}
+	cfg.Bridge.LongCommandObserver.AppliesTo = []string{"codex"}
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 16)
+	manager.AttachOut(out)
+	stdoutReader, stdoutWriter := io.Pipe()
+
+	done := make(chan struct{})
+	var result codexScanResult
+	var scanErr error
+	go func() {
+		defer close(done)
+		result, scanErr = manager.scanCodexJSONLResult(stdoutReader, "orc_codex_observer", "orc_codex_observer-01", "reviewer")
+	}()
+	fmt.Fprintln(stdoutWriter, `{"type":"item.started","item":{"id":"cmd_1","type":"command_execution","command":"python -m slow_build --workspace demo","status":"running"}}`)
+
+	deadline := time.Now().Add(time.Second)
+	var events []protocol.OrchestrationEventPayload
+	for time.Now().Before(deadline) {
+		events = append(events, drainOrchestrationEvents(t, out)...)
+		for _, event := range events {
+			if event.Kind == "turn.delta" && event.Source == "bridge" && event.BridgeNoteData != nil && event.BridgeNoteData.Category == "long-command-observer-visible-note" {
+				if !strings.Contains(event.BridgeNoteData.InjectedText, "Codex Bridge observer note") {
+					t.Fatalf("observer note missing sentinel: %#v", event)
+				}
+				if !strings.Contains(event.BridgeNoteData.Command, "python -m slow_build --workspace demo") {
+					t.Fatalf("observer note missing command: %#v", event)
+				}
+				_ = stdoutWriter.Close()
+				<-done
+				if scanErr != nil {
+					t.Fatal(scanErr)
+				}
+				if len(result.Tools) != 1 {
+					t.Fatalf("tools = %#v", result.Tools)
+				}
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = stdoutWriter.Close()
+	<-done
+	t.Fatalf("Codex observer bridge note was not emitted: %#v", events)
 }
 
 func TestClaudeStreamInputClosesAfterIdleWindowWithoutInterruptingProcess(t *testing.T) {
@@ -1155,7 +1424,7 @@ func TestOrchestrationCancelKillsCCBProcessGroup(t *testing.T) {
 	waitForProcessExit(t, pid)
 }
 
-func TestOrchestrationScanClaudeJSONLSuppressesEmptyPagesReadFailure(t *testing.T) {
+func TestOrchestrationScanClaudeJSONLEmitsAndCancelsEmptyPagesReadFailure(t *testing.T) {
 	input := strings.NewReader(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_1","name":"Read","input":{"file_path":"/tmp/Model.thy","pages":""}}]}}
 {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_1","is_error":true,"content":"<tool_use_error>Invalid pages parameter: \"\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed.</tool_use_error>"}]}}
 {"type":"assistant","message":{"content":[{"type":"text","text":"retrying"}]}}
@@ -1167,19 +1436,13 @@ func TestOrchestrationScanClaudeJSONLSuppressesEmptyPagesReadFailure(t *testing.
 	out := make(chan protocol.Envelope, 16)
 	manager.AttachOut(out)
 
-	got, tools, err := manager.scanClaudeJSONL(input, "orc_test", "turn_1", "implementer")
+	got, _, err := manager.scanClaudeJSONL(input, "orc_test", "turn_1", "implementer")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != "retrying" {
 		t.Fatalf("content = %q, want retrying", got)
 	}
-	for _, tool := range tools {
-		if tool.ID == "tool_1" {
-			t.Fatalf("empty pages failure was retained in tools: %#v", tools)
-		}
-	}
-
 	var events []protocol.OrchestrationEventPayload
 	for len(out) > 0 {
 		env := <-out
@@ -1192,17 +1455,31 @@ func TestOrchestrationScanClaudeJSONLSuppressesEmptyPagesReadFailure(t *testing.
 		}
 	}
 
+	var sawDeferredStart bool
+	var sawDeferredCancel bool
 	var sawRetryRead bool
 	for _, event := range events {
 		if event.Kind == "command.start" && event.Data["id"] == "tool_1" {
-			t.Fatalf("empty pages read start was emitted: %#v", events)
+			if event.CommandData == nil || !event.CommandData.WillSuppressOnFailure {
+				t.Fatalf("deferred read start missing suppress hint: %#v", event)
+			}
+			sawDeferredStart = true
 		}
 		if event.Kind == "command.end" && event.Data["id"] == "tool_1" {
-			t.Fatalf("empty pages read failure was emitted: %#v", events)
+			if event.CommandData == nil || event.CommandData.Status != "cancelled" || event.CommandData.Output != "" {
+				t.Fatalf("empty pages read should end as cancelled without failure output: %#v", event)
+			}
+			sawDeferredCancel = true
 		}
 		if event.Kind == "command.end" && event.Data["id"] == "tool_2" && event.Data["output"] == "theory Model\n" {
 			sawRetryRead = true
 		}
+	}
+	if !sawDeferredStart {
+		t.Fatalf("empty pages read start was not emitted: %#v", events)
+	}
+	if !sawDeferredCancel {
+		t.Fatalf("empty pages read cancel was not emitted: %#v", events)
 	}
 	if !sawRetryRead {
 		t.Fatalf("successful retry read was not emitted: %#v", events)
@@ -1305,8 +1582,9 @@ func TestComposeOrchestrationPromptRequiresGoalProgressAudit(t *testing.T) {
 }
 
 func TestComposeRelayPromptKeepsCoqUploadTaskPassThrough(t *testing.T) {
-	prompt := composeRelayPrompt(
+	prompt := composeRelayPromptForProfile(
 		"collaboration",
+		"formal-proof",
 		"把 Model.thy Termination.thy ROOT 做成 Coq 项目，补全 termination modify_lin 的证明，不能用占位符。",
 		"",
 		false,
@@ -1348,10 +1626,35 @@ func TestComposeRelayPromptKeepsCoqUploadTaskPassThrough(t *testing.T) {
 	}
 }
 
+func TestComposeRelayPromptDefaultProfileDoesNotAutoInjectFormalProofGuidance(t *testing.T) {
+	prompt := composeRelayPrompt(
+		"collaboration",
+		"把 Model.thy Termination.thy ROOT 做成 Coq 项目，补全 termination modify_lin 的证明，不能用占位符。",
+		"",
+		false,
+		"implementer",
+		"claude",
+		1,
+		4,
+		nil,
+	)
+	for _, bad := range []string{
+		"Initial orchestration strategy for this formal-proof task",
+		"Formal proof relay guidance",
+		"Coq upload benchmark",
+		"Isabelle timeout boundary",
+	} {
+		if strings.Contains(prompt, bad) {
+			t.Fatalf("default profile should not inject %q:\n%s", bad, prompt)
+		}
+	}
+}
+
 func TestComposeRelayPromptUsesCodexFirstProofStrategy(t *testing.T) {
 	prompt := composeRelayPromptWithFirstCLI(
 		"debate",
 		"codex",
+		"formal-proof",
 		"把 Model.thy Termination.thy ROOT 做成 Coq 项目，补全 termination modify_lin 的证明，不能用占位符。",
 		"",
 		false,
@@ -1376,8 +1679,9 @@ func TestComposeRelayPromptUsesCodexFirstProofStrategy(t *testing.T) {
 }
 
 func TestComposeRelayPromptAddsOnlyIsabelleTimeoutBoundary(t *testing.T) {
-	prompt := composeRelayPrompt(
+	prompt := composeRelayPromptForProfile(
 		"collaboration",
+		"formal-proof",
 		"已上传 Model.thy、Termination.thy、ROOT。请在 Isabelle 中补全 termination modify_lin 证明，不能用 sorry 或 quick_and_dirty。",
 		"",
 		false,
@@ -1635,8 +1939,9 @@ func TestForbiddenForegroundIsabelleBuildErrorHelperDoesNotAffectRelayPath(t *te
 }
 
 func TestComposeRelayDebatePromptDoesNotInjectProofFalsificationStrategy(t *testing.T) {
-	prompt := composeRelayPrompt(
+	prompt := composeRelayPromptForProfile(
 		"debate",
+		"formal-proof",
 		"补全 Coq theorem，不能用 Admitted 或 Axiom。",
 		"",
 		false,
@@ -2211,7 +2516,7 @@ func TestCoqAssumptionAuditRejectsErroredCoqtopOutput(t *testing.T) {
 		}),
 	}
 	evidence := collectProofAssessmentEvidence(history, workspaceChangeReport{})
-	if evidence.assumptionAudit {
+	if evidence.AssumptionAudit {
 		t.Fatal("errored coqtop output must not satisfy Print Assumptions audit evidence")
 	}
 }
@@ -2345,6 +2650,36 @@ func TestIsabelleManualBuildSignalDoesNotTreatTimeoutWrapperAsTimedOut(t *testin
 
 	if isabelleManualBuildRequired("", history) {
 		t.Fatal("timeout wrapper in a controlled background command should not by itself trigger manual-build carry-over")
+	}
+}
+
+func TestIsabelleManualBuildFingerprintSurvivesLocalizedOutput(t *testing.T) {
+	exitCode := 124
+	started := time.Now().Add(-45 * time.Minute)
+	completed := time.Now()
+	state := orchestrationSessionState{
+		CommandFingerprints: map[string]bridgeprofiles.CommandFingerprint{},
+	}
+	tools := []RunnerToolEvent{{
+		ID:          "build",
+		Status:      "failed",
+		Command:     "isabelle build -D /tmp/linlattice",
+		Output:      "构建进程被外部终止，详见系统任务记录。\n",
+		ExitCode:    &exitCode,
+		StartedAt:   started,
+		CompletedAt: completed,
+	}}
+
+	if domainManualBuildTextSignal(tools[0].Output) {
+		t.Fatal("localized output fixture should not trigger legacy text scraping")
+	}
+	recordCommandFingerprints(&state, "/tmp/linlattice", tools)
+	if !isabelleManualBuildRequiredWithState("", nil, &state) {
+		t.Fatal("fingerprint memory should trigger manual-build carry-over even without matching log wording")
+	}
+	reason := domainManualBuildReasonWithState("已上传 Model.thy、Termination.thy、ROOT。请补全 Isabelle 证明。", nil, &state)
+	if !strings.Contains(reason, "fingerprint") && !strings.Contains(reason, "remembers") {
+		t.Fatalf("fingerprint-backed reason should mention command memory, got %q", reason)
 	}
 }
 
@@ -2680,7 +3015,6 @@ func TestComposeFinalVerifierPromptDoesNotRequireIsabelleUploadAssessment(t *tes
 	for _, want := range []string{
 		"lightweight final verifier",
 		"actual acceptance criterion",
-		"Isabelle timeout boundary",
 		"Original user task",
 		"termination modify_lin",
 	} {
@@ -2695,7 +3029,7 @@ func TestComposeFinalVerifierPromptDoesNotRequireIsabelleUploadAssessment(t *tes
 	}
 }
 
-func TestCCBPromptAddsFormalProofRelayGuidanceWithoutAssessmentGate(t *testing.T) {
+func TestCCBPromptDoesNotAddFormalProofRelayGuidanceByDefault(t *testing.T) {
 	cfg := config.Default()
 	manager := NewOrchestrationManager(&cfg)
 	prompt := manager.ccbPrompt(protocol.OrchestrationStartPayload{
@@ -2706,9 +3040,6 @@ func TestCCBPromptAddsFormalProofRelayGuidanceWithoutAssessmentGate(t *testing.T
 		"Use only the local CCB Codex and Claude Code agents",
 		"Codex Bridge is only relaying this task and the final CCB result",
 		"Return a final user-visible conclusion",
-		"Formal proof relay guidance",
-		"Coq upload benchmark",
-		"Print Assumptions",
 		orchestrationMsgContract,
 		orchestrationHandoffContract,
 	} {
@@ -2716,7 +3047,7 @@ func TestCCBPromptAddsFormalProofRelayGuidanceWithoutAssessmentGate(t *testing.T
 			t.Fatalf("CCB prompt missing %q:\n%s", want, prompt)
 		}
 	}
-	for _, bad := range []string{"Formal proof task guardrails", "Formal proof final verifier guardrails", "Current terminal assessment before remediation"} {
+	for _, bad := range []string{"Formal proof relay guidance", "Coq upload benchmark", "Print Assumptions", "Formal proof task guardrails", "Formal proof final verifier guardrails", "Current terminal assessment before remediation"} {
 		if strings.Contains(prompt, bad) {
 			t.Fatalf("CCB prompt should not inject proof assessment %q:\n%s", bad, prompt)
 		}
@@ -3194,6 +3525,11 @@ func drainOrchestrationEvents(t *testing.T, out <-chan protocol.Envelope) []prot
 	return events
 }
 
+func stringMapValue(data map[string]any, key string) string {
+	value, _ := data[key].(string)
+	return value
+}
+
 func waitForOrchestrationEvent(t *testing.T, out <-chan protocol.Envelope, kind, cli, content string) bool {
 	t.Helper()
 	deadline := time.After(time.Second)
@@ -3369,6 +3705,41 @@ print(json.dumps({"type":"thread.started","thread_id":"thread_relay_1"}), flush=
 print(json.dumps({"type":"item.started","item":{"id":"cmd_test","type":"command_execution","command":"go test ./...","status":"running"}}), flush=True)
 print(json.dumps({"type":"item.completed","item":{"id":"cmd_test","type":"command_execution","command":"go test ./...","status":"completed","exit_code":0,"aggregated_output":"ok ./...\n"}}), flush=True)
 print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
+`
+}
+
+func fakeCodexResumeMissThenFreshScript(argvPath string) string {
+	argvPathRaw, _ := json.Marshal(argvPath)
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+argv_path = ` + string(argvPathRaw) + `
+with open(argv_path, "a", encoding="utf-8") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+if len(sys.argv) >= 3 and sys.argv[1:3] == ["exec", "resume"]:
+    print("session thread not found: rollout missing", file=sys.stderr, flush=True)
+    sys.exit(1)
+print(json.dumps({"type":"thread.started","thread_id":"thread_fresh"}), flush=True)
+print(json.dumps({"type":"item.agent_message.delta","delta":"fresh result"}), flush=True)
+`
+}
+
+func fakeClaudeResumeMissThenSessionScript(argvPath string) string {
+	argvPathRaw, _ := json.Marshal(argvPath)
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+argv_path = ` + string(argvPathRaw) + `
+with open(argv_path, "a", encoding="utf-8") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+if "--resume" in sys.argv:
+    print("session not found", file=sys.stderr, flush=True)
+    sys.exit(1)
+text = "claude fresh session result"
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
+print(json.dumps({"type":"result","result":text}), flush=True)
 `
 }
 

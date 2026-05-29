@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tencent/codex-bridge/internal/protocol"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -283,6 +284,7 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 		Title:    "Debate",
 		Mode:     "debate",
 		FirstCLI: "codex",
+		Profile:  "formal-proof",
 		Prompt:   "prove a theorem",
 		MaxTurns: 2,
 		Files:    []OrchestrationFile{{Name: "A.v", MimeType: "text/plain", Size: 10}},
@@ -290,10 +292,38 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.Status != OrchestrationQueued || run.Mode != "debate" || run.FirstCLI != "codex" || len(run.Files) != 1 {
+	if run.Status != OrchestrationQueued || run.Mode != "debate" || run.FirstCLI != "codex" || run.Profile != "formal-proof" || len(run.Files) != 1 {
 		t.Fatalf("unexpected run: %+v", run)
 	}
-	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "turn.start", Role: "proposer", CLI: "claude"}); err != nil {
+	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{
+		RunID:  run.ID,
+		Kind:   "turn.start",
+		Role:   "proposer",
+		CLI:    "claude",
+		Source: "bridge",
+		TurnStartData: &protocol.TurnStartData{
+			CLI:        "claude",
+			Turn:       1,
+			MaxTurns:   2,
+			PromptText: "secret prompt",
+			Profile:    "formal-proof",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{
+		RunID: run.ID,
+		Kind:  "command.end",
+		Role:  "proposer",
+		CLI:   "claude",
+		CommandData: &protocol.CommandData{
+			ID:       "cmd_1",
+			Command:  "go test ./...",
+			Status:   "completed",
+			Output:   "ok",
+			ExitCode: intPtr(0),
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "turn.end", Role: "proposer", CLI: "claude", Status: "success"}); err != nil {
@@ -303,8 +333,14 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 2 || events[0].Seq != 1 || events[1].Seq != 2 {
+	if len(events) != 3 || events[0].Seq != 1 || events[1].Seq != 2 || events[2].Seq != 3 {
 		t.Fatalf("unexpected events: %+v", events)
+	}
+	if events[0].Source != "bridge" || events[0].TurnStartData == nil || events[0].TurnStartData.PromptText != "secret prompt" {
+		t.Fatalf("turn typed data did not round-trip: %+v", events[0])
+	}
+	if events[1].CommandData == nil || events[1].CommandData.Command != "go test ./..." || events[1].CommandData.ExitCode == nil || *events[1].CommandData.ExitCode != 0 {
+		t.Fatalf("command typed data did not round-trip: %+v", events[1])
 	}
 	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, OrchestrationCompleted, ""); err != nil {
 		t.Fatal(err)
@@ -316,7 +352,7 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	if loaded.Status != OrchestrationCompleted || loaded.FinishedAt == 0 {
 		t.Fatalf("unexpected loaded run: %+v", loaded)
 	}
-	if err := st.UpdateOrchestrationRunSettings(ctx, run.ID, agent.ID, run.Mode, "claude", run.CWD, run.MaxTurns, run.Files); err != nil {
+	if err := st.UpdateOrchestrationRunSettings(ctx, run.ID, agent.ID, run.Mode, "claude", run.Profile, run.CWD, run.MaxTurns, run.Files); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, OrchestrationRunning, ""); err != nil {
@@ -329,8 +365,21 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	if loaded.Status != OrchestrationRunning || loaded.FinishedAt != 0 {
 		t.Fatalf("resumed run kept terminal state: %+v", loaded)
 	}
-	if loaded.FirstCLI != "claude" {
-		t.Fatalf("resumed first cli = %q, want claude", loaded.FirstCLI)
+	if loaded.FirstCLI != "claude" || loaded.Profile != "formal-proof" {
+		t.Fatalf("resumed settings = %+v", loaded)
+	}
+	if err := st.UpdateOrchestrationRunSession(ctx, run.ID, "thread_1", true, "/abs/repo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateOrchestrationRunSession(ctx, run.ID, "", false, "/abs/other"); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = st.OrchestrationRunByID(ctx, run.ID, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CodexThreadID != "thread_1" || !loaded.ClaudeStarted || loaded.RunCWD != "/abs/repo" {
+		t.Fatalf("session state not preserved: %+v", loaded)
 	}
 }
 
@@ -490,4 +539,8 @@ func openTestStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	return st
+}
+
+func intPtr(value int) *int {
+	return &value
 }

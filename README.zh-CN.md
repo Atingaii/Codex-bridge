@@ -55,6 +55,7 @@ token 由网页生成，默认 24 小时内有效。一个 token 绑定一个 CL
 - 在线/离线状态会显示在 CLI 端列表里。
 - 主对话和编排页顶部都有 CLI 端选择器，可以在多个 WSL2/服务器终端之间切换。
 - “需要确认”权限策略会把 Codex 聊天、Codex 编排和 Claude Code 编排审批都展示到浏览器；编排页会显示当前 CLI 端的能力矩阵。Hub 编排会在同一个选中的 Bridge 连接上轮流调用 Claude Code 和 Codex CLI，并把每轮摘要带给下一轮。
+- 编排页有 `默认` / `形式化证明` 配置选择。形式化证明提示是显式选择后才启用，并随 run 持久化；默认配置不会因为关键词自动注入证明提示。编排事件使用结构化字段区分 CLI、Bridge、用户来源，并用单独的最终结论事件展示收尾结果。
 - 每个 CLI 端可以展开“详情”并生成“修复连接”命令；旧版启动命令接入的端点可用该命令更新 Bridge、保留原 machine id 并重连同一个端点。
 - 删除 CLI 端会让 Hub 通知在线 Bridge 停止对应本地服务并退出，同时让已消费 token
   失效；离线端点仍会从页面隐藏并撤销旧 token。
@@ -183,7 +184,12 @@ BRIDGE_CWD='/path/to/workspace'
 BRIDGE_MODEL='gpt-5.1-codex-max'
 BRIDGE_SANDBOX=workspace-write
 BRIDGE_APPROVAL_POLICY=never
+BRIDGE_LONG_COMMAND_OBSERVER_ENABLED=false
+BRIDGE_LONG_COMMAND_OBSERVER_AFTER=2m
 ```
+
+长命令观察器的完整 YAML 配置在 `bridge.long_command_observer`，详细说明见
+`docs/dev-workflow.md`。
 
 ## 排查
 

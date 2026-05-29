@@ -70,7 +70,11 @@ orchestration also uses browser-side approval in review-required mode through
 Claude Code's permission prompt MCP hook. Hub-managed orchestration uses the
 selected Bridge connection for the whole run, alternates direct Claude Code and
 Codex CLI turns, carries compact turn summaries forward, and shows each
-endpoint's approval capabilities before a run starts.
+endpoint's approval capabilities before a run starts. The orchestration page
+also has a `default` / `formal-proof` profile selector; formal-proof guidance is
+explicit opt-in and is persisted with the run. Orchestration timelines use typed
+events with `source`, `severity`, command payloads, and one structured final
+conclusion so Bridge notes and CLI output remain distinguishable.
 Existing endpoints can be expanded under Settings -> Agents & Runtime to
 generate a repair command. That command downloads the current Bridge binary and
 reconnects the same endpoint with its existing machine id, name, and known
@@ -107,6 +111,7 @@ Common overrides:
 - `BRIDGE_HUB_URL`, `BRIDGE_TOKEN`, `BRIDGE_TOKEN_FILE`
 - `BRIDGE_NAME`, `BRIDGE_CWD`, `BRIDGE_RUNNER`, `BRIDGE_MODEL`
 - `BRIDGE_SANDBOX`, `BRIDGE_APPROVAL_POLICY`
+- `BRIDGE_LONG_COMMAND_OBSERVER_ENABLED`, `BRIDGE_LONG_COMMAND_OBSERVER_AFTER`
 - `LOG_LEVEL`, `LOG_FORMAT`
 
 Useful session behavior:
@@ -117,6 +122,10 @@ hub:
   # Set true only if closing the last browser tab should kill the backend session.
   browser_close_session: false
 ```
+
+Optional orchestration long-command observation is configured under
+`bridge.long_command_observer`; see `docs/dev-workflow.md` for the full env and
+YAML reference.
 
 ## sparkapi.tech Deployment
 

@@ -132,6 +132,14 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("BRIDGE_APPROVAL_POLICY"); v != "" {
 		cfg.Bridge.ApprovalPolicy = v
 	}
+	if v := os.Getenv("BRIDGE_LONG_COMMAND_OBSERVER_ENABLED"); v != "" {
+		cfg.Bridge.LongCommandObserver.Enabled = parseBool(v, cfg.Bridge.LongCommandObserver.Enabled)
+	}
+	if v := os.Getenv("BRIDGE_LONG_COMMAND_OBSERVER_AFTER"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Bridge.LongCommandObserver.After = Duration{Duration: d}
+		}
+	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		cfg.Observability.LogLevel = v
 	}

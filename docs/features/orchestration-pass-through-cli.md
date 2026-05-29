@@ -102,17 +102,15 @@ Reference inputs:
 - <https://isabelle.in.tum.de/dist/library/Doc/Isar_Ref/Proof.html>
 - <https://isabelle.in.tum.de/dist/library/Doc/Isar_Ref/Spec.html>
 
-For explicit Isabelle-looking Claude turns, Bridge starts Claude Code with
-`--input-format=stream-json` and sends the initial user task as a normal stream
-JSON user message. If a command event for `isabelle build`, `isabelle process`,
-or a related long Isabelle command remains active past
-`internal/bridge/orchestration.go:claudeIsabelleLongCommandNudgeAfter`, Bridge
-writes one additional stream JSON user message to the same stdin. That message
-does not cancel the subprocess or start a hidden verifier; it asks Claude to use
-the latest available output/log, skip further waiting when appropriate, and
-continue the task. The browser receives a `turn.delta` event noting that the
-nudge was sent. The stream input shape follows Claude Code's documented
-headless SDK input mode:
+When `bridge.long_command_observer.enabled` is set, Bridge can watch matching
+long-running orchestration commands. Matching Claude commands can receive a
+tagged stream JSON user message on the same stdin; matching Codex commands
+currently emit only a visible Bridge-note row because the Codex JSONL runner has
+no stdin side channel. The message does not cancel the subprocess or start a
+hidden verifier; it asks the CLI to use the latest available output/log, skip
+further waiting when appropriate, and continue the task. The browser receives a
+`source=bridge` event with `BridgeNoteData.InjectedText`. The Claude stream
+input shape follows Claude Code's documented headless SDK input mode:
 `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}`.
 When there are no active tool events and no further browser input, Bridge closes
 the stream stdin after `internal/bridge/orchestration.go:claudeStreamInputIdleCloseAfter`.

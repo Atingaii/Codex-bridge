@@ -88,6 +88,7 @@ type OrchestrationRun = {
   title: string;
   mode: 'collaboration' | 'debate';
   firstCli?: 'claude' | 'codex';
+  profile?: 'default' | 'formal-proof';
   prompt: string;
   cwd?: string;
   maxTurns: number;
@@ -104,14 +105,77 @@ type OrchestrationEvent = {
   runId: string;
   seq?: number;
   kind: string;
+  source?: 'cli' | 'bridge' | 'user';
+  severity?: 'info' | 'warning' | 'error';
   role?: string;
   cli?: string;
   turnId?: string;
   content?: string;
   status?: string;
   error?: string;
+  commandData?: CommandData;
+  runStartData?: RunStartData;
+  turnStartData?: TurnStartData;
+  runEndData?: RunEndData;
+  bridgeNoteData?: BridgeNoteData;
+  runConclusion?: RunConclusion;
   data?: Record<string, any>;
   createdAt?: number;
+};
+
+type CommandData = {
+  id?: string;
+  command?: string;
+  input?: string;
+  output?: string;
+  name?: string;
+  status?: string;
+  exitCode?: number;
+  startedAt?: number;
+  completedAt?: number;
+  durationMs?: number;
+  pid?: number;
+  pgid?: number;
+  willSuppressOnFailure?: boolean;
+};
+
+type RunStartData = {
+  cwd?: string;
+  mode?: string;
+  firstCli?: string;
+  maxTurnsRequested?: number;
+  maxTurnsApplied?: number;
+  promptSeq?: number;
+  profile?: string;
+};
+
+type TurnStartData = {
+  cli?: string;
+  turn?: number;
+  maxTurns?: number;
+  promptText?: string;
+  profile?: string;
+  resumeMode?: string;
+};
+
+type RunEndData = {
+  codexThreadId?: string;
+  claudeSessionId?: string;
+};
+
+type BridgeNoteData = {
+  category?: string;
+  command?: string;
+  afterSeconds?: number;
+  injectedText?: string;
+};
+
+type RunConclusion = {
+  outcome: 'satisfied' | 'unsatisfied' | 'blocked' | 'canceled' | 'errored' | string;
+  summary: string;
+  buildOrAuditCommands?: string[];
+  unmetObligations?: string[];
+  evidenceRefs?: string[];
 };
 
 type OrchestrationTurnInfo = {
@@ -262,6 +326,7 @@ type PublicOrchestrationRun = {
   title: string;
   mode: 'collaboration' | 'debate';
   firstCli?: 'claude' | 'codex';
+  profile?: 'default' | 'formal-proof';
   prompt: string;
   cwd?: string;
   maxTurns: number;
@@ -455,6 +520,9 @@ const uiText = {
     startCollaborationHint: 'Start a collaboration or debate run from the panel on the right.',
     mode: 'Mode',
     firstCli: 'First CLI',
+    profile: 'Profile',
+    defaultProfile: 'Default',
+    formalProofProfile: 'Formal proof',
     collaborate: 'Collaborate',
     debate: 'Debate',
     task: 'Task',
@@ -628,6 +696,9 @@ const uiText = {
     startCollaborationHint: '从右侧面板启动协作或辩论运行。',
     mode: '模式',
     firstCli: '首轮 CLI',
+    profile: '配置',
+    defaultProfile: '默认',
+    formalProofProfile: '形式化证明',
     collaborate: '协作',
     debate: '辩论',
     task: '任务',
@@ -796,11 +867,23 @@ function compareOrchestrationEvents(a: OrchestrationEvent, b: OrchestrationEvent
   return orchestrationEventKey(a).localeCompare(orchestrationEventKey(b));
 }
 
-function isBridgeRelayNotice(event: Pick<OrchestrationEvent, 'kind' | 'content'>) {
-  if (event.kind !== 'turn.delta') return false;
-  const content = stringsTrim(event.content);
-  return content.startsWith('Bridge closed Claude stream input after an idle window') ||
-    content.startsWith('Bridge sent Claude an Isabelle timeout nudge');
+function orchestrationEventSource(event: OrchestrationEvent) {
+  if (event.source === 'cli' || event.source === 'bridge' || event.source === 'user') return event.source;
+  if (event.kind === 'user.message') return 'user';
+  if (event.kind === 'run.start' || event.kind === 'run.end' || event.kind === 'run.error' || event.kind === 'run.cancelled' || event.kind === 'run.canceling' || event.kind === 'run.conclusion' || event.kind === 'turn.start') return 'bridge';
+  return 'cli';
+}
+
+function isBridgeRelayNotice(event: Pick<OrchestrationEvent, 'kind' | 'source' | 'severity'>) {
+  return orchestrationEventSource(event as OrchestrationEvent) === 'bridge' && (event.kind === 'turn.delta' || event.kind === 'run.conclusion' || Boolean(event.severity));
+}
+
+function commandData(event: OrchestrationEvent): CommandData {
+  return event.commandData || {};
+}
+
+function bridgeConclusionContent(event: OrchestrationEvent) {
+  return stringsTrim(event.runConclusion?.summary || event.content || event.error);
 }
 
 function mergeOrchestrationEvents(current: OrchestrationEvent[], incoming: OrchestrationEvent[]) {
@@ -809,7 +892,17 @@ function mergeOrchestrationEvents(current: OrchestrationEvent[], incoming: Orche
   incoming.forEach((event, index) => {
     const key = orchestrationEventKey(event, current.length + index);
     const previous = merged.get(key);
-    merged.set(key, previous ? { ...previous, ...event, data: event.data || previous.data } : event);
+    merged.set(key, previous ? {
+      ...previous,
+      ...event,
+      commandData: event.commandData || previous.commandData,
+      runStartData: event.runStartData || previous.runStartData,
+      turnStartData: event.turnStartData || previous.turnStartData,
+      runEndData: event.runEndData || previous.runEndData,
+      bridgeNoteData: event.bridgeNoteData || previous.bridgeNoteData,
+      runConclusion: event.runConclusion || previous.runConclusion,
+      data: event.data || previous.data,
+    } : event);
   });
   return Array.from(merged.values()).sort(compareOrchestrationEvents);
 }
@@ -854,7 +947,7 @@ function approvalStatusFromDecision(decision: 'accept' | 'decline' | 'cancel'): 
 }
 
 function orchestrationToolID(event: OrchestrationEvent) {
-  return typeof event.data?.id === 'string' ? event.data.id : '';
+  return commandData(event).id || '';
 }
 
 function mergeOrchestrationToolEvents(events: OrchestrationEvent[]): OrchestrationEvent[] {
@@ -874,24 +967,11 @@ function mergeOrchestrationToolEvents(events: OrchestrationEvent[]): Orchestrati
       return;
     }
     const previous = merged[index];
-    const mergedData = mergeOrchestrationToolData(previous.data, event.data);
-    if (typeof mergedData.startedAt !== 'number' && previous.createdAt) {
-      mergedData.startedAt = previous.createdAt;
-    }
-    if (typeof mergedData.completedAt !== 'number' && event.createdAt && event.kind === 'command.end') {
-      mergedData.completedAt = event.createdAt;
-    }
-    if (
-      typeof mergedData.durationMs !== 'number' &&
-      typeof mergedData.startedAt === 'number' &&
-      typeof mergedData.completedAt === 'number'
-    ) {
-      mergedData.durationMs = Math.max(0, (mergedData.completedAt - mergedData.startedAt) * 1000);
-    }
     merged[index] = {
       ...previous,
       ...event,
-      data: mergedData,
+      commandData: mergeCommandData(previous.commandData, event.commandData),
+      data: event.data || previous.data,
       content: event.content || previous.content,
       error: event.error || previous.error,
       createdAt: event.createdAt || previous.createdAt,
@@ -901,33 +981,18 @@ function mergeOrchestrationToolEvents(events: OrchestrationEvent[]): Orchestrati
   return merged;
 }
 
-function mergeOrchestrationToolData(previous?: Record<string, any>, next?: Record<string, any>) {
-  const data = {
-    ...(previous || {}),
-    ...(next || {}),
-  };
-  for (const field of ['command', 'input', 'name']) {
-    if (typeof data[field] === 'string' && !data[field].trim() && typeof previous?.[field] === 'string' && previous[field].trim()) {
-      data[field] = previous[field];
+function mergeCommandData(previous?: CommandData, next?: CommandData): CommandData | undefined {
+  if (!previous && !next) return undefined;
+  const merged = { ...(previous || {}), ...(next || {}) };
+  for (const field of ['command', 'input', 'name'] as const) {
+    if (typeof merged[field] === 'string' && !merged[field]?.trim() && typeof previous?.[field] === 'string' && previous[field]?.trim()) {
+      merged[field] = previous[field];
     }
   }
-  for (const field of ['startedAt', 'completedAt', 'durationMs']) {
-    if (typeof data[field] !== 'number' && typeof previous?.[field] === 'number') {
-      data[field] = previous[field];
-    }
-  }
-  return data;
+  return merged;
 }
 
 function orchestrationTurnKey(event: OrchestrationEvent) {
-  const contentKind = typeof event.data?.contentKind === 'string' ? event.data.contentKind : '';
-  if (contentKind === 'agent_text' || contentKind === 'agent_reply') {
-    const eventId = typeof event.data?.eventId === 'string' ? event.data.eventId : '';
-    const replyId = typeof event.data?.replyId === 'string' ? event.data.replyId : '';
-    const jobId = typeof event.data?.jobId === 'string' ? event.data.jobId : '';
-    const contentId = eventId || replyId || `${jobId}:${event.seq || event.createdAt || ''}`;
-    if (contentId) return `${event.runId}:${event.turnId || ''}:${event.role || ''}:${event.cli || ''}:${contentId}`;
-  }
   return `${event.runId}:${event.turnId || ''}:${event.role || ''}:${event.cli || ''}`;
 }
 
@@ -949,10 +1014,14 @@ function orchestrationTurnInfoFromEvents(events: OrchestrationEvent[], runId: st
   }
   if (!latest) return {};
   const info = parseOrchestrationTurnInfo(latest.turnId);
-  if (includeTotal && typeof info.ordinal === 'number' && maxTurns) {
-    return { ...info, total: maxTurns };
+  const turn = latest.turnStartData?.turn;
+  const total = latest.turnStartData?.maxTurns || maxTurns;
+  const ordinal = typeof turn === 'number' && turn > 0 ? turn : info.ordinal;
+  if (typeof ordinal !== 'number') return info;
+  if (includeTotal && total) {
+    return { ...info, ordinal, total };
   }
-  return info;
+  return { ...info, ordinal };
 }
 
 function orchestrationTurnLabel(info: OrchestrationTurnInfo, t: UIText) {
@@ -976,7 +1045,6 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
       .map(orchestrationTurnKey)
   );
   const visible: OrchestrationVisibleEvent[] = [];
-  let segmentStartIndex = 0;
   let segmentVisibleStart = 0;
 
   ordered.forEach((event, index) => {
@@ -1005,7 +1073,6 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
       if (contentfulTurnEnds.has(orchestrationTurnKey(event)) && !isBridgeRelayNotice(event)) return;
       const content = cleanOrchestrationDisplayContent(event.content);
       if (!content) return;
-      if (isRawCCBObserverDump(content)) return;
       visible.push({
         type: 'message',
         key: orchestrationEventKey(event, index),
@@ -1047,7 +1114,7 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
 
     if (event.kind === 'turn.end') {
       const content = cleanOrchestrationDisplayContent(event.content);
-      if (content && !isRawCCBObserverDump(content)) {
+      if (content) {
         visible.push({
           type: 'message',
           key: orchestrationEventKey(event, index),
@@ -1070,12 +1137,9 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
       return;
     }
 
-    if (event.kind === 'run.end' || event.kind === 'run.error') {
-      const content = cleanOrchestrationDisplayContent(orchestrationStatusContent(event));
-      const hasEquivalentVisibleConclusion = visible
-        .slice(segmentVisibleStart)
-        .some((item) => item.type === 'message' && stringsTrim(item.content) === stringsTrim(content));
-      if (content && !isRawCCBObserverDump(content) && !hasEquivalentVisibleConclusion) {
+    if (event.kind === 'run.conclusion') {
+      const content = cleanOrchestrationDisplayContent(bridgeConclusionContent(event));
+      if (content) {
         visible.push({
           type: 'message',
           key: orchestrationEventKey(event, index),
@@ -1090,21 +1154,38 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
           createdAt: event.createdAt,
           commands: [],
         });
-      } else if (shouldShowOrchestrationStatus(event)) {
+      }
+      return;
+    }
+
+    if (event.kind === 'run.end' || event.kind === 'run.error' || event.kind === 'run.cancelled') {
+      if (!ordered.some((candidate) => candidate.kind === 'run.conclusion' && candidate.runId === event.runId)) {
+        const content = cleanOrchestrationDisplayContent(orchestrationStatusContent(event));
+        const hasEquivalentVisibleConclusion = visible
+          .slice(segmentVisibleStart)
+          .some((item) => item.type === 'message' && stringsTrim(item.content) === stringsTrim(content));
+        if (content && !hasEquivalentVisibleConclusion) {
+          visible.push({
+            type: 'message',
+            key: orchestrationEventKey(event, index),
+            runId: event.runId,
+            kind: event.kind,
+            role: 'summary',
+            cli: event.cli,
+            turnId: event.turnId,
+            content,
+            status: event.status,
+            error: event.error,
+            createdAt: event.createdAt,
+            commands: [],
+          });
+        } else if (shouldShowOrchestrationStatus(event)) {
+          visible.push(statusVisibleEvent(event, index));
+        }
+      } else if (shouldShowOrchestrationStatus(event) && event.kind !== 'run.end') {
         visible.push(statusVisibleEvent(event, index));
       }
-      if (event.kind === 'run.end') {
-        const fallback = finalOrchestrationConclusionFallback(
-          ordered.slice(segmentStartIndex, index + 1),
-          visible.slice(segmentVisibleStart),
-          runId,
-          run,
-          t
-        );
-        if (fallback) visible.push(fallback);
-        segmentStartIndex = index + 1;
-        segmentVisibleStart = visible.length;
-      }
+      segmentVisibleStart = visible.length;
       return;
     }
 
@@ -1118,8 +1199,8 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
 
 function finalizeTerminalCommandEvent(event: OrchestrationEvent, runStatus?: string): OrchestrationEvent {
   if (!event.kind.startsWith('command.')) return event;
-  const data = event.data || {};
-  const status = typeof data.status === 'string' ? data.status : event.status || '';
+  const data = commandData(event);
+  const status = data.status || event.status || '';
   const active = event.kind === 'command.start' || status === 'running' || status === 'in_progress';
   if (!active || typeof data.completedAt === 'number') return event;
   const terminalStatus = runStatus === 'canceled' ? 'canceled' : 'interrupted';
@@ -1127,192 +1208,18 @@ function finalizeTerminalCommandEvent(event: OrchestrationEvent, runStatus?: str
     ...event,
     kind: 'command.end',
     status: terminalStatus,
-    data: {
-      ...data,
+    commandData: {
+      ...event.commandData,
       status: terminalStatus,
       completedAt: event.createdAt || Math.floor(Date.now() / 1000),
     },
   };
 }
 
-function finalOrchestrationConclusionFallback(
-  segmentEvents: OrchestrationEvent[],
-  segmentVisible: OrchestrationVisibleEvent[],
-  runId: string,
-  run?: OrchestrationRun | PublicOrchestrationRun | null,
-  t: UIText = uiText.en
-): OrchestrationVisibleEvent | null {
-  const runEvents = segmentEvents.filter((event) => event.runId === runId);
-  if (!runEvents.length) return null;
-  const last = runEvents[runEvents.length - 1];
-  const completed = last.kind === 'run.end' && last.status === 'completed';
-  if (!completed) return null;
-  if (isReadableFinalConclusion(last.content)) return null;
-  if (hasFreshFinalConclusion(runEvents)) return null;
-
-  const failedCommands = runEvents.filter((event) => event.kind.startsWith('command.') && commandEventFailed(event)).length;
-  const erroredTurns = runEvents.filter((event) => event.kind === 'turn.end' && (event.status === 'error' || Boolean(event.error))).length;
-  const completedCommands = runEvents.filter((event) => event.kind === 'command.end' && !commandEventFailed(event)).length;
-  const segmentFiles = orchestrationRunFilesFromEvents(runEvents, runId);
-  const fileNames = mergeOrchestrationFiles(segmentFiles.length ? segmentFiles : run?.files).map((file) => file.name).filter(Boolean);
-  const segmentPrompt = runEvents.find((event) => event.kind === 'user.message')?.content || run?.prompt;
-  const zh = t === uiText.zh || t.currentTurn === uiText.zh.currentTurn || textLooksChinese(segmentPrompt);
-  const issueCount = failedCommands + erroredTurns;
-  const ccbSummary = ccbOrchestrationSummary(runEvents);
-  const content = zh
-    ? [
-        '最终结论：本次编排已经结束，但最后一轮没有返回可直接阅读的总结，因此这里根据已记录事件生成兜底摘要。',
-        ccbSummary ? `CCB 状态：${ccbSummary}` : '',
-        `进展：${completedCommands > 0 ? `记录到 ${completedCommands} 个完成的命令事件。` : '没有可提炼的完成命令摘要，可展开命令详情审计原始事件。'}`,
-        fileNames.length ? `相关文件：${fileNames.map((name) => `\`${name}\``).join('、')}。` : '',
-        issueCount > 0 ? `剩余风险：记录到 ${issueCount} 个失败命令或错误轮次；请展开命令详情查看原始输出。` : '剩余风险：未记录新的失败命令；请按需展开命令详情审计原始输出。',
-      ].filter(Boolean).join('\n\n')
-    : [
-        'Final conclusion: this orchestration completed, but the last turn did not return a directly readable summary, so this fallback was generated from recorded events.',
-        ccbSummary ? `CCB state: ${ccbSummary}` : '',
-        `Progress: ${completedCommands > 0 ? `${completedCommands} completed command event(s) were recorded.` : 'no concise completed command summary was available; expand command details to audit raw events.'}`,
-        fileNames.length ? `Files: ${fileNames.map((name) => `\`${name}\``).join(', ')}.` : '',
-        issueCount > 0 ? `Remaining risk: ${issueCount} failed command or error turn event(s) were recorded; expand command details for raw output.` : 'Remaining risk: no new failed command was recorded; expand command details to audit raw output if needed.',
-      ].filter(Boolean).join('\n\n');
-  const lastTurn = findLastOrchestrationTurnEvent(runEvents);
-
-  return {
-    type: 'message',
-    key: `fallback-final-summary:${runId}:${last.seq || last.createdAt || segmentVisible.length}`,
-    runId,
-    kind: 'run.end',
-    role: 'summary',
-    cli: '',
-    turnId: lastTurn?.turnId,
-    content,
-    status: 'completed',
-    createdAt: last.createdAt,
-    commands: [],
-  };
-}
-
-function hasFreshFinalConclusion(runEvents: OrchestrationEvent[]) {
-  let latestCommandIndex = -1;
-  let latestTurnIndex = -1;
-  let latestTurn: OrchestrationEvent | null = null;
-  runEvents.forEach((event, index) => {
-    if (event.kind.startsWith('command.')) latestCommandIndex = index;
-    if (event.kind === 'turn.start' || event.kind === 'turn.end') {
-      latestTurnIndex = index;
-      latestTurn = event;
-    }
-  });
-
-  return runEvents.some((event, index) => {
-    if (event.kind !== 'turn.delta' && event.kind !== 'turn.end') return false;
-    if (!isReadableFinalConclusion(event.content)) return false;
-    if (index < latestCommandIndex) return false;
-    if (latestTurn && index < latestTurnIndex && orchestrationTurnKey(event) !== orchestrationTurnKey(latestTurn)) return false;
-    return true;
-  });
-}
-
-function findLastOrchestrationTurnEvent(runEvents: OrchestrationEvent[]) {
-  for (let index = runEvents.length - 1; index >= 0; index -= 1) {
-    const event = runEvents[index];
-    if (event.kind === 'turn.start' || event.kind === 'turn.end' || event.kind === 'turn.delta') return event;
-  }
-  return null;
-}
-
-function ccbOrchestrationSummary(runEvents: OrchestrationEvent[]) {
-  const agentState = new Map<string, Set<string>>();
-  const callbackJobs = new Set<string>();
-  runEvents.forEach((event) => {
-    const data = event.data || {};
-    let agent = stringsTrim(String(data.agent || data.target || event.role || event.cli || ''));
-    if (!agent && event.cli === 'ccb') agent = 'ccb';
-    const eventType = stringsTrim(String(data.eventType || ''));
-    const content = event.content || '';
-    if (!eventType && isRawCCBObserverDump(content)) {
-      rawCCBObserverEventTypes(content).forEach((raw) => {
-        if (!agent || agent === 'ccb') agent = raw.agent || agent || 'ccb';
-        recordCCBAgentState(agentState, raw.agent || agent || 'ccb', raw.eventType);
-      });
-      rawCCBCallbackJobIds(content).forEach((jobId) => callbackJobs.add(jobId));
-      return;
-    }
-    if (eventType) recordCCBAgentState(agentState, agent || 'ccb', eventType);
-    const payload = data.payload && typeof data.payload === 'object' ? data.payload as Record<string, any> : {};
-    for (const key of ['callback_child_job_id', 'child_job_id', 'continuation_job_id']) {
-      const jobId = stringsTrim(String(payload[key] || ''));
-      if (jobId) callbackJobs.add(jobId);
-    }
-    if (String(data.contentKind || '') === 'agent_console') {
-      recordCCBAgentState(agentState, agent || 'ccb', 'agent_console');
-    }
-  });
-  const parts: string[] = [];
-  Array.from(agentState.keys()).sort().forEach((agent) => {
-    const states = agentState.get(agent);
-    if (!states?.size) return;
-    parts.push(`${agent} ${Array.from(states).join('/')}`);
-  });
-  if (callbackJobs.size) parts.push(`callback ${Array.from(callbackJobs).join(', ')}`);
-  return parts.join('; ');
-}
-
-function recordCCBAgentState(map: Map<string, Set<string>>, agent: string, eventType: string) {
-  agent = stringsTrim(agent).toLowerCase() || 'ccb';
-  const state = ccbEventStateLabel(eventType);
-  if (!state) return;
-  if (!map.has(agent)) map.set(agent, new Set());
-  map.get(agent)?.add(state);
-}
-
-function ccbEventStateLabel(eventType: string) {
-  const value = stringsTrim(eventType).toLowerCase();
-  switch (value) {
-    case 'job_accepted':
-    case 'job_queued':
-      return 'accepted';
-    case 'job_started':
-      return 'started';
-    case 'completion_item':
-      return 'streaming';
-    case 'completion_terminal':
-    case 'job_completed':
-      return 'completed';
-    case 'job_failed':
-    case 'job_incomplete':
-    case 'job_cancelled':
-      return 'failed';
-    case 'job_delegated_callback':
-    case 'callback_edge_created':
-    case 'callback_continuation_submitted':
-      return 'callback';
-    case 'agent_console':
-      return 'console';
-    default:
-      return '';
-  }
-}
-
-function isReadableFinalConclusion(content?: string) {
-  const value = stringsTrim(content).toLowerCase();
-  if (!value) return false;
-  if (isRawCCBObserverDump(value)) return false;
-  if (value.includes('最终结论') || value.includes('最终总结') || value.includes('最终测试结果') || value.includes('final conclusion') || value.includes('final summary') || value.includes('final test result')) {
-    return true;
-  }
-  const hasConclusion = value.includes('结论') || value.includes('总结') || value.includes('conclusion') || value.includes('summary');
-  const hasCompletion = value.includes('完成') || value.includes('通过') || value.includes('验证') || value.includes('completed') || value.includes('verified') || value.includes('passed');
-  const hasRisk = value.includes('剩余风险') || value.includes('remaining risk');
-  return hasConclusion && (hasCompletion || hasRisk);
-}
-
-function textLooksChinese(content?: string) {
-  return /[\u3400-\u9fff]/.test(content || '');
-}
-
 function commandEventFailed(event: OrchestrationEvent) {
-  const status = String(event.data?.status || event.status || '').toLowerCase();
-  const exitCode = event.data?.exitCode;
+  const data = commandData(event);
+  const status = String(data.status || event.status || '').toLowerCase();
+  const exitCode = data.exitCode;
   return Boolean(event.error) || status === 'failed' || status === 'error' || (typeof exitCode === 'number' && exitCode !== 0);
 }
 
@@ -1326,7 +1233,7 @@ function mergeOrchestrationDeltaEvents(events: OrchestrationEvent[]): Orchestrat
     }
     const content = decodeEscapedLineBreaks(String(event.content || ''));
     if (!stringsTrim(content)) return;
-    if (isBridgeRelayNotice({ ...event, content })) {
+    if (isBridgeRelayNotice(event)) {
       merged.push({ ...event, content });
       return;
     }
@@ -1361,47 +1268,8 @@ function mergeDeltaContent(previous: string, next: string) {
 function cleanOrchestrationDisplayContent(content?: string) {
   const value = stringsTrim(stripMachineContractLines(content));
   if (!value) return '';
-  if (isRawCCBObserverDump(value)) return '';
   const index = conclusionDisplayTrimIndex(value);
   return index > 0 && shouldTrimConclusionDisplayPrefix(value.slice(0, index)) ? value.slice(index).trim() : value;
-}
-
-function isRawCCBObserverDump(content?: string) {
-  const value = stringsTrim(content);
-  if (!value) return false;
-  const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  if (lines.length < 4) return false;
-  const metadata = lines.filter((line) => isCCBObserverMetadataLine(line)).length;
-  return metadata >= Math.max(4, Math.ceil(lines.length * 0.6));
-}
-
-function isCCBObserverMetadataLine(line: string) {
-  const key = stringsTrim(line.split(':', 1)[0]).toLowerCase();
-  return [
-    'observer_view',
-    'observer_authority',
-    'observer_terminal',
-    'observer_notice',
-    'watch_status',
-    'job_id',
-    'agent_name',
-    'target_name',
-    'status',
-    'reply',
-    'event',
-  ].includes(key);
-}
-
-function rawCCBObserverEventTypes(content?: string) {
-  return stringsTrim(content).split(/\r?\n/).flatMap((line) => {
-    const match = line.trim().match(/^event:\s+\S+\s+\S+\s+(\S+)\s+(\S+)/);
-    if (!match) return [];
-    return [{ agent: match[1], eventType: match[2] }];
-  });
-}
-
-function rawCCBCallbackJobIds(content?: string) {
-  return Array.from(new Set(stringsTrim(content).match(/\bjob_[A-Za-z0-9_-]+\b/g) || []));
 }
 
 function conclusionDisplayTrimIndex(value: string) {
@@ -1504,20 +1372,20 @@ function decodeEscapedLineBreaks(value: string) {
 }
 
 function orchestrationCommandSummary(event: OrchestrationEvent) {
-  const data = event.data || {};
-  const command = typeof data.command === 'string' ? data.command.trim() : '';
-  const output = typeof data.output === 'string' ? data.output.trim() : '';
-  const fallback = stringsTrim(event.error || event.content || event.status || event.kind);
+  const data = commandData(event);
+  const command = stringsTrim(data.command);
+  const output = stringsTrim(data.output);
+  const fallback = stringsTrim(event.error || event.content || data.status || event.status || event.kind);
   if (command && output) return `${command}\n\n${output}`;
   return command || output || fallback;
 }
 
 function isEmptyPagesReadFailureEvent(event: OrchestrationEvent) {
   if (!event.kind.startsWith('command.')) return false;
-  const data = event.data || {};
-  const command = typeof data.command === 'string' ? data.command.trim() : '';
-  const output = typeof data.output === 'string' ? data.output : '';
-  const status = typeof data.status === 'string' ? data.status : event.status || '';
+  const data = commandData(event);
+  const command = stringsTrim(data.command);
+  const output = data.output || '';
+  const status = data.status || event.status || '';
   return (
     status.toLowerCase() === 'failed' &&
     command.startsWith('Read ') &&
@@ -1528,6 +1396,7 @@ function isEmptyPagesReadFailureEvent(event: OrchestrationEvent) {
 
 function shouldShowOrchestrationStatus(event: OrchestrationEvent) {
   if (event.kind === 'run.start' || event.kind === 'turn.start') return true;
+  if (event.kind === 'run.conclusion') return false;
   if (event.kind === 'run.end') {
     const content = stringsTrim(event.content);
     return Boolean(event.error || (content && content !== 'Orchestration completed.'));
@@ -1552,6 +1421,7 @@ function statusVisibleEvent(event: OrchestrationEvent, index: number): Orchestra
 }
 
 function orchestrationStatusContent(event: OrchestrationEvent) {
+  if (event.kind === 'run.conclusion') return bridgeConclusionContent(event);
   const content = stringsTrim(event.content);
   const error = stringsTrim(event.error);
   if ((event.kind === 'run.end' || event.kind === 'run.error') && content) return content;
@@ -3072,6 +2942,7 @@ function OrchestrationWorkspace({
   const [approvals, setApprovals] = useState<ApprovalItemState[]>([]);
   const [mode, setMode] = useState<'collaboration' | 'debate'>('collaboration');
   const [firstCli, setFirstCli] = useState<'claude' | 'codex'>('claude');
+  const [profile, setProfile] = useState<'default' | 'formal-proof'>('default');
   const [prompt, setPrompt] = useState('');
   const [cwd, setCwd] = useState('');
   const [maxTurns, setMaxTurns] = useState(4);
@@ -3308,6 +3179,7 @@ function OrchestrationWorkspace({
     setApprovals((current) => current.filter((item) => item.approval.runId === run.id));
     setMode(run.mode === 'debate' ? 'debate' : 'collaboration');
     setFirstCli(run.firstCli === 'codex' ? 'codex' : 'claude');
+    setProfile(run.profile === 'formal-proof' ? 'formal-proof' : 'default');
     setCwd(run.cwd || '');
     setMaxTurns(run.maxTurns || 4);
     stickToBottomRef.current = true;
@@ -3495,6 +3367,7 @@ function OrchestrationWorkspace({
         body: JSON.stringify({
           mode,
           firstCli,
+          profile,
           prompt: task,
           title: titleFromPrompt(task, t),
           cwd: cwd.trim(),
@@ -3784,6 +3657,18 @@ function OrchestrationWorkspace({
                     </button>
                     <button className={cn("h-8 rounded-md text-xs font-medium", firstCli === 'codex' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setFirstCli('codex')} disabled={creating || isRunning}>
                       Codex
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.profile}</label>
+                  <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1">
+                    <button className={cn("h-8 rounded-md text-xs font-medium", profile === 'default' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setProfile('default')} disabled={creating || isRunning}>
+                      {t.defaultProfile}
+                    </button>
+                    <button className={cn("h-8 rounded-md text-xs font-medium", profile === 'formal-proof' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setProfile('formal-proof')} disabled={creating || isRunning}>
+                      {t.formalProofProfile}
                     </button>
                   </div>
                 </div>
@@ -4106,10 +3991,10 @@ function OpenAIMark() {
 
 function CommandEvent({ event, t, open = false }: { event: OrchestrationEvent, t: UIText, open?: boolean }) {
   const [, setClockTick] = useState(0);
-  const data = event.data || {};
-  const command = typeof data.command === 'string' ? data.command : '';
-  const output = typeof data.output === 'string' ? data.output : '';
-  const status = typeof data.status === 'string' ? data.status : event.status || '';
+  const data = commandData(event);
+  const command = data.command || '';
+  const output = data.output || '';
+  const status = data.status || event.status || '';
   const exitCode = typeof data.exitCode === 'number' ? data.exitCode : undefined;
   const isActive = event.kind === 'command.start' || status === 'running' || status === 'in_progress';
   const startedAt = typeof data.startedAt === 'number' ? data.startedAt : event.createdAt;

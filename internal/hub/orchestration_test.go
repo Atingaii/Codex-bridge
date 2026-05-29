@@ -131,6 +131,40 @@ func TestCommandStatusDoesNotUpdateOrchestrationRunStatus(t *testing.T) {
 	}
 }
 
+func TestOrchestrationEventsPersistRunSessionState(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+
+	s.handleOrchestrationEvent(ctx, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+		RunID:        run.ID,
+		Kind:         "run.start",
+		Source:       "bridge",
+		RunStartData: &protocol.RunStartData{CWD: "/abs/work"},
+	}))
+	s.handleOrchestrationEvent(ctx, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+		RunID:      run.ID,
+		Kind:       "turn.end",
+		CLI:        "codex",
+		RunEndData: &protocol.RunEndData{CodexThreadID: "thread_saved"},
+	}))
+	s.handleOrchestrationEvent(ctx, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+		RunID: run.ID,
+		Kind:  "turn.end",
+		CLI:   "claude",
+	}))
+
+	loaded, err := st.OrchestrationRunByID(ctx, run.ID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.RunCWD != "/abs/work" || loaded.CodexThreadID != "thread_saved" || !loaded.ClaudeStarted {
+		t.Fatalf("run session state = %+v", loaded)
+	}
+}
+
 func TestCompletedOrchestrationStreamIsRejected(t *testing.T) {
 	t.Parallel()
 
@@ -288,6 +322,9 @@ func TestContinueOrchestrationSendsCompactedContext(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.UpdateOrchestrationRunSession(ctx, run.ID, "thread_resume", true, "/abs/resume"); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationCompleted, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +349,8 @@ func TestContinueOrchestrationSendsCompactedContext(t *testing.T) {
 
 	body := continueOrchestration(t, s, userID, run.ID, map[string]any{
 		"prompt":   "second task",
-		"maxTurns": 2,
+		"maxTurns": 20,
+		"profile":  "formal-proof",
 	}, http.StatusOK)
 	loaded := body["run"].(map[string]any)
 	if loaded["id"] != run.ID || loaded["status"] != store.OrchestrationRunning {
@@ -330,6 +368,12 @@ func TestContinueOrchestrationSendsCompactedContext(t *testing.T) {
 	}
 	if !payload.Resume || payload.Prompt != "second task" || payload.RunID != run.ID {
 		t.Fatalf("payload = %#v", payload)
+	}
+	if payload.CodexThreadID != "thread_resume" || !payload.ClaudeStarted || payload.RunCWD != "/abs/resume" {
+		t.Fatalf("payload session state = %#v", payload)
+	}
+	if payload.Profile != "formal-proof" || payload.MaxTurns != 12 || payload.MaxTurnsRequested != 20 {
+		t.Fatalf("payload profile/maxTurns = %#v", payload)
 	}
 	if !strings.Contains(payload.Context, "first task") || !strings.Contains(payload.Context, "implemented first task") {
 		t.Fatalf("payload context = %q", payload.Context)

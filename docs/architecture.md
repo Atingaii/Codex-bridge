@@ -37,15 +37,38 @@ The Bridge keeps orchestration deterministic and low overhead: it still spawns
 one CLI process per turn, and uses `codex app-server` for Codex turns when
 browser approval is required. Direct orchestration is a pass-through relay: the
 run's persisted `first_cli` selection decides whether Claude or Codex receives
-the browser task first, Bridge streams the prompt, CLI deltas, command events,
-and terminal status to the browser, and the next CLI receives the previous
-CLI's visible result plus useful command context. Bridge preserves a stable
-Claude session id and Codex thread id where each CLI supports resume. It does
-not add hidden proof strategy gates, automatic verifier turns, or remediation
-turns; formal-proof-looking prompts only add visible workflow guidance such as
-the implementer/reviewer or proposer/critic strategy, proof audit reminders, and
-an Isabelle timeout instruction for long builds. The relay contract is documented in
+the browser task first, Bridge streams CLI deltas, typed command events, and
+terminal status to the browser, and the next CLI receives the previous CLI's
+visible result plus useful command context. Bridge preserves a stable Claude
+session id and Codex thread id where each CLI supports resume. It does not add
+hidden proof strategy gates, automatic verifier turns, or remediation turns.
+Formal-proof guidance is opt-in through the persisted `profile=formal-proof`
+run setting selected in the orchestration UI; the default profile does not
+activate proof guidance based on prompt keywords. The relay contract is
+documented in
 [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
+Profile-specific prompt fragments, assessments, manual-build carry-over, and
+command fingerprint policy live behind `internal/bridge/profiles/registry` and
+`internal/bridge/profiles/formalproof/`; `internal/bridge/orchestration.go`
+only calls the neutral registry boundary.
+
+Orchestration events use a typed contract in
+`internal/protocol/envelope.go:OrchestrationEventPayload`. `source`
+distinguishes `cli`, `bridge`, and `user` events; `severity` carries
+Bridge-internal log levels without overloading lifecycle `status`; command,
+run-start, turn-start, run-end, Bridge-note, and final-conclusion details live
+in typed sub-payloads. `turn.start.content` is a one-line status; the full
+local prompt is kept in `TurnStartData.PromptText` for authenticated local
+diagnostics and is stripped from public shares. Every terminal run emits one
+structured `run.conclusion` event before `run.end`, `run.error`, or
+`run.cancelled`.
+
+Bridge long-command observation is controlled by
+`bridge.long_command_observer`. Matching Claude commands can receive a tagged
+stream-input note, and matching Codex commands emit a visible Bridge-note row
+when no stdin side-channel exists. Both paths use
+`BridgeNoteData.InjectedText` so the browser timeline records exactly what
+Bridge said.
 
 Review-required Claude orchestration uses Claude Code's
 `--permission-prompt-tool` support. `internal/bridge/orchestration.go:runClaude`
@@ -79,7 +102,10 @@ Conversation share links are Hub-only public reads. Authenticated users create
 share records for chat sessions or orchestration runs; anonymous viewers fetch
 sanitized persisted transcripts through `GET /api/public/shares/<share>`. The
 Bridge is not contacted for public reads, and the frontend `/share/<share>`
-route renders before login bootstrap.
+route renders before login bootstrap. Orchestration share sanitization in
+`internal/hub/share.go:publicOrchestrationEvents` drops severity events,
+internal Bridge notes, and `TurnStartData.PromptText`, while preserving public
+run lifecycle and structured conclusion events.
 
 ## Decisions
 
@@ -137,8 +163,13 @@ Orchestration continuity:
    run. The same persisted `first_cli` value is reused unless the request
    explicitly changes it.
 3. Hub compacts prior `orchestration_events` into context.
-4. Bridge receives the same `runID` with `Resume=true`.
-5. The frontend stores the last selected run id locally and restores it on
+4. Hub also restores native CLI state from `orchestration_runs`: the latest
+   Codex thread id, whether Claude reached a successful turn, and the locked
+   absolute run cwd reported by Bridge.
+5. Bridge receives the same `runID` with `Resume=true`, can resume Codex and
+   Claude where supported, and materializes new uploads under the locked run
+   cwd.
+6. The frontend stores the last selected run id locally and restores it on
    `/orchestrate`.
 
 Chat session isolation:
@@ -159,9 +190,11 @@ SQLite tables:
 - `messages`
 - `runs`
 - `enroll_tokens`
-- `orchestration_runs` (including persisted mode, `first_cli`, cwd, max turns,
-  status, and uploaded file metadata)
-- `orchestration_events`
+- `orchestration_runs` (including persisted mode, `first_cli`, `profile`, cwd,
+  max turns, status, native CLI continuity state, locked runtime cwd, and
+  uploaded file metadata)
+- `orchestration_events` (including `source`, `severity`, lifecycle status,
+  and typed event payload JSON)
 - `conversation_shares`
 
 Hub stores browser auth and chat history. Bridge stores only its generated `machine_id` and reads Codex/OpenAI credentials from its local environment.

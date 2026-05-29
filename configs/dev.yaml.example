@@ -53,6 +53,14 @@ bridge:
   reconnect_max: 30s
   heartbeat_interval: 15s
   max_sessions: 8
+  long_command_observer:
+    enabled: false
+    after: 2m
+    command_patterns:
+      - "python -m slow_build"
+    applies_to:
+      - claude
+      - codex
 
 auth:
   jwt_secret: dev-only-change-me-32-byte-minimum-secret

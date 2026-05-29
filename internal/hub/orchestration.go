@@ -21,6 +21,7 @@ type orchestrationCreateRequest struct {
 	Title    string                       `json:"title"`
 	Mode     string                       `json:"mode"`
 	FirstCLI string                       `json:"firstCli"`
+	Profile  string                       `json:"profile"`
 	Prompt   string                       `json:"prompt"`
 	CWD      string                       `json:"cwd"`
 	MaxTurns int                          `json:"maxTurns"`
@@ -28,14 +29,16 @@ type orchestrationCreateRequest struct {
 }
 
 type orchestrationStartRequest struct {
-	AgentID  string
-	Title    string
-	Mode     string
-	FirstCLI string
-	Prompt   string
-	CWD      string
-	MaxTurns int
-	Files    []protocol.AttachmentPayload
+	AgentID           string
+	Title             string
+	Mode              string
+	FirstCLI          string
+	Profile           string
+	Prompt            string
+	CWD               string
+	MaxTurns          int
+	MaxTurnsRequested int
+	Files             []protocol.AttachmentPayload
 }
 
 func (s *Server) handleListOrchestrations(w http.ResponseWriter, r *http.Request, uid string) {
@@ -59,6 +62,7 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		Title:    req.Title,
 		Mode:     req.Mode,
 		FirstCLI: req.FirstCLI,
+		Profile:  req.Profile,
 		Prompt:   req.Prompt,
 		CWD:      req.CWD,
 		MaxTurns: req.MaxTurns,
@@ -88,6 +92,7 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		Title:    normalized.Title,
 		Mode:     normalized.Mode,
 		FirstCLI: normalized.FirstCLI,
+		Profile:  normalized.Profile,
 		Prompt:   normalized.Prompt,
 		CWD:      normalized.CWD,
 		MaxTurns: normalized.MaxTurns,
@@ -131,6 +136,7 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		Title:    req.Title,
 		Mode:     req.Mode,
 		FirstCLI: req.FirstCLI,
+		Profile:  req.Profile,
 		Prompt:   req.Prompt,
 		CWD:      req.CWD,
 		MaxTurns: req.MaxTurns,
@@ -148,6 +154,9 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 	}
 	if startReq.FirstCLI == "" {
 		startReq.FirstCLI = run.FirstCLI
+	}
+	if startReq.Profile == "" {
+		startReq.Profile = run.Profile
 	}
 	if startReq.CWD == "" {
 		startReq.CWD = run.CWD
@@ -181,13 +190,14 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	contextSummary := compactOrchestrationContext(run, events)
-	if err := s.store.UpdateOrchestrationRunSettings(r.Context(), run.ID, agentID, normalized.Mode, normalized.FirstCLI, normalized.CWD, normalized.MaxTurns, files); err != nil {
+	if err := s.store.UpdateOrchestrationRunSettings(r.Context(), run.ID, agentID, normalized.Mode, normalized.FirstCLI, normalized.Profile, normalized.CWD, normalized.MaxTurns, files); err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to update orchestration run")
 		return
 	}
 	run.AgentID = agentID
 	run.Mode = normalized.Mode
 	run.FirstCLI = normalized.FirstCLI
+	run.Profile = normalized.Profile
 	run.CWD = normalized.CWD
 	run.MaxTurns = normalized.MaxTurns
 	run.Files = files
@@ -219,9 +229,11 @@ func (s *Server) normalizeOrchestrationStart(w http.ResponseWriter, req orchestr
 		return req, false
 	}
 	req.FirstCLI = normalizeOrchestrationFirstCLI(req.FirstCLI)
+	req.Profile = normalizeOrchestrationProfile(req.Profile)
 	if req.MaxTurns <= 0 {
 		req.MaxTurns = 4
 	}
+	req.MaxTurnsRequested = req.MaxTurns
 	if req.MaxTurns > 12 {
 		req.MaxTurns = 12
 	}
@@ -236,6 +248,7 @@ func (s *Server) startOrchestration(ctx context.Context, run store.Orchestration
 	event, err := s.store.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
 		RunID:   run.ID,
 		Kind:    "user.message",
+		Source:  "user",
 		Role:    "user",
 		Content: req.Prompt,
 		Status:  store.OrchestrationQueued,
@@ -249,24 +262,36 @@ func (s *Server) startOrchestration(ctx context.Context, run store.Orchestration
 		slog.Error("[hub] update orchestration status failed", "run_id", run.ID, "error", err)
 	}
 	payload := protocol.OrchestrationStartPayload{
-		RunID:     run.ID,
-		Mode:      req.Mode,
-		FirstCLI:  req.FirstCLI,
-		Prompt:    req.Prompt,
-		Context:   strings.Join(cleanContextParts(contextParts), "\n\n"),
-		Resume:    resume,
-		PromptSeq: event.Seq,
-		MaxTurns:  req.MaxTurns,
-		CWD:       req.CWD,
-		Files:     req.Files,
+		RunID:             run.ID,
+		Mode:              req.Mode,
+		FirstCLI:          req.FirstCLI,
+		Prompt:            req.Prompt,
+		Context:           strings.Join(cleanContextParts(contextParts), "\n\n"),
+		Resume:            resume,
+		PromptSeq:         event.Seq,
+		MaxTurns:          req.MaxTurns,
+		MaxTurnsRequested: req.MaxTurnsRequested,
+		CWD:               req.CWD,
+		Files:             req.Files,
+		CodexThreadID:     orchestrationResumeString(resume, run.CodexThreadID),
+		ClaudeStarted:     resume && run.ClaudeStarted,
+		RunCWD:            orchestrationResumeString(resume, run.RunCWD),
+		Profile:           req.Profile,
 	}
 	if err := s.pool.SendToAgent(run.AgentID, protocol.MustEnvelope(protocol.TypeOrchestrationStart, "", payload)); err != nil {
 		_ = s.store.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationFailed, err.Error())
 		_, _ = s.store.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
-			RunID:  run.ID,
-			Kind:   "run.error",
-			Status: store.OrchestrationFailed,
-			Error:  err.Error(),
+			RunID:    run.ID,
+			Kind:     "run.error",
+			Source:   "bridge",
+			Severity: "error",
+			Status:   store.OrchestrationFailed,
+			Error:    err.Error(),
+			RunConclusion: &protocol.RunConclusion{
+				Outcome:          "errored",
+				Summary:          "Orchestration could not start because the selected Bridge endpoint was unavailable: " + err.Error(),
+				UnmetObligations: []string{"No CLI turn was started."},
+			},
 		})
 		return err
 	}
@@ -346,6 +371,15 @@ func normalizeOrchestrationFirstCLI(value string) string {
 	}
 }
 
+func normalizeOrchestrationProfile(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "formal-proof":
+		return "formal-proof"
+	default:
+		return "default"
+	}
+}
+
 func (s *Server) handleGetOrchestration(w http.ResponseWriter, r *http.Request, uid string) {
 	run, err := s.store.OrchestrationRunByID(r.Context(), r.PathValue("runID"), uid)
 	if err != nil {
@@ -403,6 +437,7 @@ func (s *Server) handleCancelOrchestration(w http.ResponseWriter, r *http.Reques
 	event, err := s.store.AddOrchestrationEvent(r.Context(), store.OrchestrationEvent{
 		RunID:  run.ID,
 		Kind:   "run.canceling",
+		Source: "bridge",
 		Status: store.OrchestrationCanceling,
 	})
 	if err != nil {
@@ -435,6 +470,13 @@ func cleanContextParts(parts []string) []string {
 		}
 	}
 	return clean
+}
+
+func orchestrationResumeString(resume bool, value string) string {
+	if !resume {
+		return ""
+	}
+	return value
 }
 
 func compactOrchestrationContext(run store.OrchestrationRun, events []store.OrchestrationEvent) string {
@@ -720,16 +762,25 @@ func (s *Server) handleOrchestrationEvent(ctx context.Context, env protocol.Enve
 			slog.Error("[hub] update orchestration status failed", "run_id", payload.RunID, "error", err)
 		}
 	}
+	s.updateOrchestrationRunSessionFromEvent(ctx, payload)
 	event, err := s.store.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
-		RunID:   payload.RunID,
-		Kind:    payload.Kind,
-		Role:    payload.Role,
-		CLI:     payload.CLI,
-		TurnID:  payload.TurnID,
-		Content: payload.Content,
-		Status:  status,
-		Error:   payload.Error,
-		Data:    payload.Data,
+		RunID:          payload.RunID,
+		Kind:           payload.Kind,
+		Source:         payload.Source,
+		Severity:       payload.Severity,
+		Role:           payload.Role,
+		CLI:            payload.CLI,
+		TurnID:         payload.TurnID,
+		Content:        payload.Content,
+		Status:         status,
+		Error:          payload.Error,
+		CommandData:    payload.CommandData,
+		RunStartData:   payload.RunStartData,
+		TurnStartData:  payload.TurnStartData,
+		RunEndData:     payload.RunEndData,
+		BridgeNoteData: payload.BridgeNoteData,
+		RunConclusion:  payload.RunConclusion,
+		Data:           payload.Data,
 	})
 	if err != nil {
 		slog.Error("[hub] persist orchestration event failed", "run_id", payload.RunID, "error", err)
@@ -738,15 +789,53 @@ func (s *Server) handleOrchestrationEvent(ctx context.Context, env protocol.Enve
 	s.pool.BroadcastToOrchestrationBrowsers(payload.RunID, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", eventToPayload(event)))
 }
 
+func (s *Server) updateOrchestrationRunSessionFromEvent(ctx context.Context, payload protocol.OrchestrationEventPayload) {
+	switch payload.Kind {
+	case "run.start":
+		cwd := ""
+		if payload.RunStartData != nil {
+			cwd = payload.RunStartData.CWD
+		}
+		if cwd == "" {
+			cwd = stringFromMap(payload.Data, "cwd")
+		}
+		if cwd != "" {
+			if err := s.store.UpdateOrchestrationRunSession(ctx, payload.RunID, "", false, cwd); err != nil {
+				slog.Error("[hub] update orchestration run cwd failed", "run_id", payload.RunID, "error", err)
+			}
+		}
+	case "turn.end":
+		codexThreadID := stringFromMap(payload.Data, "codexThreadId")
+		if codexThreadID == "" {
+			codexThreadID = stringFromMap(payload.Data, "threadId")
+		}
+		if codexThreadID == "" && payload.RunEndData != nil {
+			codexThreadID = payload.RunEndData.CodexThreadID
+		}
+		claudeStarted := strings.EqualFold(payload.CLI, "claude") && !strings.EqualFold(payload.Status, "error")
+		if codexThreadID != "" || claudeStarted {
+			if err := s.store.UpdateOrchestrationRunSession(ctx, payload.RunID, codexThreadID, claudeStarted, ""); err != nil {
+				slog.Error("[hub] update orchestration run session failed", "run_id", payload.RunID, "error", err)
+			}
+		}
+	}
+}
+
 func suppressEmptyPagesReadFailure(payload protocol.OrchestrationEventPayload) bool {
 	if !strings.HasPrefix(payload.Kind, "command.") {
 		return false
 	}
 	status := strings.ToLower(strings.TrimSpace(payload.Status))
+	if payload.CommandData != nil && payload.CommandData.Status != "" {
+		status = strings.ToLower(strings.TrimSpace(payload.CommandData.Status))
+	}
 	if status != "failed" && status != "error" {
 		return false
 	}
 	output := strings.TrimSpace(payload.Error + "\n" + payload.Content)
+	if payload.CommandData != nil {
+		output += "\n" + payload.CommandData.Output
+	}
 	if payload.Data != nil {
 		if value, ok := payload.Data["output"].(string); ok {
 			output += "\n" + value
@@ -846,17 +935,25 @@ func (s *Server) resolveAgentID(ctx context.Context, uid, requested string) (str
 
 func eventToPayload(event store.OrchestrationEvent) protocol.OrchestrationEventPayload {
 	return protocol.OrchestrationEventPayload{
-		ID:        event.ID,
-		RunID:     event.RunID,
-		Seq:       event.Seq,
-		TurnID:    event.TurnID,
-		Kind:      event.Kind,
-		Role:      event.Role,
-		CLI:       event.CLI,
-		Content:   event.Content,
-		Status:    event.Status,
-		Error:     event.Error,
-		Data:      event.Data,
-		CreatedAt: event.CreatedAt,
+		ID:             event.ID,
+		RunID:          event.RunID,
+		Seq:            event.Seq,
+		TurnID:         event.TurnID,
+		Kind:           event.Kind,
+		Source:         event.Source,
+		Severity:       event.Severity,
+		Role:           event.Role,
+		CLI:            event.CLI,
+		Content:        event.Content,
+		Status:         event.Status,
+		Error:          event.Error,
+		CommandData:    event.CommandData,
+		RunStartData:   event.RunStartData,
+		TurnStartData:  event.TurnStartData,
+		RunEndData:     event.RunEndData,
+		BridgeNoteData: event.BridgeNoteData,
+		RunConclusion:  event.RunConclusion,
+		Data:           event.Data,
+		CreatedAt:      event.CreatedAt,
 	}
 }

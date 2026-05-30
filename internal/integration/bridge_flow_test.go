@@ -1278,7 +1278,7 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		id := profile["id"].(string)
 		setup := profile["setupCommand"].(string)
 		connect := profile["connectCommand"].(string)
-		sudoConnect := profile["sudoConnectCommand"].(string)
+		assertNoSudoCommandFields(t, profile)
 		if strings.Contains(setup, "\n") {
 			t.Fatalf("profile setup command should be one line: %q", setup)
 		}
@@ -1290,12 +1290,6 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		}
 		if out, err := exec.Command("sh", "-n", "-c", connect).CombinedOutput(); err != nil {
 			t.Fatalf("profile connect command shell syntax: %v\n%s\n%s", err, out, connect)
-		}
-		if !strings.Contains(sudoConnect, `sudo -H env PATH="$PATH" /root/.local/bin/codex-bridge link`) {
-			t.Fatalf("profile sudo connect command missing sudo link: %s", sudoConnect)
-		}
-		if out, err := exec.Command("sh", "-n", "-c", sudoConnect).CombinedOutput(); err != nil {
-			t.Fatalf("profile sudo connect command shell syntax: %v\n%s\n%s", err, out, sudoConnect)
 		}
 		profileCommands[id] = connect
 	}
@@ -1336,22 +1330,7 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	if tokenBody["installCommand"] != installCommand || tokenBody["connectCommand"] != connectCommand {
 		t.Fatalf("command mismatch: install=%#v connect=%#v commands=%#v", tokenBody["installCommand"], tokenBody["connectCommand"], commands)
 	}
-	sudoCommands := tokenBody["sudoCommands"].([]any)
-	if len(sudoCommands) != 2 || !strings.Contains(sudoCommands[0].(string), "sudo -H sh") || !strings.Contains(sudoCommands[1].(string), `sudo -H env PATH="$PATH" /root/.local/bin/codex-bridge link`) {
-		t.Fatalf("sudoCommands = %#v", sudoCommands)
-	}
-	for _, command := range []string{
-		tokenBody["sudoSetupCommand"].(string),
-		tokenBody["sudoInstallCommand"].(string),
-		tokenBody["sudoConnectCommand"].(string),
-	} {
-		if strings.Contains(command, "\n") {
-			t.Fatalf("sudo command should be one line: %q", command)
-		}
-		if out, err := exec.Command("sh", "-n", "-c", command).CombinedOutput(); err != nil {
-			t.Fatalf("sudo command shell syntax: %v\n%s\n%s", err, out, command)
-		}
-	}
+	assertNoSudoCommandFields(t, tokenBody)
 	for _, want := range []string{
 		`~/.local/bin/codex-bridge link`,
 		`--profile 'review-required'`,
@@ -1400,7 +1379,6 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		t.Fatalf("repair setup command shell syntax: %v\n%s\n%s", err, out, repairSetup)
 	}
 	repairConnect := repairBody["connectCommand"].(string)
-	repairSudoConnect := repairBody["sudoConnectCommand"].(string)
 	for _, want := range []string{
 		`--cwd ` + shellSingleQuote(tmp),
 		`--name ` + shellSingleQuote("fake-bridge"),
@@ -1412,9 +1390,7 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 			t.Fatalf("repair connect command missing %q: %s", want, repairConnect)
 		}
 	}
-	if !strings.Contains(repairSudoConnect, `sudo -H env PATH="$PATH" /root/.local/bin/codex-bridge link`) || !strings.Contains(repairSudoConnect, `--machine-id`) {
-		t.Fatalf("repair sudo connect command missing sudo link or machine id: %s", repairSudoConnect)
-	}
+	assertNoSudoCommandFields(t, repairBody)
 	repairProfiles := repairBody["permissionProfiles"].([]any)
 	if len(repairProfiles) != 2 {
 		t.Fatalf("repair profiles = %#v", repairProfiles)
@@ -1422,6 +1398,7 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	var sawPinnedAuto bool
 	for _, raw := range repairProfiles {
 		profile := raw.(map[string]any)
+		assertNoSudoCommandFields(t, profile)
 		connect := profile["connectCommand"].(string)
 		if !strings.Contains(connect, `--machine-id`) || !strings.Contains(connect, agent["machineId"].(string)) {
 			t.Fatalf("repair profile missing machine id: %#v", profile)
@@ -1464,6 +1441,15 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 
 func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func assertNoSudoCommandFields(t *testing.T, body map[string]any) {
+	t.Helper()
+	for _, key := range []string{"sudoSetupCommand", "sudoInstallCommand", "sudoConnectCommand", "sudoCommands"} {
+		if _, ok := body[key]; ok {
+			t.Fatalf("response should not expose %s: %#v", key, body)
+		}
+	}
 }
 
 func TestOrchestrationContinueReusesRunAndSendsContext(t *testing.T) {

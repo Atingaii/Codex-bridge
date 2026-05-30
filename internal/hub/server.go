@@ -490,12 +490,6 @@ func (s *Server) bridgeTokenResponse(r *http.Request, params bridgeTokenResponse
 		CWD:       params.CWD,
 		MachineID: params.MachineID,
 	})
-	sudoInstallCommand := s.bridgeSudoInstallCommand(hubURL)
-	sudoConnectCommand := s.bridgeSudoConnectCommand(hubURL, params.Token, params.PermissionProfile, bridgeConnectOptions{
-		Agent:     params.Agent,
-		CWD:       params.CWD,
-		MachineID: params.MachineID,
-	})
 	setupCommand := bridgeSetupCommand(installCommand, connectCommand)
 	profiles := s.bridgePermissionProfiles(hubURL, params.Token, installCommand, bridgeConnectOptions{
 		Agent:     params.Agent,
@@ -513,10 +507,6 @@ func (s *Server) bridgeTokenResponse(r *http.Request, params bridgeTokenResponse
 		"setupCommand":       setupCommand,
 		"installCommand":     installCommand,
 		"connectCommand":     connectCommand,
-		"sudoSetupCommand":   bridgeSetupCommand(sudoInstallCommand, sudoConnectCommand),
-		"sudoInstallCommand": sudoInstallCommand,
-		"sudoConnectCommand": sudoConnectCommand,
-		"sudoCommands":       []string{sudoInstallCommand, sudoConnectCommand},
 		"commands":           []string{installCommand, connectCommand},
 	}
 	if params.Agent != nil {
@@ -546,23 +536,15 @@ func (s *Server) bridgePermissionProfiles(hubURL, token, installCommand string, 
 
 func (s *Server) bridgePermissionProfile(hubURL, token, installCommand, profile string, opts bridgeConnectOptions) map[string]string {
 	connectCommand := s.bridgeConnectCommand(hubURL, token, profile, opts)
-	sudoInstallCommand := s.bridgeSudoInstallCommand(hubURL)
-	sudoConnectCommand := s.bridgeSudoConnectCommand(hubURL, token, profile, opts)
 	return map[string]string{
-		"id":                 profile,
-		"setupCommand":       bridgeSetupCommand(installCommand, connectCommand),
-		"connectCommand":     connectCommand,
-		"sudoSetupCommand":   bridgeSetupCommand(sudoInstallCommand, sudoConnectCommand),
-		"sudoConnectCommand": sudoConnectCommand,
+		"id":             profile,
+		"setupCommand":   bridgeSetupCommand(installCommand, connectCommand),
+		"connectCommand": connectCommand,
 	}
 }
 
 func (s *Server) bridgeInstallCommand(hubURL string) string {
 	return fmt.Sprintf("curl -fsSL %s | sh", shellQuote(strings.TrimRight(hubURL, "/")+"/install.sh"))
-}
-
-func (s *Server) bridgeSudoInstallCommand(hubURL string) string {
-	return fmt.Sprintf("curl -fsSL %s | sudo -H sh", shellQuote(strings.TrimRight(hubURL, "/")+"/install.sh"))
 }
 
 func bridgeSetupCommand(installCommand, connectCommand string) string {
@@ -577,12 +559,6 @@ type bridgeConnectOptions struct {
 
 func (s *Server) bridgeConnectCommand(hubURL, token, permissionProfile string, opts bridgeConnectOptions) string {
 	args := []string{"~/.local/bin/codex-bridge", "link", "--hub", shellQuote(hubURL)}
-	args = append(args, bridgeConnectArgs(hubURL, token, permissionProfile, opts)...)
-	return strings.Join(args, " ")
-}
-
-func (s *Server) bridgeSudoConnectCommand(hubURL, token, permissionProfile string, opts bridgeConnectOptions) string {
-	args := []string{"sudo", "-H", "env", `PATH="$PATH"`, "/root/.local/bin/codex-bridge", "link", "--hub", shellQuote(hubURL)}
 	args = append(args, bridgeConnectArgs(hubURL, token, permissionProfile, opts)...)
 	return strings.Join(args, " ")
 }

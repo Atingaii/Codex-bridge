@@ -279,10 +279,6 @@ type BridgeTokenResponse = {
   setupCommand: string;
   installCommand: string;
   connectCommand: string;
-  sudoSetupCommand?: string;
-  sudoInstallCommand?: string;
-  sudoConnectCommand?: string;
-  sudoCommands?: string[];
   commands: string[];
   agentId?: string;
   machineId?: string;
@@ -294,8 +290,6 @@ type BridgePermissionProfile = {
   id: PermissionProfileId;
   setupCommand: string;
   connectCommand: string;
-  sudoSetupCommand?: string;
-  sudoConnectCommand?: string;
 };
 
 type ShareInfo = {
@@ -479,8 +473,7 @@ const uiText = {
     generating: 'Generating',
     setupCommand: 'Install and connect',
     installCommand: 'Install command',
-    normalUserCommands: 'No sudo',
-    sudoRootCommands: 'With sudo',
+    normalUserCommands: 'Workspace user commands',
     linkCommand: 'Link command',
     connectCommand: 'Connect',
     repairConnection: 'Repair connection',
@@ -658,8 +651,7 @@ const uiText = {
     generating: '生成中',
     setupCommand: '安装并连接',
     installCommand: '安装命令',
-    normalUserCommands: '无需 sudo',
-    sudoRootCommands: '使用 sudo',
+    normalUserCommands: '工作区用户命令',
     linkCommand: '链接命令',
     connectCommand: '连接',
     repairConnection: '修复连接',
@@ -4988,34 +4980,23 @@ function SettingsModal({
     tokenInfo?.permissionProfiles?.find((profile) => profile.id === profileId)?.setupCommand || '';
   const profileConnectCommand = (profileId: PermissionProfileId) =>
     tokenInfo?.permissionProfiles?.find((profile) => profile.id === profileId)?.connectCommand || '';
-  const profileSudoConnectCommand = (profileId: PermissionProfileId) =>
-    tokenInfo?.permissionProfiles?.find((profile) => profile.id === profileId)?.sudoConnectCommand || '';
   const selectedSetupCommand =
     (tokenInfo && profileCommand(tokenInfo.permissionProfile)) ||
     tokenInfo?.setupCommand ||
     tokenInfo?.commands?.[0] ||
     (tokenInfo ? `${tokenInfo.installCommand} && ${tokenInfo.connectCommand}` : '');
   const installCommand = tokenInfo?.installCommand || tokenInfo?.commands?.[0] || '';
-  const sudoInstallCommand = tokenInfo?.sudoInstallCommand || tokenInfo?.sudoCommands?.[0] || '';
   const selectedLinkCommand =
     (tokenInfo && profileConnectCommand(tokenInfo.permissionProfile)) ||
     tokenInfo?.connectCommand ||
     tokenInfo?.commands?.[1] ||
     selectedSetupCommand;
-  const selectedSudoLinkCommand =
-    (tokenInfo && profileSudoConnectCommand(tokenInfo.permissionProfile)) ||
-    tokenInfo?.sudoConnectCommand ||
-    tokenInfo?.sudoCommands?.[1] ||
-    '';
   const alternateProfile = tokenInfo?.permissionProfile === 'auto-execute' ? 'review-required' : 'auto-execute';
   const alternateSetupCommand = tokenInfo ? profileConnectCommand(alternateProfile) || profileCommand(alternateProfile) : '';
-  const alternateSudoCommand = tokenInfo ? profileSudoConnectCommand(alternateProfile) : '';
   const repairProfileCommand = (info: BridgeTokenResponse | undefined, profileId: PermissionProfileId) =>
     info?.permissionProfiles?.find((profile) => profile.id === profileId)?.setupCommand || '';
   const repairProfileConnectCommand = (info: BridgeTokenResponse | undefined, profileId: PermissionProfileId) =>
     info?.permissionProfiles?.find((profile) => profile.id === profileId)?.connectCommand || '';
-  const repairProfileSudoConnectCommand = (info: BridgeTokenResponse | undefined, profileId: PermissionProfileId) =>
-    info?.permissionProfiles?.find((profile) => profile.id === profileId)?.sudoConnectCommand || '';
   const copyCommand = async (value: string, key: string) => {
     await copyText(value);
     setCopiedCommand(key);
@@ -5147,14 +5128,8 @@ function SettingsModal({
                   repairInfo?.commands?.[1] ||
                   repairProfileCommand(repairInfo, repairInfo?.permissionProfile || 'review-required') ||
                   '';
-                const selectedRepairSudoCommand =
-                  (repairInfo && repairProfileSudoConnectCommand(repairInfo, repairInfo.permissionProfile)) ||
-                  repairInfo?.sudoConnectCommand ||
-                  repairInfo?.sudoCommands?.[1] ||
-                  '';
                 const alternateRepairProfile = repairInfo?.permissionProfile === 'auto-execute' ? 'review-required' : 'auto-execute';
                 const alternateRepairCommand = repairInfo ? repairProfileConnectCommand(repairInfo, alternateRepairProfile) || repairProfileCommand(repairInfo, alternateRepairProfile) : '';
-                const alternateRepairSudoCommand = repairInfo ? repairProfileSudoConnectCommand(repairInfo, alternateRepairProfile) : '';
                 return (
                   <div
                     key={agent.id}
@@ -5266,27 +5241,6 @@ function SettingsModal({
                                 />
                               )}
                             </div>
-                            {selectedRepairSudoCommand && (
-                              <div className="space-y-2">
-                                <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t.sudoRootCommands}</div>
-                                <CommandBlock
-                                  label={`${t.repairConnectionCommand} · ${t.selectedProfileCommand}`}
-                                  value={selectedRepairSudoCommand}
-                                  copied={copiedCommand === `repair-sudo-${agent.id}`}
-                                  onCopy={() => copyCommand(selectedRepairSudoCommand, `repair-sudo-${agent.id}`).catch(() => undefined)}
-                                  t={t}
-                                />
-                                {alternateRepairSudoCommand && (
-                                  <CommandBlock
-                                    label={`${t.repairConnectionCommand} · ${t.alternateProfileCommand}`}
-                                    value={alternateRepairSudoCommand}
-                                    copied={copiedCommand === `repair-sudo-alt-${agent.id}`}
-                                    onCopy={() => copyCommand(alternateRepairSudoCommand, `repair-sudo-alt-${agent.id}`).catch(() => undefined)}
-                                    t={t}
-                                  />
-                                )}
-                              </div>
-                            )}
                           </div>
                         )}
                       </div>
@@ -5375,34 +5329,6 @@ function SettingsModal({
                       />
                     )}
                   </div>
-                  {sudoInstallCommand && selectedSudoLinkCommand && (
-                    <div className="space-y-2">
-                      <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t.sudoRootCommands}</div>
-                      <CommandBlock
-                        label={t.installCommand}
-                        value={sudoInstallCommand}
-                        copied={copiedCommand === 'sudo-install'}
-                        onCopy={() => copyCommand(sudoInstallCommand, 'sudo-install').catch(() => undefined)}
-                        t={t}
-                      />
-                      <CommandBlock
-                        label={`${t.linkCommand} · ${t.selectedProfileCommand}`}
-                        value={selectedSudoLinkCommand}
-                        copied={copiedCommand === 'sudo-link'}
-                        onCopy={() => copyCommand(selectedSudoLinkCommand, 'sudo-link').catch(() => undefined)}
-                        t={t}
-                      />
-                      {alternateSudoCommand && (
-                        <CommandBlock
-                          label={`${t.linkCommand} · ${t.alternateProfileCommand}`}
-                          value={alternateSudoCommand}
-                          copied={copiedCommand === 'sudo-link-alt'}
-                          onCopy={() => copyCommand(alternateSudoCommand, 'sudo-link-alt').catch(() => undefined)}
-                          t={t}
-                        />
-                      )}
-                    </div>
-                  )}
                 </div>
               )}
             </div>

@@ -96,11 +96,12 @@ possible.
   process for that run. Codex app-server processes may be restarted after turns
   to make native rollout files immediately available.
 - Later Codex turns use the same Codex thread id as the first Codex turn.
-- The Codex thread is persisted under the Bridge service user's `CODEX_HOME`
-  and is visible to `codex resume` / `/resume` for the same cwd after each
-  completed Codex turn. The Bridge service user must own and be able to write
-  `CODEX_HOME/sessions`, including the current date directory, or Codex can
-  create state DB rows without writing the rollout jsonl.
+- The Codex thread is persisted under the OS user that ran the generated
+  `codex-bridge link` command. Its `HOME` / `CODEX_HOME` and cwd are preserved
+  by the generated user service, so it is visible to `codex resume` / `/resume`
+  for the same cwd after each completed Codex turn. That user must own and be
+  able to write `CODEX_HOME/sessions`, including the current date directory, or
+  Codex can create state DB rows without writing the rollout jsonl.
 - Later Claude turns use the same Claude session id as the first Claude turn.
 - Follow-up prompts for the same run reuse the same live native sessions while
   Bridge remains running.
@@ -123,12 +124,18 @@ machine-readable events.
 
 **Q2: Can the user see the sessions with native resume?**
 
-A: Yes, subject to the CLI's own picker behavior and the service user's home
-directory. Bridge runs under the configured Bridge service user, so native
-history is written under that user's `CODEX_HOME` / Claude home. On the deployed
-server this means checking as the `codexbridge` user, not root, for example from
-the workspace cwd:
+A: Yes, subject to the CLI's own picker behavior and the same-user invariant.
+The generated browser setup command must be run by the workspace OS user, from
+the target workspace directory. Bridge then writes native history under that
+user's `HOME` / `CODEX_HOME` / Claude home. The user can inspect Codex history
+from the same identity and cwd:
 
 ```bash
-sudo -u codexbridge -H sh -lc 'cd /root/tencent && codex resume --all --include-non-interactive'
+cd /home/alice/project
+codex resume --include-non-interactive
 ```
+
+Use `codex resume --all --include-non-interactive` only when intentionally
+disabling Codex's cwd filter. `sudo -u <service-user>` is a legacy deployment
+diagnostic for endpoints that were incorrectly started by a central service
+user; it is not the normal user workflow.

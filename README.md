@@ -52,15 +52,17 @@ Browser self-registration is disabled. Create or update approved users with
 `codex-bridge user --username <name> --password <password>`.
 
 After login, create a CLI token in Settings and copy the single install-and-connect
-command. The command writes logs under `~/.codex-bridge/logs/` and only prints
-`codex-bridge connected` after the Bridge logs `[bridge] connected`; otherwise
-it prints recent log lines for diagnosis. It preserves `PATH`, resolved
-Codex/Claude CLI paths, and common proxy variables for the background service
-so WSL/Linux shells that need a custom CLI or proxy path keep working after
-`systemd --user` starts the Bridge. Generated user services keep the Bridge
-parent alive if a memory-heavy child process is OOM-killed. If either CLI is
-missing from the shell running the command, setup exits before registering an
-unusable endpoint.
+command from the target workspace, as the same OS user that runs Codex CLI and
+Claude Code. The command writes logs under `~/.codex-bridge/logs/` and only
+prints `codex-bridge connected` after the Bridge logs `[bridge] connected`;
+otherwise it prints recent log lines for diagnosis. It preserves `HOME`,
+`PATH`, `CODEX_HOME`, Claude config location variables, resolved Codex/Claude
+CLI paths, common model credentials, and common proxy variables for the
+background service so WSL/Linux shells that need a custom CLI, native history
+home, or proxy path keep working after `systemd --user` starts the Bridge.
+Generated user services keep the Bridge parent alive if a memory-heavy child
+process is OOM-killed. If either CLI is missing from the shell running the
+command, setup exits before registering an unusable endpoint.
 
 The Settings flow offers two permission profiles. Review required uses the
 Codex app-server runner so Codex command/file approval requests appear in the

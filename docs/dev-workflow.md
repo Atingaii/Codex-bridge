@@ -63,25 +63,31 @@ create or update local test accounts.
 ## CLI Install Flow
 
 `POST /api/bridge-tokens` returns `setupCommand` for the settings UI. It is a
-single copyable shell line that runs `/install.sh` and then starts the Bridge.
-The retained `installCommand` and `connectCommand` fields are manual fallback
-parts. The connect command prefers a restartable `systemd --user` service,
-falls back to `nohup` when user systemd is not available, writes logs under
+single copyable shell line that runs `/install.sh` and then starts the Bridge;
+`installCommand` and `connectCommand` are the same flow split into two commands
+for manual fallback. Users must run the generated command from the target
+workspace as the same OS user that runs Codex CLI and Claude Code. The connect
+command prefers a restartable `systemd --user` service, falls back to `nohup`
+when user systemd is not available, writes logs under
 `~/.codex-bridge/logs/`, and keeps a per-working-directory machine id under
 `~/.codex-bridge/machines/`. The setup command clears the per-directory log
 before starting, stops any existing same-directory user service, refuses to
 continue unless `codex` and `claude` are resolvable in the shell that runs the
 command, and only prints `codex-bridge connected` after the Bridge logs
 `[bridge] connected`; otherwise it prints recent log lines for diagnosis. It
-preserves `PATH`, resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, common
-model credential variables such as `OPENAI_API_KEY`,
-`CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_API_KEY`, and common proxy
-environment variables in `~/.codex-bridge/services/<cwd-hash>.env` so
-background services keep the same CLI, local model credentials, and Hub
-connectivity as the shell that ran the setup command. Generated user services
-include `OOMPolicy=continue`; if a heavy child process is killed by the kernel
-OOM killer, systemd should keep the Bridge service up so Hub can surface the
-command/run status instead of seeing a Bridge restart.
+preserves `HOME`, `PATH`, `CODEX_HOME`, Claude config location variables,
+resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, common model credential
+variables such as `OPENAI_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and
+`ANTHROPIC_API_KEY`, and common proxy environment variables in
+`~/.codex-bridge/services/<cwd-hash>.env` so background services keep the same
+CLI, native history location, local model credentials, and Hub connectivity as
+the shell that ran the setup command. Generated user services include
+`OOMPolicy=continue`; if a heavy child process is killed by the kernel OOM
+killer, systemd should keep the Bridge service up so Hub can surface the
+command/run status instead of seeing a Bridge restart. The token response and
+settings UI intentionally do not expose sudo/root setup commands because they
+write native CLI state under a different user and break native resume
+expectations.
 
 The settings UI exposes two permission profiles:
 

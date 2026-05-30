@@ -185,16 +185,9 @@ func resolveLinkCLIs(opts *linkOptions) error {
 	if err != nil {
 		return err
 	}
-	ccbPath, err := lookPathWithLocalBin("ccb")
-	if err != nil {
-		fmt.Println("ccb not found; installing claude_codex_bridge...")
-		if installErr := installCCB(context.Background(), opts.Home); installErr != nil {
-			return installErr
-		}
-		ccbPath, err = lookPathWithLocalBin("ccb")
-		if err != nil {
-			return errors.New("ccb install finished but ccb was not found; ensure ~/.local/bin is on PATH and rerun link")
-		}
+	ccbPath := ""
+	if path, err := lookPathWithLocalBin("ccb"); err == nil {
+		ccbPath = path
 	}
 	opts.CodexPath = codexPath
 	opts.ClaudePath = claudePath
@@ -402,10 +395,13 @@ func writeLinkFiles(opts linkOptions) error {
 
 func linkEnvFile(opts linkOptions) string {
 	var b strings.Builder
+	writeEnvAssignment(&b, "HOME", opts.Home)
 	writeEnvAssignment(&b, "PATH", linkPathWithLocalBin(opts.Home))
 	writeEnvAssignment(&b, "BRIDGE_CODEX_PATH", opts.CodexPath)
 	writeEnvAssignment(&b, "BRIDGE_CLAUDE_PATH", opts.ClaudePath)
-	writeEnvAssignment(&b, "BRIDGE_CCB_PATH", opts.CCBPath)
+	if opts.CCBPath != "" {
+		writeEnvAssignment(&b, "BRIDGE_CCB_PATH", opts.CCBPath)
+	}
 	for _, name := range linkPreservedEnvNames() {
 		if value := os.Getenv(name); value != "" {
 			writeEnvAssignment(&b, name, value)
@@ -416,6 +412,13 @@ func linkEnvFile(opts linkOptions) string {
 
 func linkPreservedEnvNames() []string {
 	return []string{
+		"CODEX_HOME",
+		"CODEX_CONFIG_HOME",
+		"CLAUDE_CONFIG_DIR",
+		"CLAUDE_HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_DATA_HOME",
+		"XDG_STATE_HOME",
 		"OPENAI_API_KEY",
 		"OPENAI_BASE_URL",
 		"OPENAI_ORG_ID",
@@ -490,6 +493,7 @@ func linkStartScript(opts linkOptions) string {
 		`if [ -f "$CB_ENV" ]; then set -a; . "$CB_ENV"; set +a; fi`,
 		fmt.Sprintf("CB_CWD=$(cat %s)", shellEnvQuote(opts.CWDPath)),
 		fmt.Sprintf("CB_NAME=$(cat %s)", shellEnvQuote(opts.NamePath)),
+		`cd "$CB_CWD"`,
 		"exec " + strings.Join(args, " "),
 		"",
 	}, "\n")
@@ -497,9 +501,9 @@ func linkStartScript(opts linkOptions) string {
 
 func linkProfileConnectArgs(profile string) []string {
 	if profile == linkProfileAutoExecute {
-		return []string{"--runner", "codex", "--orchestration-runner", "ccb", "--sandbox", "danger-full-access", "--approval-policy", "never"}
+		return []string{"--runner", "codex", "--sandbox", "danger-full-access", "--approval-policy", "never"}
 	}
-	return []string{"--runner", "codex-app-server", "--orchestration-runner", "ccb", "--sandbox", "workspace-write", "--approval-policy", "untrusted"}
+	return []string{"--runner", "codex-app-server", "--sandbox", "workspace-write", "--approval-policy", "untrusted"}
 }
 
 func startLinkedBridge(ctx context.Context, opts linkOptions) error {
@@ -572,6 +576,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+WorkingDirectory=%s
+Environment=HOME=%s
 ExecStart=%s
 Restart=always
 RestartSec=5
@@ -581,11 +587,16 @@ StandardError=append:%s
 
 [Install]
 WantedBy=default.target
-`, opts.CWD, opts.StartPath, opts.LogPath, opts.LogPath)
+`, opts.CWD, systemdEscape(opts.CWD), systemdEscape(opts.Home), systemdEscape(opts.StartPath), systemdEscape(opts.LogPath), systemdEscape(opts.LogPath))
+}
+
+func systemdEscape(value string) string {
+	return strings.ReplaceAll(value, "%", "%%")
 }
 
 func startNohupBridge(ctx context.Context, opts linkOptions) error {
 	cmd := exec.CommandContext(ctx, "nohup", opts.StartPath)
+	cmd.Dir = opts.CWD
 	logFile, err := os.OpenFile(opts.LogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err

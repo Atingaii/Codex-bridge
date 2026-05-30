@@ -10,10 +10,19 @@ settings UI should expose a single copyable setup command that installs the
 binary and starts the background endpoint without asking the user to edit in the
 token manually.
 
+The normal setup path is user-owned: the generated command is run from the
+target workspace by the same OS user that runs Codex CLI and Claude Code. Bridge
+therefore writes native Codex/Claude history under that user's `HOME` /
+`CODEX_HOME` / Claude config directory, and native resume commands work from the
+same user and workspace.
+
 ## Non-Goals
 
 - Change the Bridge WebSocket protocol, enroll token semantics, or runner
   behavior.
+- Provide a sudo/root setup path in the browser UI. Root-owned endpoints write
+  native CLI state under a different home directory and do not satisfy the
+  browser-to-native-resume workflow.
 
 ## Current State
 
@@ -42,11 +51,12 @@ for manual recovery.
   orchestration CLIs.
 - Captures `PATH`, resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, common
   model credential variables such as `OPENAI_API_KEY`,
-  `CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_API_KEY`, plus common proxy
-  variables from the shell that runs the setup command into
+  `CLAUDE_CODE_OAUTH_TOKEN`, and `ANTHROPIC_API_KEY`, native CLI home/config
+  variables such as `HOME`, `CODEX_HOME`, and `CLAUDE_CONFIG_DIR`, plus common
+  proxy variables from the shell that runs the setup command into
   `~/.codex-bridge/services/<cwd-hash>.env`. The start script loads that 0600
   file before dialing the Hub so user systemd does not lose the WSL/Linux CLI,
-  local model credentials, or proxy environment.
+  local model credentials, native history location, or proxy environment.
 - If `systemctl --user` is available, stops any existing service for the same
   working-directory hash, writes
   `~/.config/systemd/user/codex-bridge-<cwd-hash>.service` and a matching
@@ -66,6 +76,8 @@ for manual recovery.
   service can start after reboot without an interactive login.
 - Falls back to `nohup ... &` when user systemd is unavailable.
 - Prints the service name or background PID plus log path.
+- Does not install or require the historical CCB helper. Hub-managed
+  orchestration uses direct `claude` and `codex` capabilities.
 
 The command keeps the existing per-directory machine id file:
 `$HOME/.codex-bridge/machines/${CB_HASH}`. Existing enroll token rules remain:
@@ -77,7 +89,10 @@ new token.
 - `setupCommand`: the single command shown by the settings UI.
 - `installCommand` and `connectCommand`: retained for manual fallback and
   compatibility.
-- `commands`: the one-shot setup command list used by command-oriented clients.
+- `commands`: the install command and link command as a two-step fallback for
+  command-oriented clients.
+
+It does not return sudo/root command fields for the normal UI/API contract.
 
 Frontend static caching must not keep an old setup-command UI after a restart.
 `frontend/src/main.tsx` registers `/sw.js` with `updateViaCache: 'none'`, and
@@ -103,15 +118,23 @@ binary.
 6. Update integration coverage for the generated restartable command.
 7. Add Bridge-side connection-attempt logging that does not include the enroll
    token.
-8. Preserve proxy environment variables for background services.
+8. Preserve proxy and native CLI home/config environment variables for
+   background services.
 9. Keep generated systemd user services alive when child processes hit OOM.
 10. Update user-facing setup docs.
+11. Remove sudo/root setup commands from the token response and settings UI.
+12. Stop forcing CCB installation during `codex-bridge link`.
 
 ## Exit Gates
 
 - `/usr/local/go/bin/go test ./...`
 - `make doc-lint`
 - `make build` produces a static Linux binary for `/install.sh` downloads.
+- Generated token responses and settings UI do not expose sudo/root commands.
+- Running the generated link command as user `alice` from `/work/repo` produces
+  a user service and env file under Alice's home. Later native resume uses the
+  same identity, for example `cd /work/repo && codex resume
+  --include-non-interactive`.
 
 ## Reviewer Q&A
 

@@ -38,11 +38,12 @@ func TestLinkStartScriptUsesProfileAndPinnedMachineID(t *testing.T) {
 	script := linkStartScript(opts)
 	for _, want := range []string{
 		"connect --hub 'https://hub.example'",
-		"--runner codex --orchestration-runner ccb --sandbox danger-full-access --approval-policy never",
+		"--runner codex --sandbox danger-full-access --approval-policy never",
 		"--cwd \"$CB_CWD\"",
 		"--name \"$CB_NAME\"",
 		"--machine-id-file '" + opts.MIDPath + "'",
 		"--machine-id 'mid-123'",
+		"cd \"$CB_CWD\"",
 		"'tok '\\''quoted'",
 	} {
 		if !strings.Contains(script, want) {
@@ -51,11 +52,42 @@ func TestLinkStartScriptUsesProfileAndPinnedMachineID(t *testing.T) {
 	}
 }
 
+func TestResolveLinkCLIsDoesNotRequireCCB(t *testing.T) {
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"codex", "claude"} {
+		path := filepath.Join(binDir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("HOME", tmp)
+
+	opts := linkOptions{Home: tmp}
+	if err := resolveLinkCLIs(&opts); err != nil {
+		t.Fatal(err)
+	}
+	if opts.CodexPath == "" || opts.ClaudePath == "" {
+		t.Fatalf("resolved CLI paths = codex:%q claude:%q", opts.CodexPath, opts.ClaudePath)
+	}
+	if opts.CCBPath != "" {
+		t.Fatalf("ccb path should be optional, got %q", opts.CCBPath)
+	}
+}
+
 func TestWriteLinkFilesWritesDetectedPathsAndProxyEnv(t *testing.T) {
 	tmp := t.TempDir()
+	codexHome := filepath.Join(tmp, "codex-home")
+	claudeConfig := filepath.Join(tmp, "claude-config")
 	t.Setenv("HTTP_PROXY", "http://proxy.example")
 	t.Setenv("OPENAI_API_KEY", "sk-test")
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-test")
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfig)
 	opts := linkOptions{
 		HubURL:     "https://hub.example",
 		Token:      "tok",
@@ -89,9 +121,12 @@ func TestWriteLinkFilesWritesDetectedPathsAndProxyEnv(t *testing.T) {
 	}
 	env := string(envBytes)
 	for _, want := range []string{
+		"HOME='" + tmp + "'",
 		"BRIDGE_CODEX_PATH='/usr/bin/codex'",
 		"BRIDGE_CLAUDE_PATH='/usr/bin/claude'",
 		"BRIDGE_CCB_PATH='/usr/bin/ccb'",
+		"CODEX_HOME='" + codexHome + "'",
+		"CLAUDE_CONFIG_DIR='" + claudeConfig + "'",
 		"HTTP_PROXY='http://proxy.example'",
 		"OPENAI_API_KEY='sk-test'",
 		"CLAUDE_CODE_OAUTH_TOKEN='oauth-test'",
@@ -112,6 +147,7 @@ func TestWriteLinkFilesWritesDetectedPathsAndProxyEnv(t *testing.T) {
 func TestLinkSystemdUnitKeepsBridgeAliveOnChildOOM(t *testing.T) {
 	opts := linkOptions{
 		CWD:       "/repo",
+		Home:      "/home/user",
 		StartPath: "/home/user/.codex-bridge/services/abc123.sh",
 		LogPath:   "/home/user/.codex-bridge/logs/abc123.log",
 	}
@@ -119,6 +155,8 @@ func TestLinkSystemdUnitKeepsBridgeAliveOnChildOOM(t *testing.T) {
 	for _, want := range []string{
 		"Restart=always",
 		"OOMPolicy=continue",
+		"WorkingDirectory=/repo",
+		"Environment=HOME=/home/user",
 		"ExecStart=/home/user/.codex-bridge/services/abc123.sh",
 	} {
 		if !strings.Contains(unit, want) {

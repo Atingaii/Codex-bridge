@@ -102,6 +102,18 @@ func TestCodexAppServerRunnerSanitizesPromptText(t *testing.T) {
 	}
 }
 
+func TestCodexAppServerThreadStartIsPersisted(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.CWD = "/work/tree"
+	params := NewCodexAppServerRunner(&cfg).threadStartParams()
+	if got, ok := params["ephemeral"].(bool); !ok || got {
+		t.Fatalf("threadStartParams ephemeral = %#v, want false for native resume visibility", params["ephemeral"])
+	}
+	if got, _ := params["threadSource"].(string); got != "user" {
+		t.Fatalf("threadStartParams threadSource = %q, want user", got)
+	}
+}
+
 type recordingApprovalRequester struct {
 	request protocol.ApprovalRequestPayload
 }
@@ -129,7 +141,12 @@ for line in sys.stdin:
     if method == "initialize":
         emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
     elif method == "thread/start":
+        if msg.get("params", {}).get("ephemeral") is not False:
+            emit({"id": msg["id"], "error": {"code": -32600, "message": "missing persisted thread flag"}})
+            sys.exit(1)
         emit({"id": msg["id"], "result": {"thread": {"id": "thr_app"}}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
     elif method == "turn/start":
         emit({"id": msg["id"], "result": {"turn": {"id": "turn_1", "items": [], "itemsView": "notLoaded", "status": "inProgress", "error": None, "startedAt": None, "completedAt": None, "durationMs": None}}})
         emit({"jsonrpc": "2.0", "id": 99, "method": "item/commandExecution/requestApproval", "params": {"threadId": "thr_app", "turnId": "turn_1", "itemId": "cmd_1", "command": "echo ok", "cwd": "/tmp", "reason": "test"}})
@@ -159,7 +176,12 @@ for line in sys.stdin:
     if method == "initialize":
         emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
     elif method == "thread/start":
+        if msg.get("params", {}).get("ephemeral") is not False:
+            emit({"id": msg["id"], "error": {"code": -32600, "message": "missing persisted thread flag"}})
+            sys.exit(1)
         emit({"id": msg["id"], "result": {"thread": {"id": "thr_app"}}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
     elif method == "turn/start":
         with open(captured_path, "w", encoding="utf-8") as f:
             json.dump(msg, f, ensure_ascii=False)

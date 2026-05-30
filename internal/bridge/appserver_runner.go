@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
@@ -34,7 +35,11 @@ func (r *CodexAppServerRunner) Prompt(ctx context.Context, req RunnerRequest, on
 	if err != nil {
 		return RunnerResult{}, err
 	}
-	defer client.close()
+	threadID := ""
+	defer func() {
+		client.unsubscribeThreadWithTimeout(threadID)
+		client.close()
+	}()
 
 	if _, err := client.request(ctx, "initialize", map[string]any{
 		"clientInfo": map[string]string{"name": "codex-bridge", "title": "Codex Bridge", "version": "dev"},
@@ -46,7 +51,7 @@ func (r *CodexAppServerRunner) Prompt(ctx context.Context, req RunnerRequest, on
 		return RunnerResult{}, err
 	}
 
-	threadID := req.RemoteThreadID
+	threadID = req.RemoteThreadID
 	if threadID == "" {
 		res, err := client.request(ctx, "thread/start", r.threadStartParams(req))
 		if err != nil {
@@ -75,6 +80,9 @@ func (r *CodexAppServerRunner) Prompt(ctx context.Context, req RunnerRequest, on
 	}
 }
 
+const appServerThreadUnsubscribeTimeout = 15 * time.Second
+const appServerProcessCloseTimeout = 30 * time.Second
+
 func (r *CodexAppServerRunner) start(ctx context.Context, req RunnerRequest) (*appServerClient, error) {
 	cmd := exec.CommandContext(ctx, r.codexPath(), "app-server", "--listen", "stdio://")
 	configureManagedCommand(cmd)
@@ -97,10 +105,11 @@ func (r *CodexAppServerRunner) start(ctx context.Context, req RunnerRequest) (*a
 		return nil, err
 	}
 	client := &appServerClient{
-		cmd:     cmd,
-		stdin:   stdin,
-		pending: make(map[int64]chan appServerResponse),
-		events:  make(chan appServerMessage, 128),
+		cmd:      cmd,
+		stdin:    stdin,
+		pending:  make(map[int64]chan appServerResponse),
+		events:   make(chan appServerMessage, 128),
+		waitDone: make(chan struct{}),
 	}
 	go client.read(stdout)
 	go io.Copy(io.Discard, stderr)
@@ -114,6 +123,7 @@ func (r *CodexAppServerRunner) threadStartParams(req ...RunnerRequest) map[strin
 		"approvalsReviewer":     "user",
 		"sandbox":               r.sandbox(),
 		"experimentalRawEvents": false,
+		"ephemeral":             false,
 		"threadSource":          "user",
 	}
 	if r.cfg.Bridge.Model != "" {
@@ -378,14 +388,15 @@ func approvalResponseFor(method, decision string) any {
 }
 
 type appServerClient struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	mu      sync.Mutex
-	nextID  int64
-	pending map[int64]chan appServerResponse
-	events  chan appServerMessage
-	closed  bool
-	wait    sync.Once
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	mu       sync.Mutex
+	nextID   int64
+	pending  map[int64]chan appServerResponse
+	events   chan appServerMessage
+	closed   bool
+	wait     sync.Once
+	waitDone chan struct{}
 }
 
 type appServerMessage struct {
@@ -455,6 +466,31 @@ func (c *appServerClient) respond(id any, result any) error {
 	return err
 }
 
+func (c *appServerClient) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+func (c *appServerClient) unsubscribeThread(ctx context.Context, threadID string) error {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return nil
+	}
+	_, err := c.request(ctx, "thread/unsubscribe", map[string]any{"threadId": threadID})
+	return err
+}
+
+func (c *appServerClient) unsubscribeThreadWithTimeout(threadID string) {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), appServerThreadUnsubscribeTimeout)
+	defer cancel()
+	_ = c.unsubscribeThread(ctx, threadID)
+}
+
 func (c *appServerClient) read(stdout io.Reader) {
 	defer func() {
 		c.mu.Lock()
@@ -495,6 +531,10 @@ func (c *appServerClient) read(stdout io.Reader) {
 }
 
 func (c *appServerClient) close() {
+	c.closeWithTimeout(appServerProcessCloseTimeout)
+}
+
+func (c *appServerClient) closeWithTimeout(timeout time.Duration) {
 	c.mu.Lock()
 	terminate := !c.closed
 	if terminate {
@@ -502,12 +542,40 @@ func (c *appServerClient) close() {
 		_ = c.stdin.Close()
 	}
 	c.mu.Unlock()
-	if terminate && c.cmd != nil && c.cmd.Process != nil {
-		_ = terminateProcessGroup(c.cmd.Process.Pid)
+	if c.cmd == nil {
+		return
 	}
-	if c.cmd != nil {
-		c.wait.Do(func() { _ = c.cmd.Wait() })
+	done := c.waitProcess()
+	if timeout <= 0 {
+		<-done
+		return
 	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return
+	case <-timer.C:
+		if c.cmd.Process != nil {
+			_ = terminateProcessGroup(c.cmd.Process.Pid)
+		}
+		<-done
+	}
+}
+
+func (c *appServerClient) waitProcess() <-chan struct{} {
+	if c.waitDone == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	c.wait.Do(func() {
+		go func() {
+			_ = c.cmd.Wait()
+			close(c.waitDone)
+		}()
+	})
+	return c.waitDone
 }
 
 func idInt(value any) (int64, bool) {

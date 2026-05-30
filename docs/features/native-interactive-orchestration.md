@@ -39,11 +39,20 @@
 Bridge keeps a run-scoped native session object keyed by `runID`.
 
 Codex uses a long-lived `codex app-server --listen stdio://` process. Bridge
-starts or resumes one Codex thread for the run, names it with the Bridge run id,
-and sends every Codex turn through `turn/start` on that same thread. This is the
-closest non-TUI Codex surface to the interactive application: it creates native
-Codex threads, streams structured deltas/tool events, supports approvals, and
-can be resumed by native Codex tooling.
+starts or resumes one persisted, non-ephemeral Codex thread for the run, names it
+with the Bridge run id, and sends every Codex turn through `turn/start` on that
+same thread. This is the closest non-TUI Codex surface to the interactive
+application: it creates native Codex threads, streams structured deltas/tool
+events, supports approvals, and can be resumed by native Codex tooling.
+
+After a Codex turn completes, Bridge calls `thread/unsubscribe` for that thread,
+closes app-server stdin, and waits for the app-server process to exit normally.
+This asks Codex to flush and unload the thread so the rollout jsonl is available
+to native `codex resume` immediately after the browser turn. Bridge keeps the
+same thread id for the run; the next Codex turn starts a fresh app-server
+process and uses `thread/resume` on that same id before sending the next
+`turn/start`. Bridge only force-terminates the app-server process if the
+graceful shutdown wait times out.
 
 Claude Code uses a long-lived headless stream process:
 
@@ -72,19 +81,26 @@ possible.
 ## Implementation Steps
 
 1. Add a run-scoped native session map to `internal/bridge/orchestration.go`.
-2. Keep Codex app-server clients alive per run and reuse one thread for all
-   Codex turns.
+2. Reuse one Codex thread id for all Codex turns in a run.
 3. Keep Claude stream-json processes alive per run and reuse one stable session
    for all Claude turns.
-4. Update relay prompt wording for same-native-session turns.
-5. Keep existing event shapes and expose interactive resume modes in event data.
-6. Close native sessions on Bridge shutdown and explicit cancellation.
+4. Flush completed Codex turns with `thread/unsubscribe`, close the app-server
+   process, and resume the same thread id before later Codex turns.
+5. Update relay prompt wording for same-native-session turns.
+6. Keep existing event shapes and expose interactive resume modes in event data.
+7. Close native sessions on Bridge shutdown and explicit cancellation.
 
 ## Exit Gates
 
-- A multi-turn run starts at most one Codex app-server process and one Claude
-  stream-json process for that run.
+- A multi-turn run uses one persisted Codex thread id and one Claude stream-json
+  process for that run. Codex app-server processes may be restarted after turns
+  to make native rollout files immediately available.
 - Later Codex turns use the same Codex thread id as the first Codex turn.
+- The Codex thread is persisted under the Bridge service user's `CODEX_HOME`
+  and is visible to `codex resume` / `/resume` for the same cwd after each
+  completed Codex turn. The Bridge service user must own and be able to write
+  `CODEX_HOME/sessions`, including the current date directory, or Codex can
+  create state DB rows without writing the rollout jsonl.
 - Later Claude turns use the same Claude session id as the first Claude turn.
 - Follow-up prompts for the same run reuse the same live native sessions while
   Bridge remains running.
@@ -109,4 +125,10 @@ machine-readable events.
 
 A: Yes, subject to the CLI's own picker behavior and the service user's home
 directory. Bridge runs under the configured Bridge service user, so native
-history is written under that user's `CODEX_HOME` / Claude home.
+history is written under that user's `CODEX_HOME` / Claude home. On the deployed
+server this means checking as the `codexbridge` user, not root, for example from
+the workspace cwd:
+
+```bash
+sudo -u codexbridge -H sh -lc 'cd /root/tencent && codex resume --all --include-non-interactive'
+```

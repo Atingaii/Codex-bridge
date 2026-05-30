@@ -95,6 +95,7 @@ type orchestrationCodexSession struct {
 	client   *appServerClient
 	threadID string
 	mode     string
+	loaded   bool
 }
 
 type orchestrationClaudeSession struct {
@@ -305,6 +306,7 @@ func (s *orchestrationNativeSession) close() {
 	s.claude = nil
 	s.mu.Unlock()
 	if codex != nil && codex.client != nil {
+		codex.client.unsubscribeThreadWithTimeout(codex.threadID)
 		codex.client.close()
 	}
 	if claude != nil {
@@ -478,6 +480,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		if payload.PromptSeq > 0 {
 			turnID = fmt.Sprintf("%s-p%03d-%02d", payload.RunID, payload.PromptSeq, turn)
 		}
+		clearRelayResumeMode(cli, &sessionState)
 		prompt := composeRelayPromptWithFirstCLI(mode, firstCLI, profile, payload.Prompt, payload.Context, payload.Resume, role, cli, turn, maxTurns, history)
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:    "turn.start",
@@ -572,6 +575,18 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			"claudeSessionId": sessionState.ClaudeSessionID,
 		},
 	})
+}
+
+func clearRelayResumeMode(cli string, state *orchestrationSessionState) {
+	if state == nil {
+		return
+	}
+	switch cli {
+	case "codex":
+		state.CodexResumeMode = ""
+	case "claude":
+		state.ClaudeResumeMode = ""
+	}
 }
 
 func relayTerminalContent(history []orchestrationTurn) string {
@@ -3543,6 +3558,7 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 	if err != nil {
 		return "", nil, firstNonEmpty(state.CodexThreadID, ""), "codex-interactive-error", err
 	}
+	resumeMode := codex.mode
 	req := RunnerRequest{
 		Content:        prompt,
 		RemoteThreadID: codex.threadID,
@@ -3575,21 +3591,44 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 		}
 	}, done)
 	if _, err := codex.client.request(ctx, "turn/start", NewCodexAppServerRunner(m.cfg).turnStartParams(codex.threadID, prompt, req)); err != nil {
-		return "", tools, codex.threadID, codex.mode, err
+		return "", tools, codex.threadID, resumeMode, err
 	}
 	select {
 	case result := <-done:
-		return strings.TrimSpace(result.result.Content), tools, codex.threadID, codex.mode, result.err
+		if result.err == nil {
+			m.flushCodexInteractiveThread(session, codex)
+		}
+		return strings.TrimSpace(result.result.Content), tools, codex.threadID, resumeMode, result.err
 	case <-ctx.Done():
-		return "", tools, codex.threadID, codex.mode, ctx.Err()
+		return "", tools, codex.threadID, resumeMode, ctx.Err()
 	}
 }
 
 func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.Context, payload protocol.OrchestrationStartPayload, state *orchestrationSessionState) (*orchestrationCodexSession, error) {
 	session := state.NativeSession
 	if session.codex != nil && session.codex.client != nil && session.codex.threadID != "" {
-		state.CodexThreadID = session.codex.threadID
-		return session.codex, nil
+		codex := session.codex
+		state.CodexThreadID = codex.threadID
+		if codex.client.isClosed() {
+			session.codex = nil
+			state.CodexThreadID = codex.threadID
+			return m.ensureCodexInteractiveSessionLocked(ctx, payload, state)
+		}
+		if codex.loaded {
+			return codex, nil
+		}
+		if _, err := codex.client.request(ctx, "thread/resume", NewCodexAppServerRunner(m.cfg).threadResumeParams(codex.threadID, RunnerRequest{
+			RemoteThreadID: codex.threadID,
+			RunID:          payload.RunID,
+			CWD:            m.cwd(payload),
+		})); err != nil {
+			codex.client.close()
+			session.codex = nil
+			return nil, err
+		}
+		codex.loaded = true
+		codex.mode = "codex-interactive-resume"
+		return codex, nil
 	}
 	runner := NewCodexAppServerRunner(m.cfg)
 	req := RunnerRequest{
@@ -3634,9 +3673,21 @@ func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.C
 	} else {
 		mode = "codex-interactive-resume"
 	}
-	session.codex = &orchestrationCodexSession{client: client, threadID: threadID, mode: mode}
+	session.codex = &orchestrationCodexSession{client: client, threadID: threadID, mode: mode, loaded: true}
 	state.CodexThreadID = threadID
 	return session.codex, nil
+}
+
+func (m *OrchestrationManager) flushCodexInteractiveThread(session *orchestrationNativeSession, codex *orchestrationCodexSession) {
+	if session == nil || codex == nil || codex.client == nil || strings.TrimSpace(codex.threadID) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), appServerThreadUnsubscribeTimeout)
+	defer cancel()
+	_ = codex.client.unsubscribeThread(ctx, codex.threadID)
+	codex.client.close()
+	codex.loaded = false
+	codex.mode = "codex-interactive-resume"
 }
 
 func (m *OrchestrationManager) runCodexWithThread(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt, threadID string) (string, []RunnerToolEvent, string, string, error) {

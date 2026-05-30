@@ -877,7 +877,7 @@ func TestOrchestrationReusesNativeInteractiveSessionsAcrossSameCLITurns(t *testi
 	if len(claudeSessionIDs) != 2 || claudeSessionIDs[0] != wantClaudeSessionID || claudeSessionIDs[1] != wantClaudeSessionID {
 		t.Fatalf("claude session ids = %#v, want %q", claudeSessionIDs, wantClaudeSessionID)
 	}
-	if got := strings.Join(codexStartModes, ","); got != "codex-interactive-thread,codex-interactive-thread" {
+	if got := strings.Join(codexStartModes, ","); got != "codex-interactive-thread,codex-interactive-resume" {
 		t.Fatalf("codex turn.start modes = %q", got)
 	}
 	if got := strings.Join(claudeStartModes, ","); got != "claude-interactive-session,claude-interactive-session" {
@@ -885,7 +885,7 @@ func TestOrchestrationReusesNativeInteractiveSessionsAcrossSameCLITurns(t *testi
 	}
 
 	codexRecords := readJSONLines(t, codexLogPath)
-	var codexStarts, codexTurns, codexNames int
+	var codexStarts, codexTurns, codexNames, codexResumes, codexUnsubscribes int
 	var codexPrompts []string
 	for _, record := range codexRecords {
 		switch record["event"] {
@@ -901,6 +901,16 @@ func TestOrchestrationReusesNativeInteractiveSessionsAcrossSameCLITurns(t *testi
 			if got, _ := record["name"].(string); got != nativeSessionDisplayName("orc_native_reuse", "codex") {
 				t.Fatalf("codex native name = %q", got)
 			}
+		case "thread_resume":
+			codexResumes++
+			if got, _ := record["threadId"].(string); got != "thr_native" {
+				t.Fatalf("codex thread_resume id = %#v", record)
+			}
+		case "thread_unsubscribe":
+			codexUnsubscribes++
+			if got, _ := record["threadId"].(string); got != "thr_native" {
+				t.Fatalf("codex thread_unsubscribe id = %#v", record)
+			}
 		case "turn_start":
 			codexTurns++
 			codexPrompts = append(codexPrompts, stringFromNestedText(record["params"]))
@@ -909,8 +919,8 @@ func TestOrchestrationReusesNativeInteractiveSessionsAcrossSameCLITurns(t *testi
 			}
 		}
 	}
-	if codexStarts != 1 || codexTurns != 2 || codexNames != 1 {
-		t.Fatalf("codex log starts=%d turns=%d names=%d records=%#v", codexStarts, codexTurns, codexNames, codexRecords)
+	if codexStarts != 2 || codexTurns != 2 || codexNames != 1 || codexResumes != 1 || codexUnsubscribes != 2 {
+		t.Fatalf("codex log starts=%d turns=%d names=%d resumes=%d unsubscribes=%d records=%#v", codexStarts, codexTurns, codexNames, codexResumes, codexUnsubscribes, codexRecords)
 	}
 	if len(codexPrompts) != 2 || !strings.Contains(codexPrompts[1], "same native codex conversation") {
 		t.Fatalf("second codex prompt missing same-native notice: %#v", codexPrompts)
@@ -4049,6 +4059,9 @@ for line in sys.stdin:
     elif method == "thread/name/set":
         log({"event": "thread_name", "threadId": params.get("threadId"), "name": params.get("name")})
         emit({"id": msg["id"], "result": {}})
+    elif method == "thread/unsubscribe":
+        log({"event": "thread_unsubscribe", "threadId": params.get("threadId")})
+        emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
     elif method == "turn/start":
         turn_count += 1
         log({"event": "turn_start", "threadId": params.get("threadId"), "params": params})

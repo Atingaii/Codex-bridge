@@ -2564,6 +2564,8 @@ for line in sys.stdin:
         emit({"id": msg["id"], "result": {"thread": {"id": msg.get("params", {}).get("threadId") or "thr_web_approval"}}})
     elif method == "thread/name/set":
         emit({"id": msg["id"], "result": {}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
     elif method == "turn/start":
         emit({"id": msg["id"], "result": {"turn": {"id": "turn_web_approval", "items": [], "itemsView": "notLoaded", "status": "inProgress", "error": None, "startedAt": None, "completedAt": None, "durationMs": None}}})
         input_text = " ".join(part.get("text", "") for part in msg.get("params", {}).get("input", []) if isinstance(part, dict))
@@ -2578,7 +2580,6 @@ for line in sys.stdin:
         text = "结论：网页端审批已通过并完成复查，但主定理 sorry 仍未消除，不能把当前状态视为完成。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=needs_next; changed=none; verified=isabelle build -D /root/Isabelle; next=remove main theorem sorry; risks=主定理 sorry 仍未消除"
         emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_web_approval", "turnId": "turn_web_approval", "itemId": "msg_1", "delta": text}})
         emit({"method": "turn/completed", "params": {"threadId": "thr_web_approval", "turn": {"id": "turn_web_approval", "items": [], "itemsView": "notLoaded", "status": "completed", "error": None, "startedAt": 1, "completedAt": 2, "durationMs": 1}}})
-        sys.exit(0)
     elif msg.get("id") == 100:
         os.makedirs("Isabelle", exist_ok=True)
         with open(os.path.join("Isabelle", "Termination.thy"), "w", encoding="utf-8") as f:
@@ -2588,7 +2589,6 @@ for line in sys.stdin:
         text = "最终结论：补救轮已写入 Isabelle/Termination.thy，并把示例主定理改为无 sorry 的证明。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=Isabelle/Termination.thy; verified=write file; next=none; risks=none"
         emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_web_approval", "turnId": "turn_web_approval", "itemId": "msg_2", "delta": text}})
         emit({"method": "turn/completed", "params": {"threadId": "thr_web_approval", "turn": {"id": "turn_web_approval", "items": [], "itemsView": "notLoaded", "status": "completed", "error": None, "startedAt": 1, "completedAt": 2, "durationMs": 1}}})
-        sys.exit(0)
 `
 }
 
@@ -2758,6 +2758,9 @@ for line in sys.stdin:
         emit({"id": msg["id"], "result": {"thread": {"id": params.get("threadId") or thread_id}}})
     elif method == "thread/name/set":
         emit({"id": msg["id"], "result": {}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
+        sys.exit(0)
     elif method == "turn/start":
         turn_count += 1
         current_thread = params.get("threadId") or thread_id

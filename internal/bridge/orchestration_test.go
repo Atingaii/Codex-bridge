@@ -1142,6 +1142,62 @@ print(json.dumps({"type":"error","message":"Reconnecting... 1/5 (stream disconne
 	}
 }
 
+func TestOrchestrationCodexEmptyTailErrorAfterVisibleOutputContinues(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	claudePath := filepath.Join(tmp, "claude")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerEmptyErrorScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claudeText := "Claude continued after Codex visible output\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=claude continued; next=none; risks=none"
+	if err := os.WriteFile(claudePath, []byte(fakeClaudePrintScript(claudeText)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_empty_tail_error",
+		Mode:     "collaboration",
+		FirstCLI: "codex",
+		Prompt:   "prove and continue",
+		MaxTurns: 2,
+		CWD:      tmp,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "codex", "rewrite Habs direction was wrong") {
+		t.Fatalf("missing visible codex output: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "turn.delta", "codex", "empty tail error after visible output") {
+		t.Fatalf("missing recoverable warning: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "turn.end", "codex", "rewrite Habs direction was wrong") {
+		t.Fatalf("codex turn did not complete with visible output: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "turn.start", "claude", "Starting Claude") {
+		t.Fatalf("orchestration did not continue to next turn: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "run.end", "", "Claude continued after Codex visible output") {
+		t.Fatalf("run did not complete after recoverable codex error: %#v", events)
+	}
+	for _, event := range events {
+		if event.Kind == "run.error" {
+			t.Fatalf("recoverable codex tail error should not fail run: %#v", event)
+		}
+		if event.Kind == "turn.end" && event.CLI == "codex" && event.Status == "error" {
+			t.Fatalf("recoverable codex tail error should not mark turn failed: %#v", event)
+		}
+	}
+}
+
 func TestLongCommandObserverWritesToSameClaudeStreamAndEmitsBridgeNote(t *testing.T) {
 	manager := NewOrchestrationManager(&config.Config{})
 	out := make(chan protocol.Envelope, 16)

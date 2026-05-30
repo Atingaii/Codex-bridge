@@ -102,6 +102,39 @@ func TestCodexAppServerRunnerSanitizesPromptText(t *testing.T) {
 	}
 }
 
+func TestCodexAppServerRunnerEmptyErrorIncludesVisibleOutput(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerEmptyErrorScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+
+	var deltas []string
+	result, err := NewCodexAppServerRunner(&cfg).Prompt(context.Background(), RunnerRequest{
+		Content: "reason about proof",
+	}, func(update RunnerUpdate) {
+		if update.Delta != "" {
+			deltas = append(deltas, update.Delta)
+		}
+	})
+	if err == nil {
+		t.Fatal("expected empty app-server error")
+	}
+	if !strings.Contains(err.Error(), "codex app-server returned an empty error after producing visible output") ||
+		!strings.Contains(err.Error(), "rewrite Habs direction was wrong") {
+		t.Fatalf("error did not include visible output context: %q", err)
+	}
+	if result.Content != "rewrite Habs direction was wrong" {
+		t.Fatalf("result content = %q", result.Content)
+	}
+	if strings.Join(deltas, "") != "rewrite Habs direction was wrong" {
+		t.Fatalf("deltas = %#v", deltas)
+	}
+}
+
 func TestCodexAppServerThreadStartIsPersisted(t *testing.T) {
 	cfg := config.Default()
 	cfg.Bridge.CWD = "/work/tree"
@@ -188,6 +221,33 @@ for line in sys.stdin:
         emit({"id": msg["id"], "result": {"turn": {"id": "turn_1", "items": [], "itemsView": "notLoaded", "status": "inProgress"}}})
         emit({"method": "item/agentMessage/delta", "params": {"delta": "done"}})
         emit({"method": "turn/completed", "params": {"turn": {"id": "turn_1", "status": "completed"}}})
+        sys.exit(0)
+`
+}
+
+func fakeCodexAppServerEmptyErrorScript() string {
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+def emit(obj):
+    print(json.dumps(obj, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": "thr_empty_error"}}})
+    elif method == "thread/name/set":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
+    elif method == "turn/start":
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_1", "status": "inProgress"}}})
+        emit({"method": "item/agentMessage/delta", "params": {"delta": "rewrite Habs direction was wrong"}})
+        emit({"method": "error", "params": {"message": ""}})
         sys.exit(0)
 `
 }

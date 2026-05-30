@@ -511,6 +511,38 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		recordCommandFingerprints(&sessionState, runCWD, tools)
 		record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
 		if err != nil {
+			if recoverableRelayCLIError(cli, content, err) {
+				warning := visibleCLIError(err)
+				m.resetCodexInteractiveSessionAfterRecoverableError(&sessionState)
+				history = append(history, record)
+				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+					Kind:     "turn.delta",
+					Source:   "bridge",
+					Severity: "warning",
+					TurnID:   turnID,
+					Role:     role,
+					CLI:      cli,
+					Content:  "Codex app-server reported an empty tail error after visible output; Bridge kept the visible reply and continued the orchestration.",
+					Error:    warning,
+					Data: map[string]any{
+						"relayOnly":   true,
+						"recoverable": true,
+						"error":       warning,
+						"category":    "codex-empty-tail-error-after-visible-output",
+					},
+				})
+				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+					Kind:       "turn.end",
+					TurnID:     turnID,
+					Role:       role,
+					CLI:        cli,
+					Content:    record.Content,
+					Status:     "success",
+					RunEndData: relayRunEndData(cli, sessionState),
+					Data:       relayTurnEndData(cli, sessionState),
+				})
+				continue
+			}
 			record.Err = visibleCLIError(err)
 			history = append(history, record)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -617,6 +649,30 @@ func visibleCLIError(err error) string {
 		return "unknown CLI process error"
 	}
 	return trimForPrompt(value, 3000)
+}
+
+func recoverableRelayCLIError(cli, content string, err error) bool {
+	return cli == "codex" && strings.TrimSpace(content) != "" && isAppServerEmptyErrorAfterVisibleOutput(err)
+}
+
+func (m *OrchestrationManager) resetCodexInteractiveSessionAfterRecoverableError(state *orchestrationSessionState) {
+	if state == nil || state.NativeSession == nil {
+		return
+	}
+	session := state.NativeSession
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	codex := session.codex
+	if codex == nil {
+		return
+	}
+	if codex.threadID != "" {
+		state.CodexThreadID = codex.threadID
+	}
+	if codex.client != nil {
+		codex.client.close()
+	}
+	session.codex = nil
 }
 
 func relayTurnEndData(cli string, state orchestrationSessionState) map[string]any {

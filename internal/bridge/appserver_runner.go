@@ -274,7 +274,10 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 				done <- appServerTurnResult{result: result}
 				return
 			case "error":
-				done <- appServerTurnResult{result: result, err: errors.New(nestedString(map[string]any{"params": msg.Params}, "params", "message"))}
+				if text.Len() > 0 && strings.TrimSpace(result.Content) == "" {
+					result.Content = text.String()
+				}
+				done <- appServerTurnResult{result: result, err: appServerEventError(msg, result.Content)}
 				return
 			}
 			if strings.HasSuffix(msg.Method, "/requestApproval") || msg.Method == "execCommandApproval" || msg.Method == "applyPatchApproval" {
@@ -282,6 +285,33 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 			}
 		}
 	}
+}
+
+type appServerEmptyErrorAfterVisibleOutput struct {
+	visibleOutput string
+}
+
+func (e *appServerEmptyErrorAfterVisibleOutput) Error() string {
+	return fmt.Sprintf("codex app-server returned an empty error after producing visible output; last output: %s", trimForPrompt(e.visibleOutput, 1000))
+}
+
+func appServerEventError(msg appServerMessage, visibleOutput string) error {
+	message := strings.TrimSpace(nestedString(map[string]any{"params": msg.Params}, "params", "message"))
+	if message == "" && msg.Error != nil {
+		message = strings.TrimSpace(msg.Error.Message)
+	}
+	if message != "" {
+		return errors.New(message)
+	}
+	if output := strings.TrimSpace(visibleOutput); output != "" {
+		return &appServerEmptyErrorAfterVisibleOutput{visibleOutput: output}
+	}
+	return errors.New("codex app-server returned an empty error")
+}
+
+func isAppServerEmptyErrorAfterVisibleOutput(err error) bool {
+	var target *appServerEmptyErrorAfterVisibleOutput
+	return errors.As(err, &target)
 }
 
 func (r *CodexAppServerRunner) handleApproval(ctx context.Context, client *appServerClient, msg appServerMessage, req RunnerRequest, threadID string) {

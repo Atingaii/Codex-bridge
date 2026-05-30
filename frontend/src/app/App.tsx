@@ -104,6 +104,7 @@ type OrchestrationEvent = {
   id?: string;
   runId: string;
   seq?: number;
+  timelineOrder?: number;
   kind: string;
   source?: 'cli' | 'bridge' | 'user';
   severity?: 'info' | 'warning' | 'error';
@@ -216,7 +217,13 @@ type ApprovalItemState = {
   id: string;
   approval: ApprovalRequest;
   status?: ApprovalStatus;
+  timelineOrder?: number;
+  createdAt?: number;
 };
+
+type OrchestrationTimelineItem =
+  | { type: 'event'; key: string; event: OrchestrationVisibleEvent; sortIndex: number; timelineOrder?: number; createdAt?: number }
+  | { type: 'approval'; key: string; approval: ApprovalItemState; sortIndex: number; timelineOrder?: number; createdAt?: number };
 
 type OrchestrationVisibleEvent =
   | {
@@ -231,6 +238,7 @@ type OrchestrationVisibleEvent =
       status?: string;
       error?: string;
       createdAt?: number;
+      timelineOrder?: number;
       files?: OrchestrationFile[];
       commands: OrchestrationEvent[];
     }
@@ -246,6 +254,7 @@ type OrchestrationVisibleEvent =
       status?: string;
       error?: string;
       createdAt?: number;
+      timelineOrder?: number;
       command: OrchestrationEvent;
     }
   | {
@@ -260,6 +269,7 @@ type OrchestrationVisibleEvent =
       status?: string;
       error?: string;
       createdAt?: number;
+      timelineOrder?: number;
     };
 
 type Envelope = {
@@ -900,6 +910,7 @@ function mergeOrchestrationEvents(current: OrchestrationEvent[], incoming: Orche
       bridgeNoteData: event.bridgeNoteData || previous.bridgeNoteData,
       runConclusion: event.runConclusion || previous.runConclusion,
       data: event.data || previous.data,
+      timelineOrder: previous.timelineOrder || event.timelineOrder,
     } : event);
   });
   return Array.from(merged.values()).sort(compareOrchestrationEvents);
@@ -911,18 +922,29 @@ function upsertOrchestrationRun(current: OrchestrationRun[], next: Orchestration
   return runs.slice().sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
 }
 
-function upsertApprovalItem(current: ApprovalItemState[], approval: ApprovalRequest): ApprovalItemState[] {
+function upsertApprovalItem(current: ApprovalItemState[], approval: ApprovalRequest, timelineOrder?: number): ApprovalItemState[] {
   const semanticKey = approvalSemanticKey(approval);
-  const next: ApprovalItemState = { id: approval.requestId, approval, status: 'pending' };
+  const createdAt = Math.floor(Date.now() / 1000);
+  const next: ApprovalItemState = { id: approval.requestId, approval, status: 'pending', timelineOrder, createdAt };
   let replaced = false;
   const updated = current.map((item) => {
     if (item.approval.requestId === approval.requestId) {
       replaced = true;
-      return { ...item, approval };
+      return {
+        ...item,
+        approval,
+        timelineOrder: item.timelineOrder || timelineOrder,
+        createdAt: item.createdAt || createdAt,
+      };
     }
     if (approvalSemanticKey(item.approval) === semanticKey) {
       replaced = true;
-      return next;
+      return {
+        ...next,
+        status: item.status || next.status,
+        timelineOrder: item.timelineOrder || timelineOrder,
+        createdAt: item.createdAt || createdAt,
+      };
     }
     return item;
   });
@@ -942,6 +964,48 @@ function approvalSemanticKey(approval: ApprovalRequest) {
 
 function approvalStatusFromDecision(decision: 'accept' | 'decline' | 'cancel'): ApprovalStatus {
   return decision === 'accept' ? 'accepted' : decision === 'decline' ? 'declined' : 'canceled';
+}
+
+function visibleEventTimelineOrder(event: OrchestrationVisibleEvent) {
+  if (event.timelineOrder) return event.timelineOrder;
+  if (event.type === 'command') return event.command.timelineOrder;
+  if (event.type === 'message' && event.commands.length > 0) {
+    return event.commands.reduce<number | undefined>((best, command) => {
+      if (!command.timelineOrder) return best;
+      return best ? Math.min(best, command.timelineOrder) : command.timelineOrder;
+    }, undefined);
+  }
+  return undefined;
+}
+
+function compareOrchestrationTimelineItems(a: OrchestrationTimelineItem, b: OrchestrationTimelineItem) {
+  if (a.timelineOrder && b.timelineOrder && a.timelineOrder !== b.timelineOrder) return a.timelineOrder - b.timelineOrder;
+  if (a.timelineOrder && !b.timelineOrder) return 1;
+  if (!a.timelineOrder && b.timelineOrder) return -1;
+  if (a.createdAt && b.createdAt && a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+  if (a.sortIndex !== b.sortIndex) return a.sortIndex - b.sortIndex;
+  return a.key.localeCompare(b.key);
+}
+
+function orchestrationTimelineItems(events: OrchestrationVisibleEvent[], approvals: ApprovalItemState[]): OrchestrationTimelineItem[] {
+  return [
+    ...events.map((event, index) => ({
+      type: 'event' as const,
+      key: `event:${event.key}`,
+      event,
+      sortIndex: index,
+      timelineOrder: visibleEventTimelineOrder(event),
+      createdAt: event.createdAt,
+    })),
+    ...approvals.map((approval, index) => ({
+      type: 'approval' as const,
+      key: `approval:${approval.id}`,
+      approval,
+      sortIndex: events.length + index,
+      timelineOrder: approval.timelineOrder,
+      createdAt: approval.createdAt,
+    })),
+  ].sort(compareOrchestrationTimelineItems);
 }
 
 function orchestrationToolID(event: OrchestrationEvent) {
@@ -974,6 +1038,7 @@ function mergeOrchestrationToolEvents(events: OrchestrationEvent[]): Orchestrati
       error: event.error || previous.error,
       createdAt: event.createdAt || previous.createdAt,
       seq: event.seq || previous.seq,
+      timelineOrder: previous.timelineOrder || event.timelineOrder,
     };
   });
   return merged;
@@ -1057,6 +1122,7 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
         status: event.status,
         error: event.error,
         createdAt: event.createdAt,
+        timelineOrder: event.timelineOrder,
         files: orchestrationEventFiles(event),
         commands: [],
       });
@@ -1078,6 +1144,7 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
         status: event.status,
         error: event.error,
         createdAt: event.createdAt,
+        timelineOrder: event.timelineOrder,
         commands: [],
       });
       return;
@@ -1097,6 +1164,7 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
         status: event.status,
         error: event.error,
         createdAt: event.createdAt,
+        timelineOrder: event.timelineOrder,
         command: event,
       });
       if (event.status === 'error' || event.error) {
@@ -1123,6 +1191,7 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
           status: event.status,
           error: event.error,
           createdAt: event.createdAt,
+          timelineOrder: event.timelineOrder,
           commands: [],
         });
         return;
@@ -1148,6 +1217,7 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
           status: event.status,
           error: event.error,
           createdAt: event.createdAt,
+          timelineOrder: event.timelineOrder,
           commands: [],
         });
       }
@@ -1173,6 +1243,7 @@ function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string,
             status: event.status,
             error: event.error,
             createdAt: event.createdAt,
+            timelineOrder: event.timelineOrder,
             commands: [],
           });
         } else if (shouldShowOrchestrationStatus(event)) {
@@ -1244,6 +1315,7 @@ function mergeOrchestrationDeltaEvents(events: OrchestrationEvent[]): Orchestrat
       error: event.error || previous.error,
       createdAt: previous.createdAt || event.createdAt,
       seq: previous.seq || event.seq,
+      timelineOrder: previous.timelineOrder || event.timelineOrder,
     };
   });
   return merged;
@@ -1434,6 +1506,7 @@ function statusVisibleEvent(event: OrchestrationEvent, index: number): Orchestra
     status: event.status,
     error: event.error,
     createdAt: event.createdAt,
+    timelineOrder: event.timelineOrder,
   };
 }
 
@@ -3050,6 +3123,7 @@ function OrchestrationWorkspace({
   const activeRunIdRef = useRef('');
   const selectedAgentIdRef = useRef(selectedAgentId);
   const stickToBottomRef = useRef(true);
+  const timelineOrderRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const taskInputRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -3070,6 +3144,7 @@ function OrchestrationWorkspace({
   const currentTurnInfo = useMemo(() => activeRun ? orchestrationTurnInfoFromEvents(events, activeRun.id, activeRun.maxTurns, isRunning) : {}, [activeRun, events, isRunning]);
   const currentTurnLabel = useMemo(() => orchestrationTurnLabel(currentTurnInfo, t), [currentTurnInfo, t]);
   const visibleApprovals = useMemo(() => approvals.filter((item) => item.approval.runId === activeRunId), [approvals, activeRunId]);
+  const timelineItems = useMemo(() => orchestrationTimelineItems(visibleEvents, visibleApprovals), [visibleEvents, visibleApprovals]);
   const orchestrationStreamStatus = activeRun && isRunning ? connectionStatus : t.idle;
   const continuingRun = Boolean(activeRun && !isRunning);
   const canCancelRun = canCancelOrchestrationStatus(activeRun?.status);
@@ -3120,6 +3195,9 @@ function OrchestrationWorkspace({
   const loadRunEvents = useCallback(async (runId: string, replace = false) => {
     const data = await api<{ events: OrchestrationEvent[] }>(`/api/orchestrations/${encodeURIComponent(runId)}/events`);
     const incoming = data.events || [];
+    if (replace) {
+      timelineOrderRef.current = 0;
+    }
     setEvents((current) => {
       if (activeRunIdRef.current !== runId) return current;
       return replace ? incoming.slice().sort(compareOrchestrationEvents) : mergeOrchestrationEvents(current, incoming);
@@ -3148,8 +3226,8 @@ function OrchestrationWorkspace({
     }
     const nearBottom = isNearBottom(container);
     stickToBottomRef.current = nearBottom;
-    setShowScrollBottom((visibleEvents.length + visibleApprovals.length) > 0 && !nearBottom);
-  }, [visibleApprovals.length, visibleEvents.length]);
+    setShowScrollBottom(timelineItems.length > 0 && !nearBottom);
+  }, [timelineItems.length]);
 
   const clearReconnect = useCallback(() => {
     if (reconnectTimerRef.current !== null) {
@@ -3177,19 +3255,21 @@ function OrchestrationWorkspace({
     localStorage.removeItem(activeOrchestrationRunStorageKey);
     setEvents([]);
     setApprovals([]);
+    timelineOrderRef.current = 0;
     setConnectionStatus(t.idle);
     setShowScrollBottom(false);
   }, [closeWS, runs, t.idle]);
 
   const applyEvent = useCallback((event: OrchestrationEvent) => {
+    const nextEvent = { ...event, timelineOrder: event.timelineOrder || ++timelineOrderRef.current };
     setEvents((current) => {
-      if (activeRunIdRef.current !== event.runId) return current;
-      return mergeOrchestrationEvents(current, [event]);
+      if (activeRunIdRef.current !== nextEvent.runId) return current;
+      return mergeOrchestrationEvents(current, [nextEvent]);
     });
     setRuns((current) => {
-      if (!current.some((run) => run.id === event.runId)) return current;
+      if (!current.some((run) => run.id === nextEvent.runId)) return current;
       return current
-        .map((run) => run.id === event.runId ? applyOrchestrationEventToRun(run, event) : run)
+        .map((run) => run.id === nextEvent.runId ? applyOrchestrationEventToRun(run, nextEvent) : run)
         .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
     });
   }, []);
@@ -3218,7 +3298,7 @@ function OrchestrationWorkspace({
         } else if (env.type === 'approval_request') {
           const approval = env.payload as ApprovalRequest;
           if (approval.requestId && approval.runId === runId) {
-            setApprovals((current) => upsertApprovalItem(current, approval));
+            setApprovals((current) => upsertApprovalItem(current, approval, ++timelineOrderRef.current));
           }
         } else if (env.type === 'status') {
           setConnectionStatus(env.payload?.status || t.connected);
@@ -3254,6 +3334,7 @@ function OrchestrationWorkspace({
 
   const activateRun = useCallback(async (run: OrchestrationRun) => {
     const runAgentId = run.agentId || selectedAgentIdRef.current;
+    timelineOrderRef.current = 0;
     activeRunIdRef.current = run.id;
     setActiveRunId(run.id);
     setRuns((current) => upsertOrchestrationRun(current, run));
@@ -3284,6 +3365,7 @@ function OrchestrationWorkspace({
   }, [closeWS, connectRun, loadRunEvents, t.idle]);
 
   const selectRun = useCallback(async (runId: string) => {
+    timelineOrderRef.current = 0;
     activeRunIdRef.current = runId;
     setActiveRunId(runId);
     setEvents((current) => current.filter((event) => event.runId === runId));
@@ -3414,10 +3496,10 @@ function OrchestrationWorkspace({
         scrollTimelineToBottom('auto');
         return;
       }
-      setShowScrollBottom((visibleEvents.length + visibleApprovals.length) > 0 && !isNearBottom(container));
+      setShowScrollBottom(timelineItems.length > 0 && !isNearBottom(container));
     });
     return () => window.cancelAnimationFrame(id);
-  }, [activeRunId, visibleApprovals.length, visibleEvents, scrollTimelineToBottom]);
+  }, [activeRunId, scrollTimelineToBottom, timelineItems]);
 
   useEffect(() => {
     if (!workingDirs.length) {
@@ -3686,7 +3768,7 @@ function OrchestrationWorkspace({
               onScroll={updateTimelineScrollState}
               className="h-full overflow-y-auto p-4 md:p-6 space-y-3 elegant-scrollbar"
             >
-              {!visibleEvents.length && !visibleApprovals.length ? (
+              {!timelineItems.length ? (
                 <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4">
                   <div className="h-12 w-12 rounded-2xl bg-primary/5 border border-border flex items-center justify-center">
                     <GitBranch className="h-6 w-6 text-primary" />
@@ -3701,8 +3783,9 @@ function OrchestrationWorkspace({
                 </div>
               ) : (
                 <>
-                  {visibleEvents.map((event) => <OrchestrationEventItem key={event.key} item={event} t={t} />)}
-                  {visibleApprovals.map((item) => <ApprovalCard key={item.id} item={item} t={t} onDecision={respondOrchestrationApproval} />)}
+                  {timelineItems.map((item) => item.type === 'event'
+                    ? <OrchestrationEventItem key={item.key} item={item.event} t={t} />
+                    : <ApprovalCard key={item.key} item={item.approval} t={t} onDecision={respondOrchestrationApproval} />)}
                 </>
               )}
               <div ref={endRef} className="h-4" />

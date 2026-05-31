@@ -1,5 +1,9 @@
 # Codex Bridge
 
+[![CI](https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Platform](https://img.shields.io/badge/platform-Linux-555)](docs/deployment.md)
+
 Remote browser access to the **Codex** and **Claude Code** CLIs running on your
 own machine — 1:1 chat with a single CLI, plus multi-CLI orchestration that
 relays turns between a native Codex session and a native Claude Code session.

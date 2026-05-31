@@ -21,7 +21,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Frontend source | `frontend/src/app/App.tsx`, `frontend/src/app/pages/`, `frontend/src/app/components/`, `frontend/src/app/lib/`, `frontend/src/styles/` |
 | Embedded frontend output | `internal/web/static/`, `internal/web/embed.go` |
 | Android wrapper | `android/`, `frontend/capacitor.config.ts` |
-| Deployment | `deploy/Caddyfile`, `deploy/systemd-*.service` |
+| Deployment | `deploy/Caddyfile`, `deploy/systemd-*.service`, `Dockerfile`, `Makefile`, `docs/deployment.md` |
 
 ## Common Tasks
 

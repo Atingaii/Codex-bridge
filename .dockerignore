@@ -1,0 +1,10 @@
+.git
+bin/
+data/
+docs/private/
+*.zip
+frontend/node_modules/
+frontend/dist/
+android/
+configs/*.yaml
+!configs/*.yaml.example

@@ -18,6 +18,22 @@ CLI endpoints created with the review-required profile use
 chat. That runner keeps a `codex app-server --listen stdio://` JSON-RPC session
 open for the turn so Codex approval requests can be relayed to the browser.
 
+When the endpoint runs with `bridge.runner: acp`, chat uses
+`internal/bridge/acp_runner.go:ACPRunner` instead of a per-turn process. It keeps
+one resident Agent Client Protocol adapter per chat session
+(`internal/bridge/acp_client.go:acpClient` over stdio JSON-RPC) so prompts stream
+into a live conversation without restarting the process (target A). It also
+resolves the underlying CLI's own session id so the same conversation can be
+continued from the workspace with `claude --resume <id>` / `codex resume <id>`
+(target B). The dual ids round-trip to the browser through the optional
+`SessionOpenedPayload`/`PromptCompletePayload` `nativeResumeId` and
+`nativeResumeCommand` fields; the ACP session id is stored as the existing
+`remote_thread_id` so continuity plumbing is unchanged. The full design is in
+[docs/features/acp-runner.md](features/acp-runner.md). The `echo`, `codex-exec`,
+and `codex-app-server` runners are unchanged; only `ACPRunner` implements the
+`internal/bridge/runner.go:SessionRunner` interface and the session layer falls
+back to one-shot `Runner.Prompt` for every other runner.
+
 The orchestration UI uses HTTP for create/continue/cancel plus a run-scoped
 WebSocket for event streaming:
 

@@ -83,7 +83,7 @@ func runConnect(cfg *config.Config, args []string) error {
 	hubURL := fs.String("hub", cfg.Bridge.HubURL, "hub URL")
 	name := fs.String("name", "", "CLI endpoint name")
 	cwd := fs.String("cwd", "", "workspace directory")
-	runner := fs.String("runner", "codex", "runner: codex, claude, echo")
+	runner := fs.String("runner", "codex", "runner: codex, codex-app-server, acp, echo")
 	machineIDFile := fs.String("machine-id-file", cfg.Bridge.MachineIDFile, "machine id file")
 	machineID := fs.String("machine-id", "", "existing machine id to write before connecting")
 	sandbox := fs.String("sandbox", cfg.Bridge.Sandbox, "runner sandbox")
@@ -139,7 +139,34 @@ func runConnect(cfg *config.Config, args []string) error {
 	cfg.Bridge.MachineIDFile = *machineIDFile
 	cfg.Bridge.Sandbox = *sandbox
 	cfg.Bridge.ApprovalPolicy = *approvalPolicy
+	if err := preflightRunner(cfg); err != nil {
+		return err
+	}
 	return bridge.NewClient(cfg, Version).Run(context.Background())
+}
+
+// preflightRunner verifies that an opt-in runner's external dependencies exist
+// before the Bridge registers, so a missing ACP adapter fails fast with a
+// helpful message instead of erroring on the first browser prompt.
+func preflightRunner(cfg *config.Config) error {
+	if strings.ToLower(strings.TrimSpace(cfg.Bridge.Runner)) != "acp" {
+		return nil
+	}
+	cli := strings.ToLower(strings.TrimSpace(cfg.Bridge.ACP.CLI))
+	command := cfg.Bridge.ACP.ClaudeCommand
+	label := "Claude Code ACP adapter command"
+	if cli == "codex" {
+		command = cfg.Bridge.ACP.CodexCommand
+		label = "Codex ACP adapter command"
+	}
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return fmt.Errorf("%s is not configured for runner acp", label)
+	}
+	if _, err := lookPathWithLocalBin(command); err != nil {
+		return fmt.Errorf("%s %q not found. Install it or run from a shell where `command -v %s` works. PATH=%s", label, command, command, os.Getenv("PATH"))
+	}
+	return nil
 }
 
 func writeMachineID(path, machineID string) error {

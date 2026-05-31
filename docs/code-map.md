@@ -15,7 +15,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Bridge reverse WebSocket | `internal/hub/ws_bridge.go`, `internal/bridge/client.go` |
 | Browser/Bridge connection pools | `internal/hub/pool.go` |
 | Orchestration HTTP/WS | `internal/hub/orchestration.go`, `internal/bridge/orchestration*.go` |
-| Runner abstraction | `internal/bridge/runner.go`, `internal/bridge/appserver_runner.go`, `internal/bridge/session.go` |
+| Runner abstraction | `internal/bridge/runner.go`, `internal/bridge/appserver_runner.go`, `internal/bridge/acp_runner.go`, `internal/bridge/acp_client.go`, `internal/bridge/session.go` |
 | SQLite schema and CRUD | `internal/store/store.go`, `internal/store/id.go` |
 | Wire protocol | `internal/protocol/envelope.go` |
 | Frontend source | `frontend/src/app/App.tsx`, `frontend/src/app/pages/`, `frontend/src/app/components/`, `frontend/src/app/lib/`, `frontend/src/styles/` |
@@ -101,6 +101,31 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    storage.
 4. Update
    [docs/features/agent-scoped-chat-sessions.md](features/agent-scoped-chat-sessions.md).
+
+### Change ACP Runner / Resident Session Chat
+
+1. `internal/bridge/runner.go:SessionRunner` extends the one-shot `Runner`
+   with `OpenSession`/`Resume`/`PromptSession`/`CloseSession` for resident
+   adapter processes, and `internal/bridge/runner.go:NewRunner` wires the
+   `"acp"` runner.
+2. `internal/bridge/acp_client.go:startACPClient` is a bidirectional stdio
+   JSON-RPC client (responses, agent→client requests, notifications).
+3. `internal/bridge/acp_runner.go:OpenSession` starts/reuses the resident ACP
+   adapter, runs `initialize` + `session/new`/`session/load`, and resolves the
+   dual-ID model via `internal/bridge/acp_runner.go:resolveNativeResumeID`
+   (Claude: ACP sessionId equals the native `.jsonl` UUID; Codex: prefer ACP
+   id, else scan `~/.codex/sessions/`).
+4. `internal/bridge/session.go:Prompt` dispatches to `SessionRunner` when the
+   runner implements it (else falls back to one-shot `Runner.Prompt`) and emits
+   `NativeResumeID`/`NativeResumeCommand` in `prompt_complete`.
+5. `internal/protocol/envelope.go:ACPCapability` advertises adapter
+   availability and native-resume support to the Hub/browser.
+6. `main.go:preflightRunner` validates the selected ACP adapter command at
+   `connect` time.
+7. Honesty rule: report degradation truthfully when the adapter is missing, the
+   native id cannot be resolved, or cwd mismatches — never fabricate a takeover
+   command.
+8. See [docs/features/acp-runner.md](features/acp-runner.md).
 
 ### Change Browser Approval Flow
 

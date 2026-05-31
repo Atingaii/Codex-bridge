@@ -232,6 +232,30 @@ func BridgeCapabilities(cfg *config.Config) *protocol.BridgeCapabilities {
 		BrowserApproval: codexAvailable && reviewRequired,
 		ApprovalMode:    approvalMode(cfg),
 	}
+	if runner == "acp" {
+		acpCLI := strings.ToLower(strings.TrimSpace(cfg.Bridge.ACP.CLI))
+		if acpCLI != "codex" {
+			acpCLI = "claude"
+		}
+		adapter := strings.TrimSpace(cfg.Bridge.ACP.ClaudeCommand)
+		if acpCLI == "codex" {
+			adapter = strings.TrimSpace(cfg.Bridge.ACP.CodexCommand)
+		}
+		adapterAvailable := commandAvailable(adapter)
+		caps.ACP = &protocol.ACPCapability{
+			Available:    adapterAvailable,
+			LoadSession:  true,
+			NativeResume: cfg.Bridge.ACP.PreferNativeResume,
+		}
+		// The interactive long session executes through the ACP adapter, so the
+		// selected CLI's chat capability reflects the adapter, not codex exec.
+		caps.Chat[acpCLI] = protocol.BridgeCLICapability{
+			Available:       adapterAvailable,
+			Execution:       "acp:" + adapter,
+			BrowserApproval: adapterAvailable,
+			ApprovalMode:    approvalMode(cfg),
+		}
+	}
 	return caps
 }
 
@@ -306,7 +330,7 @@ func (c *Client) handleEnvelope(ctx context.Context, env protocol.Envelope, out 
 		c.requestShutdown(payload.Reason)
 	case protocol.TypeOpenSession:
 		payload, _ := protocol.Decode[protocol.OpenSessionPayload](env)
-		if err := c.sessions.Open(env.Sid, payload.RemoteThreadID, out); err != nil {
+		if err := c.sessions.Open(env.Sid, payload.RemoteThreadID, payload.CWD, out); err != nil {
 			send(out, protocol.MustEnvelope(protocol.TypeError, env.Sid, protocol.ErrorPayload{Code: "OPEN_FAILED", Message: err.Error()}))
 		}
 	case protocol.TypePrompt:

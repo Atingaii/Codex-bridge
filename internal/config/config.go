@@ -58,6 +58,24 @@ type BridgeConfig struct {
 	HeartbeatInterval   Duration                  `yaml:"heartbeat_interval"`
 	MaxSessions         int                       `yaml:"max_sessions"`
 	LongCommandObserver LongCommandObserverConfig `yaml:"long_command_observer"`
+	ACP                 ACPConfig                 `yaml:"acp"`
+}
+
+// ACPConfig configures the Agent Client Protocol runner used when
+// bridge.runner is "acp". It selects the adapter command per CLI and controls
+// whether a local native `resume` command is offered (target B).
+type ACPConfig struct {
+	// CLI selects which adapter to spawn for chat sessions: "claude" or "codex".
+	CLI string `yaml:"cli"`
+	// ClaudeCommand/ClaudeArgs spawn the Claude Code ACP adapter.
+	ClaudeCommand string   `yaml:"claude_command"`
+	ClaudeArgs    []string `yaml:"claude_args"`
+	// CodexCommand/CodexArgs spawn the Codex ACP adapter.
+	CodexCommand string   `yaml:"codex_command"`
+	CodexArgs    []string `yaml:"codex_args"`
+	// PreferNativeResume resolves and offers a local native `resume` command for
+	// opened sessions when possible.
+	PreferNativeResume bool `yaml:"prefer_native_resume"`
 }
 
 type LongCommandObserverConfig struct {
@@ -127,6 +145,14 @@ func Default() Config {
 				After:           Duration{Duration: 2 * 60 * 1_000_000_000},
 				CommandPatterns: []string{"python -m slow_build"},
 				AppliesTo:       []string{"claude", "codex"},
+			},
+			ACP: ACPConfig{
+				CLI:                "claude",
+				ClaudeCommand:      "npx",
+				ClaudeArgs:         []string{"-y", "@zed-industries/claude-code-acp"},
+				CodexCommand:       "codex-acp",
+				CodexArgs:          nil,
+				PreferNativeResume: true,
 			},
 		},
 		Auth: AuthConfig{

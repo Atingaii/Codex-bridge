@@ -42,6 +42,25 @@ bridge:
   approval_policy: never
 ```
 
+For a resident-session chat backed by an Agent Client Protocol (ACP) adapter
+(keeps one Agent process alive across turns and exposes a native local
+`/resume` takeover), use the `acp` runner:
+
+```yaml
+bridge:
+  runner: acp
+  cwd: /path/to/workspace
+  acp:
+    cli: claude            # claude | codex
+    claude_command: npx
+    claude_args: ["-y", "@zed-industries/claude-code-acp"]
+    codex_command: codex-acp
+    prefer_native_resume: true
+```
+
+See [docs/features/acp-runner.md](docs/features/acp-runner.md) for the dual-ID
+model and how local `claude --resume`/`codex resume` takeover works.
+
 ## Commands
 
 ```bash

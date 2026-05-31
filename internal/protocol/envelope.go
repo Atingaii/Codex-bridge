@@ -93,6 +93,21 @@ type BridgeCapabilities struct {
 	Chat           map[string]BridgeCLICapability `json:"chat,omitempty"`
 	Orchestration  map[string]BridgeCLICapability `json:"orchestration,omitempty"`
 	Metadata       map[string]string              `json:"metadata,omitempty"`
+	ACP            *ACPCapability                 `json:"acp,omitempty"`
+}
+
+// ACPCapability advertises whether the endpoint can run an Agent Client
+// Protocol adapter for interactive long sessions and whether those sessions can
+// be resumed from the native CLI in the workspace (target B). It is nil when the
+// endpoint does not use the ACP runner so existing endpoints stay unaffected.
+type ACPCapability struct {
+	Available bool `json:"available"`
+	// LoadSession reports whether the adapter advertised session/load support so
+	// the Bridge can resume an ACP session it previously opened.
+	LoadSession bool `json:"loadSession"`
+	// NativeResume reports whether a local `resume` command can be offered for
+	// sessions opened through this endpoint (target B).
+	NativeResume bool `json:"nativeResume"`
 }
 
 type BridgeCLICapability struct {
@@ -111,6 +126,15 @@ type OpenSessionPayload struct {
 type SessionOpenedPayload struct {
 	RemoteThreadID string `json:"remoteThreadId,omitempty"`
 	Runner         string `json:"runner,omitempty"`
+	// NativeResumeID is the underlying CLI's own session id used for local
+	// takeover (target B). It is the same value as RemoteThreadID for Claude and
+	// a separately resolved id for Codex. Empty when no native resume is
+	// available; never fabricated.
+	NativeResumeID string `json:"nativeResumeId,omitempty"`
+	// NativeResumeCommand is a ready-to-copy command that continues this same
+	// conversation in the native CLI from the workspace, e.g.
+	// `claude --resume <id>`. Empty when unavailable.
+	NativeResumeCommand string `json:"nativeResumeCommand,omitempty"`
 }
 
 type PromptPayload struct {
@@ -142,6 +166,12 @@ type PromptCompletePayload struct {
 	RemoteThreadID string          `json:"remoteThreadId,omitempty"`
 	RunID          string          `json:"runId,omitempty"`
 	PromptID       string          `json:"promptId,omitempty"`
+	// NativeResumeID and NativeResumeCommand mirror SessionOpenedPayload so the
+	// browser can refresh the local-takeover command after a turn (the native id
+	// can become resolvable only once the CLI has written its rollout). Both are
+	// optional and never fabricated.
+	NativeResumeID      string `json:"nativeResumeId,omitempty"`
+	NativeResumeCommand string `json:"nativeResumeCommand,omitempty"`
 }
 
 type ErrorPayload struct {

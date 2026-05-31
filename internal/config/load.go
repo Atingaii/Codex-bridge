@@ -118,6 +118,18 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("BRIDGE_APPROVAL_POLICY"); v != "" {
 		cfg.Bridge.ApprovalPolicy = v
 	}
+	if v := os.Getenv("BRIDGE_ACP_CLI"); v != "" {
+		cfg.Bridge.ACP.CLI = v
+	}
+	if v := os.Getenv("BRIDGE_ACP_CLAUDE_COMMAND"); v != "" {
+		cfg.Bridge.ACP.ClaudeCommand = v
+	}
+	if v := os.Getenv("BRIDGE_ACP_CODEX_COMMAND"); v != "" {
+		cfg.Bridge.ACP.CodexCommand = v
+	}
+	if v := os.Getenv("BRIDGE_ACP_PREFER_NATIVE_RESUME"); v != "" {
+		cfg.Bridge.ACP.PreferNativeResume = parseBool(v, cfg.Bridge.ACP.PreferNativeResume)
+	}
 	if v := os.Getenv("BRIDGE_LONG_COMMAND_OBSERVER_ENABLED"); v != "" {
 		cfg.Bridge.LongCommandObserver.Enabled = parseBool(v, cfg.Bridge.LongCommandObserver.Enabled)
 	}

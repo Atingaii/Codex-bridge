@@ -1042,6 +1042,7 @@ func TestComposeRelayPromptUsesCodexFirstProofStrategy(t *testing.T) {
 		"verifier/planner first",
 		"Stop blind proof search after three failed strategies",
 		"First CLI: codex",
+		"交接总结",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("codex-first proof prompt missing %q:\n%s", want, prompt)
@@ -1330,10 +1331,121 @@ func TestCleanOrchestrationTurnContentKeepsPlainAnswer(t *testing.T) {
 	}
 }
 
-func TestExtractMsgFindsTrailingContract(t *testing.T) {
-	content := "done\n\nMsg: to=reviewer; intent=review; need=none\nHandoff: status=needs_next; changed=main.go; verified=none; next=review; risks=none"
-	if got := extractMsg(content); got != "Msg: to=reviewer; intent=review; need=none" {
-		t.Fatalf("extractMsg = %q", got)
+func TestExtractHandoffSummaryFindsTrailingSection(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "chinese label",
+			content: "已经改完 main.go。\n\n交接总结：已修复登录回归并通过 go test ./...，无遗留阻塞，下一步请补充 e2e 用例。",
+			want:    "已修复登录回归并通过 go test ./...，无遗留阻塞，下一步请补充 e2e 用例。",
+		},
+		{
+			name:    "english label",
+			content: "patched the parser\n\nHandoff summary: rebuilt and ran go vet; nothing blocked; next, add a regression test.",
+			want:    "rebuilt and ran go vet; nothing blocked; next, add a regression test.",
+		},
+		{
+			name:    "conclusion fallback",
+			content: "构建过程……\n\n最终结论：定理已证明，go build 通过。",
+			want:    "定理已证明，go build 通过。",
+		},
+		{
+			name:    "none",
+			content: "just some prose without any summary marker.",
+			want:    "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractHandoffSummary(tc.content); got != tc.want {
+				t.Fatalf("extractHandoffSummary = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatRelayPriorTurnForwardsSummaryAndEvidence(t *testing.T) {
+	exit := 0
+	withCommands := orchestrationTurn{
+		Role:    "implementer",
+		CLI:     "claude",
+		Content: "改完了 main.go 并跑了测试。\n\n交接总结：已修复并通过测试，下一步请评审。",
+		Handoff: "已修复并通过测试，下一步请评审。",
+		Tools:   []RunnerToolEvent{{Command: "go test ./...", Status: "completed", ExitCode: &exit, Output: "ok"}},
+	}
+	out := formatRelayPriorTurn(withCommands)
+	if !strings.Contains(out, "handoff: 已修复并通过测试") {
+		t.Fatalf("expected handoff lead, got:\n%s", out)
+	}
+	if !strings.Contains(out, "commands:") || !strings.Contains(out, "go test ./...") {
+		t.Fatalf("expected command evidence kept, got:\n%s", out)
+	}
+	if !strings.Contains(out, "result:") {
+		t.Fatalf("expected raw result kept when commands ran, got:\n%s", out)
+	}
+	if strings.Contains(out, "result:") && strings.Contains(out[strings.Index(out, "result:"):], "交接总结") {
+		t.Fatalf("summary tail should be stripped from result, got:\n%s", out)
+	}
+
+	debateNoCommands := orchestrationTurn{
+		Role:    "proposer",
+		CLI:     "claude",
+		Content: "我认为应该用方案 A。\n\n交接总结：建议采用方案 A，理由是更简单。",
+		Handoff: "建议采用方案 A，理由是更简单。",
+	}
+	out = formatRelayPriorTurn(debateNoCommands)
+	if !strings.Contains(out, "handoff: 建议采用方案 A") {
+		t.Fatalf("expected handoff lead, got:\n%s", out)
+	}
+	if strings.Contains(out, "result:") {
+		t.Fatalf("summary should stand alone (no result) when no commands ran, got:\n%s", out)
+	}
+
+	noSummaryWithCommands := orchestrationTurn{
+		Role:    "reviewer",
+		CLI:     "codex",
+		Content: "looks fine to me.",
+		Tools:   []RunnerToolEvent{{Command: "go build ./...", Status: "completed", ExitCode: &exit}},
+	}
+	out = formatRelayPriorTurn(noSummaryWithCommands)
+	if strings.Contains(out, "handoff:") {
+		t.Fatalf("expected no handoff lead without a summary, got:\n%s", out)
+	}
+	if !strings.Contains(out, "result:") || !strings.Contains(out, "commands:") {
+		t.Fatalf("expected result and commands without a summary, got:\n%s", out)
+	}
+
+	noSummaryNoCommands := orchestrationTurn{
+		Role:    "proposer",
+		CLI:     "claude",
+		Content: "just talking, no summary.",
+	}
+	out = formatRelayPriorTurn(noSummaryNoCommands)
+	if strings.Contains(out, "handoff:") || strings.Contains(out, "commands:") {
+		t.Fatalf("expected only a result block, got:\n%s", out)
+	}
+	if !strings.Contains(out, "result:") {
+		t.Fatalf("expected result block as fallback, got:\n%s", out)
+	}
+
+	// Content that is entirely a conclusion (e.g. after scrubbing a preamble)
+	// should not be repeated as a result alongside the handoff lead.
+	conclusionLed := orchestrationTurn{
+		Role:    "reviewer",
+		CLI:     "codex",
+		Content: "最终结论：定理已证明，go build 通过。",
+		Handoff: "定理已证明，go build 通过。",
+		Tools:   []RunnerToolEvent{{Command: "go build ./...", Status: "completed", ExitCode: &exit}},
+	}
+	out = formatRelayPriorTurn(conclusionLed)
+	if !strings.Contains(out, "handoff: 定理已证明") || !strings.Contains(out, "commands:") {
+		t.Fatalf("expected handoff lead and commands, got:\n%s", out)
+	}
+	if strings.Contains(out, "result:") {
+		t.Fatalf("conclusion-only content should not be duplicated as result, got:\n%s", out)
 	}
 }
 

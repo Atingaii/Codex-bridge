@@ -66,17 +66,15 @@ func conclusionEvidenceRefs(history []orchestrationTurn) []string {
 	var out []string
 	pattern := regexp.MustCompile(`(?:^|[\s:])((?:\.{0,2}/|/)?[A-Za-z0-9._/-]+\.(?:log|txt|json|md|thy|v|` + "le" + `an|out))`)
 	for _, turn := range history {
-		for _, text := range []string{turn.Content, turn.Handoff} {
-			for _, match := range pattern.FindAllStringSubmatch(text, -1) {
-				ref := strings.Trim(strings.TrimSpace(match[1]), ".,;:)")
-				if ref == "" || seen[ref] {
-					continue
-				}
-				seen[ref] = true
-				out = append(out, ref)
-				if len(out) >= 12 {
-					return out
-				}
+		for _, match := range pattern.FindAllStringSubmatch(turn.Content, -1) {
+			ref := strings.Trim(strings.TrimSpace(match[1]), ".,;:)")
+			if ref == "" || seen[ref] {
+				continue
+			}
+			seen[ref] = true
+			out = append(out, ref)
+			if len(out) >= 12 {
+				return out
 			}
 		}
 	}

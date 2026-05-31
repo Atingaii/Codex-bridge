@@ -24,24 +24,13 @@ func IsFormal(value string) bool {
 	return Normalize(value) == Formal()
 }
 
-type HandoffFields struct {
-	Status   string
-	Changed  string
-	Verified string
-	Next     string
-	Risks    string
-}
-
 type Turn struct {
-	TurnID        string
-	Role          string
-	CLI           string
-	Msg           string
-	Content       string
-	Handoff       string
-	HandoffFields HandoffFields
-	Err           string
-	Commands      []Command
+	TurnID   string
+	Role     string
+	CLI      string
+	Content  string
+	Err      string
+	Commands []Command
 }
 
 type Command struct {

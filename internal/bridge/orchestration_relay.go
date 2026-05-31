@@ -10,24 +10,13 @@ import (
 )
 
 type orchestrationTurn struct {
-	TurnID        string
-	Role          string
-	CLI           string
-	Msg           string
-	Content       string
-	Handoff       string
-	HandoffFields orchestrationHandoffFields
-	Err           string
-	Tools         []RunnerToolEvent
-	Verifier      bool
-}
-
-type orchestrationHandoffFields struct {
-	Status   string
-	Changed  string
-	Verified string
-	Next     string
-	Risks    string
+	TurnID  string
+	Role    string
+	CLI     string
+	Content string
+	Handoff string
+	Err     string
+	Tools   []RunnerToolEvent
 }
 
 func (m *OrchestrationManager) runRelayCLI(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, error) {
@@ -281,16 +270,13 @@ func normalizeRelayFirstCLI(value string) string {
 
 func newOrchestrationTurnRecord(turnID, role, cli, content string, tools []RunnerToolEvent) orchestrationTurn {
 	content = scrubOrchestrationTurnContent(content)
-	handoff := extractHandoff(content)
 	return orchestrationTurn{
-		TurnID:        turnID,
-		Role:          role,
-		CLI:           cli,
-		Content:       content,
-		Msg:           extractMsg(content),
-		Handoff:       handoff,
-		HandoffFields: parseHandoffFields(handoff),
-		Tools:         tools,
+		TurnID:  turnID,
+		Role:    role,
+		CLI:     cli,
+		Content: content,
+		Handoff: extractHandoffSummary(content),
+		Tools:   tools,
 	}
 }
 
@@ -368,11 +354,7 @@ func oneLine(value string) string {
 	return strings.Join(strings.Fields(value), " ")
 }
 
-const orchestrationHandoffContract = "Handoff: status=<needs_next|blocked|resolved>; changed=<files or none>; verified=<commands or none>; next=<one action>; risks=<open issue or none>"
-
-const orchestrationMsgContract = "Msg: to=<next-role|user>; intent=<implement|review|challenge|final>; need=<one request or none>"
-
-const orchestrationLanguageRule = "Language rule: write all user-visible prose in Chinese by default unless the user explicitly asks for another language. Keep the machine-readable Msg: and Handoff: field names and values in the required English shape."
+const orchestrationLanguageRule = "Language rule: write all user-visible prose, including the 交接总结 handoff summary, in Chinese by default unless the user explicitly asks for another language."
 
 func composeRelayPromptWithFirstCLI(mode, firstCLI, profile, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {
 	profile = normalizeOrchestrationProfile(profile)
@@ -393,6 +375,7 @@ func composeRelayPromptWithFirstCLI(mode, firstCLI, profile, userPrompt, context
 	} else {
 		b.WriteString("You are continuing from the previous CLI's visible result. Treat the prior result as context from another person, decide independently what to do next, and continue the same user task.\n\n")
 	}
+	b.WriteString("Always end your visible reply with a short handoff summary titled \"交接总结：\" — 2-4 Chinese sentences covering what you did, what you verified and with which commands, what is still blocked, and the single most useful next step for the following CLI. Bridge forwards this summary to the next CLI as a reading guide and separately forwards your actually executed commands and their exit codes as objective evidence, so keep the summary honest and specific rather than a bare success claim. If you already write a \"最终结论/最终测试结果\" section (for example on formal-proof tasks), that section serves as the handoff summary and you need not repeat it.\n\n")
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Use the compact context below when relevant, and treat the latest user task as authoritative.\n\n")
 	}
@@ -411,7 +394,7 @@ func composeRelayPromptWithFirstCLI(mode, firstCLI, profile, userPrompt, context
 	}
 	b.WriteString(fmt.Sprintf("Relay turn: %d of %d. Mode: %s. First CLI: %s. Current CLI: %s/%s.\n\n", turn, maxTurns, mode, normalizeRelayFirstCLI(firstCLI), role, cli))
 	if len(history) > 0 {
-		b.WriteString("Previous CLI result and useful command context:\n")
+		b.WriteString("Previous CLI handoff summary, result, and command evidence:\n")
 		for _, item := range history {
 			b.WriteString(formatRelayPriorTurn(item))
 		}
@@ -430,16 +413,32 @@ func formatRelayPriorTurn(item orchestrationTurn) string {
 		b.WriteString(" error=")
 		b.WriteString(trimForPrompt(oneLine(item.Err), 220))
 	}
-	content := strings.TrimSpace(item.Content)
-	if content != "" {
-		b.WriteString("\n  result: ")
-		b.WriteString(strings.ReplaceAll(trimForPrompt(content, 1800), "\n", "\n  "))
+	summary := strings.TrimSpace(item.Handoff)
+	if summary != "" {
+		b.WriteString("\n  handoff: ")
+		b.WriteString(strings.ReplaceAll(trimForPrompt(summary, 600), "\n", "\n  "))
 	}
-	if summaries := relayCommandSummaries(item.Tools, 6); len(summaries) > 0 {
+	summaries := relayCommandSummaries(item.Tools, 6)
+	hasCommands := len(summaries) > 0
+	if summary == "" || hasCommands {
+		body := strings.TrimSpace(item.Content)
+		if summary != "" {
+			body = strings.TrimSpace(contentWithoutHandoffSummary(item.Content))
+		}
+		if body != "" {
+			limit := 1800
+			if hasCommands && summary != "" {
+				limit = 1000
+			}
+			b.WriteString("\n  result: ")
+			b.WriteString(strings.ReplaceAll(trimForPrompt(body, limit), "\n", "\n  "))
+		}
+	}
+	if hasCommands {
 		b.WriteString("\n  commands:\n")
-		for _, summary := range summaries {
+		for _, cmd := range summaries {
 			b.WriteString("  - ")
-			b.WriteString(summary)
+			b.WriteString(cmd)
 			b.WriteByte('\n')
 		}
 	}
@@ -509,52 +508,33 @@ func sanitizePromptText(value string) string {
 	return strings.ToValidUTF8(value, "\uFFFD")
 }
 
-func extractHandoff(content string) string {
-	return extractTrailingLine(content, "handoff:")
+func handoffSummaryMarkers() []string {
+	return []string{
+		"交接总结", "交接摘要", "handoff summary",
+		"最终结论", "最终总结", "final conclusion", "final summary",
+	}
 }
 
-func extractMsg(content string) string {
-	return extractTrailingLine(content, "msg:")
-}
-
-func parseHandoffFields(line string) orchestrationHandoffFields {
-	line = strings.TrimSpace(line)
-	line = strings.TrimPrefix(line, "Handoff:")
-	line = strings.TrimPrefix(line, "handoff:")
-	out := orchestrationHandoffFields{}
-	for _, part := range strings.Split(line, ";") {
-		key, value, ok := strings.Cut(part, "=")
-		if !ok {
-			continue
-		}
-		key = strings.ToLower(strings.TrimSpace(key))
-		value = strings.TrimSpace(value)
-		switch key {
-		case "status":
-			out.Status = value
-		case "changed":
-			out.Changed = value
-		case "verified":
-			out.Verified = value
-		case "next":
-			out.Next = value
-		case "risks":
-			out.Risks = value
+func extractHandoffSummary(content string) string {
+	idx := lastMarkerIndexFold(content, handoffSummaryMarkers())
+	if idx < 0 {
+		return ""
+	}
+	rest := content[idx:]
+	for _, marker := range handoffSummaryMarkers() {
+		if len(rest) >= len(marker) && strings.EqualFold(rest[:len(marker)], marker) {
+			rest = rest[len(marker):]
+			break
 		}
 	}
-	return out
+	rest = strings.TrimLeft(rest, "：: \t\r\n")
+	return strings.TrimSpace(rest)
 }
 
-func extractTrailingLine(content, prefix string) string {
-	lines := strings.Split(content, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(strings.ToLower(line), prefix) {
-			return line
-		}
+func contentWithoutHandoffSummary(content string) string {
+	idx := lastMarkerIndexFold(content, handoffSummaryMarkers())
+	if idx < 0 {
+		return content
 	}
-	return ""
+	return strings.TrimSpace(content[:idx])
 }

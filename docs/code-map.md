@@ -125,7 +125,17 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 7. Honesty rule: report degradation truthfully when the adapter is missing, the
    native id cannot be resolved, or cwd mismatches — never fabricate a takeover
    command.
-8. See [docs/features/acp-runner.md](features/acp-runner.md).
+8. `frontend/src/app/pages/Workspace.tsx:Workspace` reads the optional
+   `nativeResumeId`/`nativeResumeCommand` from `session_opened`/`prompt_complete`,
+   persists the id on the session record, and renders
+   `frontend/src/app/components/chat/TakeoverHint.tsx:TakeoverHint` (reusing
+   `frontend/src/app/components/chat/CommandBlock.tsx:CommandBlock`) plus an ACP
+   badge. `frontend/src/app/lib/types.ts:ACPCapability` mirrors the protocol
+   capability.
+9. After any frontend change, run `npm run build` in `frontend/` to regenerate
+   the embedded `internal/web/static` output and commit it.
+10. See [docs/features/acp-runner.md](features/acp-runner.md) and
+    [docs/features/acp-runner-pr2.md](features/acp-runner-pr2.md).
 
 ### Change Browser Approval Flow
 

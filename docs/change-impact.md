@@ -15,6 +15,7 @@ keeps only the top frequent subset.
 | Add or change auth/cookie behavior | `internal/auth/`, `internal/hub/server.go`, frontend login/logout handling, security docs |
 | Add or change runner behavior | `internal/bridge/runner.go` or `internal/bridge/orchestration.go`, protocol payload if needed, tests, runner notes in docs |
 | Add or change ACP runner behavior | `internal/bridge/acp_runner.go`, `internal/bridge/acp_client.go`, `internal/bridge/runner.go:SessionRunner`, `internal/bridge/session.go` dispatch, `internal/protocol.SessionOpenedPayload`/`PromptCompletePayload` native-resume fields, `docs/features/acp-runner.md`, tests |
+| Add or change ACP takeover UI | `frontend/src/app/components/chat/TakeoverHint.tsx`, `frontend/src/app/pages/Workspace.tsx`, `frontend/src/app/lib/types.ts`, `frontend/src/app/lib/i18n.ts`, rebuild `internal/web/static` via `npm run build`, `docs/features/acp-runner-pr2.md` |
 | Add or change deployment unit | `deploy/`, README deployment section, `docs/dev-workflow.md` |
 | Add or change install/download flow | `internal/hub/server.go`, `configs/*.yaml.example`, README/README.zh-CN, integration tests |
 | Add or change Android wrapper behavior | `android/`, `frontend/capacitor.config.ts`, README Android section, GitHub workflow if release output changes |

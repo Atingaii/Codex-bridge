@@ -32,7 +32,13 @@ continued from the workspace with `claude --resume <id>` / `codex resume <id>`
 [docs/features/acp-runner.md](features/acp-runner.md). The `echo`, `codex-exec`,
 and `codex-app-server` runners are unchanged; only `ACPRunner` implements the
 `internal/bridge/runner.go:SessionRunner` interface and the session layer falls
-back to one-shot `Runner.Prompt` for every other runner.
+back to one-shot `Runner.Prompt` for every other runner. The browser surfaces
+the takeover command via `frontend/src/app/components/chat/TakeoverHint.tsx` and
+an ACP badge in `frontend/src/app/pages/Workspace.tsx`, shown only when the
+Bridge actually resolved a command (otherwise a neutral "unavailable" note);
+see [docs/features/acp-runner-pr2.md](features/acp-runner-pr2.md). Orchestration
+resident-session reuse is intentionally deferred (it would touch the
+review-required approval pipeline).
 
 The orchestration UI uses HTTP for create/continue/cancel plus a run-scoped
 WebSocket for event streaming:

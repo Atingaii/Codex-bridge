@@ -31,6 +31,15 @@ var (
 	freePortUsed = map[int]struct{}{}
 )
 
+func assertShellSyntax(t *testing.T, label, command string) {
+	t.Helper()
+	cmd := exec.Command("sh", "-n")
+	cmd.Stdin = strings.NewReader(command)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%s shell syntax: %v\n%s\n%s", label, err, out, command)
+	}
+}
+
 func TestEchoBridgeEndToEnd(t *testing.T) {
 	t.Parallel()
 
@@ -1208,15 +1217,11 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		if strings.Contains(setup, "\n") {
 			t.Fatalf("profile setup command should be one line: %q", setup)
 		}
-		if out, err := exec.Command("sh", "-n", "-c", setup).CombinedOutput(); err != nil {
-			t.Fatalf("profile setup command shell syntax: %v\n%s\n%s", err, out, setup)
-		}
+		assertShellSyntax(t, "profile setup command", setup)
 		if strings.Contains(connect, "\n") {
 			t.Fatalf("profile connect command should be one line: %q", connect)
 		}
-		if out, err := exec.Command("sh", "-n", "-c", connect).CombinedOutput(); err != nil {
-			t.Fatalf("profile connect command shell syntax: %v\n%s\n%s", err, out, connect)
-		}
+		assertShellSyntax(t, "profile connect command", connect)
 		profileCommands[id] = connect
 	}
 	if !strings.Contains(profileCommands["review-required"], "codex-bridge link") || !strings.Contains(profileCommands["review-required"], "--profile 'review-required'") {
@@ -1236,23 +1241,17 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	if strings.Contains(installCommand, "\n") {
 		t.Fatalf("install command should be one line: %q", installCommand)
 	}
-	if out, err := exec.Command("sh", "-n", "-c", installCommand).CombinedOutput(); err != nil {
-		t.Fatalf("install command shell syntax: %v\n%s\n%s", err, out, installCommand)
-	}
+	assertShellSyntax(t, "install command", installCommand)
 	connectCommand := commands[1].(string)
 	if strings.Contains(connectCommand, "\n") {
 		t.Fatalf("connect command should be one line: %q", connectCommand)
 	}
-	if out, err := exec.Command("sh", "-n", "-c", connectCommand).CombinedOutput(); err != nil {
-		t.Fatalf("connect command shell syntax: %v\n%s\n%s", err, out, connectCommand)
-	}
+	assertShellSyntax(t, "connect command", connectCommand)
 	setupCommand := tokenBody["setupCommand"].(string)
 	if strings.Contains(setupCommand, "\n") {
 		t.Fatalf("setup command should be one line: %q", setupCommand)
 	}
-	if out, err := exec.Command("sh", "-n", "-c", setupCommand).CombinedOutput(); err != nil {
-		t.Fatalf("setup command shell syntax: %v\n%s\n%s", err, out, setupCommand)
-	}
+	assertShellSyntax(t, "setup command", setupCommand)
 	if tokenBody["installCommand"] != installCommand || tokenBody["connectCommand"] != connectCommand {
 		t.Fatalf("command mismatch: install=%#v connect=%#v commands=%#v", tokenBody["installCommand"], tokenBody["connectCommand"], commands)
 	}
@@ -1301,9 +1300,7 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	if strings.Contains(repairSetup, "\n") {
 		t.Fatalf("repair setup command should be one line: %q", repairSetup)
 	}
-	if out, err := exec.Command("sh", "-n", "-c", repairSetup).CombinedOutput(); err != nil {
-		t.Fatalf("repair setup command shell syntax: %v\n%s\n%s", err, out, repairSetup)
-	}
+	assertShellSyntax(t, "repair setup command", repairSetup)
 	repairConnect := repairBody["connectCommand"].(string)
 	for _, want := range []string{
 		`--cwd ` + shellSingleQuote(tmp),

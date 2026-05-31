@@ -694,7 +694,7 @@ print(json.dumps({"type":"error","message":"Reconnecting... 1/5 (stream disconne
 	}
 }
 
-func TestOrchestrationCodexEmptyTailErrorAfterVisibleOutputContinues(t *testing.T) {
+func TestOrchestrationCodexEmptyTailErrorAfterVisibleOutputCompletesSilently(t *testing.T) {
 	tmp := t.TempDir()
 	codexPath := filepath.Join(tmp, "codex")
 	claudePath := filepath.Join(tmp, "claude")
@@ -728,9 +728,6 @@ func TestOrchestrationCodexEmptyTailErrorAfterVisibleOutputContinues(t *testing.
 	if !orchestrationEventsContain(events, "turn.delta", "codex", "rewrite Habs direction was wrong") {
 		t.Fatalf("missing visible codex output: %#v", events)
 	}
-	if !orchestrationEventsContain(events, "turn.delta", "codex", "empty tail error after visible output") {
-		t.Fatalf("missing recoverable warning: %#v", events)
-	}
 	if !orchestrationEventsContain(events, "turn.end", "codex", "rewrite Habs direction was wrong") {
 		t.Fatalf("codex turn did not complete with visible output: %#v", events)
 	}
@@ -741,6 +738,9 @@ func TestOrchestrationCodexEmptyTailErrorAfterVisibleOutputContinues(t *testing.
 		t.Fatalf("run did not complete after recoverable codex error: %#v", events)
 	}
 	for _, event := range events {
+		if orchestrationEventContainsText(event, "empty tail error after visible output") {
+			t.Fatalf("empty app-server tail error should not be surfaced: %#v", event)
+		}
 		if event.Kind == "run.error" {
 			t.Fatalf("recoverable codex tail error should not fail run: %#v", event)
 		}

@@ -277,7 +277,12 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 				if text.Len() > 0 && strings.TrimSpace(result.Content) == "" {
 					result.Content = text.String()
 				}
-				done <- appServerTurnResult{result: result, err: appServerEventError(msg, result.Content)}
+				err := appServerEventError(msg, result.Content)
+				if isAppServerEmptyErrorAfterVisibleOutput(err) {
+					done <- appServerTurnResult{result: result}
+					return
+				}
+				done <- appServerTurnResult{result: result, err: err}
 				return
 			}
 			if strings.HasSuffix(msg.Method, "/requestApproval") || msg.Method == "execCommandApproval" || msg.Method == "applyPatchApproval" {

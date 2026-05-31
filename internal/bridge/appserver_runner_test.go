@@ -102,7 +102,7 @@ func TestCodexAppServerRunnerSanitizesPromptText(t *testing.T) {
 	}
 }
 
-func TestCodexAppServerRunnerEmptyErrorIncludesVisibleOutput(t *testing.T) {
+func TestCodexAppServerRunnerEmptyErrorAfterVisibleOutputCompletes(t *testing.T) {
 	tmp := t.TempDir()
 	codexPath := filepath.Join(tmp, "codex")
 	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerEmptyErrorScript()), 0o755); err != nil {
@@ -120,12 +120,8 @@ func TestCodexAppServerRunnerEmptyErrorIncludesVisibleOutput(t *testing.T) {
 			deltas = append(deltas, update.Delta)
 		}
 	})
-	if err == nil {
-		t.Fatal("expected empty app-server error")
-	}
-	if !strings.Contains(err.Error(), "codex app-server returned an empty error after producing visible output") ||
-		!strings.Contains(err.Error(), "rewrite Habs direction was wrong") {
-		t.Fatalf("error did not include visible output context: %q", err)
+	if err != nil {
+		t.Fatalf("empty app-server error after visible output should complete: %v", err)
 	}
 	if result.Content != "rewrite Habs direction was wrong" {
 		t.Fatalf("result content = %q", result.Content)

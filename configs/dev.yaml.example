@@ -55,6 +55,17 @@ bridge:
     applies_to:
       - claude
       - codex
+  # ACP runner: set bridge.runner to "acp" to use an Agent Client Protocol
+  # adapter for interactive long chat sessions that can be resumed from the
+  # native CLI in the workspace. The adapters are installed by the user
+  # (Claude: npx @zed-industries/claude-code-acp; Codex: codex-acp binary).
+  acp:
+    cli: claude
+    claude_command: "npx"
+    claude_args: ["-y", "@zed-industries/claude-code-acp"]
+    codex_command: "codex-acp"
+    codex_args: []
+    prefer_native_resume: true
 
 auth:
   jwt_secret: dev-only-change-me-32-byte-minimum-secret

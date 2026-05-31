@@ -24,7 +24,15 @@ export type BridgeCapabilities = {
   approvalPolicy?: string;
   chat?: Record<string, BridgeCLICapability | undefined>;
   orchestration?: Record<string, BridgeCLICapability | undefined>;
+  acp?: ACPCapability;
   metadata?: Record<string, string | undefined>;
+};
+
+// Mirrors internal/protocol/envelope.go:ACPCapability.
+export type ACPCapability = {
+  available?: boolean;
+  loadSession?: boolean;
+  nativeResume?: boolean;
 };
 
 export type BridgeCLICapability = {
@@ -40,6 +48,8 @@ export type Session = {
   userId: string;
   title: string;
   remoteThreadId?: string;
+  // Native CLI resume id for local takeover (target B). Client-side only.
+  nativeResumeId?: string;
   createdAt: number;
   updatedAt: number;
 };

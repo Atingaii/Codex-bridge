@@ -1,38 +1,71 @@
 # Codex Bridge
 
-Remote browser access to the Codex and Claude Code CLIs running on your own
-machine — 1:1 chat with a single CLI, plus multi-CLI orchestration that relays
-turns between a native Codex session and a native Claude Code session.
+[![CI](https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Platform](https://img.shields.io/badge/platform-Linux-555)](docs/deployment.md)
 
-## Shape
+Remote browser access to the **Codex** and **Claude Code** CLIs running on your
+own machine — 1:1 chat with a single CLI, plus multi-CLI orchestration that
+relays turns between a native Codex session and a native Claude Code session.
 
-- One Go binary with two modes: `hub` and `bridge`
-- Hub serves HTTPS/WSS behind Caddy, embeds the static web UI, and stores history in SQLite
-- Bridge reverse-connects to Hub, multiplexes chat sessions, and runs `echo`, `codex exec --json`, or the `codex app-server` runner
-- Orchestration drives one long-lived native Codex and one long-lived native Claude Code session per run; the Bridge relays output and turn context (no injected verifier/remediation turns), so you can `resume` either session from the workspace
-- No Redis, Postgres, React build pipeline, or file projection
-- Closing the browser tab does not stop an active run by default; reopen the same session to see persisted output
+[简体中文](README.zh-CN.md) · [Deployment Guide](docs/deployment.md) · [Architecture](docs/architecture.md)
 
-## Local Quick Start
+```text
+Browser ──WSS──> Hub (public) <──reverse WS── Bridge (your machine) ──> Codex / Claude
+```
+
+## Features
+
+- One Go binary, two modes: `hub` (public server) and `bridge` (your machine).
+- Hub serves HTTPS/WSS behind a reverse proxy, embeds the static web UI, and
+  stores history in SQLite — no Redis, Postgres, or external build pipeline.
+- Bridge reverse-connects to the Hub and runs a selectable runner: `echo`,
+  `codex exec --json`, the `codex app-server` runner, or the `acp` runner
+  (resident Agent session + native local `/resume` takeover).
+- Multi-CLI orchestration relays turns between native Codex and Claude Code
+  sessions, with browser-side command/file approvals in review-required mode.
+- Closing the browser tab does not stop an active run by default; reopen the
+  same session to see persisted output.
+
+## Requirements
+
+| To do this | You need |
+| --- | --- |
+| Build from source | Go 1.25+, Node 20+ (for the web UI) |
+| Run a Bridge | Codex CLI and/or Claude Code installed and authenticated |
+| Run a production Hub | A TLS-terminating reverse proxy (Caddy config provided) |
+
+> The web UI is compiled into the binary. When building from source, build the
+> frontend first (`make frontend` / `make build-all`) so the embedded assets are
+> current.
+
+## Get the code
 
 ```bash
+git clone https://github.com/Atingaii/Codex-bridge.git
+cd Codex-bridge
+```
+
+## Quick Start (from source)
+
+```bash
+# 1. Config
 cp configs/dev.yaml.example configs/dev.yaml
-# edit configs/dev.yaml: set auth.bootstrap_password and a strong auth.jwt_secret
+# Edit configs/dev.yaml: set auth.bootstrap_password and a strong auth.jwt_secret.
 
-/usr/local/go/bin/go run . user --username admin --password 'change-me'
-/usr/local/go/bin/go run . enroll
+# 2. Create a login user and an enroll token
+go run . user --username admin --password 'change-me'
+go run . enroll
+# Put the printed token into configs/dev.yaml under bridge.token
+
+# 3. Run Hub and Bridge (two terminals)
+make run-hub      # or: go run . hub
+make run-bridge   # or: go run . bridge
 ```
 
-Put the printed enroll token into `configs/dev.yaml` under `bridge.token`, then run:
+Open <http://127.0.0.1:8088>.
 
-```bash
-/usr/local/go/bin/go run . hub
-/usr/local/go/bin/go run . bridge
-```
-
-Open `http://127.0.0.1:8088`.
-
-For Codex instead of echo:
+For Codex instead of echo, set `bridge.runner` in `configs/dev.yaml`:
 
 ```yaml
 bridge:
@@ -41,6 +74,65 @@ bridge:
   sandbox: danger-full-access
   approval_policy: never
 ```
+
+For a resident-session chat backed by an Agent Client Protocol (ACP) adapter
+(keeps one Agent process alive across turns and exposes a native local
+`/resume` takeover), use the `acp` runner:
+
+```yaml
+bridge:
+  runner: acp
+  cwd: /path/to/workspace
+  acp:
+    cli: claude            # claude | codex
+    claude_command: npx
+    claude_args: ["-y", "@zed-industries/claude-code-acp"]
+    codex_command: codex-acp
+    prefer_native_resume: true
+```
+
+See [docs/features/acp-runner.md](docs/features/acp-runner.md) for the dual-ID
+model and how local `claude --resume` / `codex resume` takeover works.
+
+## Build & Install
+
+```bash
+make build-all                 # build the web UI, then the Go binary -> bin/codex-bridge
+./bin/codex-bridge hub
+sudo make install              # optional: install to /usr/local/bin/codex-bridge
+make help                      # list all targets
+```
+
+## Deployment
+
+| Method | When to use | Where |
+| --- | --- | --- |
+| From source | Local development, single host | [Quick Start](#quick-start-from-source) |
+| `make` binary | Reproducible local/staging build | [Build & Install](#build--install) |
+| Docker | Containerized Hub | [docs/deployment.md](docs/deployment.md#option-c--docker) |
+| systemd + Caddy | Production with TLS | [docs/deployment.md](docs/deployment.md#option-d--production-systemd--caddy) |
+
+The full multi-method guide — prerequisites, production config, verification,
+and troubleshooting — is in **[docs/deployment.md](docs/deployment.md)**.
+
+### Production (systemd + Caddy), at a glance
+
+```bash
+make build-all
+sudo make install
+sudo mkdir -p /opt/codex-bridge/configs /opt/codex-bridge/data
+sudo cp configs/dev.yaml.example /opt/codex-bridge/configs/prod.yaml   # then edit for prod
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile                          # edit the domain first
+sudo cp deploy/systemd-hub.service /etc/systemd/system/codex-bridge-hub.service
+sudo cp deploy/systemd-bridge.service /etc/systemd/system/codex-bridge-bridge.service
+sudo systemctl daemon-reload && sudo systemctl enable --now codex-bridge-hub codex-bridge-bridge
+sudo systemctl reload caddy
+```
+
+Production config keys (`/opt/codex-bridge/configs/prod.yaml`): `gateway.host:
+127.0.0.1`, `gateway.port: 8088`, `hub.cookie_secure: true`, a fresh
+`auth.jwt_secret`, `bridge.hub_url: https://<your-domain>`, and `bridge.token` /
+`bridge.token_file`. See the [deployment guide](docs/deployment.md) for details.
 
 ## Commands
 
@@ -138,28 +230,6 @@ Optional orchestration long-command observation is configured under
 `bridge.long_command_observer`; see `docs/dev-workflow.md` for the full env and
 YAML reference.
 
-## sparkapi.tech Deployment
-
-The included Caddy config is already bound to `sparkapi.tech`:
-
-```bash
-sudo cp bin/codex-bridge /usr/local/bin/codex-bridge
-sudo mkdir -p /opt/codex-bridge/configs /opt/codex-bridge/data
-sudo cp configs/dev.yaml.example /opt/codex-bridge/configs/prod.yaml
-sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
-```
-
-For production set these in `/opt/codex-bridge/configs/prod.yaml`:
-
-- `gateway.host: 127.0.0.1`
-- `gateway.port: 8088`
-- `hub.cookie_secure: true`
-- `auth.jwt_secret`: a fresh 32+ byte secret
-- `bridge.hub_url: https://sparkapi.tech`
-- `bridge.token` or `bridge.token_file`: the enroll token
-
-Then install the systemd units from `deploy/` and reload Caddy. With Cloudflare already pointing `sparkapi.tech` at the VPS, Caddy terminates HTTPS and proxies Hub on `127.0.0.1:8088`.
-
 ## Notes
 
 `codex exec --json` remains the automated trusted-machine runner. The
@@ -170,6 +240,14 @@ Run setup/repair commands from the same shell where Codex and Claude credentials
 work; the generated background service preserves common model credential
 variables such as `OPENAI_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` in its private
 0600 env file.
+
+## Documentation
+
+- [Deployment Guide](docs/deployment.md) — all deployment methods, production setup, troubleshooting
+- [Architecture](docs/architecture.md) — components, data flow, protocol
+- [Developer Workflow](docs/dev-workflow.md) — full env/YAML reference, local dev
+- [Code Map](docs/code-map.md) — "change X → edit Y" guidance
+- [Feature designs](docs/features/) — per-feature design docs
 
 ## Project Workflow
 

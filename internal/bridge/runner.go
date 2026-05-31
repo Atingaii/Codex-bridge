@@ -22,6 +22,65 @@ type Runner interface {
 	Close()
 }
 
+// SessionRunner is implemented by runners that keep one resident process per
+// chat session (an interactive long session) instead of spawning a one-shot
+// process per turn. Only ACPRunner implements it. Callers detect support with a
+// type assertion and otherwise fall back to the one-shot Runner.Prompt path, so
+// existing runners (echo, codex-exec, codex-app-server) stay unchanged.
+type SessionRunner interface {
+	Runner
+	// OpenSession starts (or reuses) a resident session and returns a handle
+	// carrying both the ACP session id (for browser continuation, target A) and
+	// the native resume id/command (for local takeover, target B).
+	OpenSession(ctx context.Context, req OpenSessionRequest) (SessionHandle, error)
+	// Resume loads a previously opened session by its ACP session id.
+	Resume(ctx context.Context, req ResumeRequest) (SessionHandle, error)
+	// PromptSession sends a prompt into an already-open resident session.
+	PromptSession(ctx context.Context, req PromptSessionRequest, onUpdate func(update RunnerUpdate)) (RunnerResult, error)
+	// CloseSession releases the resident process for a chat session.
+	CloseSession(sid string)
+}
+
+// OpenSessionRequest opens a resident session for a chat sid.
+type OpenSessionRequest struct {
+	SID string
+	CWD string
+	// RemoteThreadID, when set, carries the ACP session id persisted by Hub so a
+	// previously opened session can be reloaded instead of created fresh.
+	RemoteThreadID string
+	Approvals      ApprovalRequester
+}
+
+// ResumeRequest reloads a resident session by its ACP session id.
+type ResumeRequest struct {
+	SID            string
+	CWD            string
+	RemoteThreadID string
+	Approvals      ApprovalRequester
+}
+
+// PromptSessionRequest sends one prompt into a resident session.
+type PromptSessionRequest struct {
+	SID       string
+	Content   string
+	RunID     string
+	PromptID  string
+	Approvals ApprovalRequester
+}
+
+// SessionHandle describes a resident session's dual-id state. The native fields
+// are empty (never fabricated) when a local takeover command cannot be honestly
+// resolved.
+type SessionHandle struct {
+	// ACPSessionID is the adapter's session id; it is also stored as the
+	// persisted remote_thread_id for continuity.
+	ACPSessionID string
+	// NativeResumeID is the underlying CLI's own session id for local resume.
+	NativeResumeID string
+	// NativeResumeCommand is a ready-to-copy local takeover command, or empty.
+	NativeResumeCommand string
+}
+
 type RunnerRequest struct {
 	SID            string
 	Content        string
@@ -67,6 +126,8 @@ func NewRunner(cfg *config.Config) (Runner, error) {
 		return NewCodexExecRunner(cfg), nil
 	case "codex-app-server", "codex-appserver", "app-server":
 		return NewCodexAppServerRunner(cfg), nil
+	case "acp":
+		return NewACPRunner(cfg), nil
 	default:
 		return nil, fmt.Errorf("unknown runner %q", cfg.Bridge.Runner)
 	}

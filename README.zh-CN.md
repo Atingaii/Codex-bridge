@@ -1,5 +1,11 @@
 # Codex Bridge 中文接入指南
 
+[![CI](https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Platform](https://img.shields.io/badge/platform-Linux-555)](docs/deployment.md)
+
+[English](README.md) · [部署指南](docs/deployment.md) · [架构](docs/architecture.md)
+
 Codex Bridge 让浏览器远程访问私有机器上的 Codex 和 Claude Code CLI：既可与单个 CLI 一对一聊天，也可通过编排在一个长驻的原生 Codex 会话与一个长驻的原生 Claude Code 会话之间逐轮中转（Bridge 只回传输出与轮次上下文，不注入额外的校验/补救轮次，因此你可以在工作目录里 `resume` 这些原生会话）。Hub 是公网入口和 Web UI，Bridge 从私有机器反向连接 Hub，所以 Hub 不需要保存 `OPENAI_API_KEY`，也不需要直连你的工作目录。
 
 ## 普通用户接入 SparkAPI Hub
@@ -75,11 +81,32 @@ codex resume --include-non-interactive
 
 ## 自建 Hub
 
-构建单个 Go 二进制：
+> 完整的多种部署方式（源码 / make / Docker / systemd + Caddy）、生产配置、
+> 验证与排查见 **[docs/deployment.md](docs/deployment.md)**。
+
+先获取代码：
 
 ```bash
-/usr/local/go/bin/go test ./...
-CGO_ENABLED=0 /usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .
+git clone https://github.com/Atingaii/Codex-bridge.git
+cd Codex-bridge
+```
+
+构建单个 Go 二进制（前置：Go 1.25+、Node 20+）。Web UI 已编译进二进制，从源码构建时
+需要先构建前端，因此推荐用 `make build-all`：
+
+```bash
+make test            # 等价于 go test ./...
+make build-all       # 先构建前端，再编译 Go 二进制 -> bin/codex-bridge
+```
+
+也可以用 Docker 跑 Hub：
+
+```bash
+docker build -t codex-bridge:local .          # 或 make docker
+docker run --rm -p 8088:8088 \
+  -v "$PWD/configs:/opt/codex-bridge/configs:ro" \
+  -v codex-bridge-data:/opt/codex-bridge/data \
+  codex-bridge:local hub
 ```
 
 初始化生产配置：
@@ -167,15 +194,15 @@ BRIDGE_HUB_URL='https://your-domain.example' BRIDGE_TOKEN="$TOKEN" codex-bridge 
 
 ```bash
 cp configs/dev.yaml.example configs/dev.yaml
-/usr/local/go/bin/go run . user --username admin --password 'change-me'
-TOKEN=$(/usr/local/go/bin/go run . enroll | tail -n1)
-BRIDGE_TOKEN="$TOKEN" /usr/local/go/bin/go run . bridge
+go run . user --username admin --password 'change-me'
+TOKEN=$(go run . enroll | tail -n1)
+BRIDGE_TOKEN="$TOKEN" go run . bridge        # 或 make run-bridge
 ```
 
 另开一个终端：
 
 ```bash
-/usr/local/go/bin/go run . hub
+go run . hub                                  # 或 make run-hub
 ```
 
 浏览器打开 `http://127.0.0.1:8088`。
@@ -207,7 +234,7 @@ BRIDGE_LONG_COMMAND_OBSERVER_AFTER=2m
 ```bash
 curl https://sparkapi.tech/health
 ~/.local/bin/codex-bridge connect '<TOKEN>' --runner echo
-/usr/local/go/bin/go test ./...
+go test ./...                                 # 或 make test
 ```
 
 常见问题：

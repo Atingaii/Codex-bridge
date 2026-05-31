@@ -35,6 +35,7 @@ import type {
 import type { Language, UIText } from '../lib/i18n';
 import { AgentSelector } from '../components/AgentSelector';
 import { ApprovalCard } from '../components/chat/ApprovalCard';
+import { TakeoverHint } from '../components/chat/TakeoverHint';
 import { MessageItem, ToolItem } from '../components/chat/MessageItem';
 import { RenameSessionModal, SettingsModal } from '../components/Settings';
 import { SidebarContent } from '../components/SidebarContent';
@@ -90,6 +91,10 @@ export function Workspace({
   const [items, setItems] = useState<ChatItem[]>([]);
   const [runner, setRunner] = useState('-');
   const [thread, setThread] = useState('-');
+  // Native local-takeover info for ACP-backed sessions (target B).
+  const [nativeResumeCommand, setNativeResumeCommand] = useState('');
+  const [nativeResumeId, setNativeResumeId] = useState('');
+  const [takeoverCopied, setTakeoverCopied] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState(t.disconnected);
   const [activeRun, setActiveRun] = useState<Run | null>(null);
   const [search, setSearch] = useState('');
@@ -216,6 +221,9 @@ export function Workspace({
     setItems([]);
     setRunner('-');
     setThread('-');
+    setNativeResumeCommand('');
+    setNativeResumeId('');
+    setTakeoverCopied(false);
     setActiveRun(null);
     setConnectionStatus(t.disconnected);
     setShowScrollBottom(false);
@@ -228,6 +236,22 @@ export function Workspace({
       const updated = { ...session, updatedAt: Math.floor(Date.now() / 1000) };
       return [updated, ...current.filter((item) => item.id !== sessionId)];
     });
+  }, []);
+
+  // captureNativeResume reads the optional native local-takeover fields that an
+  // ACP-backed Bridge attaches to session_opened / prompt_complete, updates the
+  // takeover UI, and persists the native resume id onto the session record so a
+  // reopen can rehydrate the hint without waiting for the next turn.
+  const captureNativeResume = useCallback((payload: any) => {
+    const command = typeof payload?.nativeResumeCommand === 'string' ? payload.nativeResumeCommand : '';
+    const nativeId = typeof payload?.nativeResumeId === 'string' ? payload.nativeResumeId : '';
+    setNativeResumeCommand(command);
+    setNativeResumeId(nativeId);
+    setTakeoverCopied(false);
+    if (nativeId && activeSessionIdRef.current) {
+      const sid = activeSessionIdRef.current;
+      setSessions((current) => current.map((item) => item.id === sid ? { ...item, nativeResumeId: nativeId } : item));
+    }
   }, []);
 
   const handleEnvelope = useCallback((env: Envelope) => {
@@ -247,6 +271,7 @@ export function Workspace({
       case 'session_opened':
         setRunner(payload.runner || '-');
         setThread(payload.remoteThreadId || '-');
+        captureNativeResume(payload);
         setConnectionStatus(t.ready);
         break;
       case 'session_update':
@@ -300,6 +325,7 @@ export function Workspace({
           setItems((current) => upsertAssistant(current, id, assistantTextRef.current));
         }
         setThread(payload.remoteThreadId || thread || '-');
+        captureNativeResume(payload);
         setActiveRun(null);
         assistantItemIdRef.current = null;
         assistantTextRef.current = '';
@@ -318,7 +344,7 @@ export function Workspace({
       default:
         break;
     }
-  }, [appendSystem, clearActiveChat, t.connected, t.error, t.ready, thread, touchSession]);
+  }, [appendSystem, captureNativeResume, clearActiveChat, t.connected, t.error, t.ready, thread, touchSession]);
 
   const connectWS = useCallback((sessionId: string) => {
     closeWS();
@@ -368,6 +394,11 @@ export function Workspace({
     activeSessionIdRef.current = sessionId;
     setRunner('-');
     setThread(session.remoteThreadId || '-');
+    // Hydrate the takeover hint from the stored native id until the next
+    // session_opened / prompt_complete refreshes it (command is re-sent then).
+    setNativeResumeId(session.nativeResumeId || '');
+    setNativeResumeCommand('');
+    setTakeoverCopied(false);
     setActiveRun(null);
     setMobileMenuOpen(false);
     await loadMessages(sessionId);
@@ -384,6 +415,9 @@ export function Workspace({
     activeSessionIdRef.current = session.id;
     setRunner('-');
     setThread(session.remoteThreadId || '-');
+    setNativeResumeId(session.nativeResumeId || '');
+    setNativeResumeCommand('');
+    setTakeoverCopied(false);
     setActiveRun(null);
     setMobileMenuOpen(false);
     await loadMessages(session.id);
@@ -794,6 +828,11 @@ export function Workspace({
             <Command className="h-3.5 w-3.5" />
             <span>{t.status}: {connectionStatus}</span>
           </div>
+          {runner === 'acp' && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-border bg-background/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide">
+              {t.acpBadge}
+            </span>
+          )}
           <AgentSelector
             agents={agents}
             selectedAgentId={selectedAgentId}
@@ -802,6 +841,29 @@ export function Workspace({
             className="sm:hidden min-w-[220px]"
           />
         </div>
+
+        {(nativeResumeCommand || (runner === 'acp' && (nativeResumeId || activeSessionId))) && (
+          <div className="border-b border-border bg-background px-3 py-2 md:px-4">
+            <TakeoverHint
+              command={nativeResumeCommand}
+              nativeId={nativeResumeId}
+              available={!!nativeResumeCommand}
+              copied={takeoverCopied}
+              onCopy={() => {
+                if (!nativeResumeCommand) return;
+                copyText(nativeResumeCommand)
+                  .then((ok) => {
+                    if (ok) {
+                      setTakeoverCopied(true);
+                      window.setTimeout(() => setTakeoverCopied(false), 1500);
+                    }
+                  })
+                  .catch(() => undefined);
+              }}
+              t={t}
+            />
+          </div>
+        )}
 
         <div className="relative flex-1 min-h-0">
           <div

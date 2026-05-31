@@ -29,7 +29,11 @@ should list names and point here for detail.
 | `BRIDGE_TOKEN_FILE` | File containing Bridge token | config `bridge.token_file` |
 | `BRIDGE_NAME` | Agent display name | config `bridge.name` |
 | `BRIDGE_CWD` | Default workspace path for runner | config `bridge.cwd` |
-| `BRIDGE_RUNNER` | `echo` or `codex` | config `bridge.runner` |
+| `BRIDGE_RUNNER` | `echo`, `codex`, `codex-app-server`, or `acp` | config `bridge.runner` |
+| `BRIDGE_ACP_CLI` | ACP runner CLI selection: `claude` or `codex` | config `bridge.acp.cli` |
+| `BRIDGE_ACP_CLAUDE_COMMAND` | Command that launches the Claude Code ACP adapter | config `bridge.acp.claude_command` |
+| `BRIDGE_ACP_CODEX_COMMAND` | Command that launches the Codex ACP adapter | config `bridge.acp.codex_command` |
+| `BRIDGE_ACP_PREFER_NATIVE_RESUME` | Offer a local native `resume` command for ACP sessions | config `bridge.acp.prefer_native_resume` |
 | `BRIDGE_CODEX_PATH` | Codex CLI path used by Bridge | config `bridge.codex_path` |
 | `BRIDGE_CLAUDE_PATH` | Claude Code CLI path used by orchestration | config `bridge.claude_path` |
 | `BRIDGE_MODEL` | Model argument for Codex runner | config `bridge.model` |

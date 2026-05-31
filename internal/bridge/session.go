@@ -33,6 +33,11 @@ type Session struct {
 	promptID       string
 	pending        []protocol.Envelope
 	approvals      map[string]chan protocol.ApprovalResponsePayload
+	cwd            string
+	// nativeResumeID/nativeResumeCommand carry the ACP runner's local takeover
+	// hints (target B). Empty for non-ACP runners.
+	nativeResumeID      string
+	nativeResumeCommand string
 }
 
 func NewSessionManager(cfg *config.Config) *SessionManager {
@@ -42,7 +47,7 @@ func NewSessionManager(cfg *config.Config) *SessionManager {
 	}
 }
 
-func (m *SessionManager) Open(sid, remoteThreadID string, out chan<- protocol.Envelope) error {
+func (m *SessionManager) Open(sid, remoteThreadID, cwd string, out chan<- protocol.Envelope) error {
 	if sid == "" {
 		return errors.New("sid is required")
 	}
@@ -51,12 +56,17 @@ func (m *SessionManager) Open(sid, remoteThreadID string, out chan<- protocol.En
 		if remoteThreadID != "" {
 			existing.remoteThreadID = remoteThreadID
 		}
+		if cwd != "" {
+			existing.cwd = cwd
+		}
 		existing.out = out
 		pending := append([]protocol.Envelope(nil), existing.pending...)
 		existing.pending = nil
 		opened := protocol.MustEnvelope(protocol.TypeSessionOpened, sid, protocol.SessionOpenedPayload{
-			RemoteThreadID: existing.remoteThreadID,
-			Runner:         m.cfg.Bridge.Runner,
+			RemoteThreadID:      existing.remoteThreadID,
+			Runner:              m.cfg.Bridge.Runner,
+			NativeResumeID:      existing.nativeResumeID,
+			NativeResumeCommand: existing.nativeResumeCommand,
 		})
 		m.mu.Unlock()
 		for _, env := range pending {
@@ -74,7 +84,7 @@ func (m *SessionManager) Open(sid, remoteThreadID string, out chan<- protocol.En
 		m.mu.Unlock()
 		return err
 	}
-	s := &Session{sid: sid, remoteThreadID: remoteThreadID, runner: runner, out: out, approvals: make(map[string]chan protocol.ApprovalResponsePayload)}
+	s := &Session{sid: sid, remoteThreadID: remoteThreadID, runner: runner, out: out, cwd: cwd, approvals: make(map[string]chan protocol.ApprovalResponsePayload)}
 	m.sessions[sid] = s
 	m.mu.Unlock()
 	send(out, protocol.MustEnvelope(protocol.TypeSessionOpened, sid, protocol.SessionOpenedPayload{
@@ -112,14 +122,10 @@ func (m *SessionManager) Prompt(parent context.Context, sid string, payload prot
 	defer cleanup()
 
 	approvals := sessionApprovalRequester{manager: m, sid: sid, runID: runID, promptID: promptID}
-	result, err := s.runner.Prompt(ctx, RunnerRequest{
-		SID:            sid,
-		Content:        preparedContent,
-		RemoteThreadID: remoteThreadID,
-		RunID:          runID,
-		PromptID:       promptID,
-		Approvals:      approvals,
-	}, func(update RunnerUpdate) {
+	m.mu.Lock()
+	cwd := s.cwd
+	m.mu.Unlock()
+	onUpdate := func(update RunnerUpdate) {
 		if update.Delta == "" && update.Content == "" && update.Tool == nil {
 			return
 		}
@@ -141,12 +147,58 @@ func (m *SessionManager) Prompt(parent context.Context, sid string, payload prot
 			Event:    updateEvent(update),
 			Tool:     tool,
 		}))
-	})
+	}
+
+	var (
+		result       RunnerResult
+		nativeID     string
+		nativeCmd    string
+	)
+	if sr, ok := s.runner.(SessionRunner); ok {
+		// Interactive long-session path (ACP runner). Open or reuse the resident
+		// session, then prompt into it. Both ids round-trip back to the browser.
+		handle, openErr := sr.OpenSession(ctx, OpenSessionRequest{
+			SID:            sid,
+			CWD:            cwd,
+			RemoteThreadID: remoteThreadID,
+			Approvals:      approvals,
+		})
+		if openErr != nil {
+			err = openErr
+		} else {
+			nativeID = handle.NativeResumeID
+			nativeCmd = handle.NativeResumeCommand
+			result, err = sr.PromptSession(ctx, PromptSessionRequest{
+				SID:       sid,
+				Content:   preparedContent,
+				RunID:     runID,
+				PromptID:  promptID,
+				Approvals: approvals,
+			}, onUpdate)
+			if result.RemoteThreadID == "" {
+				result.RemoteThreadID = handle.ACPSessionID
+			}
+		}
+	} else {
+		result, err = s.runner.Prompt(ctx, RunnerRequest{
+			SID:            sid,
+			Content:        preparedContent,
+			RemoteThreadID: remoteThreadID,
+			RunID:          runID,
+			PromptID:       promptID,
+			CWD:            cwd,
+			Approvals:      approvals,
+		}, onUpdate)
+	}
 	cancel()
 
 	m.mu.Lock()
 	if result.RemoteThreadID != "" {
 		s.remoteThreadID = result.RemoteThreadID
+	}
+	if nativeID != "" {
+		s.nativeResumeID = nativeID
+		s.nativeResumeCommand = nativeCmd
 	}
 	s.cancel = nil
 	s.busy = false
@@ -167,11 +219,13 @@ func (m *SessionManager) Prompt(parent context.Context, sid string, payload prot
 		return
 	}
 	m.sendSessionEnvelope(sid, protocol.MustEnvelope(protocol.TypePromptComplete, sid, protocol.PromptCompletePayload{
-		Content:        result.Content,
-		Usage:          result.Usage,
-		RemoteThreadID: result.RemoteThreadID,
-		RunID:          runID,
-		PromptID:       promptID,
+		Content:             result.Content,
+		Usage:               result.Usage,
+		RemoteThreadID:      result.RemoteThreadID,
+		RunID:               runID,
+		PromptID:            promptID,
+		NativeResumeID:      nativeID,
+		NativeResumeCommand: nativeCmd,
 	}))
 }
 

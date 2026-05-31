@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const source = readFileSync(new URL('./src/app/App.tsx', import.meta.url), 'utf8');
+const utilsSource = readFileSync(new URL('./src/app/lib/utils.ts', import.meta.url), 'utf8');
+const orchestrationComponentsSource = readFileSync(new URL('./src/app/components/OrchestrationComponents.tsx', import.meta.url), 'utf8');
+const source = `${utilsSource}\n${orchestrationComponentsSource}`;
 
 assert.match(source, /function orchestrationStatusContent\(event: OrchestrationEvent\)/);
 assert.match(source, /if \(\(event\.kind === 'run\.end' \|\| event\.kind === 'run\.error'\) && content\) return content;/);

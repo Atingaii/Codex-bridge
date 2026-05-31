@@ -1,5 +1,13 @@
 # Orchestration Event Protocol Hardening
 
+> **UPDATE 2026-05-30** — The dead CCB code this review called for deleting is now
+> gone, along with the superseded per-turn orchestration design. Any
+> `internal/bridge/orchestration*.go:<line>` references below predate that removal
+> and the later same-package split; rely on
+> `docs/architecture.md` and
+> [orchestration-pass-through-cli.md](orchestration-pass-through-cli.md) for the
+> current design. The typed event-protocol contract itself remains live.
+
 > Status: partially implemented. This document collects findings from a
 > 2026-05-29 review of how Bridge reports CLI processing back to the browser,
 > how orchestration prompts are composed, how the final-conclusion contract is
@@ -65,8 +73,8 @@ The orchestration `Kind` set in production today (grepped from
 - User input: `user.message`.
 - Historical / partly-dead: `ccb.terminal_prompt`, `claude.permission_prompt`.
 
-`Data` is an undocumented but load-bearing schema. The frontend
-(`frontend/src/app/App.tsx`) reads at least:
+`Data` is an undocumented but load-bearing schema. The frontend reducer
+(`frontend/src/app/lib/utils.ts:visibleOrchestrationEvents`) reads at least:
 `cwd`, `mode`, `firstCli`, `maxTurns`, `promptSeq`, `relayOnly`,
 `codexThreadId`, `claudeSessionId`, `cli`, `turn`, `id`, `command`, `input`,
 `output`, `name`, `status`, `exitCode`, `startedAt`, `completedAt`,
@@ -90,7 +98,7 @@ line 5361) concatenates, per turn:
 7. Compacted prior history.
 
 Each fragment is gated by a `looksLikeXxxTask` string-keyword detector
-(`internal/bridge/orchestration.go:5988+`). The full assembled prompt is then
+(`internal/bridge/orchestration.go`). The full assembled prompt is then
 echoed back to the frontend verbatim as the `Content` of the `turn.start`
 event:
 
@@ -102,24 +110,25 @@ m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 })
 ```
 
-`maxTurns` is silently clamped to 12 (`internal/bridge/orchestration.go:300`). The frontend
+`maxTurns` is silently clamped to 12 (`internal/bridge/orchestration.go`). The frontend
 receives no signal that its requested value was capped.
 
 ### How the final conclusion is produced
 
 There are three independent layers of "final conclusion" today:
 
-1. Bridge's `relayTerminalContent` (`internal/bridge/orchestration.go:408`) takes the last
+1. Bridge's `relayTerminalContent` (`internal/bridge/orchestration.go`) takes the last
    turn's raw content and ships it as `run.end.Content`.
 2. The prompt itself contains a "Browser-visible result rule" instructing the
    CLI to emit a Chinese `最终测试结果/最终结论` section. This is enforcement by
    prompt only; nothing structural validates it.
-3. The frontend `finalOrchestrationConclusionFallback` (`frontend/src/app/App.tsx:1138`)
-   detects whether the visible content is "a readable final conclusion" by
-   keyword search (`isReadableFinalConclusion`, `frontend/src/app/App.tsx:1296` —
-   `最终结论 / 最终总结 / 最终测试结果 / final conclusion / final summary` plus
-   loose `结论 + 完成|通过|验证 / 剩余风险` heuristics). If absent, the frontend
-   synthesises its own bilingual fallback summary.
+3. Historically, frontend final-conclusion fallback helpers in
+   `frontend/src/app/App.tsx` detected whether visible content was "a readable
+   final conclusion" by keyword search (`最终结论 / 最终总结 / 最终测试结果 /
+   final conclusion / final summary` plus loose `结论 + 完成|通过|验证 / 剩余风险`
+   heuristics). If absent, the frontend synthesised its own bilingual fallback
+   summary. Current rendering is owned by
+   `frontend/src/app/lib/utils.ts:visibleOrchestrationEvents`.
 
 The fallback only fires when `last.kind === 'run.end' && status === 'completed'`.
 `run.error` and `run.cancelled` get no fallback summary at all.
@@ -152,8 +161,7 @@ to Isabelle handling:
 - An "Isabelle oracle 审计" boolean dimension in the proof assessment matrix
   (4761).
 
-The frontend has its own Isabelle-aware string match
-(`frontend/src/app/App.tsx:799`):
+The frontend previously had its own Isabelle-aware string match in `App.tsx`:
 
 ```ts
 return content.startsWith('Bridge closed Claude stream input after an idle window')
@@ -179,10 +187,10 @@ The same `Status` slot in `OrchestrationEventPayload` carries:
 - Bridge-internal log levels (`info`, `warning` for nudge / idle-close
   notices).
 
-`commandEventFailed` (`frontend/src/app/App.tsx:1313`) treats any event with `error` or a
-`failed/error` status as a real failure. A Bridge-internal warning ("could not
-write to Claude stdin") therefore inflates the failed-command count shown in
-the run summary card.
+`frontend/src/app/lib/utils.ts:commandEventFailed` treats any event with
+`error` or a `failed/error` status as a real failure. A Bridge-internal warning
+("could not write to Claude stdin") therefore inflates the failed-command count
+shown in the run summary card.
 
 **Direction:** split into `Status` (lifecycle, enumerated) and an optional
 `Severity` (`info` / `warning` / `error`). Bridge-internal notes always have
@@ -190,10 +198,10 @@ the run summary card.
 
 ### F2 — Bridge-originated events are detected by string prefix (P0)
 
-The frontend identifies "Bridge said this, not the CLI" by string matching on
-hard-coded English prefixes (`frontend/src/app/App.tsx:799`). A wording change on either side
-silently breaks the contract; CLIs can also accidentally echo a string starting
-with `"Bridge "` and be misclassified.
+Historically, the frontend identified "Bridge said this, not the CLI" by string
+matching on hard-coded English prefixes in `App.tsx`. A wording change on
+either side silently breaks the contract; CLIs can also accidentally echo a
+string starting with `"Bridge "` and be misclassified.
 
 `emitIsabelleManualBuildCarryOver` is even worse: it emits a `turn.delta`
 without `relayOnly: true`, so it is indistinguishable from a real CLI delta on
@@ -227,9 +235,10 @@ fields out of it.
 ### F4 — Tool timing is computed twice and only "happens" to agree (P1)
 
 Bridge stamps `startedAt / completedAt / durationMs` in `stampToolTiming`
-(`internal/bridge/orchestration.go:4091`) and stores them into `Data`. The frontend
-recomputes the same fields in `mergeOrchestrationToolEvents` and
-`mergeOrchestrationToolData` (`frontend/src/app/App.tsx:860, 904`). Both sides must agree on
+(`internal/bridge/orchestration.go`) and stores them into `Data`. The frontend
+recomputes the same fields in
+`frontend/src/app/lib/utils.ts:mergeOrchestrationToolEvents` and
+`frontend/src/app/lib/utils.ts:mergeCommandData`. Both sides must agree on
 field names; nothing enforces it.
 
 **Direction:** Bridge always emits a single `command.end` carrying final
@@ -237,7 +246,7 @@ field names; nothing enforces it.
 
 ### F5 — Claude `Read` tool starts are silently deferred (P1)
 
-`emitClaudeTool` (`internal/bridge/orchestration.go:3878+`) caches `in_progress` events for
+`emitClaudeTool` (`internal/bridge/orchestration.go`) caches `in_progress` events for
 Claude `Read ...` commands and only emits them once `command.end` arrives, to
 hide paginated-read failures. From the frontend's perspective, work happens
 without any visible event.
@@ -250,7 +259,7 @@ event timeline never has unexplained gaps.
 ### F6 — Full prompt text is echoed into `turn.start.Content` (P0)
 
 `turn.start` ships `"Prompt sent to <cli>:\n<prompt>"` as its `Content`
-(`internal/bridge/orchestration.go:340`). The prompt is the full assembled relay prompt:
+(`internal/bridge/orchestration.go`). The prompt is the full assembled relay prompt:
 language rule, formal-proof guidance, Isabelle boundary, role block, history
 compaction, plus the user's text — often hundreds to thousands of lines.
 
@@ -269,7 +278,7 @@ This:
 
 ### F7 — `maxTurns` is silently clamped to 12 (P1)
 
-`internal/bridge/orchestration.go:300` clamps `maxTurns` to 12 with no event signalling the
+`internal/bridge/orchestration.go` clamps `maxTurns` to 12 with no event signalling the
 clamp. Users who chose 20 see 12 with no explanation.
 
 **Direction:** emit both `maxTurnsRequested` and `maxTurnsApplied` in
@@ -315,7 +324,7 @@ generator are deleted.
 
 `internal/bridge/orchestration.go` is 7634 lines; a sizable share is formal
 proof. The function name `modify_lin` from a specific benchmark is hard-coded
-in user-facing prompt text (`internal/bridge/orchestration.go:5345`). This means:
+in user-facing prompt text (`internal/bridge/orchestration.go`). This means:
 
 - A user pasting a `.thy` file but asking Codex to convert it to Coq still
   gets the full Isabelle audit guidance.
@@ -345,7 +354,7 @@ profile?"), never as silent activation.
 ### F10 — Isabelle nudge is a silent prompt injection (P0)
 
 `scheduleClaudeIsabelleNudge` writes a `{"type":"user", ...}` JSON message
-into Claude's stdin (`writeClaudeStreamUserMessage`, `internal/bridge/orchestration.go:4037`)
+into Claude's stdin (`writeClaudeStreamUserMessage`, `internal/bridge/orchestration.go`)
 when an Isabelle build runs longer than 2 minutes. The browser sees a
 small `Status: "info"` `turn.delta` saying Bridge sent a nudge, but the
 nudge text itself is not aligned with Claude's subsequent reply in the
@@ -373,7 +382,7 @@ The 2-minute window is hard-coded with no per-task or per-machine knob.
 
 ### F11 — `isabelleManualBuildSignal` derives state from log scraping (P1)
 
-`isabelleManualBuildSignal` (`internal/bridge/orchestration.go:570`) decides whether a
+`isabelleManualBuildSignal` (`internal/bridge/orchestration.go`) decides whether a
 build has already timed out by scanning history text for English and
 Chinese phrases such as `manual build`, `exit 124`, `status=124`, `超时`,
 `build.pid`, `build.log`, plus a `cancelled + running` co-occurrence
@@ -390,7 +399,7 @@ events that originated before fingerprint tracking landed.
 ### F12 — `looksLikeIsabelleRuntimeTask` is an alias of `looksLikeIsabelleProofTask` (P2)
 
 `looksLikeIsabelleRuntimeTask` is defined as `return looksLikeIsabelleProofTask(text)`
-(`internal/bridge/orchestration.go:5988`). Six call sites use the two names interchangeably,
+(`internal/bridge/orchestration.go`). Six call sites use the two names interchangeably,
 which suggests a vanished distinction. New contributors cannot tell which
 predicate to call.
 
@@ -401,7 +410,7 @@ name.
 
 ### F13 — `case 'job_accepted' | 'job_queued' | 'completion_item' | ...` is dead-or-half-dead frontend code (P2)
 
-`frontend/src/app/App.tsx:1271–1289` dispatches on CCB-style event kinds (`job_accepted`,
+Historically, `frontend/src/app/App.tsx` dispatched on CCB-style event kinds (`job_accepted`,
 `job_started`, `completion_item`, `completion_terminal`, `job_completed`,
 `job_failed`, `job_cancelled`, `agent_console`, `callback_*`) even though
 `docs/architecture.md` says CCB is no longer an active backend. Same for
@@ -435,7 +444,7 @@ notes" line at most), `Data.TurnStartData.PromptText`, and any event with
 | 1 | Add `Source` to `OrchestrationEventPayload` | `internal/protocol/envelope.go`, Hub passthrough, frontend renderer |
 | 2 | Split `Status` from `Severity` | same |
 | 3 | Promote load-bearing `Data` keys to typed sub-payloads | same + `internal/store/orchestration_events` if persisted |
-| 4 | Single source of truth for tool timing | `internal/bridge/orchestration.go:stampToolTiming`, frontend `mergeOrchestrationToolData` deletion |
+| 4 | Single source of truth for tool timing | `internal/bridge/orchestration_claude.go:stampToolTiming`, frontend `mergeOrchestrationToolData` deletion |
 | 5 | One-line `turn.start.Content` + `Data.PromptText` | same |
 | 6 | Surface clamped `maxTurns` | `RunStartData.MaxTurnsRequested/Applied`, frontend banner |
 | 7 | Structured `run.conclusion` event | new event kind, deletes `isReadableFinalConclusion` and the bilingual fallback prose generator |
@@ -600,12 +609,12 @@ Implemented:
   compatibility for existing rows.
 - `internal/hub/orchestration.go:handleOrchestrationEvent` persists typed
   events and updates run continuity from typed run-start/run-end payloads.
-- `internal/bridge/orchestration.go:emit` normalizes source/severity and emits
+- `internal/bridge/orchestration_events.go:emit` normalizes source/severity and emits
   one `run.conclusion` before terminal run events.
-- `internal/bridge/orchestration.go:composeRelayPromptWithFirstCLI` gates
+- `internal/bridge/orchestration_relay.go:composeRelayPromptWithFirstCLI` gates
   formal-proof prompt guidance behind explicit `profile=formal-proof`; Hub,
   Store, and the UI persist/pass the profile.
-- `frontend/src/app/App.tsx:visibleOrchestrationEvents` uses `source`,
+- `frontend/src/app/lib/utils.ts:visibleOrchestrationEvents` uses `source`,
   `severity`, `commandData`, and `runConclusion`; deleted the keyword final
   conclusion fallback helpers and CCB event-state dispatch.
 - `internal/hub/share.go:publicOrchestrationEvents` strips private

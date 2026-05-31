@@ -1,8 +1,6 @@
 package bridge
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/tencent/codex-bridge/internal/config"
@@ -25,31 +23,6 @@ func TestBridgeCapabilitiesCheckCLIPaths(t *testing.T) {
 	}
 	if caps.Orchestration["claude"].Available || caps.Orchestration["claude"].BrowserApproval {
 		t.Fatalf("orchestration claude should be unavailable: %#v", caps.Orchestration["claude"])
-	}
-}
-
-func TestBridgeCapabilitiesDoNotAdvertiseCCBOrchestration(t *testing.T) {
-	tmp := t.TempDir()
-	ccb := filepath.Join(tmp, "ccb")
-	if err := os.WriteFile(ccb, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Default()
-	cfg.Bridge.Runner = "codex"
-	cfg.Bridge.OrchestrationRunner = "ccb"
-	cfg.Bridge.CCBPath = ccb
-	cfg.Bridge.CodexPath = "/definitely/missing/codex"
-	cfg.Bridge.ClaudePath = "/definitely/missing/claude"
-
-	caps := BridgeCapabilities(&cfg)
-	if _, ok := caps.Orchestration["ccb"]; ok {
-		t.Fatalf("ccb orchestration should not be advertised: %#v", caps.Orchestration)
-	}
-	if caps.Runner != "codex" || caps.Metadata["orchestrationRunner"] != "" {
-		t.Fatalf("capability metadata mismatch: %#v", caps)
-	}
-	if caps.Orchestration["codex"].Available || caps.Orchestration["claude"].Available {
-		t.Fatalf("ccb orchestration should not require direct codex/claude capabilities: %#v", caps.Orchestration)
 	}
 }
 

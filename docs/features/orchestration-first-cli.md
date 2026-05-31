@@ -26,7 +26,8 @@
   `firstCli` in the existing JSON body.
 - `internal/store.OrchestrationRun` stores `first_cli` as `FirstCLI` with
   values `claude` or `codex`; empty legacy rows behave as `claude`.
-- `frontend/src/app/App.tsx` sends and displays the first-turn CLI selector.
+- `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
+  sends and displays the first-turn CLI selector.
 
 ## Implementation Steps
 

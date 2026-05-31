@@ -45,7 +45,12 @@ state and keeps anonymous traffic on Hub-only storage.
 - `internal/store/store.go`: `conversation_shares` schema and CRUD
 - `internal/hub/share.go`: protected share creation/revocation and public read
 - `internal/hub/server.go:NewServer`: share API route registration
-- `frontend/src/app/App.tsx`: share buttons and `/share/<id>` read-only route
+- `frontend/src/app/App.tsx:App`: `/share/<id>` read-only route
+- `frontend/src/app/pages/Workspace.tsx:Workspace` and
+  `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`:
+  share buttons
+- `frontend/src/app/pages/PublicSharePage.tsx:PublicSharePage`: read-only
+  share renderer
 - `docs/features/conversation-share-links.md`: user workflow and API contract
 
 ## Revisit When

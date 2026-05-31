@@ -33,7 +33,8 @@ agent is asked to shut down before its Hub connection is closed.
 1. Add the Hub route in `internal/hub/server.go:NewServer`.
 2. Add store soft-delete and token-revocation helpers.
 3. Filter deleted agents from list and lookup methods.
-4. Add a delete icon button in `frontend/src/app/App.tsx:SettingsModal`.
+4. Add a delete icon button in
+   `frontend/src/app/components/Settings.tsx:SettingsModal`.
 5. Add `protocol.TypeAgentShutdown` and handle it in
    `internal/bridge/client.go:handleEnvelope`.
 6. Rebuild embedded static assets.

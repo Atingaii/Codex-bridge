@@ -1,5 +1,10 @@
 # Manual Orchestration Rounds
 
+> **UPDATE 2026-05-30** — The CCB backend and its helper code/tests were fully
+> removed (this doc's original non-goal of preserving them no longer holds). Hub
+> still rejects endpoints that cannot run both Codex and Claude. Current
+> orchestration design: [orchestration-pass-through-cli.md](orchestration-pass-through-cli.md).
+
 ## Goals
 
 - Restore browser orchestration to the Bridge-managed manual Claude Code and
@@ -42,9 +47,10 @@
 3. Remove the CCB capability bypass from
    `internal/hub/orchestration.go:validateOrchestrationCapabilities`.
 4. Reject follow-up prompts that try to change the run's selected Bridge agent.
-5. Update the orchestration UI in `frontend/src/app/App.tsx` so the mode switch,
-   capability matrix, and turns input are always shown for manual
-   Claude/Codex orchestration.
+5. Update the orchestration UI in
+   `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
+   so the mode switch, capability matrix, and turns input are always shown for
+   manual Claude/Codex orchestration.
 6. Update tests and docs that described CCB as an active orchestration backend.
 
 ## Exit Gates

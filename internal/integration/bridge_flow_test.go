@@ -536,81 +536,6 @@ func TestOrchestrationApprovalResponseRoutesToBridge(t *testing.T) {
 	}
 }
 
-func TestCCBConfiguredBridgeCannotBypassManualOrchestrationRequirements(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	tmp := t.TempDir()
-	binDir := filepath.Join(tmp, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "ccb"), []byte(fakeCCBTerminalApprovalScript()), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	port := freePort(t)
-	cfg := config.Default()
-	cfg.Gateway.Host = "127.0.0.1"
-	cfg.Gateway.Port = port
-	cfg.Gateway.ReadTimeout.Duration = 5 * time.Second
-	cfg.Gateway.WriteTimeout.Duration = 0
-	cfg.Hub.DBPath = tmp + "/bridge.db"
-	cfg.Hub.HeartbeatInterval.Duration = 100 * time.Millisecond
-	cfg.Hub.BrowserCloseGrace.Duration = 20 * time.Millisecond
-	cfg.Auth.JWTSecret = "integration-test-secret-32-byte-minimum"
-	cfg.Auth.AccessTokenTTL.Duration = time.Hour
-	cfg.Bridge.HubURL = fmt.Sprintf("http://127.0.0.1:%d", port)
-	cfg.Bridge.Token = store.NewToken("enr")
-	cfg.Bridge.Name = "ccb-terminal-approval"
-	cfg.Bridge.MachineIDFile = tmp + "/machine_id"
-	cfg.Bridge.CWD = tmp
-	cfg.Bridge.Runner = "codex"
-	cfg.Bridge.OrchestrationRunner = "ccb"
-	cfg.Bridge.CCBPath = filepath.Join(binDir, "ccb")
-	cfg.Bridge.CCBTarget = "codex"
-	cfg.Bridge.CCBTimeout.Duration = 5 * time.Second
-	cfg.Bridge.CodexPath = filepath.Join(binDir, "missing-codex")
-	cfg.Bridge.ClaudePath = filepath.Join(binDir, "missing-claude")
-	cfg.Bridge.ReconnectMin.Duration = 50 * time.Millisecond
-	cfg.Bridge.ReconnectMax.Duration = 100 * time.Millisecond
-	cfg.Bridge.HeartbeatInterval.Duration = 200 * time.Millisecond
-
-	st, err := store.Open(cfg.Hub.DBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
-		t.Fatal(err)
-	}
-	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
-
-	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
-	go func() { _ = srv.Run(ctx) }()
-	waitHTTP(t, cfg.Bridge.HubURL+"/health")
-	go func() { _ = bridge.NewClient(&cfg, "test").Run(ctx) }()
-
-	client := httpClient(t)
-	postJSON(t, client, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
-	waitAgents(t, client, cfg.Bridge.HubURL)
-	body := postJSON(t, client, cfg.Bridge.HubURL+"/api/orchestrations", map[string]any{
-		"prompt":   "try ccb bypass",
-		"title":    "manual orchestration requirements",
-		"mode":     "collaboration",
-		"cwd":      tmp,
-		"maxTurns": 2,
-	}, http.StatusConflict)
-	if body["code"] != "ORCHESTRATION_CAPABILITY_UNAVAILABLE" || !strings.Contains(body["message"].(string), "Claude") || !strings.Contains(body["message"].(string), "Codex") {
-		t.Fatalf("capability error body = %#v", body)
-	}
-}
-
 func TestWebOrchestrationInitialRequestApprovesAndRemediatesMissingFileChange(t *testing.T) {
 	t.Parallel()
 
@@ -1000,6 +925,7 @@ func TestCoqTaskWebSmokeWithFakeBridge(t *testing.T) {
 			assertRunHasFiles(t, run, []string{"Model.thy", "Termination.thy", "ROOT"})
 			ws := dialOrchestrationWS(t, client, cfg.Bridge.HubURL, runID)
 			defer ws.Close()
+			waitOrchestrationWSConnected(t, ws, runID)
 
 			env := waitBridgeEnvelope(t, fakeBridge, protocol.TypeOrchestrationStart, "")
 			start, err := protocol.Decode[protocol.OrchestrationStartPayload](env)
@@ -2037,6 +1963,31 @@ func waitOrchestrationStatus(t *testing.T, client *http.Client, baseURL, runID, 
 	t.Fatalf("timed out waiting for orchestration run %s status %s", runID, want)
 }
 
+func waitOrchestrationWSConnected(t *testing.T, ws *websocket.Conn, runID string) {
+	t.Helper()
+	_ = ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer ws.SetReadDeadline(time.Time{})
+	for {
+		var env protocol.Envelope
+		if err := ws.ReadJSON(&env); err != nil {
+			t.Fatal(err)
+		}
+		if env.Type == protocol.TypeHeartbeat {
+			continue
+		}
+		if env.Type != protocol.TypeStatus {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["status"] == "connected" && payload["runId"] == runID {
+			return
+		}
+	}
+}
+
 func waitOrchestrationCommandEvents(t *testing.T, ws *websocket.Conn, runID string, commands []string) map[string]bool {
 	t.Helper()
 	want := make(map[string]bool, len(commands))
@@ -2083,65 +2034,6 @@ type orchestrationWebObservation struct {
 	sawCodexCommand       bool
 	sawRemediationCommand bool
 	sawUnresolvedRisk     bool
-}
-
-type ccbTerminalApprovalObservation struct {
-	approvals         int
-	acceptedApprovals int
-	sawTrustPrompt    bool
-	sawForwardedInput bool
-	sawCompleted      bool
-}
-
-func observeCCBTerminalApprovalAndApprove(t *testing.T, ws *websocket.Conn, runID string) ccbTerminalApprovalObservation {
-	t.Helper()
-	var obs ccbTerminalApprovalObservation
-	_ = ws.SetReadDeadline(time.Now().Add(8 * time.Second))
-	defer ws.SetReadDeadline(time.Time{})
-	for {
-		var env protocol.Envelope
-		if err := ws.ReadJSON(&env); err != nil {
-			t.Fatal(err)
-		}
-		switch env.Type {
-		case protocol.TypeHeartbeat, protocol.TypeStatus:
-			continue
-		case protocol.TypeApprovalRequest:
-			req, err := protocol.Decode[protocol.ApprovalRequestPayload](env)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if req.RunID != runID {
-				t.Fatalf("approval for wrong run: %#v", req)
-			}
-			if req.Kind != "ccb.terminal_prompt" || !strings.Contains(req.Reason, "Do you trust the contents of this directory") {
-				t.Fatalf("unexpected CCB approval request: %#v", req)
-			}
-			obs.approvals++
-			obs.sawTrustPrompt = true
-			if err := ws.WriteJSON(protocol.MustEnvelope(protocol.TypeApprovalResponse, "", protocol.ApprovalResponsePayload{RequestID: req.RequestID, Decision: "accept"})); err != nil {
-				t.Fatal(err)
-			}
-			obs.acceptedApprovals++
-		case protocol.TypeOrchestrationEvent:
-			event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if event.RunID != runID {
-				t.Fatalf("event for wrong run: %#v", event)
-			}
-			if strings.Contains(event.Content, "forwarded press Enter to trust and continue") {
-				obs.sawForwardedInput = true
-			}
-			if strings.Contains(event.Content, "completed after browser approval") {
-				obs.sawCompleted = true
-			}
-			if event.Kind == "run.end" || event.Kind == "run.error" || event.Kind == "run.cancelled" {
-				return obs
-			}
-		}
-	}
 }
 
 func observeOrchestrationAndApprove(t *testing.T, ws *websocket.Conn, runID string) orchestrationWebObservation {
@@ -2367,145 +2259,6 @@ func fakeTerminationClaudeScript() string {
 
 func fakeUnresolvedSorryClaudeScript() string {
 	return fakeClaudeStreamScript([]string{"结论：我只确认了当前项目状态，主定理 sorry 尚未消除，下一轮必须直接处理该验收标准。\n\nMsg: to=reviewer; intent=review; need=verify main theorem sorry removal\nHandoff: status=needs_next; changed=none; verified=none; next=remove main theorem sorry; risks=主定理 sorry 仍未消除"}, nil)
-}
-
-func fakeCCBTerminalApprovalScript() string {
-	return `#!/usr/bin/env python3
-import json
-import os
-import socket
-import subprocess
-import sys
-import time
-
-root = os.getcwd()
-runtime_root = os.path.join(root, ".ccb")
-agent_root = os.path.join(runtime_root, "agents", "codex")
-sock_path = os.path.join(runtime_root, "ccbd", "ccbd.sock")
-job_id = "job_terminal"
-cursor = 0
-completed = False
-
-def write_runtime():
-    os.makedirs(agent_root, exist_ok=True)
-    with open(os.path.join(agent_root, "runtime.json"), "w", encoding="utf-8") as f:
-        json.dump({
-            "agent_name": "codex",
-            "pane_id": "%7",
-            "state": "running",
-            "health": "waiting",
-            "tmux_socket_path": os.path.join(root, "tmux.sock"),
-        }, f)
-    os.makedirs(os.path.join(runtime_root, "agents", "claude"), exist_ok=True)
-    with open(os.path.join(runtime_root, "agents", "claude", "runtime.json"), "w", encoding="utf-8") as f:
-        json.dump({"agent_name": "claude"}, f)
-    with open(os.path.join(root, "pane.txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join([
-            "> You are in /home/zy/study",
-            "Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.",
-            "› 1. Yes, continue",
-            "2. No, quit",
-            "Press enter to continue",
-            "",
-        ]))
-
-def handle(conn):
-    global cursor, completed
-    line = conn.recv(1048576)
-    if not line:
-        return
-    req = json.loads(line.decode("utf-8"))
-    op = req.get("op")
-    if op == "watch":
-        events = []
-        if cursor == 0:
-            events.append({"event_id": "evt_1", "job_id": job_id, "agent_name": "ccb", "target_name": "codex", "type": "job_started", "timestamp": "2026-05-26T00:00:00Z", "payload": {"status": "started"}})
-            cursor = 1
-        if os.path.exists(os.path.join(root, "send_keys.log")):
-            completed = True
-        payload = {
-            "api_version": 2,
-            "ok": True,
-            "job_id": job_id,
-            "agent_name": "ccb",
-            "target_name": "codex",
-            "cursor": cursor,
-            "terminal": completed,
-            "status": "completed" if completed else "running",
-            "reply": "completed after browser approval" if completed else "",
-            "events": events,
-        }
-    elif op == "trace":
-        payload = {
-            "api_version": 2,
-            "ok": True,
-            "reply": "completed after browser approval",
-            "replies": [{"reply_id": "rep_1", "agent_name": "codex", "reply": "completed after browser approval"}],
-        }
-    else:
-        payload = {"api_version": 2, "ok": False, "error": "unknown op"}
-    conn.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-
-def serve():
-    os.makedirs(os.path.dirname(sock_path), exist_ok=True)
-    try:
-        os.unlink(sock_path)
-    except FileNotFoundError:
-        pass
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(sock_path)
-    srv.listen(20)
-    while True:
-        conn, _ = srv.accept()
-        with conn:
-            handle(conn)
-
-write_runtime()
-
-if sys.argv[1:2] == ["serve"]:
-    serve()
-
-if len(sys.argv) == 1:
-    proc = subprocess.Popen([sys.executable, os.path.abspath(sys.argv[0]), "serve"], cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    with open(os.path.join(root, "server.pid"), "w", encoding="utf-8") as f:
-        f.write(str(proc.pid))
-    for _ in range(50):
-        try:
-            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            probe.connect(sock_path)
-            probe.close()
-            break
-        except OSError:
-            pass
-        time.sleep(0.02)
-    print("start_status: ok")
-    print("socket_path: " + sock_path)
-    print("agents: codex, claude")
-    time.sleep(0.2)
-    sys.exit(0)
-
-if sys.argv[1:4] == ["ask", "--compact", "codex"]:
-    sys.stdin.read()
-    print("accepted job=" + job_id + " target=codex")
-    print("[CCB_ASYNC_SUBMITTED job=" + job_id + " target=codex]")
-    sys.exit(0)
-
-if sys.argv[1:2] == ["trace"]:
-    if os.path.exists(os.path.join(root, "send_keys.log")):
-        print("reply: id=rep_1 message=msg_1 attempt=att_1 agent=codex terminal=completed size=31 notice=false kind=None reason=task_complete finished=2026-05-26T00:00:00Z preview=completed after browser approval")
-    sys.exit(0)
-
-if sys.argv[1:3] == ["pend", "--watch"]:
-    if os.path.exists(os.path.join(root, "send_keys.log")):
-        print("status: completed")
-        print("reply: completed after browser approval")
-    else:
-        print("status:")
-        print("reply:")
-    sys.exit(0)
-
-sys.exit(0)
-`
 }
 
 func fakeTmuxTerminalApprovalScript() string {

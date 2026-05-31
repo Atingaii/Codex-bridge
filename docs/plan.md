@@ -40,4 +40,32 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 
 ## Follow-up
 
-The current runner uses short-lived `codex exec` processes and resumes with the returned Codex thread id. A deeper integration should add a second runner backed by `codex app-server`, using `initialize`, `thread/start`, `turn/start`, streamed `item/agentMessage/delta`, and `turn/interrupt`.
+- Chat resumes native Codex history: short-lived `codex exec` paths resume with the
+  returned thread id, and review-required chat uses the `codex app-server` runner
+  (`internal/bridge/appserver_runner.go`) with `initialize` / `thread/start` /
+  `turn/start` / streamed deltas / `turn/interrupt`.
+- Orchestration is a native-session relay: one long-lived Codex app-server thread and
+  one long-lived Claude Code stream-json session per run, reused across turns so the
+  user can `resume` them from the workspace. The Bridge only relays output and turn
+  context; it does not inject verifier/remediation/assessment turns. Formal-proof is
+  opt-in *prompt guidance* via `internal/bridge/profiles/registry` +
+  `internal/bridge/profiles/formalproof`.
+
+## Maintenance Log
+
+- 2026-05-30: Removed the abandoned external CCB orchestration backend and the
+  superseded per-turn orchestration design (verifier / remediation / acceptance
+  assessment), the deprecated `orchestration_runner` config, and dead CCB install
+  code in `link.go`. `internal/bridge/orchestration.go` 7358 -> ~3200 lines;
+  `profiles/formalproof` 1579 -> ~335; `profiles/registry` 109 -> ~39. Full
+  `go test ./...` green. Verified unreachable code with
+  `go run golang.org/x/tools/cmd/deadcode@latest ./...`.
+- 2026-05-30: Completed the Go Part A monolith split from
+  `docs/features/monolith-file-split.md`, moving orchestration relay, Codex,
+  Claude, events, redaction, and profile helpers into same-package
+  `internal/bridge/orchestration*.go` files.
+- 2026-05-30: Completed the frontend Part B monolith split from
+  `docs/features/monolith-file-split.md`, reducing `frontend/src/app/App.tsx`
+  to root routing/bootstrap and moving pages, shared helpers, chat components,
+  settings, orchestration renderers, and UI primitives under
+  `frontend/src/app/{pages,components,lib}`.

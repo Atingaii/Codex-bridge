@@ -37,7 +37,7 @@ and an async guardrail that avoids repeated polling.
 ## Current State
 
 - `internal/bridge/orchestration.go:run` alternates Claude and Codex turns.
-- `internal/bridge/orchestration.go:composeOrchestrationPrompt` uses compact
+- `internal/bridge/orchestration.go` uses compact
   `Msg:` and `Handoff:` lines, but the Bridge can still store those fields as
   typed turn state to avoid reparsing or carrying unnecessary transcript text.
 - Chat approvals flow through `internal/protocol.TypeApprovalRequest` and
@@ -110,8 +110,8 @@ Hub routing:
 
 Frontend:
 
-- `frontend/src/app/App.tsx:OrchestrationWorkspace` stores run-scoped approval
-  cards in memory.
+- `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
+  stores run-scoped approval cards in memory.
 - The orchestration WebSocket handles `approval_request` frames and renders the
   same approval UI used by chat inside the timeline.
 - Clicking allow/deny sends `approval_response` on the run WebSocket.

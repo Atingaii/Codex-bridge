@@ -21,8 +21,8 @@ UI.
 
 ## Current State
 
-The frontend in `frontend/src/app/App.tsx` switches between the main chat
-workspace and the orchestration workspace using `window.location.pathname`.
+The frontend router in `frontend/src/app/App.tsx:App` switches between the main
+chat workspace and the orchestration workspace using `window.location.pathname`.
 There is no standalone display route for a read-only conversation artifact.
 
 ## Design
@@ -44,9 +44,9 @@ source of truth for sessions or orchestration events.
 
 ## Implementation Steps
 
-1. Add the route branch in `frontend/src/app/App.tsx`.
+1. Add the route branch in `frontend/src/app/App.tsx:App`.
 2. Add a read-only React component for the snapshot page and static snapshot
-   data in the same file.
+   data in `frontend/src/app/pages/ConversationSnapshotPage.tsx`.
 3. Refresh `internal/web/static/` by running the frontend build.
 
 ## Exit Gates

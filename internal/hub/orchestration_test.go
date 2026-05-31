@@ -469,7 +469,7 @@ func TestCreateOrchestrationAllowsAutoExecuteWithoutBrowserApprovalCapability(t 
 	}
 }
 
-func TestCreateOrchestrationRejectsCCBBackendWithoutDirectCLIRequirements(t *testing.T) {
+func TestCreateOrchestrationRejectsEndpointMissingDirectCLIs(t *testing.T) {
 	t.Parallel()
 
 	s, _, userID, agentID := newOrchestrationTestServer(t)
@@ -479,10 +479,7 @@ func TestCreateOrchestrationRejectsCCBBackendWithoutDirectCLIRequirements(t *tes
 			Runner:         "codex",
 			Sandbox:        "workspace-write",
 			ApprovalPolicy: "untrusted",
-			Orchestration: map[string]protocol.BridgeCLICapability{
-				"ccb": {Available: true, Execution: "ccb ask"},
-			},
-			Metadata: map[string]string{"orchestrationRunner": "ccb"},
+			Orchestration:  map[string]protocol.BridgeCLICapability{},
 		},
 		wsSender: wsSender{
 			send: make(chan protocol.Envelope, 2),
@@ -494,7 +491,7 @@ func TestCreateOrchestrationRejectsCCBBackendWithoutDirectCLIRequirements(t *tes
 
 	body := createOrchestrationHTTP(t, s, userID, map[string]any{
 		"agentId":  agentID,
-		"prompt":   "run through local ccb",
+		"prompt":   "run orchestration",
 		"maxTurns": 2,
 	}, http.StatusConflict)
 	if body["code"] != "ORCHESTRATION_CAPABILITY_UNAVAILABLE" || !strings.Contains(body["message"].(string), "Claude") || !strings.Contains(body["message"].(string), "Codex") {

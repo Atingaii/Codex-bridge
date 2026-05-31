@@ -93,7 +93,8 @@ and a sign-in action; it does not open authenticated APIs or WebSockets.
 5. Add Hub tests that prove public reads work without auth and private APIs
    still require auth.
 6. Add share buttons to the chat and orchestration UI in
-   `frontend/src/app/App.tsx`.
+   `frontend/src/app/pages/Workspace.tsx:Workspace` and
+   `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`.
 7. Add `/share/<shareID>` read-only route that bypasses `/api/me`.
 8. Build `frontend/` so `internal/web/static/` is refreshed.
 9. Update architecture/code-map docs for the new table and API surface.

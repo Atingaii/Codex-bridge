@@ -84,7 +84,6 @@ func runConnect(cfg *config.Config, args []string) error {
 	name := fs.String("name", "", "CLI endpoint name")
 	cwd := fs.String("cwd", "", "workspace directory")
 	runner := fs.String("runner", "codex", "runner: codex, claude, echo")
-	orchestrationRunner := fs.String("orchestration-runner", cfg.Bridge.OrchestrationRunner, "deprecated; orchestration always uses Hub-managed Claude/Codex turns")
 	machineIDFile := fs.String("machine-id-file", cfg.Bridge.MachineIDFile, "machine id file")
 	machineID := fs.String("machine-id", "", "existing machine id to write before connecting")
 	sandbox := fs.String("sandbox", cfg.Bridge.Sandbox, "runner sandbox")
@@ -137,7 +136,6 @@ func runConnect(cfg *config.Config, args []string) error {
 	cfg.Bridge.Name = *name
 	cfg.Bridge.CWD = *cwd
 	cfg.Bridge.Runner = *runner
-	cfg.Bridge.OrchestrationRunner = *orchestrationRunner
 	cfg.Bridge.MachineIDFile = *machineIDFile
 	cfg.Bridge.Sandbox = *sandbox
 	cfg.Bridge.ApprovalPolicy = *approvalPolicy
@@ -299,15 +297,23 @@ func runEnroll(cfg *config.Config, args []string) error {
 
 func printUsage() {
 	fmt.Println(`codex-bridge
+Remote browser chat + multi-CLI orchestration for Codex/Claude CLIs on a private machine.
 
-Usage:
+Hub (public server):
   codex-bridge hub                 Run the public Hub server
-  codex-bridge bridge              Run the reverse-connecting Bridge
-  codex-bridge connect <token>     Connect this CLI endpoint to https://sparkapi.tech
-  codex-bridge link <token>        Install and run Bridge in the background
-  codex-bridge claude-approval-mcp Internal Claude permission prompt MCP server
-  codex-bridge user --username u --password p
-  codex-bridge enroll [--ttl 24h]
+  codex-bridge user --username u --password p   Create or update a login user
+  codex-bridge enroll [--ttl 24h]  Mint an enroll token for a new endpoint
+
+Endpoint (private machine):
+  codex-bridge link <token>        Recommended. Install + run as a background service
+                                   (auto-restart, survives logout). This is the command the
+                                   Hub Settings page generates for you.
+  codex-bridge connect <token>     Run the endpoint in the foreground. Used internally by
+                                   ` + "`link`" + `; also handy for one-off runs or debugging.
+  codex-bridge bridge              Run the endpoint from configs/<env>.yaml (advanced/dev).
+
+Internal:
+  codex-bridge claude-approval-mcp Claude permission-prompt MCP server (spawned by Bridge)
 
 Configuration is loaded from configs/${APP_ENV:-dev}.yaml, then environment variables.`)
 }

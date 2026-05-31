@@ -36,14 +36,8 @@ bridge:
   machine_id_file: ~/.codex-bridge/machine_id
   cwd: .
   runner: echo
-  # Historical only. Hub-managed orchestration now always uses direct
-  # Claude Code + Codex CLI turns on the selected Bridge endpoint.
-  orchestration_runner: ""
   codex_path: codex
   claude_path: claude
-  ccb_path: ccb
-  ccb_target: codex
-  ccb_timeout: 1h
   claude_model: ""
   claude_effort: ""
   model: ""

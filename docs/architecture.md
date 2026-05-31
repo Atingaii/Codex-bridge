@@ -75,26 +75,30 @@ when no stdin side-channel exists. Both paths use
 Bridge said.
 
 Review-required Claude orchestration uses Claude Code's
-`--permission-prompt-tool` support. `internal/bridge/orchestration.go:runClaude`
-and `internal/bridge/orchestration.go:runClaudeInteractive` write a temporary
-MCP config, run `codex-bridge claude-approval-mcp` as a stdio MCP server, and
-forward MCP permission prompts back to the parent Bridge over a Unix socket.
-Hub then reuses existing `approval_request` and `approval_response` frames with
-`payload.runId` for browser approval on the orchestration timeline.
+`--permission-prompt-tool` support.
+`internal/bridge/orchestration_claude.go:runClaude` and
+`internal/bridge/orchestration_claude.go:runClaudeInteractive` write a
+temporary MCP config, run `codex-bridge claude-approval-mcp` as a stdio MCP
+server, and forward MCP permission prompts back to the parent Bridge over a
+Unix socket. Hub then reuses existing `approval_request` and
+`approval_response` frames with `payload.runId` for browser approval on the
+orchestration timeline.
 
 Codex orchestration uses `codex app-server --listen stdio://` through
-`internal/bridge/orchestration.go:runCodexInteractive`. App-server approval
+`internal/bridge/orchestration_codex.go:runCodexInteractive`. App-server approval
 callbacks are mapped to run-scoped `approval_request` frames with
 `payload.runId`, and browser decisions return as `approval_response` frames to
 the owning Bridge. The standalone `internal/bridge/appserver_runner.go:Prompt`
 path remains the Codex app-server runner for chat and non-orchestration runner
 uses.
 
-CCB is not an active orchestration backend for new Hub-managed runs. Historical
-CCB helper code and event rendering remain in place, but current orchestration
-starts use the selected Bridge connection to run the direct Claude Code and
-Codex CLI turn loop described above. See
-[docs/features/manual-orchestration-rounds.md](features/manual-orchestration-rounds.md).
+Orchestration is a native-session relay only. Each run drives one long-lived
+Codex app-server thread and one long-lived Claude Code stream-json session on the
+selected Bridge, and follow-up turns reuse those native conversations so the user
+can `resume` them from the workspace. The Bridge streams CLI output and typed
+command events to the browser and carries the previous turn's visible result
+forward; it does not inject verifier, remediation, or assessment turns. The
+earlier per-turn design (and the external CCB backend) was removed on 2026-05-30.
 
 Bridge registration includes `protocol.RegisterPayload.Capabilities`. Hub keeps
 the latest online capabilities in `internal/hub/pool.go` and returns them from

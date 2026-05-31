@@ -14,11 +14,11 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Browser chat WebSocket | `internal/hub/ws_browser.go` |
 | Bridge reverse WebSocket | `internal/hub/ws_bridge.go`, `internal/bridge/client.go` |
 | Browser/Bridge connection pools | `internal/hub/pool.go` |
-| Orchestration HTTP/WS | `internal/hub/orchestration.go`, `internal/bridge/orchestration.go` |
+| Orchestration HTTP/WS | `internal/hub/orchestration.go`, `internal/bridge/orchestration*.go` |
 | Runner abstraction | `internal/bridge/runner.go`, `internal/bridge/appserver_runner.go`, `internal/bridge/session.go` |
 | SQLite schema and CRUD | `internal/store/store.go`, `internal/store/id.go` |
 | Wire protocol | `internal/protocol/envelope.go` |
-| Frontend source | `frontend/src/app/App.tsx`, `frontend/src/styles/` |
+| Frontend source | `frontend/src/app/App.tsx`, `frontend/src/app/pages/`, `frontend/src/app/components/`, `frontend/src/app/lib/`, `frontend/src/styles/` |
 | Embedded frontend output | `internal/web/static/`, `internal/web/embed.go` |
 | Android wrapper | `android/`, `frontend/capacitor.config.ts` |
 | Deployment | `deploy/Caddyfile`, `deploy/systemd-*.service` |
@@ -30,7 +30,8 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 1. Add the route in `internal/hub/server.go:NewServer`.
 2. Implement the handler in the relevant `internal/hub/*.go` file.
 3. Add store methods if persistence is needed.
-4. Add frontend caller in `frontend/src/app/App.tsx` when UI-visible.
+4. Add frontend caller in the relevant `frontend/src/app/pages/` or
+   `frontend/src/app/components/` file when UI-visible.
 5. Add or update a feature doc and tests.
 
 ### Change Conversation Share Links
@@ -45,8 +46,9 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    `internal/hub/share.go:publicOrchestrationEvents` strips Bridge-internal
    severity events, `TurnStartData.PromptText`, and private Bridge-note fields
    while preserving public lifecycle and `run.conclusion` events.
-5. `frontend/src/app/App.tsx:PublicSharePage` renders `/share/{shareID}`
-   before login bootstrap.
+5. `frontend/src/app/App.tsx:App` routes `/share/{shareID}` before login
+   bootstrap, and `frontend/src/app/pages/PublicSharePage.tsx:PublicSharePage`
+   renders it.
 6. Update [docs/features/conversation-share-links.md](features/conversation-share-links.md).
 
 ### Change CLI Endpoint Management
@@ -62,8 +64,8 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 5. `internal/bridge/client.go:requestShutdown` handles remote endpoint
    shutdown and local user-service cleanup.
 6. `internal/store/store.go:DeleteAgent` owns agent soft deletion.
-7. `frontend/src/app/App.tsx:SettingsModal` renders add/delete/detail/repair
-   controls.
+7. `frontend/src/app/components/Settings.tsx:SettingsModal` renders
+   add/delete/detail/repair controls.
 8. Update the relevant feature doc and tests.
 
 ### Add A WebSocket Frame
@@ -73,7 +75,8 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    orchestration WS code.
 3. Handle Bridge-originated frames in `internal/hub/ws_bridge.go`.
 4. Handle Hub-to-Bridge frames in `internal/bridge/client.go`.
-5. Update frontend parsing in `frontend/src/app/App.tsx`.
+5. Update frontend parsing in the relevant page under
+   `frontend/src/app/pages/` or helper under `frontend/src/app/lib/`.
 6. Add integration tests under `internal/integration/`.
 
 ### Change Chat Continuity
@@ -93,8 +96,9 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 1. `internal/store/store.go:Session` owns `AgentID`.
 2. `internal/hub/server.go:handleCreateSession` creates sessions for the
    selected agent.
-3. `frontend/src/app/App.tsx:Workspace` filters sessions by selected agent and
-   stores per-agent active session ids in browser local storage.
+3. `frontend/src/app/pages/Workspace.tsx:Workspace` filters sessions by
+   selected agent and stores per-agent active session ids in browser local
+   storage.
 4. Update
    [docs/features/agent-scoped-chat-sessions.md](features/agent-scoped-chat-sessions.md).
 
@@ -104,10 +108,10 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    `approval_response`.
 2. `internal/bridge/appserver_runner.go` maps Codex app-server approval requests
    to Bridge protocol frames.
-3. `internal/bridge/orchestration.go:runCodexAppServer` reuses the app-server
+3. `internal/bridge/orchestration_codex.go:runCodexAppServerWithThread` reuses the app-server
    runner for review-required Codex orchestration and emits run-scoped approval
    frames.
-4. `internal/bridge/orchestration.go:runClaude` maps Claude Code permission
+4. `internal/bridge/orchestration_claude.go:runClaude` maps Claude Code permission
    prompts through `codex-bridge claude-approval-mcp` and run-scoped approval
    frames.
 5. `internal/bridge/session.go:ApprovalResponse` routes browser decisions back
@@ -124,8 +128,12 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 9. `internal/hub/ws_browser.go:handleBrowserEnvelope` and
    `internal/hub/orchestration.go:handleOrchestrationWS` forward browser
    approval decisions back to the Bridge.
-10. `frontend/src/app/App.tsx` renders capability status, approval cards, and
-    approve/deny responses in chat and orchestration views.
+10. `frontend/src/app/components/OrchestrationComponents.tsx:CapabilityMatrix`,
+    `frontend/src/app/components/chat/ApprovalCard.tsx:ApprovalCard`,
+    `frontend/src/app/pages/Workspace.tsx:Workspace`, and
+    `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
+    render capability status, approval cards, and approve/deny responses in
+    chat and orchestration views.
 
 ### Change Orchestration Continuity
 
@@ -140,11 +148,13 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    native CLI continuity fields from `run.start` and `turn.end` events.
 5. `internal/bridge/orchestration.go:run` executes turns using the prompt plus
    compacted context, restored CLI state, and locked cwd.
-6. `frontend/src/app/App.tsx:OrchestrationWorkspace` must keep selecting the
-   current run and call the continue endpoint for follow-up tasks.
+6. `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
+   must keep selecting the current run and call the continue endpoint for
+   follow-up tasks.
 7. `internal/hub/orchestration.go:startOrchestration` attaches uploaded file
    metadata to `user.message` events, and
-   `frontend/src/app/App.tsx:OrchestrationEventItem` renders those files.
+   `frontend/src/app/components/OrchestrationComponents.tsx:OrchestrationEventItem`
+   renders those files.
 8. Update [docs/features/orchestration-continuity.md](features/orchestration-continuity.md).
 
 ### Change Orchestration Strategy
@@ -156,11 +166,11 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 2. `internal/hub/orchestration.go:normalizeOrchestrationProfile`,
    `internal/store/store.go:normalizeOrchestrationProfile`,
    `internal/protocol.OrchestrationStartPayload`, and
-   `frontend/src/app/App.tsx:OrchestrationWorkspace` carry the persisted
-   orchestration profile (`default` or `formal-proof`).
-3. `internal/bridge/orchestration.go:roleForTurnWithFirstCLI` controls which
+   `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
+   carry the persisted orchestration profile (`default` or `formal-proof`).
+3. `internal/bridge/orchestration_relay.go:roleForTurnWithFirstCLI` controls which
    CLI owns each turn.
-4. `internal/bridge/orchestration.go:composeRelayPromptWithFirstCLI` controls
+4. `internal/bridge/orchestration_relay.go:composeRelayPromptWithFirstCLI` controls
    the pass-through prompt sent to Claude/Codex. Only
    `profile=formal-proof` enables formal-proof prompt guidance; the default
    profile does not silently activate it from prompt keywords.
@@ -169,11 +179,11 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    assessments, manual-build carry-over, command fingerprint decisions, and
    benchmark-specific detectors live under
    `internal/bridge/profiles/formalproof/`.
-6. `internal/bridge/orchestration.go:formatRelayPriorTurn` controls how much
+6. `internal/bridge/orchestration_relay.go:formatRelayPriorTurn` controls how much
    prior visible output and command context is sent to the next CLI.
-7. `internal/bridge/orchestration.go:runRelayCLI`,
-   `internal/bridge/orchestration.go:runCodexInteractive`, and
-   `internal/bridge/orchestration.go:runClaudeInteractive` preserve the
+7. `internal/bridge/orchestration_relay.go:runRelayCLI`,
+   `internal/bridge/orchestration_codex.go:runCodexInteractive`, and
+   `internal/bridge/orchestration_claude.go:runClaudeInteractive` preserve the
    run-scoped native Codex app-server thread, Claude stream-json process,
    stable Claude session id, and Codex thread id when launching the next CLI
    turn.
@@ -181,10 +191,11 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    run cwd reported by Bridge, and
    `internal/bridge/orchestration.go:PrepareOrchestrationPromptFiles` writes
    uploaded files under that cwd.
-9. `internal/bridge/orchestration.go:relayTerminalContent` controls terminal
+9. `internal/bridge/orchestration_relay.go:relayTerminalContent` controls terminal
    run content without adding a hidden verifier or remediation turn.
-10. Keep event kinds compatible with `frontend/src/app/App.tsx:visibleOrchestrationEvents`,
-   including terminal run summary rendering for `run.end` / `run.error`.
+10. Keep event kinds compatible with
+   `frontend/src/app/lib/utils.ts:visibleOrchestrationEvents`, including
+   terminal run summary rendering for `run.end` / `run.error`.
 11. Update
    [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
 
@@ -193,17 +204,19 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 1. `internal/protocol/envelope.go:OrchestrationEventPayload` defines the event
    contract, including `Source`, `Severity`, typed sub-payloads, and
    `RunConclusion`.
-2. `internal/bridge/orchestration.go:emit` normalizes source/severity and
+2. `internal/bridge/orchestration_events.go:emit` normalizes source/severity and
    emits exactly one `run.conclusion` before terminal run events.
-3. `internal/bridge/orchestration.go:emitTool` maps `RunnerToolEvent` into
+3. `internal/bridge/orchestration_events.go:emitTool` maps `RunnerToolEvent` into
    typed `CommandData`; frontend command cards must use `commandData`, not
    free-form `data` keys.
 4. `internal/store/store.go:AddOrchestrationEvent` persists typed event
    payloads and keeps legacy `Data` compatibility for older rows.
 5. `internal/hub/orchestration.go:handleOrchestrationEvent` persists the
    Bridge event and updates run continuity fields from typed payloads.
-6. `frontend/src/app/App.tsx:visibleOrchestrationEvents` renders events using
-   `source`, `severity`, `commandData`, and `runConclusion`.
+6. `frontend/src/app/lib/utils.ts:visibleOrchestrationEvents` reduces events
+   using `source`, `severity`, `commandData`, and `runConclusion`, and
+   `frontend/src/app/components/OrchestrationComponents.tsx:OrchestrationEventItem`
+   renders the result.
 7. `internal/hub/share.go:publicOrchestrationEvents` is the public transcript
    sanitizer for typed orchestration events.
 8. Update [docs/features/orchestration-event-protocol-hardening(1).md](features/orchestration-event-protocol-hardening(1).md).
@@ -217,7 +230,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 
 ### Change Frontend UI
 
-1. Edit `frontend/src/app/App.tsx` or styles.
+1. Edit the relevant file under `frontend/src/app/` or styles.
 2. Run `cd frontend && npm run build` so `internal/web/static/` is refreshed.
 3. Run Go tests because embedded static tests cover expected assets.
 
@@ -227,7 +240,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 2. Bind env overrides in `internal/config/load.go`.
 3. Update `configs/dev.yaml.example`.
 4. For `bridge.long_command_observer`, keep YAML fields, env overrides, and
-   `internal/bridge/orchestration.go:longCommandObserverConfig` defaults in
+   `internal/bridge/orchestration_claude.go:longCommandObserverConfig` defaults in
    sync.
 5. Update `docs/dev-workflow.md`.
 

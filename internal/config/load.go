@@ -97,25 +97,11 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("BRIDGE_RUNNER"); v != "" {
 		cfg.Bridge.Runner = v
 	}
-	if v := os.Getenv("BRIDGE_ORCHESTRATION_RUNNER"); v != "" {
-		cfg.Bridge.OrchestrationRunner = v
-	}
 	if v := os.Getenv("BRIDGE_CODEX_PATH"); v != "" {
 		cfg.Bridge.CodexPath = v
 	}
 	if v := os.Getenv("BRIDGE_CLAUDE_PATH"); v != "" {
 		cfg.Bridge.ClaudePath = v
-	}
-	if v := os.Getenv("BRIDGE_CCB_PATH"); v != "" {
-		cfg.Bridge.CCBPath = v
-	}
-	if v := os.Getenv("BRIDGE_CCB_TARGET"); v != "" {
-		cfg.Bridge.CCBTarget = v
-	}
-	if v := os.Getenv("BRIDGE_CCB_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			cfg.Bridge.CCBTimeout = Duration{Duration: d}
-		}
 	}
 	if v := os.Getenv("BRIDGE_CLAUDE_MODEL"); v != "" {
 		cfg.Bridge.ClaudeModel = v

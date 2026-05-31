@@ -30,7 +30,8 @@
 1. Make `internal/hub/server.go:handleRegister` reject every request before
    parsing credentials.
 2. Remove the public registration switch from `internal/config`.
-3. Remove registration controls from `frontend/src/app/App.tsx:LoginScreen`.
+3. Remove registration controls from
+   `frontend/src/app/pages/LoginScreen.tsx:LoginScreen`.
 4. Update auth and integration tests to pre-create non-admin users through the
    store.
 5. Rebuild embedded static assets under `internal/web/static/`.

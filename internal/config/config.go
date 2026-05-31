@@ -46,12 +46,8 @@ type BridgeConfig struct {
 	MachineIDFile       string                    `yaml:"machine_id_file"`
 	CWD                 string                    `yaml:"cwd"`
 	Runner              string                    `yaml:"runner"`
-	OrchestrationRunner string                    `yaml:"orchestration_runner"`
 	CodexPath           string                    `yaml:"codex_path"`
 	ClaudePath          string                    `yaml:"claude_path"`
-	CCBPath             string                    `yaml:"ccb_path"`
-	CCBTarget           string                    `yaml:"ccb_target"`
-	CCBTimeout          Duration                  `yaml:"ccb_timeout"`
 	ClaudeModel         string                    `yaml:"claude_model"`
 	ClaudeEffort        string                    `yaml:"claude_effort"`
 	Model               string                    `yaml:"model"`
@@ -111,25 +107,21 @@ func Default() Config {
 			MaxAssistantMessageBytes: 4 * 1024 * 1024,
 		},
 		Bridge: BridgeConfig{
-			HubURL:              "https://sparkapi.tech",
-			Name:                "local-codex",
-			MachineIDFile:       "~/.codex-bridge/machine_id",
-			CWD:                 ".",
-			Runner:              "echo",
-			OrchestrationRunner: "",
-			CodexPath:           "codex",
-			ClaudePath:          "claude",
-			CCBPath:             "ccb",
-			CCBTarget:           "codex",
-			CCBTimeout:          Duration{Duration: 60 * 60 * 1_000_000_000},
-			ClaudeModel:         "",
-			ClaudeEffort:        "",
-			Sandbox:             "workspace-write",
-			ApprovalPolicy:      "never",
-			ReconnectMin:        Duration{Duration: 5_000_000_000},
-			ReconnectMax:        Duration{Duration: 30_000_000_000},
-			HeartbeatInterval:   Duration{Duration: 15_000_000_000},
-			MaxSessions:         8,
+			HubURL:            "https://sparkapi.tech",
+			Name:              "local-codex",
+			MachineIDFile:     "~/.codex-bridge/machine_id",
+			CWD:               ".",
+			Runner:            "echo",
+			CodexPath:         "codex",
+			ClaudePath:        "claude",
+			ClaudeModel:       "",
+			ClaudeEffort:      "",
+			Sandbox:           "workspace-write",
+			ApprovalPolicy:    "never",
+			ReconnectMin:      Duration{Duration: 5_000_000_000},
+			ReconnectMax:      Duration{Duration: 30_000_000_000},
+			HeartbeatInterval: Duration{Duration: 15_000_000_000},
+			MaxSessions:       8,
 			LongCommandObserver: LongCommandObserverConfig{
 				Enabled:         false,
 				After:           Duration{Duration: 2 * 60 * 1_000_000_000},

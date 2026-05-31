@@ -57,7 +57,7 @@ transcripts.
 
 - `internal/bridge/orchestration.go:run` alternates turns between Claude and
   Codex.
-- `internal/bridge/orchestration.go:composeOrchestrationPrompt` appends prior
+- `internal/bridge/orchestration.go` appends prior
   turn content directly, which can become token-heavy and does not define a
   shared handoff contract.
 - `internal/hub/orchestration.go:compactOrchestrationContext` already compacts
@@ -229,7 +229,7 @@ discharged.
 The Bridge must avoid sending full raw previous outputs unless they are short.
 Each prior turn in the next prompt should be capped and should prefer parsed
 handoff fields when the agent provided them. The visible `Handoff:` line remains
-the compatibility surface, while `internal/bridge/orchestration.go:parseHandoffFields`
+the compatibility surface, while `internal/bridge/orchestration_relay.go:parseHandoffFields`
 stores the important values as structured turn state for later prompts.
 Compact prior turns include both successful verification commands and failed
 command summaries so the next CLI can see what has already been tried.

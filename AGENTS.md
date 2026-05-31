@@ -5,9 +5,13 @@ the detailed docs linked below only when the task needs them.
 
 ## Positioning
 
-Single-user remote browser access to Codex CLI running on a private machine.
-The public Hub is only a transport, auth, static UI, and SQLite persistence
-layer. The private Bridge owns workspace access and model credentials.
+Single-user remote access, from any browser, to Codex and Claude Code CLIs
+running on a private machine. Two surfaces: 1:1 chat with a single CLI, and
+multi-CLI orchestration that relays turns between one long-lived native Codex
+session and one long-lived native Claude Code session (with opt-in formal-proof
+prompt guidance). The public Hub is only a transport, auth, static UI, and SQLite
+persistence layer. The private Bridge owns workspace access and model
+credentials.
 
 ## Core Decisions
 

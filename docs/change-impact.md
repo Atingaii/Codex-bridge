@@ -23,13 +23,13 @@ keeps only the top frequent subset.
 
 | Change | Must update |
 | --- | --- |
-| Chat session creation or selection | `internal/hub/server.go`, `internal/store/` session methods, `frontend/src/app/App.tsx`, continuity feature doc |
+| Chat session creation or selection | `internal/hub/server.go`, `internal/store/` session methods, `frontend/src/app/pages/Workspace.tsx`, continuity feature doc |
 | Chat prompt flow | `internal/hub/ws_browser.go`, `internal/bridge/session.go`, `internal/bridge/runner.go`, run/message store methods, integration tests |
 | Codex thread resume behavior | `internal/bridge/runner.go:args`, `internal/hub/ws_bridge.go:handlePromptComplete`, `internal/store/store.go:UpdateSessionRemoteThreadByID`, tests |
-| Orchestration create/continue flow | `internal/hub/orchestration.go`, `internal/bridge/orchestration.go`, `frontend/src/app/App.tsx`, `docs/features/orchestration-continuity.md` |
-| Orchestration endpoint continuity | `internal/hub/orchestration.go:handleContinueOrchestration`, `frontend/src/app/App.tsx`, `docs/features/orchestration-continuity.md`, `docs/features/manual-orchestration-rounds.md` |
+| Orchestration create/continue flow | `internal/hub/orchestration.go`, `internal/bridge/orchestration*.go`, `frontend/src/app/pages/OrchestrationWorkspace.tsx`, `docs/features/orchestration-continuity.md` |
+| Orchestration endpoint continuity | `internal/hub/orchestration.go:handleContinueOrchestration`, `frontend/src/app/pages/OrchestrationWorkspace.tsx`, `docs/features/orchestration-continuity.md`, `docs/features/manual-orchestration-rounds.md` |
 | Bridge capability reporting | `internal/protocol.RegisterPayload`, `internal/bridge/client.go`, `internal/hub/pool.go`, `internal/hub/server.go:handleAgents`, frontend agent types/UI, policy tests |
-| Orchestration event shape | `internal/protocol.OrchestrationEventPayload`, Bridge emitters in `internal/bridge/orchestration.go`, `internal/store.OrchestrationEvent`, Hub persistence/share sanitizers, visible event reducer in `frontend/src/app/App.tsx`, integration tests, `docs/architecture.md`, `docs/code-map.md` |
+| Orchestration event shape | `internal/protocol.OrchestrationEventPayload`, Bridge emitters in `internal/bridge/orchestration_events.go`, `internal/store.OrchestrationEvent`, Hub persistence/share sanitizers, visible event reducer in `frontend/src/app/lib/utils.ts`, integration tests, `docs/architecture.md`, `docs/code-map.md` |
 | Orchestration profile behavior | Hub create/continue payloads, `internal/store.OrchestrationRun.profile`, Bridge prompt composition, `internal/bridge/profiles/`, frontend profile selector, continuity docs |
 | Orchestration long-command observer | `internal/config/`, `configs/*.yaml.example`, Bridge scanner/observer tests for Claude and Codex, frontend Bridge-note rendering, `docs/dev-workflow.md`, README if user-facing |
 | Cancellation semantics | Hub cancel handler, Bridge cancel manager, status constants, frontend stop button, tests |

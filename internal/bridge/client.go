@@ -257,13 +257,6 @@ func bridgeClaudePath(cfg *config.Config) string {
 	return cfg.Bridge.ClaudePath
 }
 
-func bridgeCCBPath(cfg *config.Config) string {
-	if strings.TrimSpace(cfg.Bridge.CCBPath) == "" {
-		return "ccb"
-	}
-	return cfg.Bridge.CCBPath
-}
-
 func codexOrchestrationExecution(cfg *config.Config) string {
 	if bridgeBypassApprovalsAndSandbox(cfg) {
 		return "codex exec --json"

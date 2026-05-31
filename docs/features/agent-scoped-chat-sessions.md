@@ -19,12 +19,13 @@ sidebar lists should switch to that endpoint's own space.
 - `internal/store/store.go:Session` already stores `AgentID`.
 - `internal/hub/server.go:handleCreateSession` creates sessions for the chosen
   agent.
-- `frontend/src/app/App.tsx:Workspace` loads all sessions and keeps one global
-  `activeSessionId`, so switching the selected agent does not switch the visible
-  chat space.
-- `frontend/src/app/App.tsx:OrchestrationWorkspace` loads all orchestration runs
-  and previously kept one global active run id, so switching endpoints could
-  leave another endpoint's run list and timeline visible.
+- `frontend/src/app/pages/Workspace.tsx:Workspace` loads all sessions and keeps
+  one global `activeSessionId`, so switching the selected agent does not switch
+  the visible chat space.
+- `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
+  loads all orchestration runs and previously kept one global active run id, so
+  switching endpoints could leave another endpoint's run list and timeline
+  visible.
 
 ## Design
 

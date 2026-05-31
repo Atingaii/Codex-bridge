@@ -111,7 +111,7 @@ binary.
 2. Preserve explicit `--hub` only when the public Hub URL differs from
    configured `bridge.hub_url`.
 3. Return `setupCommand` from `internal/hub/server.go:handleCreateBridgeToken`
-   and prefer it in `frontend/src/app/App.tsx:SettingsModal`.
+   and prefer it in `frontend/src/app/components/Settings.tsx:SettingsModal`.
 4. Update service worker cache handling in `frontend/public/sw.js` and rebuild
    `internal/web/static/`.
 5. Make `/install.sh` replace the binary through a temporary file.

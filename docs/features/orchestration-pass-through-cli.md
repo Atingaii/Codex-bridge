@@ -9,7 +9,7 @@
 - Avoid Bridge-owned proof acceptance gates, automatic proof remediation turns,
   or runtime command bans that constrain what the CLI may do.
 - For formal-proof-looking tasks, provide lightweight workflow and audit
-  reminders in the initial CLI/CCB prompt so the browser-visible result records
+  reminders in the initial CLI prompt so the browser-visible result records
   the original obligation, build/scan/audit evidence, and unresolved blockers.
 - Keep one narrow safety boundary for explicit Isabelle work: when Claude Code
   appears to be running a long Isabelle build, Bridge may append a user-style
@@ -113,7 +113,8 @@ further waiting when appropriate, and continue the task. The browser receives a
 input shape follows Claude Code's documented headless SDK input mode:
 `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}`.
 When there are no active tool events and no further browser input, Bridge closes
-the stream stdin after `internal/bridge/orchestration.go:claudeStreamInputIdleCloseAfter`.
+the stream stdin after
+`internal/bridge/orchestration_claude.go:claudeStreamInputIdleCloseAfter`.
 That EOF tells Claude no more user messages are pending; it does not cancel or
 kill the Claude process.
 
@@ -127,11 +128,7 @@ Automatic post-run remediation is disabled for pass-through orchestration. If a
 CLI says it is finished, Bridge should not start a new hidden assessment or
 repair turn just because a proof-specific checklist is missing.
 
-The local CCB path follows the same rule: CCB receives the lightweight
-formal-proof guidance when applicable, but CCB status and final reply are
-relayed without a Bridge-owned formal-proof acceptance gate.
-
-CLI turns run under managed process groups. Direct Codex, Claude, CCB, and
+CLI turns run under managed process groups. Direct Codex, Claude, and
 Codex app-server processes use the same cancellation boundary; on Linux their
 direct child receives `Pdeathsig=SIGKILL` if Bridge exits unexpectedly. The
 packaged Bridge service and generated user services set `OOMPolicy=continue` so
@@ -140,8 +137,8 @@ an OOM-killed child build does not by itself restart the Bridge parent.
 ## Implementation Steps
 
 1. Mark the older strategy-optimization proof-gate design as deprecated.
-2. Remove proof-specific hidden assessment/remediation behavior from normal,
-   verifier, remediation, and CCB paths.
+2. Remove proof-specific hidden assessment/remediation behavior from normal and
+   verifier paths.
 3. Add a small Isabelle timeout-boundary prompt block.
 4. Stop wrapping CLI results with foreground Isabelle build rejection.
 5. Disable automatic final verifier and remediation decisions that interrupt
@@ -176,8 +173,6 @@ an OOM-killed child build does not by itself restart the Bridge parent.
 - Direct CLI execution does not reject foreground Isabelle build commands.
 - A resolved CLI handoff for the three-upload task can complete without Bridge
   requiring proof-specific assessment dimensions.
-- CCB completed replies are relayed without the old proof assessment gate, while
-  CCB prompts still carry the same lightweight proof reminders.
 - Runs created with `firstCli: "codex"` show Codex as turn one in the browser
   timeline and include the selection in persisted run data.
 - Full verification passes:

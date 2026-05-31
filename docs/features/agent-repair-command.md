@@ -52,8 +52,8 @@ for it, so simply opening settings does not mint unused credentials.
 2. Extract reusable command response construction from
    `internal/hub/server.go:handleCreateBridgeToken`.
 3. Add `internal/hub/server.go:handleCreateAgentRepairToken`.
-4. Update `frontend/src/app/App.tsx:SettingsModal` with per-agent details and
-   repair command generation.
+4. Update `frontend/src/app/components/Settings.tsx:SettingsModal` with
+   per-agent details and repair command generation.
 5. Add integration coverage for repair command authorization, syntax, and
    machine-id pinning.
 6. Rebuild `internal/web/static/`.

@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -21,9 +20,6 @@ import (
 const (
 	linkProfileReviewRequired = "review-required"
 	linkProfileAutoExecute    = "auto-execute"
-	linkCCBRepoURL            = "https://github.com/SeemSeam/claude_codex_bridge.git"
-	linkCCBArchiveURL         = "https://github.com/SeemSeam/claude_codex_bridge/archive/refs/heads/main.tar.gz"
-	linkCCBInstallDirName     = "claude_codex_bridge"
 )
 
 type linkOptions struct {
@@ -37,7 +33,6 @@ type linkOptions struct {
 
 	CodexPath  string
 	ClaudePath string
-	CCBPath    string
 
 	Hash       string
 	ServiceDir string
@@ -185,13 +180,8 @@ func resolveLinkCLIs(opts *linkOptions) error {
 	if err != nil {
 		return err
 	}
-	ccbPath := ""
-	if path, err := lookPathWithLocalBin("ccb"); err == nil {
-		ccbPath = path
-	}
 	opts.CodexPath = codexPath
 	opts.ClaudePath = claudePath
-	opts.CCBPath = ccbPath
 	return nil
 }
 
@@ -215,149 +205,6 @@ func lookPathWithLocalBin(name string) (string, error) {
 		}
 	}
 	return "", exec.ErrNotFound
-}
-
-func installCCB(ctx context.Context, home string) error {
-	if runtime.GOOS == "windows" {
-		return errors.New("automatic ccb install is only supported from Unix-like shells; install CCB manually and rerun link")
-	}
-	srcDir := filepath.Join(home, ".local", "share", linkCCBInstallDirName)
-	if err := os.MkdirAll(filepath.Dir(srcDir), 0o755); err != nil {
-		return fmt.Errorf("create ccb install parent: %w", err)
-	}
-	gitPath, gitErr := exec.LookPath("git")
-	switch {
-	case gitErr == nil:
-		if _, err := os.Stat(filepath.Join(srcDir, ".git")); err == nil {
-			if err := runLoggedCommand(ctx, srcDir, gitPath, "pull", "--ff-only"); err != nil {
-				return fmt.Errorf("update ccb source: %w", err)
-			}
-		} else if _, err := os.Stat(filepath.Join(srcDir, "install.sh")); err == nil {
-			fmt.Printf("using existing ccb source directory: %s\n", srcDir)
-		} else {
-			if _, err := os.Stat(srcDir); err == nil {
-				return fmt.Errorf("%s already exists but is not a CCB checkout; move it aside or install ccb manually", srcDir)
-			}
-			if err := runLoggedCommand(ctx, "", gitPath, "clone", "--depth", "1", linkCCBRepoURL, srcDir); err != nil {
-				return fmt.Errorf("clone ccb source: %w", err)
-			}
-		}
-	default:
-		if _, err := os.Stat(filepath.Join(srcDir, "install.sh")); err == nil {
-			fmt.Printf("git not found; using existing ccb source directory: %s\n", srcDir)
-		} else if err := downloadCCBArchive(ctx, srcDir); err != nil {
-			return err
-		}
-	}
-	env := append(os.Environ(),
-		"CODEX_BIN_DIR="+filepath.Join(home, ".local", "bin"),
-		"CODEX_INSTALL_PREFIX="+filepath.Join(home, ".local", "share", "codex-dual"),
-		"CCB_INSTALL_ASSUME_YES=1",
-		"CCB_DROID_AUTOINSTALL=0",
-	)
-	if os.Geteuid() == 0 {
-		return installCCBRootWrapper(srcDir, filepath.Join(home, ".local", "bin"))
-	}
-	bashPath, err := exec.LookPath("bash")
-	if err != nil {
-		return errors.New("bash is required to run CCB's installer; install bash or install CCB manually, then rerun link")
-	}
-	if err := runLoggedCommandEnv(ctx, srcDir, env, bashPath, "./install.sh", "install"); err != nil {
-		return fmt.Errorf("install ccb: %w", err)
-	}
-	return nil
-}
-
-func installCCBRootWrapper(srcDir, binDir string) error {
-	ccbSource := filepath.Join(srcDir, "ccb")
-	if st, err := os.Stat(ccbSource); err != nil || st.IsDir() {
-		if err != nil {
-			return fmt.Errorf("install root ccb wrapper: %w", err)
-		}
-		return fmt.Errorf("install root ccb wrapper: %s is a directory", ccbSource)
-	}
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		return fmt.Errorf("create ccb bin dir: %w", err)
-	}
-	if err := os.Chmod(ccbSource, 0o755); err != nil {
-		return fmt.Errorf("make ccb executable: %w", err)
-	}
-	target := filepath.Join(binDir, "ccb")
-	if st, err := os.Lstat(target); err == nil {
-		if st.IsDir() {
-			return fmt.Errorf("%s exists as a directory; remove it or install ccb manually", target)
-		}
-		if err := os.Remove(target); err != nil {
-			return fmt.Errorf("replace existing ccb entrypoint: %w", err)
-		}
-	}
-	if err := os.Symlink(ccbSource, target); err == nil {
-		fmt.Printf("installed root ccb wrapper: %s -> %s\n", target, ccbSource)
-		return nil
-	}
-	wrapper := "#!/bin/sh\nexec " + shellEnvQuote(ccbSource) + " \"$@\"\n"
-	if err := os.WriteFile(target, []byte(wrapper), 0o755); err != nil {
-		return fmt.Errorf("write ccb wrapper: %w", err)
-	}
-	fmt.Printf("installed root ccb wrapper: %s\n", target)
-	return nil
-}
-
-func downloadCCBArchive(ctx context.Context, srcDir string) error {
-	tarPath, cleanup, err := fetchCCBArchive(ctx)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	tmpDir, err := os.MkdirTemp(filepath.Dir(srcDir), "ccb-src-*")
-	if err != nil {
-		return fmt.Errorf("create ccb temp dir: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	if err := runLoggedCommand(ctx, "", "tar", "-xzf", tarPath, "-C", tmpDir, "--strip-components", "1"); err != nil {
-		return fmt.Errorf("extract ccb archive: %w", err)
-	}
-	if _, err := os.Stat(filepath.Join(tmpDir, "install.sh")); err != nil {
-		return fmt.Errorf("downloaded ccb archive is missing install.sh")
-	}
-	if _, err := os.Stat(srcDir); err == nil {
-		return fmt.Errorf("%s already exists but is not a CCB checkout; move it aside or install ccb manually", srcDir)
-	}
-	if err := os.Rename(tmpDir, srcDir); err != nil {
-		return fmt.Errorf("install ccb source archive: %w", err)
-	}
-	return nil
-}
-
-func fetchCCBArchive(ctx context.Context) (string, func(), error) {
-	tmp, err := os.CreateTemp("", "ccb-main-*.tar.gz")
-	if err != nil {
-		return "", func() {}, fmt.Errorf("create ccb archive temp file: %w", err)
-	}
-	path := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(path)
-		return "", func() {}, err
-	}
-	cleanup := func() { _ = os.Remove(path) }
-	if curl, err := exec.LookPath("curl"); err == nil {
-		if err := runLoggedCommand(ctx, "", curl, "-fL", "--retry", "3", "-o", path, linkCCBArchiveURL); err != nil {
-			cleanup()
-			return "", func() {}, fmt.Errorf("download ccb archive with curl: %w", err)
-		}
-		return path, cleanup, nil
-	}
-	if wget, err := exec.LookPath("wget"); err == nil {
-		if err := runLoggedCommand(ctx, "", wget, "-O", path, linkCCBArchiveURL); err != nil {
-			cleanup()
-			return "", func() {}, fmt.Errorf("download ccb archive with wget: %w", err)
-		}
-		return path, cleanup, nil
-	}
-	cleanup()
-	return "", func() {}, errors.New("git, curl, or wget is required to install ccb automatically; install one of them or install CCB manually, then rerun link")
 }
 
 func writeLinkFiles(opts linkOptions) error {
@@ -399,9 +246,6 @@ func linkEnvFile(opts linkOptions) string {
 	writeEnvAssignment(&b, "PATH", linkPathWithLocalBin(opts.Home))
 	writeEnvAssignment(&b, "BRIDGE_CODEX_PATH", opts.CodexPath)
 	writeEnvAssignment(&b, "BRIDGE_CLAUDE_PATH", opts.ClaudePath)
-	if opts.CCBPath != "" {
-		writeEnvAssignment(&b, "BRIDGE_CCB_PATH", opts.CCBPath)
-	}
 	for _, name := range linkPreservedEnvNames() {
 		if value := os.Getenv(name); value != "" {
 			writeEnvAssignment(&b, name, value)

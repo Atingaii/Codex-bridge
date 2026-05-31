@@ -1,4 +1,5 @@
 bin/
+/codex-bridge
 data/
 configs/*.yaml
 !configs/*.yaml.example

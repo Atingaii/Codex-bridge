@@ -52,7 +52,7 @@ func TestLinkStartScriptUsesProfileAndPinnedMachineID(t *testing.T) {
 	}
 }
 
-func TestResolveLinkCLIsDoesNotRequireCCB(t *testing.T) {
+func TestResolveLinkCLIsResolvesCodexAndClaude(t *testing.T) {
 	tmp := t.TempDir()
 	binDir := filepath.Join(tmp, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -73,9 +73,6 @@ func TestResolveLinkCLIsDoesNotRequireCCB(t *testing.T) {
 	}
 	if opts.CodexPath == "" || opts.ClaudePath == "" {
 		t.Fatalf("resolved CLI paths = codex:%q claude:%q", opts.CodexPath, opts.ClaudePath)
-	}
-	if opts.CCBPath != "" {
-		t.Fatalf("ccb path should be optional, got %q", opts.CCBPath)
 	}
 }
 
@@ -98,7 +95,6 @@ func TestWriteLinkFilesWritesDetectedPathsAndProxyEnv(t *testing.T) {
 		Home:       tmp,
 		CodexPath:  "/usr/bin/codex",
 		ClaudePath: "/usr/bin/claude",
-		CCBPath:    "/usr/bin/ccb",
 		Hash:       "abc123",
 		ServiceDir: filepath.Join(tmp, ".codex-bridge", "services"),
 		LogDir:     filepath.Join(tmp, ".codex-bridge", "logs"),
@@ -124,7 +120,6 @@ func TestWriteLinkFilesWritesDetectedPathsAndProxyEnv(t *testing.T) {
 		"HOME='" + tmp + "'",
 		"BRIDGE_CODEX_PATH='/usr/bin/codex'",
 		"BRIDGE_CLAUDE_PATH='/usr/bin/claude'",
-		"BRIDGE_CCB_PATH='/usr/bin/ccb'",
 		"CODEX_HOME='" + codexHome + "'",
 		"CLAUDE_CONFIG_DIR='" + claudeConfig + "'",
 		"HTTP_PROXY='http://proxy.example'",
@@ -162,38 +157,5 @@ func TestLinkSystemdUnitKeepsBridgeAliveOnChildOOM(t *testing.T) {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("systemd unit missing %q:\n%s", want, unit)
 		}
-	}
-}
-
-func TestInstallCCBRootWrapperLinksSourceEntrypoint(t *testing.T) {
-	tmp := t.TempDir()
-	srcDir := filepath.Join(tmp, "src")
-	binDir := filepath.Join(tmp, "bin")
-	if err := os.MkdirAll(srcDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	source := filepath.Join(srcDir, "ccb")
-	if err := os.WriteFile(source, []byte("#!/usr/bin/env python3\nprint('ok')\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := installCCBRootWrapper(srcDir, binDir); err != nil {
-		t.Fatal(err)
-	}
-
-	target := filepath.Join(binDir, "ccb")
-	st, err := os.Stat(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Mode()&0o111 == 0 {
-		t.Fatalf("installed ccb is not executable: %s", st.Mode())
-	}
-	sourceInfo, err := os.Stat(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sourceInfo.Mode()&0o111 == 0 {
-		t.Fatalf("source ccb is not executable: %s", sourceInfo.Mode())
 	}
 }

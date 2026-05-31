@@ -34,7 +34,7 @@ understandable choice.
 The existing automated Bridge runner uses short-lived non-interactive CLI calls:
 
 - `internal/bridge/runner.go:execArgs` calls `codex exec --json`.
-- `internal/bridge/orchestration.go:claudeArgs` calls `claude --print
+- `internal/bridge/orchestration_claude.go:claudeArgsWithSession` calls `claude --print
   --output-format=stream-json`.
 
 `codex exec --json` does not expose an approval request/response channel through
@@ -94,14 +94,14 @@ The Bridge sends `internal/protocol.TypeApprovalRequest` to Hub, Hub broadcasts
 it to the browser session, and the browser returns
 `internal/protocol.TypeApprovalResponse` to the same Bridge session.
 
-Claude Code orchestration uses `internal/bridge/orchestration.go:runClaude` to
+Claude Code orchestration uses `internal/bridge/orchestration_claude.go:runClaude` to
 write a temporary MCP config and launch `claude --permission-prompt-tool`. The
 MCP subprocess runs `codex-bridge claude-approval-mcp --socket <path>`, forwards
 the permission prompt to the parent Bridge process over a Unix socket, and the
 parent reuses the same `approval_request` / `approval_response` frames with
 `payload.runId` and `payload.turnId`.
 
-Codex orchestration uses `internal/bridge/orchestration.go:runCodexAppServer`
+Codex orchestration uses `internal/bridge/orchestration_codex.go:runCodexAppServerWithThread`
 when the selected endpoint is not auto-execute. The app-server runner emits
 `approval_request` with `payload.runId` and the orchestration turn id in
 `payload.promptId`, and the browser response is routed back to the same Bridge
@@ -117,7 +117,8 @@ for both Claude and Codex.
    `internal/hub/server.go`.
 2. Extend `POST /api/bridge-tokens` request/response handling.
 3. Add integration coverage for both generated commands.
-4. Update `frontend/src/app/App.tsx` settings UI to show both profiles.
+4. Update `frontend/src/app/components/Settings.tsx:SettingsModal` to show
+   both profiles.
 5. Add `internal/bridge/appserver_runner.go` and approval request/response
    frames for Codex chat.
 6. Add run-scoped orchestration approval routing and the Claude MCP permission

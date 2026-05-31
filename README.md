@@ -1,14 +1,17 @@
 # Codex Bridge
 
-Remote browser access for a Codex CLI running on your own machine.
+Remote browser access to the Codex and Claude Code CLIs running on your own
+machine — 1:1 chat with a single CLI, plus multi-CLI orchestration that relays
+turns between a native Codex session and a native Claude Code session.
 
 ## Shape
 
 - One Go binary with two modes: `hub` and `bridge`
 - Hub serves HTTPS/WSS behind Caddy, embeds the static web UI, and stores history in SQLite
-- Bridge reverse-connects to Hub, multiplexes chat sessions, and runs either `echo` or `codex exec --json`
+- Bridge reverse-connects to Hub, multiplexes chat sessions, and runs `echo`, `codex exec --json`, or the `codex app-server` runner
+- Orchestration drives one long-lived native Codex and one long-lived native Claude Code session per run; the Bridge relays output and turn context (no injected verifier/remediation turns), so you can `resume` either session from the workspace
 - No Redis, Postgres, React build pipeline, or file projection
-- Closing the browser tab does not stop an active Codex run by default; reopen the same session to see persisted output
+- Closing the browser tab does not stop an active run by default; reopen the same session to see persisted output
 
 ## Local Quick Start
 
@@ -42,11 +45,17 @@ bridge:
 ## Commands
 
 ```bash
-codex-bridge hub
-codex-bridge bridge
-codex-bridge user --username admin --password '...'
-codex-bridge enroll --ttl 24h
+codex-bridge hub                  # public Hub server
+codex-bridge user --username admin --password '...'   # create/update a login user
+codex-bridge enroll --ttl 24h     # mint an enroll token for a new endpoint
+
+codex-bridge link <token>         # endpoint: install + run as a background service (recommended)
+codex-bridge connect <token>      # endpoint: run in the foreground (used internally by `link`)
+codex-bridge bridge               # endpoint: run from configs/<env>.yaml (advanced/dev)
 ```
+
+For a real endpoint, use the single command the Hub **Settings** page generates;
+it runs `codex-bridge link`. `connect` and `bridge` are lower-level entry points.
 
 Browser self-registration is disabled. Create or update approved users with
 `codex-bridge user --username <name> --password <password>`.

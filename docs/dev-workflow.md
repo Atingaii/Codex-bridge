@@ -105,7 +105,12 @@ The settings UI exposes two permission profiles:
   to expose both direct Claude Code and Codex CLI capabilities.
 - `auto-execute`: starts Bridge with `--runner codex --sandbox
   danger-full-access --approval-policy never`, preserving the previous
-  browser-first trusted-machine behavior.
+  browser-first trusted-machine behavior. Claude Code orchestration maps this
+  profile to Claude's bypass permission mode and, when Bridge itself runs as
+  root, sets `IS_SANDBOX=1` only on the managed Claude child process so users do
+  not need to edit global Claude settings. Bridge-launched child processes
+  inherit the captured service environment before these runner-specific
+  additions are applied.
 
 Existing endpoints in the settings UI can be expanded to generate a repair
 command. The repair command mints a fresh enroll token, installs the latest

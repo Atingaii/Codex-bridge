@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,6 +39,63 @@ func TestOrchestrationClaudeStreamInputArgsKeepSessionAndOmitPromptArg(t *testin
 	}
 	if containsArg(args, "task") {
 		t.Fatalf("stream claude args should not append prompt as argv: %#v", args)
+	}
+}
+
+func TestOrchestrationClaudeAutoExecuteUsesBypassPermissions(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+
+	printArgs := manager.claudeArgsWithSession(protocol.OrchestrationStartPayload{CWD: "/repo"}, "task", "11111111-1111-5111-8111-111111111111", false)
+	streamArgs := manager.claudeArgsWithStreamInput(protocol.OrchestrationStartPayload{CWD: "/repo"}, "11111111-1111-5111-8111-111111111111", false)
+	for name, args := range map[string][]string{"print": printArgs, "stream": streamArgs} {
+		assertArgPair(t, args, "--permission-mode", "bypassPermissions")
+		if containsArg(args, "acceptEdits") {
+			t.Fatalf("%s claude args should not downgrade auto-execute to acceptEdits: %#v", name, args)
+		}
+	}
+	if manager.shouldBridgeClaudeApproval() {
+		t.Fatalf("auto-execute mode should not attach browser approval MCP")
+	}
+}
+
+func TestOrchestrationClaudeReviewRequiredKeepsBrowserApproval(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.Sandbox = "workspace-write"
+	cfg.Bridge.ApprovalPolicy = "untrusted"
+	manager := NewOrchestrationManager(&cfg)
+
+	args := manager.claudeArgsWithStreamInput(protocol.OrchestrationStartPayload{CWD: "/repo"}, "11111111-1111-5111-8111-111111111111", false)
+	if containsArg(args, "--permission-mode") {
+		t.Fatalf("review-required base args should leave permission mode to approval MCP helper: %#v", args)
+	}
+	if !manager.shouldBridgeClaudeApproval() {
+		t.Fatalf("review-required mode should attach browser approval MCP")
+	}
+	args = manager.withClaudeStreamApprovalArgs(args, "/tmp/codex-bridge-mcp.json")
+	assertArgPair(t, args, "--permission-mode", "default")
+	assertArgPair(t, args, "--mcp-config", "/tmp/codex-bridge-mcp.json")
+}
+
+func TestAppendCommandEnvInheritsEnvironmentBeforeAppending(t *testing.T) {
+	t.Setenv("CODEX_BRIDGE_ENV_TEST", "parent")
+	cmd := exec.Command("true")
+
+	appendCommandEnv(cmd, "IS_SANDBOX=1", "CODEX_BRIDGE_ENV_TEST=child")
+
+	if !containsArg(cmd.Env, "PATH="+os.Getenv("PATH")) {
+		t.Fatalf("command env did not inherit PATH: %#v", cmd.Env)
+	}
+	if !containsArg(cmd.Env, "CODEX_BRIDGE_ENV_TEST=parent") {
+		t.Fatalf("command env did not inherit parent variable: %#v", cmd.Env)
+	}
+	if !containsArg(cmd.Env, "CODEX_BRIDGE_ENV_TEST=child") {
+		t.Fatalf("command env did not append override variable: %#v", cmd.Env)
+	}
+	if !containsArg(cmd.Env, "IS_SANDBOX=1") {
+		t.Fatalf("command env did not append sandbox marker: %#v", cmd.Env)
 	}
 }
 

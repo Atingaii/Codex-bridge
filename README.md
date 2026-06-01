@@ -169,7 +169,9 @@ command, setup exits before registering an unusable endpoint.
 The Settings flow offers two permission profiles. Review required uses the
 Codex app-server runner so Codex command/file approval requests appear in the
 browser for chat and orchestration. Auto execute keeps the previous
-trusted-machine mode with `danger-full-access` and no prompts. Claude Code
+trusted-machine mode with `danger-full-access` and no prompts; Bridge maps that
+profile to Claude Code's bypass permission mode and scopes any root-only
+`IS_SANDBOX` handling to the managed Claude child process. Claude Code
 orchestration also uses browser-side approval in review-required mode through
 Claude Code's permission prompt MCP hook. Hub-managed orchestration uses the
 selected Bridge connection for the whole run, alternates direct Claude Code and

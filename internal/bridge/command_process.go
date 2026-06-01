@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -19,6 +20,16 @@ func configureManagedCommand(cmd *exec.Cmd) {
 		}
 		return terminateProcessGroup(cmd.Process.Pid)
 	}
+}
+
+func appendCommandEnv(cmd *exec.Cmd, values ...string) {
+	if cmd == nil {
+		return
+	}
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = append(cmd.Env, values...)
 }
 
 func terminateProcessGroup(pid int) error {

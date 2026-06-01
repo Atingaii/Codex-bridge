@@ -113,9 +113,7 @@ func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.
 	}
 	cmd := exec.CommandContext(context.Background(), m.claudePath(), args...)
 	configureManagedCommand(cmd)
-	if os.Geteuid() == 0 {
-		cmd.Env = append(cmd.Env, "IS_SANDBOX=1")
-	}
+	configureClaudeCommandEnv(cmd)
 	cwd := m.cwd(payload)
 	if cwd != "" {
 		cmd.Dir = cwd
@@ -206,9 +204,7 @@ func (m *OrchestrationManager) runClaudeWithSessionAttempt(ctx context.Context, 
 	}
 	cmd := exec.CommandContext(cmdCtx, m.claudePath(), args...)
 	configureManagedCommand(cmd)
-	if os.Geteuid() == 0 {
-		cmd.Env = append(cmd.Env, "IS_SANDBOX=1")
-	}
+	configureClaudeCommandEnv(cmd)
 	if cwd := m.cwd(payload); cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -381,11 +377,7 @@ func (m *OrchestrationManager) claudeArgsWithSession(payload protocol.Orchestrat
 		}
 	}
 	if m.bypassApprovalsAndSandbox() {
-		if runningAsRoot() {
-			args = append(args, "--permission-mode", "acceptEdits")
-		} else {
-			args = append(args, "--permission-mode", "bypassPermissions")
-		}
+		args = append(args, "--permission-mode", "bypassPermissions")
 	}
 	if m.cfg.Bridge.ClaudeModel != "" {
 		args = append(args, "--model", m.cfg.Bridge.ClaudeModel)
@@ -413,11 +405,7 @@ func (m *OrchestrationManager) claudeArgsWithStreamInput(payload protocol.Orches
 		}
 	}
 	if m.bypassApprovalsAndSandbox() {
-		if runningAsRoot() {
-			args = append(args, "--permission-mode", "acceptEdits")
-		} else {
-			args = append(args, "--permission-mode", "bypassPermissions")
-		}
+		args = append(args, "--permission-mode", "bypassPermissions")
 	}
 	if m.cfg.Bridge.ClaudeModel != "" {
 		args = append(args, "--model", m.cfg.Bridge.ClaudeModel)
@@ -472,6 +460,12 @@ func (m *OrchestrationManager) bypassApprovalsAndSandbox() bool {
 
 func (m *OrchestrationManager) shouldBridgeClaudeApproval() bool {
 	return !m.bypassApprovalsAndSandbox()
+}
+
+func configureClaudeCommandEnv(cmd *exec.Cmd) {
+	if runningAsRoot() {
+		appendCommandEnv(cmd, "IS_SANDBOX=1")
+	}
 }
 
 type claudeApprovalSocketRequest struct {

@@ -42,22 +42,14 @@ func (s *Server) handleBrowserWS(w http.ResponseWriter, r *http.Request, uid str
 	})
 
 	conn := NewBrowserConn(sid, ws, s.cfg.Hub.MaxBrowserSendQueue)
+	reattached := s.tryReattach(sid)
 	s.pool.AddBrowser(sid, conn)
 	go conn.WriteLoop()
 	defer func() {
 		last := s.pool.RemoveBrowser(sid, conn)
 		conn.Close()
-		if last && s.cfg.Hub.BrowserCloseSession {
-			grace := s.cfg.Hub.BrowserCloseGrace.Duration
-			go func() {
-				if grace > 0 {
-					time.Sleep(grace)
-				}
-				if s.pool.HasBrowser(sid) {
-					return
-				}
-				_ = s.pool.SendToAgent(session.AgentID, protocol.MustEnvelope(protocol.TypeCloseSession, sid, nil))
-			}()
+		if last {
+			s.startBrowserLease(session)
 		}
 	}()
 
@@ -68,7 +60,11 @@ func (s *Server) handleBrowserWS(w http.ResponseWriter, r *http.Request, uid str
 	if err := s.pool.SendToAgent(session.AgentID, protocol.MustEnvelope(protocol.TypeOpenSession, sid, openPayload)); err != nil {
 		_ = conn.Send(s.bridgeErrorToBrowser(sid, err))
 	} else {
-		_ = conn.Send(protocol.MustEnvelope(protocol.TypeStatus, sid, map[string]any{"status": "opening"}))
+		status := "opening"
+		if reattached {
+			status = "reattached"
+		}
+		_ = conn.Send(protocol.MustEnvelope(protocol.TypeStatus, sid, map[string]any{"status": status}))
 	}
 
 	for {

@@ -29,6 +29,7 @@ type HubConfig struct {
 	BridgeReadTimeout        Duration `yaml:"bridge_read_timeout"`
 	BrowserCloseSession      bool     `yaml:"browser_close_session"`
 	BrowserCloseGrace        Duration `yaml:"browser_close_grace"`
+	BrowserLeaseTTL          Duration `yaml:"browser_lease_ttl"`
 	AllowedOrigins           []string `yaml:"allowed_origins"`
 	BridgeDownloadURL        string   `yaml:"bridge_download_url"`
 	MaxBridgeSendQueue       int      `yaml:"max_bridge_send_queue"`
@@ -117,6 +118,7 @@ func Default() Config {
 			BridgeReadTimeout:        Duration{Duration: 45_000_000_000},
 			BrowserCloseSession:      false,
 			BrowserCloseGrace:        Duration{Duration: 1500_000_000},
+			BrowserLeaseTTL:          Duration{Duration: 5 * 60 * 1_000_000_000},
 			BridgeDownloadURL:        "",
 			MaxBridgeSendQueue:       128,
 			MaxBrowserSendQueue:      128,

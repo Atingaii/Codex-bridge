@@ -54,6 +54,9 @@ type Server struct {
 	buffersMu sync.Mutex
 	buffers   map[string]string
 
+	leasesMu sync.Mutex
+	leases   map[string]*browserSessionLease
+
 	rateMu sync.Mutex
 	rates  map[string]rateBucket
 }
@@ -70,6 +73,7 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 		signer:  auth.NewSigner(cfg.Auth.JWTSecret, cfg.Auth.AccessTokenTTL.Duration),
 		pool:    NewPool(),
 		buffers: make(map[string]string),
+		leases:  make(map[string]*browserSessionLease),
 		rates:   make(map[string]rateBucket),
 	}
 

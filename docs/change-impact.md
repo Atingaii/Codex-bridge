@@ -28,6 +28,7 @@ keeps only the top frequent subset.
 | --- | --- |
 | Chat session creation or selection | `internal/hub/server.go`, `internal/store/` session methods, `frontend/src/app/pages/Workspace.tsx`, continuity feature doc |
 | Chat prompt flow | `internal/hub/ws_browser.go`, `internal/bridge/session.go`, `internal/bridge/runner.go`, run/message store methods, integration tests |
+| Browser chat reconnect/close behavior | `internal/hub/ws_browser.go`, `internal/hub/browser_lease.go`, `internal/config/`, `configs/*.yaml.example`, integration tests, `docs/features/browser-session-lease.md` |
 | Codex thread resume behavior | `internal/bridge/runner.go:args`, `internal/hub/ws_bridge.go:handlePromptComplete`, `internal/store/store.go:UpdateSessionRemoteThreadByID`, tests |
 | Orchestration create/continue flow | `internal/hub/orchestration.go`, `internal/bridge/orchestration*.go`, `frontend/src/app/pages/OrchestrationWorkspace.tsx`, `docs/features/orchestration-continuity.md` |
 | Orchestration endpoint continuity | `internal/hub/orchestration.go:handleContinueOrchestration`, `frontend/src/app/pages/OrchestrationWorkspace.tsx`, `docs/features/orchestration-continuity.md`, `docs/features/manual-orchestration-rounds.md` |

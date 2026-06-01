@@ -8,6 +8,64 @@
 
 Codex Bridge 让浏览器远程访问私有机器上的 Codex 和 Claude Code CLI：既可与单个 CLI 一对一聊天，也可通过编排在一个长驻的原生 Codex 会话与一个长驻的原生 Claude Code 会话之间逐轮中转（Bridge 只回传输出与轮次上下文，不注入额外的校验/补救轮次，因此你可以在工作目录里 `resume` 这些原生会话）。Hub 是公网入口和 Web UI，Bridge 从私有机器反向连接 Hub，所以 Hub 不需要保存 `OPENAI_API_KEY`，也不需要直连你的工作目录。
 
+## Bridge / ACP / resume 简明版
+
+用户侧执行网页里的 `curl .../install.sh | sh` 后，装到本机的核心就是
+`~/.local/bin/codex-bridge`。兼容软链 `acp-bridge` 和
+`agent-up.sh` / `agent-down.sh` 只负责旧命名与启停；Codex、Claude Code、
+Gemini、CodeBuddy 等 agent CLI 仍然要用户自己安装和登录。Bridge 本身是通信与进程管理器：
+它从私有机器主动连到 Hub 的反向 WebSocket，然后按会话在工作目录里 `exec` 本机 CLI，
+所以 Hub 不需要访问你的工作目录，也不需要你的模型密钥。
+
+ACP 是 Bridge 和本地 CLI/适配器之间的程序化协议：JSON-RPC over
+stdin/stdout，不是人工 REPL。`bridge.runner: acp` 时，Bridge 会启动对应 ACP 适配器
+（例如 Claude 用 `npx @zed-industries/claude-code-acp`，Codex 用 `codex-acp`），
+执行 `initialize -> session/new` 或 `session/load`，之后每轮发
+`session/prompt`。Hub 的 `open_session` 对应打开/恢复 ACP 会话，`prompt`
+对应一轮提示，ACP 的 `session/update` 再被转成网页上的流式输出。
+
+核心绑定关系是：
+
+```text
+浏览器会话 sid <-> Bridge sessionRouter <-> 一个常驻 CLI/ACP 子进程 <-> 一个 ACP session
+```
+
+同一个 `sid` 后续每轮都会查到同一个 router，复用同一个进程和同一个
+ACP session，所以上下文在这个本地 CLI 会话里持续累积。只有前端显式新建会话、
+让 Hub 使用新的 `sid` 发 `open_session`，才会新开本地进程并得到一段新的上下文。
+如果把 `/new` 当普通消息发给网页，Bridge 不解析斜杠命令；它会原样转给同一个
+ACP session，是否清空由 CLI 自己决定。真正决定“是不是同一个本地会话”的开关是 `sid`。
+
+`/resume` 能看到真实对话不是因为 Hub 回放了网页消息，而是因为 CLI 自己在本机落盘。
+Bridge 在 `cwd=/你的项目` 下驱动 ACP 会话，CLI 执行时会按自己的规则把对话写到本地
+session 存储，并按项目目录归档。事后你在同一台机器执行
+`cd /你的项目 && claude` 后用 `/resume`，或执行 `codex resume ...`，CLI 扫到的是它自己
+写下的本地记录。也就是说：ACP 负责实时驱动和流式回传，CLI 本地 session 存储负责事后
+原生 resume，两条链路是解耦的。
+
+浏览器 WebSocket 断开时，Hub 不会立刻清掉 Bridge 侧会话，而是把该 `sid` 放进
+`leaseIdleLeased` 租约状态并启动 TTL 计时器（默认由 `HUB_BROWSER_LEASE_TTL` /
+`hub.browser_lease_ttl` 控制）。TTL 内重新打开同一个会话，Hub 走 `tryReattach`
+取消计时器并再次发送同一个 `open_session{sid}`；Bridge 侧按 `sid` 命中已有
+sessionRouter，继续复用原进程和 ACP session，不需要 `/resume`。TTL 过期后 Hub 才发送
+`close_session`，Bridge 才真正释放本地会话。
+
+整体链路可以压缩成：
+
+```text
+安装 codex-bridge
+  -> Bridge 反向拨 WebSocket 连 Hub
+前端打开会话 sid
+  -> Bridge 在项目 cwd 下启动一个本地 CLI/ACP 会话，形成 1:1 绑定
+前端每轮发消息
+  -> 复用同一进程、同一 ACP session，上下文持续累积，并流式回显到网页
+  -> CLI 同时把对话写到本机 session 存储
+关闭浏览器再回来
+  -> TTL 内同 sid 直接 reattach，不需要 /resume
+事后在本机 cd 到项目目录运行 CLI
+  -> 用 CLI 自己的 resume 能看到 bridge 跑过的真实对话
+```
+
 ## 普通用户接入 SparkAPI Hub
 
 目标 Hub：`https://sparkapi.tech`
@@ -214,6 +272,7 @@ APP_HOST=127.0.0.1
 APP_PORT=8088
 HUB_DB_PATH=/opt/codex-bridge/data/codex-bridge.db
 HUB_BRIDGE_DOWNLOAD_URL='https://your-release-url/codex-bridge-linux-amd64'
+HUB_BROWSER_LEASE_TTL=5m
 JWT_SECRET='32-byte-random-secret'
 BRIDGE_HUB_URL='https://sparkapi.tech'
 BRIDGE_TOKEN='enroll-token'

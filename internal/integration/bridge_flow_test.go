@@ -300,6 +300,146 @@ func TestBrowserCloseDoesNotStopActivePrompt(t *testing.T) {
 	cancel()
 }
 
+func TestBrowserCloseExpiresLeaseAndClosesBridgeSession(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tmp := t.TempDir()
+	port := freePort(t)
+	cfg := config.Default()
+	cfg.Gateway.Host = "127.0.0.1"
+	cfg.Gateway.Port = port
+	cfg.Gateway.ReadTimeout.Duration = 5 * time.Second
+	cfg.Gateway.WriteTimeout.Duration = 0
+	cfg.Hub.DBPath = tmp + "/bridge.db"
+	cfg.Hub.HeartbeatInterval.Duration = 200 * time.Millisecond
+	cfg.Hub.BrowserCloseSession = false
+	cfg.Hub.BrowserLeaseTTL.Duration = 40 * time.Millisecond
+	cfg.Auth.JWTSecret = "integration-test-secret-32-byte-minimum"
+	cfg.Auth.AccessTokenTTL.Duration = time.Hour
+	cfg.Bridge.HubURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	cfg.Bridge.Token = store.NewToken("enr")
+
+	st, err := store.Open(cfg.Hub.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
+	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
+	go func() { _ = srv.Run(ctx) }()
+	waitHTTP(t, cfg.Bridge.HubURL+"/health")
+
+	fakeBridge := dialFakeBridge(t, cfg.Bridge.HubURL, cfg.Bridge.Token)
+	defer fakeBridge.Close()
+
+	client := httpClient(t)
+	postJSON(t, client, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
+	waitAgents(t, client, cfg.Bridge.HubURL)
+
+	sid := createSession(t, client, cfg.Bridge.HubURL, "lease-expire")
+	ws := dialBrowserWS(t, client, cfg.Bridge.HubURL, sid)
+	waitBridgeEnvelope(t, fakeBridge, protocol.TypeOpenSession, sid)
+	if err := fakeBridge.WriteJSON(protocol.MustEnvelope(protocol.TypeSessionOpened, sid, protocol.SessionOpenedPayload{Runner: "fake"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	waitBridgeEnvelope(t, fakeBridge, protocol.TypeCloseSession, sid)
+}
+
+func TestBrowserReconnectWithinLeaseReattachesWithoutClose(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tmp := t.TempDir()
+	port := freePort(t)
+	cfg := config.Default()
+	cfg.Gateway.Host = "127.0.0.1"
+	cfg.Gateway.Port = port
+	cfg.Gateway.ReadTimeout.Duration = 5 * time.Second
+	cfg.Gateway.WriteTimeout.Duration = 0
+	cfg.Hub.DBPath = tmp + "/bridge.db"
+	cfg.Hub.HeartbeatInterval.Duration = 200 * time.Millisecond
+	cfg.Hub.BrowserCloseSession = false
+	cfg.Hub.BrowserLeaseTTL.Duration = 150 * time.Millisecond
+	cfg.Auth.JWTSecret = "integration-test-secret-32-byte-minimum"
+	cfg.Auth.AccessTokenTTL.Duration = time.Hour
+	cfg.Bridge.HubURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	cfg.Bridge.Token = store.NewToken("enr")
+
+	st, err := store.Open(cfg.Hub.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
+	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
+	go func() { _ = srv.Run(ctx) }()
+	waitHTTP(t, cfg.Bridge.HubURL+"/health")
+
+	fakeBridge := dialFakeBridge(t, cfg.Bridge.HubURL, cfg.Bridge.Token)
+	defer fakeBridge.Close()
+
+	client := httpClient(t)
+	postJSON(t, client, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
+	waitAgents(t, client, cfg.Bridge.HubURL)
+
+	sid := createSession(t, client, cfg.Bridge.HubURL, "lease-reattach")
+	ws := dialBrowserWS(t, client, cfg.Bridge.HubURL, sid)
+	waitBridgeEnvelope(t, fakeBridge, protocol.TypeOpenSession, sid)
+	if err := fakeBridge.WriteJSON(protocol.MustEnvelope(protocol.TypeSessionOpened, sid, protocol.SessionOpenedPayload{Runner: "fake"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	ws2 := dialBrowserWS(t, client, cfg.Bridge.HubURL, sid)
+	defer ws2.Close()
+	waitBridgeEnvelope(t, fakeBridge, protocol.TypeOpenSession, sid)
+	statusEnv := waitBrowserEnvelope(t, ws2, protocol.TypeStatus, sid)
+	statusPayload, err := protocol.Decode[map[string]string](statusEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statusPayload["status"] != "reattached" {
+		t.Fatalf("status = %#v, want reattached", statusPayload)
+	}
+	if err := fakeBridge.WriteJSON(protocol.MustEnvelope(protocol.TypeSessionOpened, sid, protocol.SessionOpenedPayload{Runner: "fake"})); err != nil {
+		t.Fatal(err)
+	}
+
+	assertNoBridgeCloseSession(t, fakeBridge, sid, 220*time.Millisecond)
+}
+
 func TestDuplicatePromptRejectedWhileRunActive(t *testing.T) {
 	t.Parallel()
 

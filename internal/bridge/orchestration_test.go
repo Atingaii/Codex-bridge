@@ -31,7 +31,7 @@ func TestOrchestrationClaudeStreamInputArgsKeepSessionAndOmitPromptArg(t *testin
 	cfg.Bridge.ApprovalPolicy = "never"
 	manager := NewOrchestrationManager(&cfg)
 	args := manager.claudeArgsWithStreamInput(protocol.OrchestrationStartPayload{CWD: "/repo"}, "11111111-1111-5111-8111-111111111111", false)
-	for _, want := range []string{"--print", "--input-format=stream-json", "--output-format=stream-json", "--verbose", "--session-id", "11111111-1111-5111-8111-111111111111"} {
+	for _, want := range []string{"--input-format=stream-json", "--output-format=stream-json", "--verbose", "--session-id", "11111111-1111-5111-8111-111111111111"} {
 		if !containsArg(args, want) {
 			t.Fatalf("stream claude args missing %q: %#v", want, args)
 		}
@@ -486,8 +486,8 @@ func TestOrchestrationReusesNativeInteractiveSessionsAcrossSameCLITurns(t *testi
 		case "process_start":
 			claudeStarts++
 			args, _ := record["argv"].([]any)
-			if !sliceContainsArgPrefix(args, "--input-format") || !sliceContainsString(args, "--session-id") || !sliceContainsString(args, "--name") {
-				t.Fatalf("claude process args missing stream session/name: %#v", record)
+			if !sliceContainsArgPrefix(args, "--input-format") || !sliceContainsString(args, "--session-id") {
+				t.Fatalf("claude process args missing stream input or session: %#v", record)
 			}
 		case "user_message":
 			claudeMessages++

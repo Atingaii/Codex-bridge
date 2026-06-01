@@ -103,7 +103,7 @@ func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.
 	}
 	resume := state.ClaudeSessionStarted
 	args := m.claudeArgsWithStreamInput(payload, state.ClaudeSessionID, resume)
-	args = append(args, "--name", nativeSessionDisplayName(payload.RunID, "claude"))
+	// Don't set --name, let Claude CLI use default project name based on cwd
 	approvalServer, releaseApprovalServer, err := m.prepareClaudeApprovalServer(ctx, payload, "", "")
 	if err != nil {
 		return nil, err
@@ -113,7 +113,11 @@ func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.
 	}
 	cmd := exec.CommandContext(context.Background(), m.claudePath(), args...)
 	configureManagedCommand(cmd)
-	if cwd := m.cwd(payload); cwd != "" {
+	if os.Geteuid() == 0 {
+		cmd.Env = append(cmd.Env, "IS_SANDBOX=1")
+	}
+	cwd := m.cwd(payload)
+	if cwd != "" {
 		cmd.Dir = cwd
 	}
 	stdout, err := cmd.StdoutPipe()
@@ -147,6 +151,12 @@ func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.
 		release:        releaseApprovalServer,
 	}
 	session.claude = claude
+	// Register session with Claude CLI so it appears in /resume
+	if !resume {
+		if err := m.registerClaudeSession(cmd.Process.Pid, state.ClaudeSessionID, payload.RunID, cwd); err != nil {
+			slog.Warn("failed to register claude session", "error", err)
+		}
+	}
 	return claude, nil
 }
 
@@ -190,11 +200,15 @@ func (m *OrchestrationManager) runClaudeWithSessionAttempt(ctx context.Context, 
 	if useStreamInput {
 		args = m.claudeArgsWithStreamInput(payload, sessionID, resume)
 	}
+	// Don't set --name, let Claude CLI use default project name based on cwd
 	if approvalServer != nil {
 		args = m.withClaudeApprovalArgs(args, approvalServer.configPath)
 	}
 	cmd := exec.CommandContext(cmdCtx, m.claudePath(), args...)
 	configureManagedCommand(cmd)
+	if os.Geteuid() == 0 {
+		cmd.Env = append(cmd.Env, "IS_SANDBOX=1")
+	}
 	if cwd := m.cwd(payload); cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -354,7 +368,7 @@ func (s *claudeApprovalServer) updateTurn(turnID, role string) {
 }
 
 func (m *OrchestrationManager) claudeArgsWithSession(payload protocol.OrchestrationStartPayload, prompt, sessionID string, resume bool) []string {
-	args := []string{"--print", "--output-format=stream-json"}
+	args := []string{"--output-format=stream-json"}
 	if cwd := m.cwd(payload); cwd != "" {
 		args = append(args, "--add-dir", cwd)
 	}
@@ -386,7 +400,7 @@ func (m *OrchestrationManager) claudeArgsWithSession(payload protocol.Orchestrat
 }
 
 func (m *OrchestrationManager) claudeArgsWithStreamInput(payload protocol.OrchestrationStartPayload, sessionID string, resume bool) []string {
-	args := []string{"--print", "--input-format=stream-json", "--output-format=stream-json"}
+	args := []string{"--input-format=stream-json", "--output-format=stream-json"}
 	if cwd := m.cwd(payload); cwd != "" {
 		args = append(args, "--add-dir", cwd)
 	}
@@ -1199,4 +1213,49 @@ func claudeToolResultContent(value any) string {
 	default:
 		return ""
 	}
+}
+
+func (m *OrchestrationManager) registerClaudeSession(pid int, sessionID, runID, cwd string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	sessionsDir := filepath.Join(homeDir, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0700); err != nil {
+		return err
+	}
+	sessionFile := filepath.Join(sessionsDir, sessionID+".json")
+
+	// Read /proc/<pid>/stat to get process start time
+	procStart := ""
+	if statData, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
+		fields := strings.Fields(string(statData))
+		if len(fields) >= 22 {
+			procStart = fields[21] // starttime field
+		}
+	}
+
+	sessionData := map[string]any{
+		"pid":          pid,
+		"sessionId":    sessionID,
+		"cwd":          cwd,
+		"startedAt":    time.Now().UnixMilli(),
+		"procStart":    procStart,
+		"version":      "2.1.158",
+		"peerProtocol": 1,
+		"kind":         "interactive",
+		"entrypoint":   "cli",
+		"status":       "busy",
+		"updatedAt":    time.Now().UnixMilli(),
+	}
+	if runID != "" {
+		sessionData["name"] = nativeSessionDisplayName(runID, "claude")
+	}
+
+	data, err := json.Marshal(sessionData)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(sessionFile, data, 0600)
 }

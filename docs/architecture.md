@@ -188,6 +188,17 @@ Chat continuity:
    follow-up prompts. Codex app-server runner paths use `thread/resume`; Codex
    exec runner paths use `codex exec resume <thread-id> -`.
 5. Hub persists the latest returned thread id on `prompt_complete`.
+6. When the last browser WebSocket for a chat `sid` disconnects, Hub starts an
+   in-memory `leaseIdleLeased` timer in
+   `internal/hub/browser_lease.go:startBrowserLease`. Reopening the same `sid`
+   before `hub.browser_lease_ttl` expires calls
+   `internal/hub/browser_lease.go:tryReattach`, sends the existing
+   `open_session` frame again, and lets
+   `internal/bridge/session.go:SessionManager.Open` rebind the browser output
+   channel to the existing Bridge-side session. TTL expiry sends
+   `close_session`; explicit session deletion still closes immediately.
+   Setting `hub.browser_close_session: true` opts back into the legacy
+   close-after-`browser_close_grace` behavior.
 
 Orchestration continuity:
 

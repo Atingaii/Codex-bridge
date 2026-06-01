@@ -90,6 +90,13 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    `codex exec resume <thread> -`.
 5. `internal/hub/ws_bridge.go:handlePromptComplete` writes the new thread id
    after a prompt completes.
+6. `internal/hub/browser_lease.go:startBrowserLease` keeps a disconnected chat
+   `sid` in `leaseIdleLeased` until `hub.browser_lease_ttl` expires, and
+   `internal/hub/browser_lease.go:tryReattach` cancels that timer when the same
+   `sid` reconnects.
+7. `internal/bridge/session.go:SessionManager.Open` is the Bridge-side reattach
+   point: if the `sid` already exists, it updates the output channel and reuses
+   the existing runner/session instead of spawning a new process.
 
 ### Change Agent-Scoped Chat Sessions
 

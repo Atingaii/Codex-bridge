@@ -67,6 +67,11 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("HUB_BRIDGE_DOWNLOAD_URL"); v != "" {
 		cfg.Hub.BridgeDownloadURL = v
 	}
+	if v := os.Getenv("HUB_BROWSER_LEASE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Hub.BrowserLeaseTTL = Duration{Duration: d}
+		}
+	}
 	if v := os.Getenv("JWT_SECRET"); v != "" {
 		cfg.Auth.JWTSecret = v
 	}

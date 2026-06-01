@@ -24,8 +24,9 @@ Browser ──WSS──> Hub (public) <──reverse WS── Bridge (your machi
   (resident Agent session + native local `/resume` takeover).
 - Multi-CLI orchestration relays turns between native Codex and Claude Code
   sessions, with browser-side command/file approvals in review-required mode.
-- Closing the browser tab does not stop an active run by default; reopen the
-  same session to see persisted output.
+- Closing the browser tab leases the live chat session by default; reopen the
+  same `sid` before `hub.browser_lease_ttl` expires to reattach to the same
+  Bridge-side CLI process.
 
 ## Requirements
 
@@ -209,7 +210,7 @@ Config loads from `configs/${APP_ENV:-dev}.yaml`, then selected environment vari
 Common overrides:
 
 - `APP_HOST`, `APP_PORT`
-- `HUB_DB_PATH`, `HUB_COOKIE_SECURE`
+- `HUB_DB_PATH`, `HUB_COOKIE_SECURE`, `HUB_BROWSER_LEASE_TTL`
 - `JWT_SECRET`, `HUB_USERNAME`, `HUB_PASSWORD`
 - `BRIDGE_HUB_URL`, `BRIDGE_TOKEN`, `BRIDGE_TOKEN_FILE`
 - `BRIDGE_NAME`, `BRIDGE_CWD`, `BRIDGE_RUNNER`, `BRIDGE_MODEL`
@@ -221,8 +222,10 @@ Useful session behavior:
 
 ```yaml
 hub:
-  # false keeps Bridge/Codex work running after the browser tab is closed.
-  # Set true only if closing the last browser tab should kill the backend session.
+  # Keeps the Bridge-side session alive briefly after the last browser tab closes.
+  browser_lease_ttl: 5m
+  # Legacy close-on-tab-close mode. Set true only if tab close should kill the
+  # backend session after browser_close_grace instead of using the lease.
   browser_close_session: false
 ```
 

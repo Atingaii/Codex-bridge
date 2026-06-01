@@ -153,15 +153,16 @@ variables override it. Set `CODEX_BRIDGE_CONFIG_DIR` to read config files from
 another directory. Common overrides:
 
 - `APP_HOST`, `APP_PORT`, `APP_ENV`
-- `HUB_DB_PATH`, `HUB_COOKIE_SECURE`
+- `HUB_DB_PATH`, `HUB_COOKIE_SECURE`, `HUB_BROWSER_LEASE_TTL`
 - `JWT_SECRET`, `HUB_USERNAME`, `HUB_PASSWORD`
 - `BRIDGE_HUB_URL`, `BRIDGE_TOKEN`, `BRIDGE_TOKEN_FILE`
 - `BRIDGE_NAME`, `BRIDGE_CWD`, `BRIDGE_RUNNER`, `BRIDGE_MODEL`
 - `BRIDGE_SANDBOX`, `BRIDGE_APPROVAL_POLICY`
 - `LOG_LEVEL`, `LOG_FORMAT`
 
-The full env and YAML reference (including the ACP runner and the long-command
-observer) lives in [dev-workflow.md](dev-workflow.md).
+The full env and YAML reference (including browser session lease TTL, the ACP
+runner, and the long-command observer) lives in
+[dev-workflow.md](dev-workflow.md).
 
 ## Verifying a deployment
 

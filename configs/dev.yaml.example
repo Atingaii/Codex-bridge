@@ -16,6 +16,7 @@ hub:
   bridge_read_timeout: 45s
   browser_close_session: false
   browser_close_grace: 1500ms
+  browser_lease_ttl: 5m
   allowed_origins:
     - https://sparkapi.tech
   # Empty means /install.sh downloads the currently running Hub binary from

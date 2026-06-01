@@ -565,6 +565,218 @@ func TestOrchestrationReusesNativeInteractiveSessionsAcrossSameCLITurns(t *testi
 	}
 }
 
+func TestOrchestrationNativeContextCompactionAfterTurn(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	claudeLogPath := filepath.Join(tmp, "claude_log.jsonl")
+	codexLogPath := filepath.Join(tmp, "codex_log.jsonl")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeInteractiveRelayScript(claudeLogPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexInteractiveRelayScript(codexLogPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "workspace-write"
+	cfg.Bridge.ApprovalPolicy = "untrusted"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 256)
+	manager.AttachOut(out)
+	defer manager.CloseAll()
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:                   "orc_native_compact",
+		Mode:                    "collaboration",
+		Prompt:                  "finish native context maintenance",
+		MaxTurns:                2,
+		CWD:                     tmp,
+		NativeContextCompaction: protocol.NativeContextCompactionAfterTurn,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	var compactionNotes int
+	var finalContent string
+	for _, event := range events {
+		if event.Kind == "run.start" && event.RunStartData != nil && event.RunStartData.NativeContextCompaction != protocol.NativeContextCompactionAfterTurn {
+			t.Fatalf("run.start native compaction = %q", event.RunStartData.NativeContextCompaction)
+		}
+		if event.BridgeNoteData != nil && event.BridgeNoteData.Category == "native-context-compaction" {
+			compactionNotes++
+			if event.BridgeNoteData.Command != nativeContextCompactionCommand {
+				t.Fatalf("compaction note command = %#v", event.BridgeNoteData)
+			}
+		}
+		if event.Kind == "run.end" {
+			finalContent = event.Content
+		}
+	}
+	if compactionNotes != 4 {
+		t.Fatalf("native compaction notes = %d, want 4 events=%#v", compactionNotes, events)
+	}
+	if strings.Contains(finalContent, "compacted") || strings.Contains(finalContent, nativeContextCompactionCommand) {
+		t.Fatalf("maintenance output leaked into final content: %q", finalContent)
+	}
+
+	codexRecords := readJSONLines(t, codexLogPath)
+	var codexBusinessTurns, codexMaintenanceTurns int
+	for _, record := range codexRecords {
+		switch record["event"] {
+		case "turn_start":
+			codexBusinessTurns++
+		case "thread_compact":
+			codexMaintenanceTurns++
+		}
+	}
+	if codexBusinessTurns != 1 || codexMaintenanceTurns != 1 {
+		t.Fatalf("codex business=%d maintenance=%d records=%#v", codexBusinessTurns, codexMaintenanceTurns, codexRecords)
+	}
+
+	claudeRecords := readJSONLines(t, claudeLogPath)
+	var claudeBusinessTurns, claudeMaintenanceTurns int
+	for _, record := range claudeRecords {
+		if record["event"] != "user_message" {
+			continue
+		}
+		prompt, _ := record["prompt"].(string)
+		if prompt == nativeContextCompactionCommand {
+			claudeMaintenanceTurns++
+		} else {
+			claudeBusinessTurns++
+		}
+	}
+	if claudeBusinessTurns != 1 || claudeMaintenanceTurns != 0 {
+		t.Fatalf("claude business=%d maintenance=%d records=%#v", claudeBusinessTurns, claudeMaintenanceTurns, claudeRecords)
+	}
+}
+
+func TestOrchestrationNativeContextCompactionFailureIsWarningOnly(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	claudeLogPath := filepath.Join(tmp, "claude_log.jsonl")
+	codexLogPath := filepath.Join(tmp, "codex_log.jsonl")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeInteractiveRelayScript(claudeLogPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexInteractiveRelayScriptWithCompactFailure(codexLogPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "workspace-write"
+	cfg.Bridge.ApprovalPolicy = "untrusted"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 256)
+	manager.AttachOut(out)
+	defer manager.CloseAll()
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:                   "orc_native_compact_warn",
+		Mode:                    "collaboration",
+		Prompt:                  "finish despite maintenance warning",
+		MaxTurns:                2,
+		CWD:                     tmp,
+		NativeContextCompaction: protocol.NativeContextCompactionAfterTurn,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "run.end", "", "Codex native") {
+		t.Fatalf("run did not complete after compaction failure: %#v", events)
+	}
+	var warnings int
+	for _, event := range events {
+		if event.BridgeNoteData != nil && event.BridgeNoteData.Category == "native-context-compaction" && event.Severity == "warning" {
+			warnings++
+			if !strings.Contains(event.Error, "compact failed") {
+				t.Fatalf("warning did not expose compaction error: %#v", event)
+			}
+		}
+	}
+	if warnings != 1 {
+		t.Fatalf("compaction warning count = %d events=%#v", warnings, events)
+	}
+}
+
+func TestClaudeNativeResumeMetadataUpdatesProjectVisibility(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	cwd := filepath.Join(tmp, "work")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	sessionID := "11111111-2222-5333-8444-555555555555"
+	transcriptPath := claudeSessionFilePath(cwd, sessionID)
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte(`{"sessionId":"`+sessionID+`","type":"summary"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	otherCWD := filepath.Join(tmp, "other")
+	seed := map[string]any{
+		"projects": map[string]any{
+			otherCWD: map[string]any{"lastSessionId": "keep-me"},
+		},
+	}
+	seedData, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), seedData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewOrchestrationManager(&config.Config{})
+	claude := &orchestrationClaudeSession{sessionID: sessionID}
+	info := manager.registerClaudeNativeResume(&orchestrationNativeSession{cwd: cwd}, claude, "orc_resume", cwd)
+	if info == nil {
+		t.Fatal("expected claude native resume info")
+	}
+	if !info.Visible || info.TranscriptPath != transcriptPath || info.Command != "claude --resume "+sessionID {
+		t.Fatalf("unexpected resume info: %#v", info)
+	}
+	raw, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	projects := root["projects"].(map[string]any)
+	project := projects[cwd].(map[string]any)
+	if project["lastSessionId"] != sessionID || project["lastGracefulShutdown"] != true {
+		t.Fatalf("project metadata not updated: %#v", project)
+	}
+	other := projects[otherCWD].(map[string]any)
+	if other["lastSessionId"] != "keep-me" {
+		t.Fatalf("unrelated project changed: %#v", other)
+	}
+	hintPath := filepath.Join(home, ".claude", "sessions", sessionID+".json")
+	hintRaw, err := os.ReadFile(hintPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hint map[string]any
+	if err := json.Unmarshal(hintRaw, &hint); err != nil {
+		t.Fatal(err)
+	}
+	if hint["nativeResumeCommand"] != info.Command || hint["nativeResumeAvailable"] != true {
+		t.Fatalf("compat session hint = %#v", hint)
+	}
+}
+
 func TestOrchestrationCodexResumeMissingThreadRetriesFresh(t *testing.T) {
 	tmp := t.TempDir()
 	codexPath := filepath.Join(tmp, "codex")
@@ -1882,6 +2094,8 @@ if len(sys.argv) >= 2 and sys.argv[1] == "app-server":
             print(json.dumps({"id":msg["id"],"result":{"thread":{"id":params.get("threadId") or "thread_fake"}}}), flush=True)
         elif method == "thread/name/set":
             print(json.dumps({"id":msg["id"],"result":{}}), flush=True)
+        elif method == "thread/unsubscribe":
+            print(json.dumps({"id":msg["id"],"result":{"status":"unsubscribed"}}), flush=True)
         elif method == "turn/start":
             turn_count += 1
             thread_id = params.get("threadId") or "thread_fake"
@@ -1925,6 +2139,8 @@ if len(sys.argv) >= 2 and sys.argv[1] == "app-server":
             print(json.dumps({"id":msg["id"],"result":{"thread":{"id":params.get("threadId") or "thread_relay_1"}}}), flush=True)
         elif method == "thread/name/set":
             print(json.dumps({"id":msg["id"],"result":{}}), flush=True)
+        elif method == "thread/unsubscribe":
+            print(json.dumps({"id":msg["id"],"result":{"status":"unsubscribed"}}), flush=True)
         elif method == "turn/start":
             prompt = (params.get("input") or [{}])[0].get("text", "")
             with open(prompt_path, "w", encoding="utf-8") as f:
@@ -2006,12 +2222,70 @@ for line in sys.stdin:
     elif method == "thread/unsubscribe":
         log({"event": "thread_unsubscribe", "threadId": params.get("threadId")})
         emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
+    elif method == "thread/compact/start":
+        log({"event": "thread_compact", "threadId": params.get("threadId")})
+        emit({"id": msg["id"], "result": {}})
+        emit({"method": "thread/compacted", "params": {"threadId": params.get("threadId"), "turnId": "compact_1"}})
+    elif method == "turn/start":
+        turn_count += 1
+        log({"event": "turn_start", "threadId": params.get("threadId"), "params": params})
+        prompt = (params.get("input") or [{}])[0].get("text", "")
+        text = "Codex native turn %d\n\nMsg: to=implementer; intent=continue; need=next\nHandoff: status=needs_next; changed=none; verified=codex native; next=continue; risks=none" % turn_count
+        if turn_count >= 2:
+            text = "Codex native final\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=codex native reused; next=none; risks=none"
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_%d" % turn_count, "status": "inProgress"}}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": params.get("threadId"), "turnId": "turn_%d" % turn_count, "delta": text}})
+        emit({"method": "turn/completed", "params": {"threadId": params.get("threadId"), "turn": {"id": "turn_%d" % turn_count, "status": "completed"}}})
+`
+}
+
+func fakeCodexInteractiveRelayScriptWithCompactFailure(logPath string) string {
+	logPathRaw, _ := json.Marshal(logPath)
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+log_path = ` + string(logPathRaw) + `
+thread_id = "thr_native"
+turn_count = 0
+
+def log(obj):
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+def emit(obj):
+    print(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+if len(sys.argv) < 2 or sys.argv[1] != "app-server":
+    print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
+    sys.exit(1)
+
+log({"event": "process_start", "argv": sys.argv[1:]})
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
+    elif method == "thread/start":
+        log({"event": "thread_start", "threadId": thread_id})
+        emit({"id": msg["id"], "result": {"thread": {"id": thread_id}}})
+    elif method == "thread/resume":
+        log({"event": "thread_resume", "threadId": params.get("threadId")})
+        emit({"id": msg["id"], "result": {"thread": {"id": params.get("threadId") or thread_id}}})
+    elif method == "thread/name/set":
+        log({"event": "thread_name", "threadId": params.get("threadId"), "name": params.get("name")})
+        emit({"id": msg["id"], "result": {}})
+    elif method == "thread/unsubscribe":
+        log({"event": "thread_unsubscribe", "threadId": params.get("threadId")})
+        emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
+    elif method == "thread/compact/start":
+        log({"event": "thread_compact", "threadId": params.get("threadId")})
+        emit({"id": msg["id"], "error": {"code": -32000, "message": "compact failed"}})
     elif method == "turn/start":
         turn_count += 1
         log({"event": "turn_start", "threadId": params.get("threadId"), "params": params})
         text = "Codex native turn %d\n\nMsg: to=implementer; intent=continue; need=next\nHandoff: status=needs_next; changed=none; verified=codex native; next=continue; risks=none" % turn_count
-        if turn_count >= 2:
-            text = "Codex native final\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=codex native reused; next=none; risks=none"
         emit({"id": msg["id"], "result": {"turn": {"id": "turn_%d" % turn_count, "status": "inProgress"}}})
         emit({"method": "item/agentMessage/delta", "params": {"threadId": params.get("threadId"), "turnId": "turn_%d" % turn_count, "delta": text}})
         emit({"method": "turn/completed", "params": {"threadId": params.get("threadId"), "turn": {"id": "turn_%d" % turn_count, "status": "completed"}}})
@@ -2046,9 +2320,11 @@ for idx, line in enumerate(sys.stdin, start=1):
     payload = json.loads(line)
     prompt = prompt_text(payload)
     log({"event": "user_message", "index": idx, "sessionId": session_id, "prompt": prompt})
-    text = "Claude native turn %d\n\nMsg: to=reviewer; intent=review; need=continue\nHandoff: status=needs_next; changed=none; verified=claude native; next=review; risks=none" % idx
-    if idx >= 2:
-        text = "Claude native turn 2\n\nMsg: to=reviewer; intent=final-check; need=finish\nHandoff: status=needs_next; changed=none; verified=claude native reused; next=finish; risks=none"
+    text = "Claude compacted native context."
+    if prompt != "/compact":
+        text = "Claude native turn %d\n\nMsg: to=reviewer; intent=review; need=continue\nHandoff: status=needs_next; changed=none; verified=claude native; next=review; risks=none" % idx
+        if idx >= 2:
+            text = "Claude native turn 2\n\nMsg: to=reviewer; intent=final-check; need=finish\nHandoff: status=needs_next; changed=none; verified=claude native reused; next=finish; risks=none"
     print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}, ensure_ascii=False), flush=True)
     print(json.dumps({"type": "result", "result": text}, ensure_ascii=False), flush=True)
 `

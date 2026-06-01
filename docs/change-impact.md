@@ -35,6 +35,8 @@ keeps only the top frequent subset.
 | Bridge capability reporting | `internal/protocol.RegisterPayload`, `internal/bridge/client.go`, `internal/hub/pool.go`, `internal/hub/server.go:handleAgents`, frontend agent types/UI, policy tests |
 | Orchestration event shape | `internal/protocol.OrchestrationEventPayload`, Bridge emitters in `internal/bridge/orchestration_events.go`, `internal/store.OrchestrationEvent`, Hub persistence/share sanitizers, visible event reducer in `frontend/src/app/lib/utils.ts`, integration tests, `docs/architecture.md`, `docs/code-map.md` |
 | Orchestration profile behavior | Hub create/continue payloads, `internal/store.OrchestrationRun.profile`, Bridge prompt composition, `internal/bridge/profiles/`, frontend profile selector, continuity docs |
+| Orchestration native context compaction | `internal/protocol.OrchestrationStartPayload`/`RunStartData`, `internal/store.OrchestrationRun.native_context_compaction`, Hub create/continue/share payloads, `internal/bridge/orchestration_native.go`, Codex/Claude interactive turn helpers, frontend orchestration settings, `docs/features/native-context-compaction.md`, tests |
+| Orchestration native resume metadata | `internal/protocol.RunEndData`, `internal/bridge/orchestration_native.go`, `internal/bridge/orchestration_relay.go`, frontend run-end types/reducers, share sanitizer, `docs/features/claude-native-resume-visibility.md`, tests |
 | Orchestration long-command observer | `internal/config/`, `configs/*.yaml.example`, Bridge scanner/observer tests for Claude and Codex, frontend Bridge-note rendering, `docs/dev-workflow.md`, README if user-facing |
 | Cancellation semantics | Hub cancel handler, Bridge cancel manager, status constants, frontend stop button, tests |
 | Attachment handling | Hub size/type validation, Bridge file materialization, frontend upload limits, README if limits are user-facing |
@@ -59,4 +61,4 @@ keeps only the top frequent subset.
 | Changed setup command | README, README.zh-CN if Chinese quick start changes, `docs/dev-workflow.md` |
 | Deprecated design | Mark old doc as deprecated and link the replacement |
 
-Last updated: 2026-05-23
+Last updated: 2026-06-02

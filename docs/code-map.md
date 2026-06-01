@@ -210,35 +210,48 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    `internal/protocol.OrchestrationStartPayload`, and
    `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
    carry the persisted orchestration profile (`default` or `formal-proof`).
-3. `internal/bridge/orchestration_relay.go:roleForTurnWithFirstCLI` controls which
+3. `internal/protocol/envelope.go:NormalizeNativeContextCompaction`,
+   `internal/store/store.go:OrchestrationRun`,
+   `internal/hub/orchestration.go:normalizeOrchestrationStart`, and
+   `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
+   carry the persisted native context compaction preference (`off` or
+   `after-turn`).
+4. `internal/bridge/orchestration_relay.go:roleForTurnWithFirstCLI` controls which
    CLI owns each turn.
-4. `internal/bridge/orchestration_relay.go:composeRelayPromptWithFirstCLI` controls
+5. `internal/bridge/orchestration_relay.go:composeRelayPromptWithFirstCLI` controls
    the pass-through prompt sent to Claude/Codex. Only
    `profile=formal-proof` enables formal-proof prompt guidance; the default
    profile does not silently activate it from prompt keywords.
-5. `internal/bridge/profiles/registry` is the neutral boundary for
+6. `internal/bridge/profiles/registry` is the neutral boundary for
    profile-specific orchestration behavior. Formal-proof prompt fragments,
    assessments, manual-build carry-over, command fingerprint decisions, and
    benchmark-specific detectors live under
    `internal/bridge/profiles/formalproof/`.
-6. `internal/bridge/orchestration_relay.go:formatRelayPriorTurn` controls how much
+7. `internal/bridge/orchestration_relay.go:formatRelayPriorTurn` controls how much
    prior visible output and command context is sent to the next CLI.
-7. `internal/bridge/orchestration_relay.go:runRelayCLI`,
+8. `internal/bridge/orchestration_relay.go:runRelayCLI`,
    `internal/bridge/orchestration_codex.go:runCodexInteractive`, and
    `internal/bridge/orchestration_claude.go:runClaudeInteractive` preserve the
    run-scoped native Codex app-server thread, Claude stream-json process,
    stable Claude session id, and Codex thread id when launching the next CLI
    turn.
-8. `internal/bridge/orchestration.go:cwd` locks resumed runs to the absolute
+9. `internal/bridge/orchestration_native.go:runNativeContextCompaction` runs
+   native compaction only through verified CLI control channels, records skip
+   Bridge notes for unsupported surfaces, and emits warning-only Bridge notes on
+   failure.
+10. `internal/bridge/orchestration_native.go:runEndDataWithNativeResume` and
+   `internal/bridge/orchestration_relay.go:relayRunEndData` attach Codex and
+   Claude native resume metadata to run-end payloads.
+11. `internal/bridge/orchestration.go:cwd` locks resumed runs to the absolute
    run cwd reported by Bridge, and
    `internal/bridge/orchestration.go:PrepareOrchestrationPromptFiles` writes
    uploaded files under that cwd.
-9. `internal/bridge/orchestration_relay.go:relayTerminalContent` controls terminal
+12. `internal/bridge/orchestration_relay.go:relayTerminalContent` controls terminal
    run content without adding a hidden verifier or remediation turn.
-10. Keep event kinds compatible with
+13. Keep event kinds compatible with
    `frontend/src/app/lib/utils.ts:visibleOrchestrationEvents`, including
    terminal run summary rendering for `run.end` / `run.error`.
-11. Update
+14. Update
    [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
 
 ### Change Orchestration Event Protocol
@@ -268,6 +281,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 1. Edit `internal/store.Store.Migrate`.
 2. Update structs, scanners, and CRUD methods in `internal/store/store.go`.
 3. Add store tests.
+4. Update `docs/architecture.md` storage bullets and `docs/change-impact.md`.
 4. Update docs that describe persisted tables.
 
 ### Change Frontend UI

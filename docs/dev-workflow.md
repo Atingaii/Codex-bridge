@@ -134,6 +134,13 @@ configured delay. Claude Code can receive a tagged stream-input note when the
 stream-input side channel is active; Codex currently records the same note in
 the browser timeline without injecting stdin.
 
+Orchestration native context compaction is also opt-in from the browser
+orchestration panel. The `after-turn` setting is persisted per run. Codex uses
+the app-server `thread/compact/start` native RPC after successful business
+turns; Claude Code stream-json is skipped with an info Bridge note until a
+verified native control channel exists. Maintenance output is tagged as Bridge
+notes and is not forwarded as handoff evidence.
+
 ```yaml
 bridge:
   long_command_observer:

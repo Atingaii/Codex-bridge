@@ -20,6 +20,13 @@ type orchestrationCodexSession struct {
 	loaded   bool
 }
 
+type orchestrationMaintenanceResult struct {
+	Content string
+	Skipped bool
+	Reason  string
+	Err     error
+}
+
 type codexScanResult struct {
 	Content       string
 	Tools         []RunnerToolEvent
@@ -44,6 +51,7 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 		return "", nil, firstNonEmpty(state.CodexThreadID, ""), "codex-interactive-error", err
 	}
 	resumeMode := codex.mode
+	compactAfterTurn := protocol.NormalizeNativeContextCompaction(session.nativeContextCompaction) == protocol.NativeContextCompactionAfterTurn
 	req := RunnerRequest{
 		Content:        prompt,
 		RemoteThreadID: codex.threadID,
@@ -62,7 +70,9 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 	var tools []RunnerToolEvent
 	toolStarts := make(map[string]time.Time)
 	done := make(chan appServerTurnResult, 1)
-	go NewCodexAppServerRunner(m.cfg).readEvents(ctx, codex.client, req, codex.threadID, func(update RunnerUpdate) {
+	runner := NewCodexAppServerRunner(m.cfg)
+	scope := newAppServerTurnScope(codex.threadID)
+	go runner.readEvents(ctx, codex.client, req, scope, func(update RunnerUpdate) {
 		if update.Delta != "" {
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: update.Delta})
 		}
@@ -75,12 +85,15 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 			m.emitTool(payload.RunID, turnID, role, "codex", update.Tool)
 		}
 	}, done)
-	if _, err := codex.client.request(ctx, "turn/start", NewCodexAppServerRunner(m.cfg).turnStartParams(codex.threadID, prompt, req)); err != nil {
+	res, err := codex.client.request(ctx, "turn/start", runner.turnStartParams(codex.threadID, prompt, req))
+	if err != nil {
 		return "", tools, codex.threadID, resumeMode, err
 	}
+	scope.setTurnID(appServerTurnIDFromResponse(res))
 	select {
 	case result := <-done:
 		if result.err == nil {
+			m.runNativeContextCompaction(ctx, payload.RunID, turnID, role, "codex", compactAfterTurn, session, codex)
 			m.flushCodexInteractiveThread(session, codex)
 		}
 		return strings.TrimSpace(result.result.Content), tools, codex.threadID, resumeMode, result.err
@@ -172,6 +185,60 @@ func (m *OrchestrationManager) flushCodexInteractiveThread(session *orchestratio
 	_ = codex.client.unsubscribeThread(ctx, codex.threadID)
 	codex.loaded = false
 	codex.mode = "codex-interactive-resume"
+}
+
+func (m *OrchestrationManager) compactCodexInteractiveThread(ctx context.Context, session *orchestrationNativeSession, codex *orchestrationCodexSession) orchestrationMaintenanceResult {
+	if session == nil || codex == nil || codex.client == nil || strings.TrimSpace(codex.threadID) == "" {
+		return orchestrationMaintenanceResult{Err: errors.New("codex native session is not available")}
+	}
+	maintCtx, cancel := context.WithTimeout(ctx, nativeContextCompactionTimeout)
+	defer cancel()
+	done := make(chan orchestrationMaintenanceResult, 1)
+	go waitForCodexNativeCompaction(maintCtx, codex.client, codex.threadID, done)
+	if _, err := codex.client.request(maintCtx, "thread/compact/start", map[string]any{"threadId": codex.threadID}); err != nil {
+		return orchestrationMaintenanceResult{Err: err}
+	}
+	select {
+	case result := <-done:
+		return result
+	case <-maintCtx.Done():
+		return orchestrationMaintenanceResult{Err: maintCtx.Err()}
+	}
+}
+
+func waitForCodexNativeCompaction(ctx context.Context, client *appServerClient, threadID string, done chan<- orchestrationMaintenanceResult) {
+	for {
+		select {
+		case <-ctx.Done():
+			done <- orchestrationMaintenanceResult{Err: ctx.Err()}
+			return
+		case msg, ok := <-client.events:
+			if !ok {
+				done <- orchestrationMaintenanceResult{Err: errors.New("codex app-server exited")}
+				return
+			}
+			if msg.Method == "" {
+				continue
+			}
+			if msgThreadID := appServerMessageThreadID(msg); msgThreadID != "" && msgThreadID != threadID {
+				continue
+			}
+			switch msg.Method {
+			case "thread/compacted":
+				done <- orchestrationMaintenanceResult{}
+				return
+			case "item/completed":
+				item, _ := appServerNestedMap(msg.Params, "item")
+				if itemType, _ := item["type"].(string); itemType == "contextCompaction" {
+					done <- orchestrationMaintenanceResult{}
+					return
+				}
+			case "error":
+				done <- orchestrationMaintenanceResult{Err: appServerEventError(msg, "")}
+				return
+			}
+		}
+	}
 }
 
 func (m *OrchestrationManager) runCodexWithThread(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt, threadID string) (string, []RunnerToolEvent, string, string, error) {

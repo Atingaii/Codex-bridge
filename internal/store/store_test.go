@@ -352,7 +352,7 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	if loaded.Status != OrchestrationCompleted || loaded.FinishedAt == 0 {
 		t.Fatalf("unexpected loaded run: %+v", loaded)
 	}
-	if err := st.UpdateOrchestrationRunSettings(ctx, run.ID, agent.ID, run.Mode, "claude", run.Profile, run.CWD, run.MaxTurns, run.Files); err != nil {
+	if err := st.UpdateOrchestrationRunSettings(ctx, run.ID, agent.ID, run.Mode, "claude", run.Profile, run.CWD, "after-turn", run.MaxTurns, run.Files); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, OrchestrationRunning, ""); err != nil {
@@ -365,7 +365,7 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	if loaded.Status != OrchestrationRunning || loaded.FinishedAt != 0 {
 		t.Fatalf("resumed run kept terminal state: %+v", loaded)
 	}
-	if loaded.FirstCLI != "claude" || loaded.Profile != "formal-proof" {
+	if loaded.FirstCLI != "claude" || loaded.Profile != "formal-proof" || loaded.NativeContextCompaction != "after-turn" {
 		t.Fatalf("resumed settings = %+v", loaded)
 	}
 	if err := st.UpdateOrchestrationRunSession(ctx, run.ID, "thread_1", true, "/abs/repo"); err != nil {

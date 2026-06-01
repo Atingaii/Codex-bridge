@@ -131,6 +131,35 @@ func TestCodexAppServerRunnerEmptyErrorAfterVisibleOutputCompletes(t *testing.T)
 	}
 }
 
+func TestCodexAppServerRunnerIgnoresStaleTurnCompleted(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerStaleTurnScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+
+	var deltas []string
+	result, err := NewCodexAppServerRunner(&cfg).Prompt(context.Background(), RunnerRequest{
+		Content: "do the actual work",
+	}, func(update RunnerUpdate) {
+		if update.Delta != "" {
+			deltas = append(deltas, update.Delta)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "real final" {
+		t.Fatalf("result content = %q", result.Content)
+	}
+	if strings.Join(deltas, "") != "real final" {
+		t.Fatalf("deltas = %#v", deltas)
+	}
+}
+
 func TestCodexAppServerThreadStartIsPersisted(t *testing.T) {
 	cfg := config.Default()
 	cfg.Bridge.CWD = "/work/tree"
@@ -242,8 +271,35 @@ for line in sys.stdin:
         emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
     elif method == "turn/start":
         emit({"id": msg["id"], "result": {"turn": {"id": "turn_1", "status": "inProgress"}}})
-        emit({"method": "item/agentMessage/delta", "params": {"delta": "rewrite Habs direction was wrong"}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_empty_error", "turnId": "turn_1", "delta": "rewrite Habs direction was wrong"}})
         emit({"method": "error", "params": {"message": ""}})
+        sys.exit(0)
+`
+}
+
+func fakeCodexAppServerStaleTurnScript() string {
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+def emit(obj):
+    print(json.dumps(obj, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": "thr_app"}}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
+    elif method == "turn/start":
+        emit({"method": "turn/completed", "params": {"threadId": "thr_app", "turn": {"id": "turn_stale", "status": "completed"}}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_app", "turnId": "turn_stale", "delta": "stale"}})
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_real", "status": "inProgress"}}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_app", "turnId": "turn_real", "delta": "real final"}})
+        emit({"method": "turn/completed", "params": {"threadId": "thr_app", "turn": {"id": "turn_real", "status": "completed"}}})
         sys.exit(0)
 `
 }

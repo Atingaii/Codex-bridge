@@ -26,6 +26,7 @@ import type {
   ApprovalItemState,
   ApprovalRequest,
   Envelope,
+  NativeContextCompaction,
   OrchestrationEvent,
   OrchestrationRun,
   ShareInfo,
@@ -100,6 +101,7 @@ export function OrchestrationWorkspace({
   const [mode, setMode] = useState<'collaboration' | 'debate'>('collaboration');
   const [firstCli, setFirstCli] = useState<'claude' | 'codex'>('claude');
   const [profile, setProfile] = useState<'default' | 'formal-proof'>('default');
+  const [nativeContextCompaction, setNativeContextCompaction] = useState<NativeContextCompaction>('off');
   const [prompt, setPrompt] = useState('');
   const [cwd, setCwd] = useState('');
   const [maxTurns, setMaxTurns] = useState(4);
@@ -345,6 +347,7 @@ export function OrchestrationWorkspace({
     setMode(run.mode === 'debate' ? 'debate' : 'collaboration');
     setFirstCli(run.firstCli === 'codex' ? 'codex' : 'claude');
     setProfile(run.profile === 'formal-proof' ? 'formal-proof' : 'default');
+    setNativeContextCompaction(run.nativeContextCompaction === 'after-turn' ? 'after-turn' : 'off');
     setCwd(run.cwd || '');
     setMaxTurns(run.maxTurns || 4);
     stickToBottomRef.current = true;
@@ -534,6 +537,7 @@ export function OrchestrationWorkspace({
           mode,
           firstCli,
           profile,
+          nativeContextCompaction,
           prompt: task,
           title: titleFromPrompt(task, t),
           cwd: cwd.trim(),
@@ -895,10 +899,23 @@ export function OrchestrationWorkspace({
                   </div>
                 </label>
 
-                <label className="block space-y-2">
-                  <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.turns}</span>
-                  <Input type="number" min={2} max={12} value={maxTurns} onChange={(event) => setMaxTurns(Number(event.target.value) || 4)} disabled={creating || isRunning} />
-                </label>
+                <div className="grid gap-3 sm:grid-cols-[minmax(7rem,0.45fr)_minmax(10rem,0.55fr)]">
+                  <label className="block space-y-2">
+                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.turns}</span>
+                    <Input type="number" min={2} max={12} value={maxTurns} onChange={(event) => setMaxTurns(Number(event.target.value) || 4)} disabled={creating || isRunning} />
+                  </label>
+                  <div className="space-y-2">
+                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.nativeContextCompaction}</span>
+                    <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1">
+                      <button className={cn("h-8 rounded-md text-xs font-medium", nativeContextCompaction === 'off' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setNativeContextCompaction('off')} disabled={creating || isRunning}>
+                        {t.nativeContextCompactionOff}
+                      </button>
+                      <button className={cn("h-8 rounded-md text-xs font-medium", nativeContextCompaction === 'after-turn' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setNativeContextCompaction('after-turn')} disabled={creating || isRunning}>
+                        {t.nativeContextCompactionAfterTurn}
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div className="flex shrink-0 flex-col gap-2">

@@ -34,20 +34,21 @@ type publicMessageResponse struct {
 }
 
 type publicOrchestrationRunResponse struct {
-	ID         string                    `json:"id"`
-	Title      string                    `json:"title"`
-	Mode       string                    `json:"mode"`
-	FirstCLI   string                    `json:"firstCli,omitempty"`
-	Profile    string                    `json:"profile,omitempty"`
-	Prompt     string                    `json:"prompt"`
-	CWD        string                    `json:"cwd,omitempty"`
-	MaxTurns   int                       `json:"maxTurns"`
-	Status     string                    `json:"status"`
-	Error      string                    `json:"error,omitempty"`
-	Files      []store.OrchestrationFile `json:"files,omitempty"`
-	CreatedAt  int64                     `json:"createdAt"`
-	UpdatedAt  int64                     `json:"updatedAt"`
-	FinishedAt int64                     `json:"finishedAt,omitempty"`
+	ID                      string                    `json:"id"`
+	Title                   string                    `json:"title"`
+	Mode                    string                    `json:"mode"`
+	FirstCLI                string                    `json:"firstCli,omitempty"`
+	Profile                 string                    `json:"profile,omitempty"`
+	NativeContextCompaction string                    `json:"nativeContextCompaction,omitempty"`
+	Prompt                  string                    `json:"prompt"`
+	CWD                     string                    `json:"cwd,omitempty"`
+	MaxTurns                int                       `json:"maxTurns"`
+	Status                  string                    `json:"status"`
+	Error                   string                    `json:"error,omitempty"`
+	Files                   []store.OrchestrationFile `json:"files,omitempty"`
+	CreatedAt               int64                     `json:"createdAt"`
+	UpdatedAt               int64                     `json:"updatedAt"`
+	FinishedAt              int64                     `json:"finishedAt,omitempty"`
 }
 
 type publicOrchestrationEventResponse struct {
@@ -210,20 +211,21 @@ func publicSession(session store.Session) publicSessionResponse {
 
 func publicOrchestrationRun(run store.OrchestrationRun) publicOrchestrationRunResponse {
 	return publicOrchestrationRunResponse{
-		ID:         run.ID,
-		Title:      run.Title,
-		Mode:       run.Mode,
-		FirstCLI:   run.FirstCLI,
-		Profile:    run.Profile,
-		Prompt:     run.Prompt,
-		CWD:        run.CWD,
-		MaxTurns:   run.MaxTurns,
-		Status:     run.Status,
-		Error:      run.Error,
-		Files:      run.Files,
-		CreatedAt:  run.CreatedAt,
-		UpdatedAt:  run.UpdatedAt,
-		FinishedAt: run.FinishedAt,
+		ID:                      run.ID,
+		Title:                   run.Title,
+		Mode:                    run.Mode,
+		FirstCLI:                run.FirstCLI,
+		Profile:                 run.Profile,
+		NativeContextCompaction: run.NativeContextCompaction,
+		Prompt:                  run.Prompt,
+		CWD:                     run.CWD,
+		MaxTurns:                run.MaxTurns,
+		Status:                  run.Status,
+		Error:                   run.Error,
+		Files:                   run.Files,
+		CreatedAt:               run.CreatedAt,
+		UpdatedAt:               run.UpdatedAt,
+		FinishedAt:              run.FinishedAt,
 	}
 }
 

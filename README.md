@@ -177,10 +177,16 @@ Claude Code's permission prompt MCP hook. Hub-managed orchestration uses the
 selected Bridge connection for the whole run, alternates direct Claude Code and
 Codex CLI turns, carries compact turn summaries forward, and shows each
 endpoint's approval capabilities before a run starts. The orchestration page
-also has a `default` / `formal-proof` profile selector; formal-proof guidance is
-explicit opt-in and is persisted with the run. Orchestration timelines use typed
-events with `source`, `severity`, command payloads, and one structured final
-conclusion so Bridge notes and CLI output remain distinguishable.
+also has a `default` / `formal-proof` profile selector and a native context
+maintenance setting; formal-proof guidance and post-turn native compaction are
+explicit opt-ins and are persisted with the run. Codex uses its app-server
+compaction RPC when available; CLI surfaces without a verified control channel
+are skipped with Bridge notes instead of receiving model-visible slash commands.
+Run-end metadata includes
+direct native resume commands for Codex and Claude Code when their native ids
+are available. Orchestration timelines use typed events with `source`,
+`severity`, command payloads, and one structured final conclusion so Bridge
+notes and CLI output remain distinguishable.
 Existing endpoints can be expanded under Settings -> Agents & Runtime to
 generate a repair command. That command downloads the current Bridge binary and
 reconnects the same endpoint with its existing machine id, name, and known

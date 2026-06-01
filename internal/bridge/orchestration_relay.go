@@ -131,14 +131,17 @@ func relayTurnEndData(cli string, state orchestrationSessionState) map[string]an
 	return data
 }
 
-func relayRunEndData(cli string, state orchestrationSessionState) *protocol.RunEndData {
+func (m *OrchestrationManager) relayRunEndData(cli string, state orchestrationSessionState, cwd string) *protocol.RunEndData {
 	data := &protocol.RunEndData{}
 	switch cli {
 	case "codex":
 		data.CodexThreadID = state.CodexThreadID
+		data.CodexNativeResume = codexNativeResumeInfo(state.CodexThreadID, cwd)
 	case "claude":
 		data.ClaudeSessionID = state.ClaudeSessionID
+		data.ClaudeNativeResume = m.claudeNativeResumeInfo(state.ClaudeSessionID, cwd)
 	}
+	data = runEndDataWithNativeResume(data, cwd)
 	if data.CodexThreadID == "" && data.ClaudeSessionID == "" {
 		return nil
 	}

@@ -66,11 +66,14 @@ func (r *CodexAppServerRunner) Prompt(ctx context.Context, req RunnerRequest, on
 	}
 
 	done := make(chan appServerTurnResult, 1)
-	go r.readEvents(ctx, client, req, threadID, onUpdate, done)
+	scope := newAppServerTurnScope(threadID)
+	go r.readEvents(ctx, client, req, scope, onUpdate, done)
 
-	if _, err := client.request(ctx, "turn/start", r.turnStartParams(threadID, req.Content, req)); err != nil {
+	res, err := client.request(ctx, "turn/start", r.turnStartParams(threadID, req.Content, req))
+	if err != nil {
 		return RunnerResult{RemoteThreadID: threadID}, err
 	}
+	scope.setTurnID(appServerTurnIDFromResponse(res))
 	select {
 	case result := <-done:
 		result.result.RemoteThreadID = threadID
@@ -80,7 +83,7 @@ func (r *CodexAppServerRunner) Prompt(ctx context.Context, req RunnerRequest, on
 	}
 }
 
-const appServerThreadUnsubscribeTimeout = 15 * time.Second
+const appServerThreadUnsubscribeTimeout = 2 * time.Second
 const appServerProcessCloseTimeout = 30 * time.Second
 
 func (r *CodexAppServerRunner) start(ctx context.Context, req RunnerRequest) (*appServerClient, error) {
@@ -215,7 +218,99 @@ type appServerTurnResult struct {
 	err    error
 }
 
-func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServerClient, req RunnerRequest, threadID string, onUpdate func(update RunnerUpdate), done chan<- appServerTurnResult) {
+type appServerTurnScope struct {
+	mu        sync.RWMutex
+	readyOnce sync.Once
+	ready     chan struct{}
+	threadID  string
+	turnID    string
+}
+
+func newAppServerTurnScope(threadID string) *appServerTurnScope {
+	return &appServerTurnScope{threadID: threadID, ready: make(chan struct{})}
+}
+
+func (s *appServerTurnScope) setTurnID(turnID string) {
+	turnID = strings.TrimSpace(turnID)
+	if s == nil || turnID == "" {
+		return
+	}
+	s.mu.Lock()
+	s.turnID = turnID
+	s.mu.Unlock()
+	s.readyOnce.Do(func() {
+		close(s.ready)
+	})
+}
+
+func (s *appServerTurnScope) current() (threadID, turnID string) {
+	if s == nil {
+		return "", ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.threadID, s.turnID
+}
+
+func (s *appServerTurnScope) waitForTurnID(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	select {
+	case <-s.ready:
+	case <-ctx.Done():
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+func (s *appServerTurnScope) matches(ctx context.Context, msg appServerMessage) bool {
+	if messageRequiresTurnID(msg.Method) {
+		s.waitForTurnID(ctx)
+	}
+	threadID, turnID := s.current()
+	if msgThreadID := appServerMessageThreadID(msg); msgThreadID != "" && threadID != "" && msgThreadID != threadID {
+		return false
+	}
+	msgTurnID := appServerMessageTurnID(msg)
+	if msgTurnID != "" && turnID == "" {
+		s.waitForTurnID(ctx)
+		_, turnID = s.current()
+	}
+	if msg.Method == "turn/completed" || msg.Method == "item/agentMessage/delta" {
+		return turnID != "" && msgTurnID == turnID
+	}
+	if msgTurnID != "" && turnID != "" && msgTurnID != turnID {
+		return false
+	}
+	return true
+}
+
+func messageRequiresTurnID(method string) bool {
+	switch method {
+	case "turn/completed",
+		"item/agentMessage/delta",
+		"item/completed",
+		"item/started",
+		"item/commandExecution/outputDelta":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *appServerTurnScope) matchesNonTerminal(msg appServerMessage) bool {
+	threadID, turnID := s.current()
+	if msgThreadID := appServerMessageThreadID(msg); msgThreadID != "" && threadID != "" && msgThreadID != threadID {
+		return false
+	}
+	msgTurnID := appServerMessageTurnID(msg)
+	if msgTurnID != "" && turnID != "" && msgTurnID != turnID {
+		return false
+	}
+	return true
+}
+
+func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServerClient, req RunnerRequest, scope *appServerTurnScope, onUpdate func(update RunnerUpdate), done chan<- appServerTurnResult) {
 	var result RunnerResult
 	var text strings.Builder
 	for {
@@ -238,6 +333,22 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 			if msg.Method == "" {
 				continue
 			}
+			if strings.HasSuffix(msg.Method, "/requestApproval") || msg.Method == "execCommandApproval" || msg.Method == "applyPatchApproval" {
+				if scope.matchesNonTerminal(msg) {
+					threadID, _ := scope.current()
+					r.handleApproval(ctx, client, msg, req, threadID)
+				}
+				continue
+			}
+			if msg.Method == "turn/started" {
+				if turnID := appServerMessageTurnID(msg); turnID != "" {
+					scope.setTurnID(turnID)
+				}
+				continue
+			}
+			if !scope.matches(ctx, msg) {
+				continue
+			}
 			switch msg.Method {
 			case "item/agentMessage/delta":
 				delta := nestedString(map[string]any{"params": msg.Params}, "params", "delta")
@@ -249,10 +360,10 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 				item, _ := appServerNestedMap(msg.Params, "item")
 				if itemType, _ := item["type"].(string); itemType == "agentMessage" {
 					if content, _ := item["text"].(string); content != "" {
-						result.Content = content
-						text.Reset()
-						text.WriteString(content)
-						onUpdate(RunnerUpdate{Content: content})
+						if delta := appendAgentMessageContent(&text, content); delta != "" {
+							onUpdate(RunnerUpdate{Content: delta})
+						}
+						result.Content = text.String()
 					}
 				}
 				if tool := appServerToolEvent(item); tool != nil {
@@ -285,11 +396,51 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 				done <- appServerTurnResult{result: result, err: err}
 				return
 			}
-			if strings.HasSuffix(msg.Method, "/requestApproval") || msg.Method == "execCommandApproval" || msg.Method == "applyPatchApproval" {
-				r.handleApproval(ctx, client, msg, req, threadID)
-			}
 		}
 	}
+}
+
+func appServerTurnIDFromResponse(raw json.RawMessage) string {
+	return nestedString(appServerResultMap(raw), "turn", "id")
+}
+
+func appServerMessageThreadID(msg appServerMessage) string {
+	wrapped := map[string]any{"params": msg.Params}
+	if id := nestedString(wrapped, "params", "threadId"); id != "" {
+		return id
+	}
+	if child, _ := msg.Params["thread"].(map[string]any); child != nil {
+		if id, _ := child["id"].(string); id != "" {
+			return id
+		}
+	}
+	if child, _ := msg.Params["item"].(map[string]any); child != nil {
+		if id, _ := child["threadId"].(string); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func appServerMessageTurnID(msg appServerMessage) string {
+	wrapped := map[string]any{"params": msg.Params}
+	if id := nestedString(wrapped, "params", "turnId"); id != "" {
+		return id
+	}
+	if child, _ := msg.Params["turn"].(map[string]any); child != nil {
+		if id, _ := child["id"].(string); id != "" {
+			return id
+		}
+		if id, _ := child["turnId"].(string); id != "" {
+			return id
+		}
+	}
+	if child, _ := msg.Params["item"].(map[string]any); child != nil {
+		if id, _ := child["turnId"].(string); id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 type appServerEmptyErrorAfterVisibleOutput struct {

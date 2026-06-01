@@ -17,28 +17,30 @@ import (
 )
 
 type orchestrationCreateRequest struct {
-	AgentID  string                       `json:"agentId"`
-	Title    string                       `json:"title"`
-	Mode     string                       `json:"mode"`
-	FirstCLI string                       `json:"firstCli"`
-	Profile  string                       `json:"profile"`
-	Prompt   string                       `json:"prompt"`
-	CWD      string                       `json:"cwd"`
-	MaxTurns int                          `json:"maxTurns"`
-	Files    []protocol.AttachmentPayload `json:"files"`
+	AgentID                 string                       `json:"agentId"`
+	Title                   string                       `json:"title"`
+	Mode                    string                       `json:"mode"`
+	FirstCLI                string                       `json:"firstCli"`
+	Profile                 string                       `json:"profile"`
+	NativeContextCompaction string                       `json:"nativeContextCompaction"`
+	Prompt                  string                       `json:"prompt"`
+	CWD                     string                       `json:"cwd"`
+	MaxTurns                int                          `json:"maxTurns"`
+	Files                   []protocol.AttachmentPayload `json:"files"`
 }
 
 type orchestrationStartRequest struct {
-	AgentID           string
-	Title             string
-	Mode              string
-	FirstCLI          string
-	Profile           string
-	Prompt            string
-	CWD               string
-	MaxTurns          int
-	MaxTurnsRequested int
-	Files             []protocol.AttachmentPayload
+	AgentID                 string
+	Title                   string
+	Mode                    string
+	FirstCLI                string
+	Profile                 string
+	NativeContextCompaction string
+	Prompt                  string
+	CWD                     string
+	MaxTurns                int
+	MaxTurnsRequested       int
+	Files                   []protocol.AttachmentPayload
 }
 
 func (s *Server) handleListOrchestrations(w http.ResponseWriter, r *http.Request, uid string) {
@@ -58,15 +60,16 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	startReq := orchestrationStartRequest{
-		AgentID:  req.AgentID,
-		Title:    req.Title,
-		Mode:     req.Mode,
-		FirstCLI: req.FirstCLI,
-		Profile:  req.Profile,
-		Prompt:   req.Prompt,
-		CWD:      req.CWD,
-		MaxTurns: req.MaxTurns,
-		Files:    req.Files,
+		AgentID:                 req.AgentID,
+		Title:                   req.Title,
+		Mode:                    req.Mode,
+		FirstCLI:                req.FirstCLI,
+		Profile:                 req.Profile,
+		NativeContextCompaction: req.NativeContextCompaction,
+		Prompt:                  req.Prompt,
+		CWD:                     req.CWD,
+		MaxTurns:                req.MaxTurns,
+		Files:                   req.Files,
 	}
 	normalized, ok := s.normalizeOrchestrationStart(w, startReq)
 	if !ok {
@@ -87,16 +90,17 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 	}
 	files := orchestrationFileMeta(normalized.Files)
 	run, err := s.store.CreateOrchestrationRun(r.Context(), store.CreateOrchestrationRunParams{
-		UserID:   uid,
-		AgentID:  agentID,
-		Title:    normalized.Title,
-		Mode:     normalized.Mode,
-		FirstCLI: normalized.FirstCLI,
-		Profile:  normalized.Profile,
-		Prompt:   normalized.Prompt,
-		CWD:      normalized.CWD,
-		MaxTurns: normalized.MaxTurns,
-		Files:    files,
+		UserID:                  uid,
+		AgentID:                 agentID,
+		Title:                   normalized.Title,
+		Mode:                    normalized.Mode,
+		FirstCLI:                normalized.FirstCLI,
+		Profile:                 normalized.Profile,
+		NativeContextCompaction: normalized.NativeContextCompaction,
+		Prompt:                  normalized.Prompt,
+		CWD:                     normalized.CWD,
+		MaxTurns:                normalized.MaxTurns,
+		Files:                   files,
 	})
 	if err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to create orchestration run")
@@ -132,15 +136,16 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	startReq := orchestrationStartRequest{
-		AgentID:  req.AgentID,
-		Title:    req.Title,
-		Mode:     req.Mode,
-		FirstCLI: req.FirstCLI,
-		Profile:  req.Profile,
-		Prompt:   req.Prompt,
-		CWD:      req.CWD,
-		MaxTurns: req.MaxTurns,
-		Files:    req.Files,
+		AgentID:                 req.AgentID,
+		Title:                   req.Title,
+		Mode:                    req.Mode,
+		FirstCLI:                req.FirstCLI,
+		Profile:                 req.Profile,
+		NativeContextCompaction: req.NativeContextCompaction,
+		Prompt:                  req.Prompt,
+		CWD:                     req.CWD,
+		MaxTurns:                req.MaxTurns,
+		Files:                   req.Files,
 	}
 	if startReq.AgentID == "" {
 		startReq.AgentID = run.AgentID
@@ -157,6 +162,9 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 	}
 	if startReq.Profile == "" {
 		startReq.Profile = run.Profile
+	}
+	if startReq.NativeContextCompaction == "" {
+		startReq.NativeContextCompaction = run.NativeContextCompaction
 	}
 	if startReq.CWD == "" {
 		startReq.CWD = run.CWD
@@ -190,7 +198,7 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	contextSummary := compactOrchestrationContext(run, events)
-	if err := s.store.UpdateOrchestrationRunSettings(r.Context(), run.ID, agentID, normalized.Mode, normalized.FirstCLI, normalized.Profile, normalized.CWD, normalized.MaxTurns, files); err != nil {
+	if err := s.store.UpdateOrchestrationRunSettings(r.Context(), run.ID, agentID, normalized.Mode, normalized.FirstCLI, normalized.Profile, normalized.CWD, normalized.NativeContextCompaction, normalized.MaxTurns, files); err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to update orchestration run")
 		return
 	}
@@ -198,6 +206,7 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 	run.Mode = normalized.Mode
 	run.FirstCLI = normalized.FirstCLI
 	run.Profile = normalized.Profile
+	run.NativeContextCompaction = normalized.NativeContextCompaction
 	run.CWD = normalized.CWD
 	run.MaxTurns = normalized.MaxTurns
 	run.Files = files
@@ -230,6 +239,7 @@ func (s *Server) normalizeOrchestrationStart(w http.ResponseWriter, req orchestr
 	}
 	req.FirstCLI = normalizeOrchestrationFirstCLI(req.FirstCLI)
 	req.Profile = normalizeOrchestrationProfile(req.Profile)
+	req.NativeContextCompaction = protocol.NormalizeNativeContextCompaction(req.NativeContextCompaction)
 	if req.MaxTurns <= 0 {
 		req.MaxTurns = 4
 	}
@@ -262,21 +272,22 @@ func (s *Server) startOrchestration(ctx context.Context, run store.Orchestration
 		slog.Error("[hub] update orchestration status failed", "run_id", run.ID, "error", err)
 	}
 	payload := protocol.OrchestrationStartPayload{
-		RunID:             run.ID,
-		Mode:              req.Mode,
-		FirstCLI:          req.FirstCLI,
-		Prompt:            req.Prompt,
-		Context:           strings.Join(cleanContextParts(contextParts), "\n\n"),
-		Resume:            resume,
-		PromptSeq:         event.Seq,
-		MaxTurns:          req.MaxTurns,
-		MaxTurnsRequested: req.MaxTurnsRequested,
-		CWD:               req.CWD,
-		Files:             req.Files,
-		CodexThreadID:     orchestrationResumeString(resume, run.CodexThreadID),
-		ClaudeStarted:     resume && run.ClaudeStarted,
-		RunCWD:            orchestrationResumeString(resume, run.RunCWD),
-		Profile:           req.Profile,
+		RunID:                   run.ID,
+		Mode:                    req.Mode,
+		FirstCLI:                req.FirstCLI,
+		Prompt:                  req.Prompt,
+		Context:                 strings.Join(cleanContextParts(contextParts), "\n\n"),
+		Resume:                  resume,
+		PromptSeq:               event.Seq,
+		MaxTurns:                req.MaxTurns,
+		MaxTurnsRequested:       req.MaxTurnsRequested,
+		CWD:                     req.CWD,
+		Files:                   req.Files,
+		CodexThreadID:           orchestrationResumeString(resume, run.CodexThreadID),
+		ClaudeStarted:           resume && run.ClaudeStarted,
+		RunCWD:                  orchestrationResumeString(resume, run.RunCWD),
+		Profile:                 req.Profile,
+		NativeContextCompaction: req.NativeContextCompaction,
 	}
 	if err := s.pool.SendToAgent(run.AgentID, protocol.MustEnvelope(protocol.TypeOrchestrationStart, "", payload)); err != nil {
 		_ = s.store.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationFailed, err.Error())

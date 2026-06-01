@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 const (
@@ -201,21 +202,22 @@ type ApprovalResponsePayload struct {
 }
 
 type OrchestrationStartPayload struct {
-	RunID             string              `json:"runId"`
-	Mode              string              `json:"mode"`
-	FirstCLI          string              `json:"firstCli,omitempty"`
-	Prompt            string              `json:"prompt"`
-	Context           string              `json:"context,omitempty"`
-	Resume            bool                `json:"resume,omitempty"`
-	PromptSeq         int64               `json:"promptSeq,omitempty"`
-	MaxTurns          int                 `json:"maxTurns,omitempty"`
-	MaxTurnsRequested int                 `json:"maxTurnsRequested,omitempty"`
-	CWD               string              `json:"cwd,omitempty"`
-	Files             []AttachmentPayload `json:"files,omitempty"`
-	CodexThreadID     string              `json:"codexThreadId,omitempty"`
-	ClaudeStarted     bool                `json:"claudeStarted,omitempty"`
-	RunCWD            string              `json:"runCwd,omitempty"`
-	Profile           string              `json:"profile,omitempty"`
+	RunID                   string              `json:"runId"`
+	Mode                    string              `json:"mode"`
+	FirstCLI                string              `json:"firstCli,omitempty"`
+	Prompt                  string              `json:"prompt"`
+	Context                 string              `json:"context,omitempty"`
+	Resume                  bool                `json:"resume,omitempty"`
+	PromptSeq               int64               `json:"promptSeq,omitempty"`
+	MaxTurns                int                 `json:"maxTurns,omitempty"`
+	MaxTurnsRequested       int                 `json:"maxTurnsRequested,omitempty"`
+	CWD                     string              `json:"cwd,omitempty"`
+	Files                   []AttachmentPayload `json:"files,omitempty"`
+	CodexThreadID           string              `json:"codexThreadId,omitempty"`
+	ClaudeStarted           bool                `json:"claudeStarted,omitempty"`
+	RunCWD                  string              `json:"runCwd,omitempty"`
+	Profile                 string              `json:"profile,omitempty"`
+	NativeContextCompaction string              `json:"nativeContextCompaction,omitempty"`
 }
 
 type OrchestrationCancelPayload struct {
@@ -270,13 +272,14 @@ type CommandData struct {
 }
 
 type RunStartData struct {
-	CWD               string `json:"cwd,omitempty"`
-	Mode              string `json:"mode,omitempty"`
-	FirstCLI          string `json:"firstCli,omitempty"`
-	MaxTurnsRequested int    `json:"maxTurnsRequested,omitempty"`
-	MaxTurnsApplied   int    `json:"maxTurnsApplied,omitempty"`
-	PromptSeq         int64  `json:"promptSeq,omitempty"`
-	Profile           string `json:"profile,omitempty"`
+	CWD                     string `json:"cwd,omitempty"`
+	Mode                    string `json:"mode,omitempty"`
+	FirstCLI                string `json:"firstCli,omitempty"`
+	MaxTurnsRequested       int    `json:"maxTurnsRequested,omitempty"`
+	MaxTurnsApplied         int    `json:"maxTurnsApplied,omitempty"`
+	PromptSeq               int64  `json:"promptSeq,omitempty"`
+	Profile                 string `json:"profile,omitempty"`
+	NativeContextCompaction string `json:"nativeContextCompaction,omitempty"`
 }
 
 type TurnStartData struct {
@@ -289,8 +292,11 @@ type TurnStartData struct {
 }
 
 type RunEndData struct {
-	CodexThreadID   string `json:"codexThreadId,omitempty"`
-	ClaudeSessionID string `json:"claudeSessionId,omitempty"`
+	CodexThreadID      string             `json:"codexThreadId,omitempty"`
+	ClaudeSessionID    string             `json:"claudeSessionId,omitempty"`
+	NativeResume       []NativeResumeInfo `json:"nativeResume,omitempty"`
+	CodexNativeResume  *NativeResumeInfo  `json:"codexNativeResume,omitempty"`
+	ClaudeNativeResume *NativeResumeInfo  `json:"claudeNativeResume,omitempty"`
 }
 
 type BridgeNoteData struct {
@@ -298,6 +304,30 @@ type BridgeNoteData struct {
 	Command      string `json:"command,omitempty"`
 	AfterSeconds int    `json:"afterSeconds,omitempty"`
 	InjectedText string `json:"injectedText,omitempty"`
+}
+
+type NativeResumeInfo struct {
+	CLI              string `json:"cli,omitempty"`
+	ID               string `json:"id,omitempty"`
+	Command          string `json:"command,omitempty"`
+	CWD              string `json:"cwd,omitempty"`
+	TranscriptPath   string `json:"transcriptPath,omitempty"`
+	Visible          bool   `json:"visible"`
+	VisibilityReason string `json:"visibilityReason,omitempty"`
+}
+
+const (
+	NativeContextCompactionOff       = "off"
+	NativeContextCompactionAfterTurn = "after-turn"
+)
+
+func NormalizeNativeContextCompaction(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case NativeContextCompactionAfterTurn:
+		return NativeContextCompactionAfterTurn
+	default:
+		return NativeContextCompactionOff
+	}
 }
 
 type RunConclusion struct {

@@ -76,6 +76,7 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 	if err := writeClaudeStreamUserMessage(claude.stdin, prompt); err != nil {
 		return "", nil, claude.mode, err
 	}
+	compactAfterTurn := protocol.NormalizeNativeContextCompaction(session.nativeContextCompaction) == protocol.NativeContextCompactionAfterTurn
 	if claude.approvalServer != nil {
 		claude.approvalServer.updateTurn(turnID, role)
 	}
@@ -92,6 +93,10 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 		if msg != "" {
 			err = errors.New(msg)
 		}
+	}
+	if err == nil {
+		m.registerClaudeNativeResume(state.NativeSession, claude, payload.RunID, session.cwd)
+		m.runNativeContextCompaction(ctx, payload.RunID, turnID, role, "claude", compactAfterTurn, state.NativeSession, claude)
 	}
 	return content, tools, claude.mode, err
 }
@@ -149,12 +154,6 @@ func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.
 		release:        releaseApprovalServer,
 	}
 	session.claude = claude
-	// Register session with Claude CLI so it appears in /resume
-	if !resume {
-		if err := m.registerClaudeSession(cmd.Process.Pid, state.ClaudeSessionID, payload.RunID, cwd); err != nil {
-			slog.Warn("failed to register claude session", "error", err)
-		}
-	}
 	return claude, nil
 }
 
@@ -466,6 +465,10 @@ func configureClaudeCommandEnv(cmd *exec.Cmd) {
 	if runningAsRoot() {
 		appendCommandEnv(cmd, "IS_SANDBOX=1")
 	}
+}
+
+func (m *OrchestrationManager) compactClaudeInteractiveSession(ctx context.Context, runID, turnID, role string, claude *orchestrationClaudeSession) orchestrationMaintenanceResult {
+	return orchestrationMaintenanceResult{Skipped: true, Reason: "Claude Code stream-json does not expose a verified native context-compaction control channel; Bridge skipped automatic /compact to avoid injecting it as a normal user message."}
 }
 
 type claudeApprovalSocketRequest struct {
@@ -1207,49 +1210,4 @@ func claudeToolResultContent(value any) string {
 	default:
 		return ""
 	}
-}
-
-func (m *OrchestrationManager) registerClaudeSession(pid int, sessionID, runID, cwd string) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	sessionsDir := filepath.Join(homeDir, ".claude", "sessions")
-	if err := os.MkdirAll(sessionsDir, 0700); err != nil {
-		return err
-	}
-	sessionFile := filepath.Join(sessionsDir, sessionID+".json")
-
-	// Read /proc/<pid>/stat to get process start time
-	procStart := ""
-	if statData, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
-		fields := strings.Fields(string(statData))
-		if len(fields) >= 22 {
-			procStart = fields[21] // starttime field
-		}
-	}
-
-	sessionData := map[string]any{
-		"pid":          pid,
-		"sessionId":    sessionID,
-		"cwd":          cwd,
-		"startedAt":    time.Now().UnixMilli(),
-		"procStart":    procStart,
-		"version":      "2.1.158",
-		"peerProtocol": 1,
-		"kind":         "interactive",
-		"entrypoint":   "cli",
-		"status":       "busy",
-		"updatedAt":    time.Now().UnixMilli(),
-	}
-	if runID != "" {
-		sessionData["name"] = nativeSessionDisplayName(runID, "claude")
-	}
-
-	data, err := json.Marshal(sessionData)
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(sessionFile, data, 0600)
 }

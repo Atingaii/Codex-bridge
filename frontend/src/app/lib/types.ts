@@ -74,6 +74,8 @@ export type OrchestrationFile = {
   size: number;
 };
 
+export type NativeContextCompaction = 'off' | 'after-turn';
+
 export type OrchestrationRun = {
   id: string;
   agentId: string;
@@ -81,6 +83,7 @@ export type OrchestrationRun = {
   mode: 'collaboration' | 'debate';
   firstCli?: 'claude' | 'codex';
   profile?: 'default' | 'formal-proof';
+  nativeContextCompaction?: NativeContextCompaction;
   prompt: string;
   cwd?: string;
   maxTurns: number;
@@ -140,6 +143,7 @@ export type RunStartData = {
   maxTurnsApplied?: number;
   promptSeq?: number;
   profile?: string;
+  nativeContextCompaction?: NativeContextCompaction;
 };
 
 export type TurnStartData = {
@@ -154,6 +158,19 @@ export type TurnStartData = {
 export type RunEndData = {
   codexThreadId?: string;
   claudeSessionId?: string;
+  nativeResume?: NativeResumeInfo[];
+  codexNativeResume?: NativeResumeInfo;
+  claudeNativeResume?: NativeResumeInfo;
+};
+
+export type NativeResumeInfo = {
+  cli?: 'codex' | 'claude' | string;
+  id?: string;
+  command?: string;
+  cwd?: string;
+  transcriptPath?: string;
+  visible?: boolean;
+  visibilityReason?: string;
 };
 
 export type BridgeNoteData = {
@@ -323,6 +340,7 @@ export type PublicOrchestrationRun = {
   mode: 'collaboration' | 'debate';
   firstCli?: 'claude' | 'codex';
   profile?: 'default' | 'formal-proof';
+  nativeContextCompaction?: NativeContextCompaction;
   prompt: string;
   cwd?: string;
   maxTurns: number;

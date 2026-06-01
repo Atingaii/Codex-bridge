@@ -143,6 +143,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			run_cwd TEXT DEFAULT '',
 			codex_thread_id TEXT DEFAULT '',
 			claude_started INTEGER NOT NULL DEFAULT 0,
+			native_context_compaction TEXT NOT NULL DEFAULT 'off',
 			max_turns INTEGER NOT NULL,
 			status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','canceled','canceling')),
 			error TEXT,
@@ -158,6 +159,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE orchestration_runs ADD COLUMN run_cwd TEXT DEFAULT '';`,
 		`ALTER TABLE orchestration_runs ADD COLUMN codex_thread_id TEXT DEFAULT '';`,
 		`ALTER TABLE orchestration_runs ADD COLUMN claude_started INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE orchestration_runs ADD COLUMN native_context_compaction TEXT NOT NULL DEFAULT 'off';`,
 		`CREATE INDEX IF NOT EXISTS idx_orchestration_runs_user_updated ON orchestration_runs(user_id, updated_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS orchestration_events (
 			id TEXT PRIMARY KEY,
@@ -263,7 +265,7 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), max_turns, status,
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), COALESCE(native_context_compaction,'off'), max_turns, status,
 			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE agent_id = ? AND status IN (?, ?)
@@ -1076,25 +1078,26 @@ type OrchestrationFile struct {
 }
 
 type OrchestrationRun struct {
-	ID            string              `json:"id"`
-	UserID        string              `json:"userId"`
-	AgentID       string              `json:"agentId"`
-	Title         string              `json:"title"`
-	Mode          string              `json:"mode"`
-	FirstCLI      string              `json:"firstCli,omitempty"`
-	Profile       string              `json:"profile"`
-	Prompt        string              `json:"prompt"`
-	CWD           string              `json:"cwd,omitempty"`
-	RunCWD        string              `json:"runCwd,omitempty"`
-	CodexThreadID string              `json:"codexThreadId,omitempty"`
-	ClaudeStarted bool                `json:"claudeStarted,omitempty"`
-	MaxTurns      int                 `json:"maxTurns"`
-	Status        string              `json:"status"`
-	Error         string              `json:"error,omitempty"`
-	Files         []OrchestrationFile `json:"files,omitempty"`
-	CreatedAt     int64               `json:"createdAt"`
-	UpdatedAt     int64               `json:"updatedAt"`
-	FinishedAt    int64               `json:"finishedAt,omitempty"`
+	ID                      string              `json:"id"`
+	UserID                  string              `json:"userId"`
+	AgentID                 string              `json:"agentId"`
+	Title                   string              `json:"title"`
+	Mode                    string              `json:"mode"`
+	FirstCLI                string              `json:"firstCli,omitempty"`
+	Profile                 string              `json:"profile"`
+	Prompt                  string              `json:"prompt"`
+	CWD                     string              `json:"cwd,omitempty"`
+	RunCWD                  string              `json:"runCwd,omitempty"`
+	CodexThreadID           string              `json:"codexThreadId,omitempty"`
+	ClaudeStarted           bool                `json:"claudeStarted,omitempty"`
+	NativeContextCompaction string              `json:"nativeContextCompaction,omitempty"`
+	MaxTurns                int                 `json:"maxTurns"`
+	Status                  string              `json:"status"`
+	Error                   string              `json:"error,omitempty"`
+	Files                   []OrchestrationFile `json:"files,omitempty"`
+	CreatedAt               int64               `json:"createdAt"`
+	UpdatedAt               int64               `json:"updatedAt"`
+	FinishedAt              int64               `json:"finishedAt,omitempty"`
 }
 
 type OrchestrationEvent struct {
@@ -1121,16 +1124,17 @@ type OrchestrationEvent struct {
 }
 
 type CreateOrchestrationRunParams struct {
-	UserID   string
-	AgentID  string
-	Title    string
-	Mode     string
-	FirstCLI string
-	Profile  string
-	Prompt   string
-	CWD      string
-	MaxTurns int
-	Files    []OrchestrationFile
+	UserID                  string
+	AgentID                 string
+	Title                   string
+	Mode                    string
+	FirstCLI                string
+	Profile                 string
+	Prompt                  string
+	CWD                     string
+	NativeContextCompaction string
+	MaxTurns                int
+	Files                   []OrchestrationFile
 }
 
 func (s *Store) CreateRun(ctx context.Context, sessionID, promptID string) (Run, error) {
@@ -1251,32 +1255,34 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 		params.MaxTurns = 12
 	}
 	params.Profile = normalizeOrchestrationProfile(params.Profile)
+	params.NativeContextCompaction = protocol.NormalizeNativeContextCompaction(params.NativeContextCompaction)
 	filesJSON, err := json.Marshal(params.Files)
 	if err != nil {
 		return OrchestrationRun{}, err
 	}
 	now := time.Now().Unix()
 	run := OrchestrationRun{
-		ID:        NewID("orc"),
-		UserID:    params.UserID,
-		AgentID:   params.AgentID,
-		Title:     params.Title,
-		Mode:      params.Mode,
-		FirstCLI:  params.FirstCLI,
-		Profile:   params.Profile,
-		Prompt:    params.Prompt,
-		CWD:       params.CWD,
-		MaxTurns:  params.MaxTurns,
-		Status:    OrchestrationQueued,
-		Files:     params.Files,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:                      NewID("orc"),
+		UserID:                  params.UserID,
+		AgentID:                 params.AgentID,
+		Title:                   params.Title,
+		Mode:                    params.Mode,
+		FirstCLI:                params.FirstCLI,
+		Profile:                 params.Profile,
+		Prompt:                  params.Prompt,
+		CWD:                     params.CWD,
+		NativeContextCompaction: params.NativeContextCompaction,
+		MaxTurns:                params.MaxTurns,
+		Status:                  OrchestrationQueued,
+		Files:                   params.Files,
+		CreatedAt:               now,
+		UpdatedAt:               now,
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO orchestration_runs
-			(id, user_id, agent_id, title, mode, first_cli, profile, prompt, cwd, max_turns, status, files_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, run.ID, run.UserID, run.AgentID, run.Title, run.Mode, run.FirstCLI, run.Profile, run.Prompt, nullString(run.CWD), run.MaxTurns, run.Status, string(filesJSON), now, now)
+			(id, user_id, agent_id, title, mode, first_cli, profile, prompt, cwd, native_context_compaction, max_turns, status, files_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, run.ID, run.UserID, run.AgentID, run.Title, run.Mode, run.FirstCLI, run.Profile, run.Prompt, nullString(run.CWD), run.NativeContextCompaction, run.MaxTurns, run.Status, string(filesJSON), now, now)
 	if err != nil {
 		return OrchestrationRun{}, err
 	}
@@ -1286,7 +1292,7 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 func (s *Store) OrchestrationRunByID(ctx context.Context, id, userID string) (OrchestrationRun, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), max_turns, status,
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), COALESCE(native_context_compaction,'off'), max_turns, status,
 			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE id = ? AND user_id = ?
@@ -1297,7 +1303,7 @@ func (s *Store) OrchestrationRunByID(ctx context.Context, id, userID string) (Or
 func (s *Store) OrchestrationRunByIDAnyUser(ctx context.Context, id string) (OrchestrationRun, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), max_turns, status,
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), COALESCE(native_context_compaction,'off'), max_turns, status,
 			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE id = ?
@@ -1311,7 +1317,7 @@ func (s *Store) ListOrchestrationRuns(ctx context.Context, userID string, limit 
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), max_turns, status,
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), COALESCE(native_context_compaction,'off'), max_turns, status,
 			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE user_id = ?
@@ -1347,7 +1353,7 @@ func (s *Store) UpdateOrchestrationRunStatus(ctx context.Context, id, status, er
 	return err
 }
 
-func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID, mode, firstCLI, profile, cwd string, maxTurns int, files []OrchestrationFile) error {
+func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID, mode, firstCLI, profile, cwd, nativeContextCompaction string, maxTurns int, files []OrchestrationFile) error {
 	if id == "" || agentID == "" {
 		return errors.New("run id and agent id are required")
 	}
@@ -1362,6 +1368,7 @@ func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID,
 		maxTurns = 12
 	}
 	profile = normalizeOrchestrationProfile(profile)
+	nativeContextCompaction = protocol.NormalizeNativeContextCompaction(nativeContextCompaction)
 	filesJSON, err := json.Marshal(files)
 	if err != nil {
 		return err
@@ -1369,9 +1376,9 @@ func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID,
 	now := time.Now().Unix()
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE orchestration_runs
-		SET agent_id = ?, mode = ?, first_cli = ?, profile = ?, cwd = ?, max_turns = ?, files_json = ?, finished_at = NULL, updated_at = ?
+		SET agent_id = ?, mode = ?, first_cli = ?, profile = ?, cwd = ?, native_context_compaction = ?, max_turns = ?, files_json = ?, finished_at = NULL, updated_at = ?
 		WHERE id = ?
-	`, agentID, mode, firstCLI, profile, nullString(cwd), maxTurns, string(filesJSON), now, id)
+	`, agentID, mode, firstCLI, profile, nullString(cwd), nativeContextCompaction, maxTurns, string(filesJSON), now, id)
 	return err
 }
 
@@ -1476,7 +1483,7 @@ func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (Orchestrati
 	var filesJSON string
 	var claudeStarted int
 	if err := row.Scan(&run.ID, &run.UserID, &run.AgentID, &run.Title, &run.Mode, &run.FirstCLI, &run.Profile, &run.Prompt, &run.CWD,
-		&run.RunCWD, &run.CodexThreadID, &claudeStarted, &run.MaxTurns, &run.Status, &run.Error, &filesJSON, &run.CreatedAt, &run.UpdatedAt, &run.FinishedAt); err != nil {
+		&run.RunCWD, &run.CodexThreadID, &claudeStarted, &run.NativeContextCompaction, &run.MaxTurns, &run.Status, &run.Error, &filesJSON, &run.CreatedAt, &run.UpdatedAt, &run.FinishedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return OrchestrationRun{}, ErrNotFound
 		}
@@ -1487,6 +1494,7 @@ func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (Orchestrati
 	}
 	run.FirstCLI = normalizeOrchestrationFirstCLI(run.FirstCLI)
 	run.Profile = normalizeOrchestrationProfile(run.Profile)
+	run.NativeContextCompaction = protocol.NormalizeNativeContextCompaction(run.NativeContextCompaction)
 	run.ClaudeStarted = claudeStarted != 0
 	return run, nil
 }

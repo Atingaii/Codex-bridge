@@ -348,9 +348,10 @@ func TestContinueOrchestrationSendsCompactedContext(t *testing.T) {
 	defer s.pool.UnregisterAgent(agentID, conn)
 
 	body := continueOrchestration(t, s, userID, run.ID, map[string]any{
-		"prompt":   "second task",
-		"maxTurns": 20,
-		"profile":  "formal-proof",
+		"prompt":                  "second task",
+		"maxTurns":                20,
+		"profile":                 "formal-proof",
+		"nativeContextCompaction": "after-turn",
 	}, http.StatusOK)
 	loaded := body["run"].(map[string]any)
 	if loaded["id"] != run.ID || loaded["status"] != store.OrchestrationRunning {
@@ -372,7 +373,7 @@ func TestContinueOrchestrationSendsCompactedContext(t *testing.T) {
 	if payload.CodexThreadID != "thread_resume" || !payload.ClaudeStarted || payload.RunCWD != "/abs/resume" {
 		t.Fatalf("payload session state = %#v", payload)
 	}
-	if payload.Profile != "formal-proof" || payload.MaxTurns != 12 || payload.MaxTurnsRequested != 20 {
+	if payload.Profile != "formal-proof" || payload.NativeContextCompaction != "after-turn" || payload.MaxTurns != 12 || payload.MaxTurnsRequested != 20 {
 		t.Fatalf("payload profile/maxTurns = %#v", payload)
 	}
 	if !strings.Contains(payload.Context, "first task") || !strings.Contains(payload.Context, "implemented first task") {

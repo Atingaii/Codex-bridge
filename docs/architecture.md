@@ -65,7 +65,13 @@ Bridge streams CLI deltas, typed command events, and terminal status to the
 browser, and the next CLI receives the previous CLI's visible result plus
 useful command context. Bridge persists the Codex thread id and stable Claude
 session id so follow-up prompts can resume native history after a Bridge
-restart where the CLI supports it. It does not add hidden proof strategy gates,
+restart where the CLI supports it. Run-end data also carries direct native
+resume metadata for both CLIs: Codex exposes `codex resume <thread-id>`, and
+Claude exposes `claude --resume <session-id>` plus the project transcript path
+under `~/.claude/projects/<encoded-cwd>/`. After successful Claude turns,
+Bridge updates only the current cwd entry in `~/.claude.json` so native Claude
+project metadata points at the Bridge session without touching unrelated
+projects. It does not add hidden proof strategy gates,
 automatic verifier turns, or remediation turns. Formal-proof guidance is opt-in
 through the persisted `profile=formal-proof` run setting selected in the
 orchestration UI; the default profile does not activate proof guidance based on
@@ -73,6 +79,12 @@ prompt keywords. The native-session design is documented in
 [docs/features/native-interactive-orchestration.md](features/native-interactive-orchestration.md),
 and the relay contract is documented in
 [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
+Runs may opt in to `native_context_compaction=after-turn`; Bridge then sends
+native compaction maintenance after each successful business turn where the CLI
+surface exposes a verified control channel. Codex uses app-server
+`thread/compact/start`; Claude Code stream-json is skipped with an info Bridge
+note until it exposes an equivalent control channel. Bridge keeps maintenance
+output out of handoffs and treats compaction failures as warnings.
 Profile-specific prompt fragments, assessments, manual-build carry-over, and
 command fingerprint policy live behind `internal/bridge/profiles/registry` and
 `internal/bridge/profiles/formalproof/`; `internal/bridge/orchestration.go`
@@ -210,7 +222,8 @@ Orchestration continuity:
 3. Hub compacts prior `orchestration_events` into context.
 4. Hub also restores native CLI state from `orchestration_runs`: the latest
    Codex thread id, whether Claude reached a successful turn, and the locked
-   absolute run cwd reported by Bridge.
+   absolute run cwd reported by Bridge. The persisted
+   `native_context_compaction` setting is restored with the same run.
 5. Bridge receives the same `runID` with `Resume=true`, reuses any live
    run-scoped native sessions, can resume Codex and Claude by persisted native
    ids after restart where supported, and materializes new uploads under the
@@ -237,8 +250,8 @@ SQLite tables:
 - `runs`
 - `enroll_tokens`
 - `orchestration_runs` (including persisted mode, `first_cli`, `profile`, cwd,
-  max turns, status, native CLI continuity state, locked runtime cwd, and
-  uploaded file metadata)
+  max turns, status, native CLI continuity state, native context compaction
+  preference, locked runtime cwd, and uploaded file metadata)
 - `orchestration_events` (including `source`, `severity`, lifecycle status,
   and typed event payload JSON)
 - `conversation_shares`

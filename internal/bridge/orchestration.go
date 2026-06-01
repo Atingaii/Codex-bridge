@@ -50,11 +50,12 @@ type orchestrationSessionState struct {
 }
 
 type orchestrationNativeSession struct {
-	runID  string
-	cwd    string
-	mu     sync.Mutex
-	codex  *orchestrationCodexSession
-	claude *orchestrationClaudeSession
+	runID                   string
+	cwd                     string
+	nativeContextCompaction string
+	mu                      sync.Mutex
+	codex                   *orchestrationCodexSession
+	claude                  *orchestrationClaudeSession
 }
 
 type workspaceSnapshot struct {
@@ -348,9 +349,14 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		maxTurns = 12
 	}
 	profile := normalizeOrchestrationProfile(payload.Profile)
+	nativeContextCompaction := protocol.NormalizeNativeContextCompaction(payload.NativeContextCompaction)
+	nativeSession := m.nativeSession(payload.RunID, runCWD)
+	nativeSession.mu.Lock()
+	nativeSession.nativeContextCompaction = nativeContextCompaction
+	nativeSession.mu.Unlock()
 	sessionState := orchestrationSessionState{
 		ClaudeSessionID:     stableOrchestrationSessionID(payload.RunID, "claude"),
-		NativeSession:       m.nativeSession(payload.RunID, runCWD),
+		NativeSession:       nativeSession,
 		CommandFingerprints: map[string]bridgeprofiles.CommandFingerprint{},
 	}
 	if payload.Resume {
@@ -362,23 +368,25 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		Status:  store.OrchestrationRunning,
 		Content: fmt.Sprintf("Starting relay orchestration with %d CLI turns.", maxTurns),
 		RunStartData: &protocol.RunStartData{
-			CWD:               runCWD,
-			Mode:              mode,
-			FirstCLI:          firstCLI,
-			MaxTurnsRequested: maxTurnsRequested,
-			MaxTurnsApplied:   maxTurns,
-			PromptSeq:         payload.PromptSeq,
-			Profile:           profile,
+			CWD:                     runCWD,
+			Mode:                    mode,
+			FirstCLI:                firstCLI,
+			MaxTurnsRequested:       maxTurnsRequested,
+			MaxTurnsApplied:         maxTurns,
+			PromptSeq:               payload.PromptSeq,
+			Profile:                 profile,
+			NativeContextCompaction: nativeContextCompaction,
 		},
 		Data: map[string]any{
-			"cwd":               runCWD,
-			"mode":              mode,
-			"firstCli":          firstCLI,
-			"maxTurns":          maxTurns,
-			"maxTurnsRequested": maxTurnsRequested,
-			"maxTurnsApplied":   maxTurns,
-			"promptSeq":         payload.PromptSeq,
-			"profile":           profile,
+			"cwd":                     runCWD,
+			"mode":                    mode,
+			"firstCli":                firstCLI,
+			"maxTurns":                maxTurns,
+			"maxTurnsRequested":       maxTurnsRequested,
+			"maxTurnsApplied":         maxTurns,
+			"promptSeq":               payload.PromptSeq,
+			"profile":                 profile,
+			"nativeContextCompaction": nativeContextCompaction,
 		},
 	})
 
@@ -455,7 +463,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 					CLI:        cli,
 					Content:    record.Content,
 					Status:     "success",
-					RunEndData: relayRunEndData(cli, sessionState),
+					RunEndData: m.relayRunEndData(cli, sessionState, runCWD),
 					Data:       relayTurnEndData(cli, sessionState),
 				})
 				continue
@@ -470,7 +478,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 				Content:    relayTerminalContent([]orchestrationTurn{record}),
 				Status:     "error",
 				Error:      record.Err,
-				RunEndData: relayRunEndData(cli, sessionState),
+				RunEndData: m.relayRunEndData(cli, sessionState, runCWD),
 				Data:       relayTurnEndData(cli, sessionState),
 			})
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
@@ -504,24 +512,30 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			CLI:        cli,
 			Content:    record.Content,
 			Status:     "success",
-			RunEndData: relayRunEndData(cli, sessionState),
+			RunEndData: m.relayRunEndData(cli, sessionState, runCWD),
 			Data:       relayTurnEndData(cli, sessionState),
 		})
 	}
 	finalContent := relayTerminalContent(history)
+	finalRunEndData := runEndDataWithNativeResume(&protocol.RunEndData{
+		CodexThreadID:      sessionState.CodexThreadID,
+		ClaudeSessionID:    sessionState.ClaudeSessionID,
+		CodexNativeResume:  codexNativeResumeInfo(sessionState.CodexThreadID, runCWD),
+		ClaudeNativeResume: m.claudeNativeResumeInfo(sessionState.ClaudeSessionID, runCWD),
+	}, runCWD)
 	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-		Kind:    "run.end",
-		Status:  store.OrchestrationCompleted,
-		Content: finalContent,
-		RunEndData: &protocol.RunEndData{
-			CodexThreadID:   sessionState.CodexThreadID,
-			ClaudeSessionID: sessionState.ClaudeSessionID,
-		},
+		Kind:          "run.end",
+		Status:        store.OrchestrationCompleted,
+		Content:       finalContent,
+		RunEndData:    finalRunEndData,
 		RunConclusion: runConclusionForStatus(store.OrchestrationCompleted, finalContent, history),
 		Data: map[string]any{
-			"relayOnly":       true,
-			"codexThreadId":   sessionState.CodexThreadID,
-			"claudeSessionId": sessionState.ClaudeSessionID,
+			"relayOnly":          true,
+			"codexThreadId":      sessionState.CodexThreadID,
+			"claudeSessionId":    sessionState.ClaudeSessionID,
+			"codexNativeResume":  finalRunEndData.CodexNativeResume,
+			"claudeNativeResume": finalRunEndData.ClaudeNativeResume,
+			"nativeResume":       finalRunEndData.NativeResume,
 		},
 	})
 }

@@ -28,6 +28,12 @@
 - No new HTTP endpoint or WebSocket frame kind is required.
 - Existing `TurnStartData.ResumeMode`, `RunEndData.CodexThreadID`, and
   `RunEndData.ClaudeSessionID` continue to expose native ids.
+- `RunStartData.NativeContextCompaction` and
+  `OrchestrationRun.native_context_compaction` carry the optional post-turn
+  maintenance setting.
+- `RunEndData.NativeResume`, `RunEndData.CodexNativeResume`, and
+  `RunEndData.ClaudeNativeResume` expose direct native resume commands and
+  visibility status for both CLIs.
 - Event `data.resumeMode` gains interactive modes such as
   `codex-interactive-thread`, `codex-interactive-resume`,
   `claude-interactive-session`, and `claude-interactive-resume`.
@@ -54,6 +60,13 @@ next Codex turn uses `thread/resume` on that same process and thread id before
 sending the next `turn/start`. Bridge only closes the app-server process on
 explicit run cancellation, replacement, Bridge shutdown, or if the process dies.
 
+When `nativeContextCompaction=after-turn`, Bridge calls the Codex app-server
+`thread/compact/start` RPC on the same thread after the successful business turn
+and before `thread/unsubscribe`. Bridge waits for the matching compaction
+completion notification. Maintenance output is tagged with
+`BridgeNoteData.Category=native-context-compaction` and is not appended to
+cross-CLI handoff history.
+
 Claude Code uses a long-lived headless stream process:
 
 ```bash
@@ -66,6 +79,19 @@ Bridge uses `--resume <session-id>` instead. Every Claude turn is written as a
 stream-json user message to the same stdin. Bridge reads stdout until that turn's
 `result` event, then leaves the process alive for later turns and follow-up
 prompts.
+
+Claude native resume metadata is based on the real transcript file under
+`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. After a successful
+Claude turn, Bridge updates only the matching `projects[absCwd]` entry in
+`~/.claude.json` and exposes `claude --resume <session-id>` in run-end metadata.
+If the native `/resume` picker filters a session, the direct command and
+transcript path remain the source of truth.
+
+Claude Code stream-json does not currently expose a verified native compaction
+control RPC. When `nativeContextCompaction=after-turn`, Bridge emits an info
+skip note for Claude rather than writing `/compact` to stdin, because that stdin
+path is model-visible user input. This keeps Claude's business conversation
+clean while preserving the same post-turn lifecycle and observability.
 
 The relay prompt changes slightly for same-CLI turns. If a CLI has already seen
 earlier turns in its own native session, Bridge tells it this is another message
@@ -90,6 +116,10 @@ possible.
 5. Update relay prompt wording for same-native-session turns.
 6. Keep existing event shapes and expose interactive resume modes in event data.
 7. Close native sessions on Bridge shutdown and explicit cancellation.
+8. If `nativeContextCompaction=after-turn`, run Codex compaction through
+   `thread/compact/start` and skip CLI surfaces that have no verified native
+   compact-control channel, keeping maintenance output out of handoff history.
+9. Emit native resume metadata for Codex and Claude in run-end data.
 
 ## Exit Gates
 
@@ -103,6 +133,16 @@ possible.
   able to write `CODEX_HOME/sessions`, including the current date directory, or
   Codex can create state DB rows without writing the rollout jsonl.
 - Later Claude turns use the same Claude session id as the first Claude turn.
+- Run-end metadata includes `codex resume <thread-id>` and
+  `claude --resume <session-id>` when the native ids are available.
+- Claude resume visibility is checked against the project transcript JSONL and
+  the current cwd entry in `~/.claude.json` is updated without changing other
+  projects.
+- When native context compaction is enabled, Codex receives
+  `thread/compact/start` after successful business turns; Claude stream-json is
+  skipped with an info Bridge note until a verified native control channel is
+  available. Compaction failures emit warning Bridge notes and do not fail the
+  run.
 - Follow-up prompts for the same run reuse the same live native sessions while
   Bridge remains running.
 - After Bridge restart, follow-up prompts resume native history by persisted

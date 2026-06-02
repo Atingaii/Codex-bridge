@@ -801,6 +801,19 @@ func TestClaudeNativeResumeMetadataUpdatesProjectVisibility(t *testing.T) {
 	}
 }
 
+func TestClaudeTranscriptTitlePrefersNativeTitleOverFirstUserMessage(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Return exactly this phrase for the smoke run"}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`,
+		`{"type":"ai-title","aiTitle":"Return specified bridge phrase"}`,
+		"",
+	}, "\n")
+
+	if got := claudeTranscriptTitle([]byte(transcript)); got != "Return specified bridge phrase" {
+		t.Fatalf("claudeTranscriptTitle() = %q", got)
+	}
+}
+
 func TestOrchestrationCodexResumeMissingThreadRetriesFresh(t *testing.T) {
 	tmp := t.TempDir()
 	codexPath := filepath.Join(tmp, "codex")

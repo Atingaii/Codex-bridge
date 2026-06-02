@@ -427,6 +427,7 @@ func claudeHistoryDisplay(runID string, transcript []byte) string {
 func claudeTranscriptTitle(transcript []byte) string {
 	scanner := bufio.NewScanner(strings.NewReader(string(transcript)))
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	var firstUserTitle string
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -449,12 +450,14 @@ func claudeTranscriptTitle(transcript []byte) string {
 			continue
 		}
 		if msg, _ := record["message"].(map[string]any); msg != nil {
-			if content := claudeMessageContentText(msg["content"]); content != "" {
-				return trimForPrompt(content, 80)
+			if firstUserTitle == "" {
+				if content := claudeMessageContentText(msg["content"]); content != "" {
+					firstUserTitle = trimForPrompt(content, 80)
+				}
 			}
 		}
 	}
-	return ""
+	return firstUserTitle
 }
 
 func claudeMessageContentText(value any) string {

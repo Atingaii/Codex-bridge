@@ -707,6 +707,65 @@ func TestOrchestrationNativeContextCompactionFailureIsWarningOnly(t *testing.T) 
 	}
 }
 
+func TestOrchestrationFailedCommandTailStopsBeforeCompactionAndNextTurn(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudePrintScript("Claude should not run")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerFailedCommandScript(false)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "workspace-write"
+	cfg.Bridge.ApprovalPolicy = "untrusted"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+	defer manager.CloseAll()
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:                   "orc_failed_tail",
+		Mode:                    "collaboration",
+		FirstCLI:                "codex",
+		Prompt:                  "continue failed proof",
+		MaxTurns:                2,
+		CWD:                     tmp,
+		NativeContextCompaction: protocol.NativeContextCompactionAfterTurn,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "codex", "继续编译。") {
+		t.Fatalf("missing visible Codex progress before failure: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "command.end", "codex", "Unable to unify") {
+		t.Fatalf("missing failed command event: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "turn.end", "codex", "without a follow-up response") {
+		t.Fatalf("codex error turn.end did not expose failed-tail cause: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "run.error", "codex", "coqc -R . LinLattice HWQ_U/L0Proof.v") {
+		t.Fatalf("run.error did not expose failed command: %#v", events)
+	}
+	for _, event := range events {
+		if event.BridgeNoteData != nil && event.BridgeNoteData.Category == "native-context-compaction" {
+			t.Fatalf("failed business turn should not trigger native compaction: %#v", event)
+		}
+		if event.Kind == "turn.start" && event.CLI == "claude" {
+			t.Fatalf("failed Codex turn should stop before next Claude turn: %#v", event)
+		}
+		if event.Kind == "turn.end" && event.CLI == "codex" && (event.Severity != "error" || event.Error == "") {
+			t.Fatalf("failed Codex turn should carry error severity and detail: %#v", event)
+		}
+	}
+}
+
 func TestClaudeNativeResumeMetadataUpdatesProjectVisibility(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
@@ -1117,6 +1176,60 @@ func TestLongCommandObserverWritesToSameClaudeStreamAndEmitsBridgeNote(t *testin
 	t.Fatalf("observer event did not carry structured injected text: %#v", events)
 }
 
+func TestClaudeStreamFailedToolWithoutFollowupFails(t *testing.T) {
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 16)
+	manager.AttachOut(out)
+	input := strings.NewReader(strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"继续编译。"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_build","name":"Bash","input":{"command":"coqc -R . LinLattice HWQ_U/L0Proof.v"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_build","is_error":true,"content":"Error: Unable to unify proof state.\n"}]}}`,
+		`{"type":"result","result":"继续编译。"}`,
+		"",
+	}, "\n"))
+
+	content, tools, err := manager.scanClaudeJSONLWithOptions(input, "orc_claude_failed_tail", "orc_claude_failed_tail-01", "implementer", claudeScanOptions{})
+	if err == nil {
+		t.Fatal("expected failed tool without follow-up to fail the scanner")
+	}
+	for _, want := range []string{"coqc -R . LinLattice HWQ_U/L0Proof.v", "Unable to unify", "without a follow-up response"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q: %v", want, err)
+		}
+	}
+	if content != "继续编译。" {
+		t.Fatalf("content = %q", content)
+	}
+	if len(tools) != 2 || !runnerToolEventFailed(tools[1]) {
+		t.Fatalf("tools = %#v", tools)
+	}
+}
+
+func TestClaudeStreamFailedToolWithFollowupCompletes(t *testing.T) {
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 16)
+	manager.AttachOut(out)
+	input := strings.NewReader(strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"继续编译。"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_build","name":"Bash","input":{"command":"coqc -R . LinLattice HWQ_U/L0Proof.v"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_build","is_error":true,"content":"Error: Unable to unify proof state.\n"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"我会根据这个错误继续修正。"}]}}`,
+		`{"type":"result","result":"继续编译。我会根据这个错误继续修正。"}`,
+		"",
+	}, "\n"))
+
+	content, tools, err := manager.scanClaudeJSONLWithOptions(input, "orc_claude_handled_tail", "orc_claude_handled_tail-01", "implementer", claudeScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "我会根据这个错误继续修正。") {
+		t.Fatalf("content = %q", content)
+	}
+	if len(tools) != 2 || !runnerToolEventFailed(tools[1]) {
+		t.Fatalf("tools = %#v", tools)
+	}
+}
+
 func TestLongCommandObserverEmitsCodexBridgeNoteWithoutSideChannel(t *testing.T) {
 	cfg := config.Default()
 	cfg.Bridge.LongCommandObserver.Enabled = true
@@ -1165,6 +1278,58 @@ func TestLongCommandObserverEmitsCodexBridgeNoteWithoutSideChannel(t *testing.T)
 	_ = stdoutWriter.Close()
 	<-done
 	t.Fatalf("Codex observer bridge note was not emitted: %#v", events)
+}
+
+func TestCodexJSONLFailedCommandWithoutFollowupFails(t *testing.T) {
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 16)
+	manager.AttachOut(out)
+	input := strings.NewReader(strings.Join([]string{
+		`{"type":"item.agent_message.delta","delta":"继续编译。"}`,
+		`{"type":"item.started","item":{"id":"cmd_1","type":"command_execution","command":"coqc -R . LinLattice HWQ_U/L0Proof.v","status":"running"}}`,
+		`{"type":"item.completed","item":{"id":"cmd_1","type":"command_execution","command":"coqc -R . LinLattice HWQ_U/L0Proof.v","status":"failed","exit_code":1,"aggregated_output":"Error: Unable to unify proof state.\n"}}`,
+		"",
+	}, "\n"))
+
+	result, err := manager.scanCodexJSONLResult(input, "orc_codex_failed_tail", "orc_codex_failed_tail-01", "reviewer")
+	if err == nil {
+		t.Fatal("expected failed command without follow-up to fail the scanner")
+	}
+	for _, want := range []string{"coqc -R . LinLattice HWQ_U/L0Proof.v", "Unable to unify", "exit code 1", "without a follow-up response"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q: %v", want, err)
+		}
+	}
+	if result.Content != "继续编译。" {
+		t.Fatalf("content = %q", result.Content)
+	}
+	if len(result.Tools) != 2 || !runnerToolEventFailed(result.Tools[1]) {
+		t.Fatalf("tools = %#v", result.Tools)
+	}
+}
+
+func TestCodexJSONLFailedCommandWithFollowupCompletes(t *testing.T) {
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 16)
+	manager.AttachOut(out)
+	input := strings.NewReader(strings.Join([]string{
+		`{"type":"item.agent_message.delta","delta":"继续编译。"}`,
+		`{"type":"item.started","item":{"id":"cmd_1","type":"command_execution","command":"coqc -R . LinLattice HWQ_U/L0Proof.v","status":"running"}}`,
+		`{"type":"item.completed","item":{"id":"cmd_1","type":"command_execution","command":"coqc -R . LinLattice HWQ_U/L0Proof.v","status":"failed","exit_code":1,"aggregated_output":"Error: Unable to unify proof state.\n"}}`,
+		`{"type":"item.agent_message.delta","delta":"我会根据这个错误继续修正。"}`,
+		"",
+	}, "\n"))
+
+	result, err := manager.scanCodexJSONLResult(input, "orc_codex_handled_tail", "orc_codex_handled_tail-01", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "我会根据这个错误继续修正。") {
+		t.Fatalf("content = %q", result.Content)
+	}
+	if len(result.Tools) != 2 || !runnerToolEventFailed(result.Tools[1]) {
+		t.Fatalf("tools = %#v", result.Tools)
+	}
 }
 
 func TestClaudeStreamInputClosesAfterIdleWindowWithoutInterruptingProcess(t *testing.T) {

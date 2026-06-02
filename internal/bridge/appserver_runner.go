@@ -313,6 +313,7 @@ func (s *appServerTurnScope) matchesNonTerminal(msg appServerMessage) bool {
 func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServerClient, req RunnerRequest, scope *appServerTurnScope, onUpdate func(update RunnerUpdate), done chan<- appServerTurnResult) {
 	var result RunnerResult
 	var text strings.Builder
+	var pendingFailedTool *RunnerToolEvent
 	for {
 		select {
 		case <-ctx.Done():
@@ -322,6 +323,10 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 			if !ok {
 				if text.Len() > 0 {
 					result.Content = text.String()
+				}
+				if pendingFailedTool != nil {
+					done <- appServerTurnResult{result: result, err: failedToolWithoutFollowupError("codex app-server", *pendingFailedTool)}
+					return
 				}
 				if strings.TrimSpace(result.Content) != "" {
 					done <- appServerTurnResult{result: result}
@@ -354,6 +359,7 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 				delta := nestedString(map[string]any{"params": msg.Params}, "params", "delta")
 				if delta != "" {
 					text.WriteString(delta)
+					pendingFailedTool = nil
 					onUpdate(RunnerUpdate{Delta: delta})
 				}
 			case "item/completed":
@@ -361,6 +367,7 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 				if itemType, _ := item["type"].(string); itemType == "agentMessage" {
 					if content, _ := item["text"].(string); content != "" {
 						if delta := appendAgentMessageContent(&text, content); delta != "" {
+							pendingFailedTool = nil
 							onUpdate(RunnerUpdate{Content: delta})
 						}
 						result.Content = text.String()
@@ -368,6 +375,10 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 				}
 				if tool := appServerToolEvent(item); tool != nil {
 					onUpdate(RunnerUpdate{Tool: tool})
+					if runnerToolEventFailed(*tool) {
+						copy := *tool
+						pendingFailedTool = &copy
+					}
 				}
 			case "item/started":
 				item, _ := appServerNestedMap(msg.Params, "item")
@@ -379,8 +390,21 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 					onUpdate(RunnerUpdate{Tool: &RunnerToolEvent{ID: id, Output: nestedString(map[string]any{"params": msg.Params}, "params", "delta"), Status: "running"}})
 				}
 			case "turn/completed":
+				if terminal, err := appServerCompletedTurnState(msg); !terminal {
+					continue
+				} else if err != nil {
+					if text.Len() > 0 {
+						result.Content = text.String()
+					}
+					done <- appServerTurnResult{result: result, err: err}
+					return
+				}
 				if text.Len() > 0 {
 					result.Content = text.String()
+				}
+				if pendingFailedTool != nil {
+					done <- appServerTurnResult{result: result, err: failedToolWithoutFollowupError("codex app-server", *pendingFailedTool)}
+					return
 				}
 				done <- appServerTurnResult{result: result}
 				return
@@ -398,6 +422,58 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 			}
 		}
 	}
+}
+
+func appServerCompletedTurnState(msg appServerMessage) (bool, error) {
+	status := normalizeToolStatus(appServerTurnStatus(msg))
+	if status == "" {
+		return true, nil
+	}
+	switch status {
+	case "completed", "success", "succeeded":
+		return true, nil
+	case "failed", "error":
+		return true, appServerTurnError(msg)
+	case "cancelled", "canceled":
+		return true, context.Canceled
+	case "in_progress", "running", "started", "pending", "queued":
+		return false, nil
+	default:
+		return true, nil
+	}
+}
+
+func appServerTurnStatus(msg appServerMessage) string {
+	if value := firstString(msg.Params, "status"); value != "" {
+		return value
+	}
+	if turn, _ := appServerNestedMap(msg.Params, "turn"); turn != nil {
+		return firstString(turn, "status")
+	}
+	return ""
+}
+
+func appServerTurnError(msg appServerMessage) error {
+	if message := eventErrorMessage(map[string]any{"params": msg.Params}); message != "" {
+		return errors.New(message)
+	}
+	if message := firstString(msg.Params, "message", "error"); message != "" {
+		return errors.New(message)
+	}
+	if turn, _ := appServerNestedMap(msg.Params, "turn"); turn != nil {
+		if message := firstString(turn, "message", "error"); message != "" {
+			return errors.New(message)
+		}
+		if errObj, _ := turn["error"].(map[string]any); errObj != nil {
+			if message := firstString(errObj, "message", "code", "type"); message != "" {
+				return errors.New(message)
+			}
+		}
+	}
+	if msg.Error != nil && strings.TrimSpace(msg.Error.Message) != "" {
+		return errors.New(strings.TrimSpace(msg.Error.Message))
+	}
+	return errors.New("codex app-server turn failed")
 }
 
 func appServerTurnIDFromResponse(raw json.RawMessage) string {

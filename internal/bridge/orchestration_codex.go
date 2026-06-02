@@ -475,6 +475,7 @@ func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, tur
 	var tools []RunnerToolEvent
 	var threadID string
 	var threadStarted bool
+	var pendingFailedTool *RunnerToolEvent
 	toolStarts := make(map[string]time.Time)
 	observer := m.longCommandObserverConfig()
 	activeObservers := make(map[string]context.CancelFunc)
@@ -505,6 +506,10 @@ func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, tur
 		}
 		tools = append(tools, *tool)
 		m.emitTool(runID, turnID, role, "codex", tool)
+		if runnerToolEventFailed(*tool) {
+			copy := *tool
+			pendingFailedTool = &copy
+		}
 	}
 	for {
 		line, err := readJSONLLine(reader, 32*1024*1024)
@@ -543,6 +548,7 @@ func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, tur
 		case "item.agent_message.delta", "item.agentMessage.delta", "agent_message.delta", "agentMessage.delta", "response.output_text.delta":
 			if delta := extractDelta(msg); delta != "" {
 				content.WriteString(delta)
+				pendingFailedTool = nil
 				m.emit(runID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: delta})
 			}
 		case "item.completed":
@@ -551,6 +557,7 @@ func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, tur
 			if itemType == "agent_message" || itemType == "agentMessage" {
 				if text := agentMessageText(item); text != "" {
 					if delta := appendAgentMessageContent(&content, text); delta != "" {
+						pendingFailedTool = nil
 						m.emit(runID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: delta})
 					}
 				}
@@ -568,6 +575,9 @@ func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, tur
 	}
 	if eventErr != "" && !codexTailErrorAfterContent(eventErr, content.String()) {
 		return codexScanResult{Content: content.String(), Tools: tools, ThreadID: threadID, ThreadStarted: threadStarted}, errors.New(eventErr)
+	}
+	if pendingFailedTool != nil {
+		return codexScanResult{Content: strings.TrimSpace(content.String()), Tools: tools, ThreadID: threadID, ThreadStarted: threadStarted}, failedToolWithoutFollowupError("codex", *pendingFailedTool)
 	}
 	return codexScanResult{Content: strings.TrimSpace(content.String()), Tools: tools, ThreadID: threadID, ThreadStarted: threadStarted}, nil
 }

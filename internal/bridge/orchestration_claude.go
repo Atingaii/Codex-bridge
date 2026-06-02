@@ -639,6 +639,7 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 	toolCommands := make(map[string]string)
 	toolStarts := make(map[string]time.Time)
 	deferredReadStarts := make(map[string]*RunnerToolEvent)
+	var pendingFailedTool *RunnerToolEvent
 	activeNudges := make(map[string]context.CancelFunc)
 	activeTools := make(map[string]bool)
 	var idleCloseCancel context.CancelFunc
@@ -730,6 +731,7 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 			stampToolTiming(tool, toolStarts)
 			tools = append(tools, *tool)
 			m.emitTool(runID, turnID, role, "claude", tool)
+			pendingFailedTool = nil
 			return
 		}
 		stampToolTiming(tool, toolStarts)
@@ -763,6 +765,10 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 		}
 		tools = append(tools, *tool)
 		m.emitTool(runID, turnID, role, "claude", tool)
+		if runnerToolEventFailed(*tool) {
+			copy := *tool
+			pendingFailedTool = &copy
+		}
 		scheduleIdleClose()
 	}
 	for {
@@ -792,6 +798,7 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 			}
 			if delta := claudeAssistantText(msg); delta != "" {
 				content.WriteString(delta)
+				pendingFailedTool = nil
 				m.emit(runID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "claude", Content: delta})
 			}
 		case "user":
@@ -806,9 +813,22 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 				}
 				return content.String(), tools, errors.New("claude returned an error")
 			}
-			if text := firstString(msg, "result"); text != "" && content.Len() == 0 {
-				content.WriteString(text)
-				m.emit(runID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "claude", Content: text})
+			if text := firstString(msg, "result"); text != "" {
+				before := content.String()
+				delta := ""
+				if content.Len() == 0 {
+					content.WriteString(text)
+					delta = text
+				} else {
+					delta = appendAgentMessageContent(&content, text)
+				}
+				if strings.TrimSpace(delta) != "" && strings.TrimSpace(content.String()) != strings.TrimSpace(before) {
+					pendingFailedTool = nil
+					m.emit(runID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "claude", Content: delta})
+				}
+			}
+			if pendingFailedTool != nil {
+				return strings.TrimSpace(content.String()), tools, failedToolWithoutFollowupError("claude", *pendingFailedTool)
 			}
 			if options.ReturnAfterResult {
 				return strings.TrimSpace(content.String()), tools, nil
@@ -823,6 +843,9 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 	}
 	if options.ReturnAfterResult && !receivedResult {
 		return strings.TrimSpace(content.String()), tools, errors.New("claude stream ended before result")
+	}
+	if pendingFailedTool != nil {
+		return strings.TrimSpace(content.String()), tools, failedToolWithoutFollowupError("claude", *pendingFailedTool)
 	}
 	return strings.TrimSpace(content.String()), tools, nil
 }
@@ -1066,6 +1089,40 @@ func isRunningToolStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func runnerToolEventFailed(tool RunnerToolEvent) bool {
+	status := normalizeToolStatus(tool.Status)
+	if status == "failed" || status == "error" {
+		return true
+	}
+	return tool.ExitCode != nil && *tool.ExitCode != 0
+}
+
+func failedToolWithoutFollowupError(cli string, tool RunnerToolEvent) error {
+	command := strings.TrimSpace(tool.Command)
+	if command == "" {
+		command = strings.TrimSpace(tool.ID)
+	}
+	if command == "" {
+		command = "a command"
+	}
+	detail := strings.TrimSpace(tool.Output)
+	if detail == "" {
+		detail = strings.TrimSpace(tool.Status)
+	}
+	if tool.ExitCode != nil {
+		exit := fmt.Sprintf("exit code %d", *tool.ExitCode)
+		if detail == "" {
+			detail = exit
+		} else {
+			detail += "\n" + exit
+		}
+	}
+	if detail == "" {
+		return fmt.Errorf("%s turn ended after %s failed without a follow-up response", cli, command)
+	}
+	return fmt.Errorf("%s turn ended after %s failed without a follow-up response: %s", cli, command, trimForPrompt(detail, 1000))
 }
 
 func normalizeToolStatus(status string) string {

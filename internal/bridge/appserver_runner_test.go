@@ -160,6 +160,68 @@ func TestCodexAppServerRunnerIgnoresStaleTurnCompleted(t *testing.T) {
 	}
 }
 
+func TestCodexAppServerRunnerFailedCommandWithoutFollowupFails(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerFailedCommandScript(false)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+
+	var deltas []string
+	var tools []RunnerToolEvent
+	result, err := NewCodexAppServerRunner(&cfg).Prompt(context.Background(), RunnerRequest{
+		Content: "continue proof",
+	}, func(update RunnerUpdate) {
+		if update.Delta != "" {
+			deltas = append(deltas, update.Delta)
+		}
+		if update.Tool != nil {
+			tools = append(tools, *update.Tool)
+		}
+	})
+	if err == nil {
+		t.Fatal("expected failed command without follow-up to fail the runner")
+	}
+	for _, want := range []string{"coqc -R . LinLattice HWQ_U/L0Proof.v", "Unable to unify", "exit code 1", "without a follow-up response"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q: %v", want, err)
+		}
+	}
+	if result.Content != "继续编译。" {
+		t.Fatalf("visible content = %q", result.Content)
+	}
+	if strings.Join(deltas, "") != "继续编译。" {
+		t.Fatalf("deltas = %#v", deltas)
+	}
+	if len(tools) != 2 || !runnerToolEventFailed(tools[1]) {
+		t.Fatalf("tools = %#v", tools)
+	}
+}
+
+func TestCodexAppServerRunnerFailedCommandWithFollowupCompletes(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerFailedCommandScript(true)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+
+	result, err := NewCodexAppServerRunner(&cfg).Prompt(context.Background(), RunnerRequest{
+		Content: "continue proof",
+	}, func(update RunnerUpdate) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "我会根据这个错误继续修正。") {
+		t.Fatalf("result content = %q", result.Content)
+	}
+}
+
 func TestCodexAppServerThreadStartIsPersisted(t *testing.T) {
 	cfg := config.Default()
 	cfg.Bridge.CWD = "/work/tree"
@@ -292,6 +354,8 @@ for line in sys.stdin:
         emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
     elif method == "thread/start":
         emit({"id": msg["id"], "result": {"thread": {"id": "thr_app"}}})
+    elif method == "thread/name/set":
+        emit({"id": msg["id"], "result": {}})
     elif method == "thread/unsubscribe":
         emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
     elif method == "turn/start":
@@ -300,6 +364,40 @@ for line in sys.stdin:
         emit({"id": msg["id"], "result": {"turn": {"id": "turn_real", "status": "inProgress"}}})
         emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_app", "turnId": "turn_real", "delta": "real final"}})
         emit({"method": "turn/completed", "params": {"threadId": "thr_app", "turn": {"id": "turn_real", "status": "completed"}}})
+        sys.exit(0)
+`
+}
+
+func fakeCodexAppServerFailedCommandScript(withFollowup bool) string {
+	followup := ""
+	if withFollowup {
+		followup = `        emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_app", "turnId": "turn_1", "itemId": "msg_2", "delta": "我会根据这个错误继续修正。"}})
+`
+	}
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+def emit(obj):
+    print(json.dumps(obj, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": "thr_app"}}})
+    elif method == "thread/name/set":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
+    elif method == "turn/start":
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_1", "status": "inProgress"}}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_app", "turnId": "turn_1", "itemId": "msg_1", "delta": "继续编译。"}})
+        emit({"method": "item/started", "params": {"threadId": "thr_app", "turnId": "turn_1", "item": {"id": "cmd_1", "turnId": "turn_1", "type": "commandExecution", "command": "coqc -R . LinLattice HWQ_U/L0Proof.v", "status": "running"}}})
+        emit({"method": "item/completed", "params": {"threadId": "thr_app", "turnId": "turn_1", "item": {"id": "cmd_1", "turnId": "turn_1", "type": "commandExecution", "command": "coqc -R . LinLattice HWQ_U/L0Proof.v", "status": "failed", "exitCode": 1, "aggregatedOutput": "File ./HWQ_U/L0Proof.v, line 24, characters 2-18:\nError: Unable to unify proof state.\n"}}})
+` + followup + `        emit({"method": "turn/completed", "params": {"threadId": "thr_app", "turn": {"id": "turn_1", "status": "completed"}}})
         sys.exit(0)
 `
 }

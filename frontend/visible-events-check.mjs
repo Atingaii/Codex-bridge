@@ -12,6 +12,7 @@ assert.match(source, /function isBridgeRelayNotice\(event: Pick<OrchestrationEve
 assert.match(source, /function canMergeAdjacentOrchestrationDelta\(previous: OrchestrationEvent \| undefined, event: OrchestrationEvent\)/);
 assert.match(source, /function orchestrationTurnDeltaContentByKey\(events: OrchestrationEvent\[\]\)/);
 assert.match(source, /function turnEndDisplayContent\(content: string, deltaContent: string\)/);
+assert.match(source, /visible\.push\(statusVisibleEvent\(event, index, ':status'\)\);/);
 assert.doesNotMatch(source, /contentfulTurnEnds\.has\(orchestrationTurnKey\(event\)\)/);
 assert.match(source, /const rawContent = item\.content \|\| item\.error \|\| '';/);
 assert.doesNotMatch(source, /unresolvedAcceptanceSummary/);
@@ -108,7 +109,9 @@ function visibleEventKindsAndContent(events) {
     }
     if (event.kind === 'turn.end') {
       const content = turnEndDisplayContent(event.content, deltaContent.get(orchestrationTurnKey(event)) || '');
-      return content ? [{ kind: event.kind, seq: event.seq, content }] : [];
+      const out = content ? [{ kind: event.kind, seq: event.seq, content }] : [];
+      if (event.error) out.push({ kind: event.kind, seq: event.seq, content: orchestrationStatusContent(event), type: 'status' });
+      return out;
     }
     return [];
   });
@@ -171,3 +174,11 @@ assert.deepEqual(orderedProgress.map((item) => item.seq), [39, 40, 41, 104]);
 assert.ok(orderedProgress[0].content.includes('辅助引理'));
 assert.ok(orderedProgress[3].content.includes('多数 assert'));
 assert.ok(!orderedProgress.some((item) => item.seq === 122));
+
+const failedTurnEnd = visibleEventKindsAndContent([
+  { runId: 'run1', turnId: 'turn1', role: 'reviewer', cli: 'codex', kind: 'turn.end', seq: 10, content: '继续编译。', error: 'codex app-server turn ended after coqc failed without a follow-up response' },
+]);
+
+assert.equal(failedTurnEnd.length, 2);
+assert.equal(failedTurnEnd[1].type, 'status');
+assert.ok(failedTurnEnd[1].content.includes('without a follow-up response'));

@@ -124,6 +124,18 @@ identical blockers from CLI handoffs, or explicit CLI `blocked` / `needs_next`
 handoffs as non-completed terminal states, because those are the CLI-visible
 result rather than a Bridge proof verdict.
 
+If a command/tool event ends failed and the CLI then finishes the turn without a
+later assistant text response, Bridge treats the turn as errored rather than as
+a successful clipped answer. This applies to
+`internal/bridge/appserver_runner.go:313`,
+`internal/bridge/orchestration_codex.go:471`, and
+`internal/bridge/orchestration_claude.go:628`. The orchestration loop in
+`internal/bridge/orchestration.go:323` then emits the
+failed `turn.end` and `run.error`, skips after-turn native context compaction,
+and does not start the next CLI turn. A later assistant text response after the
+failed command is considered the CLI's visible handling of that failure and may
+complete normally.
+
 Automatic post-run remediation is disabled for pass-through orchestration. If a
 CLI says it is finished, Bridge should not start a new hidden assessment or
 repair turn just because a proof-specific checklist is missing.

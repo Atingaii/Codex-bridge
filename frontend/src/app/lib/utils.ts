@@ -449,7 +449,7 @@ export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: 
         command: event,
       });
       if (event.status === 'error' || event.error) {
-        visible.push(statusVisibleEvent(event, index));
+        visible.push(statusVisibleEvent(event, index, ':status'));
       }
       return;
     }
@@ -475,6 +475,9 @@ export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: 
           timelineOrder: event.timelineOrder,
           commands: [],
         });
+        if (shouldShowOrchestrationStatus(event)) {
+          visible.push(statusVisibleEvent(event, index, ':status'));
+        }
         return;
       }
       if (event.error) {
@@ -774,10 +777,10 @@ export function shouldShowOrchestrationStatus(event: OrchestrationEvent) {
   return event.kind === 'run.error' || event.kind === 'run.cancelled' || event.kind === 'run.canceling' || Boolean(event.error);
 }
 
-export function statusVisibleEvent(event: OrchestrationEvent, index: number): OrchestrationVisibleEvent {
+export function statusVisibleEvent(event: OrchestrationEvent, index: number, keySuffix = ''): OrchestrationVisibleEvent {
   return {
     type: 'status',
-    key: orchestrationEventKey(event, index),
+    key: `${orchestrationEventKey(event, index)}${keySuffix}`,
     runId: event.runId,
     kind: event.kind,
     role: event.role,

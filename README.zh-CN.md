@@ -106,7 +106,7 @@ cd /home/zy/os
 codex resume --include-non-interactive
 ```
 
-要直接恢复 Claude Code，可以使用运行结束元数据里的 `claude --resume <session-id>`；Bridge 会按当前工作目录更新 Claude 的项目最近会话记录，并以 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` 作为真实 transcript。`/resume` 选择器能否展示取决于 Claude Code 版本的过滤规则，直接 resume 命令是可信入口。
+要查看或直接恢复 Claude Code，请在同一个工作目录运行 `claude`，然后使用 `/resume`；Bridge 会把 Claude 自己写下的 stream-json transcript 规范成 `/resume` 选择器可见的本地会话，并同步 `~/.claude/history.jsonl` 与当前项目最近会话记录。运行结束元数据里的 `claude --resume <session-id>` 仍然是直接恢复入口，真实 transcript 位于 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`。
 
 如果要忽略 Codex cwd 过滤再使用 `codex resume --all --include-non-interactive`。正常接入流程不使用 sudo/root 命令，因为那会把原生会话写到另一个用户的 HOME 下。
 

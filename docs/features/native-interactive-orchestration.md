@@ -84,8 +84,10 @@ Claude native resume metadata is based on the real transcript file under
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. After a successful
 Claude turn, Bridge updates only the matching `projects[absCwd]` entry in
 `~/.claude.json` and exposes `claude --resume <session-id>` in run-end metadata.
-If the native `/resume` picker filters a session, the direct command and
-transcript path remain the source of truth.
+Because Claude Code's interactive `/resume` picker filters stream-json
+`sdk-cli` transcripts, Bridge also materializes the same Claude-written
+transcript into picker-visible `entrypoint:"cli"` form and appends the missing
+`~/.claude/history.jsonl` index row.
 
 Claude Code stream-json does not currently expose a verified native compaction
 control RPC. When `nativeContextCompaction=after-turn`, Bridge emits an info
@@ -137,7 +139,8 @@ possible.
   `claude --resume <session-id>` when the native ids are available.
 - Claude resume visibility is checked against the project transcript JSONL and
   the current cwd entry in `~/.claude.json` is updated without changing other
-  projects.
+  projects. The same Bridge session is visible from the run cwd through
+  Claude Code `/resume`.
 - When native context compaction is enabled, Codex receives
   `thread/compact/start` after successful business turns; Claude stream-json is
   skipped with an info Bridge note until a verified native control channel is
@@ -164,11 +167,13 @@ machine-readable events.
 
 **Q2: Can the user see the sessions with native resume?**
 
-A: Yes, subject to the CLI's own picker behavior and the same-user invariant.
-The generated browser setup command must be run by the workspace OS user, from
-the target workspace directory. Bridge then writes native history under that
-user's `HOME` / `CODEX_HOME` / Claude home. The user can inspect Codex history
-from the same identity and cwd:
+A: Yes, under the same-user invariant. The generated browser setup command must
+be run by the workspace OS user, from the target workspace directory. Bridge
+then writes native history under that user's `HOME` / `CODEX_HOME` / Claude
+home. Codex remains visible through Codex's native thread metadata, and Bridge
+materializes Claude stream-json transcripts so they appear in Claude Code's
+interactive `/resume` picker from the run cwd. The user can inspect Codex
+history from the same identity and cwd:
 
 ```bash
 cd /home/alice/project

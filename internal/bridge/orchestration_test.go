@@ -720,7 +720,14 @@ func TestClaudeNativeResumeMetadataUpdatesProjectVisibility(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(transcriptPath, []byte(`{"sessionId":"`+sessionID+`","type":"summary"}`+"\n"), 0o600); err != nil {
+	transcript := strings.Join([]string{
+		`{"type":"custom-title","customTitle":"Bridge visible resume","sessionId":"` + sessionID + `"}`,
+		`{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"create a visible bridge session"}]},"uuid":"user-1","timestamp":"2026-06-02T00:00:00.000Z","permissionMode":"acceptEdits","userType":"external","entrypoint":"sdk-cli","cwd":"` + cwd + `","sessionId":"` + sessionID + `","version":"2.1.159","gitBranch":"HEAD"}`,
+		`{"parentUuid":"user-1","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"uuid":"assistant-1","timestamp":"2026-06-02T00:00:01.000Z","userType":"external","entrypoint":"sdk-cli","cwd":"` + cwd + `","sessionId":"` + sessionID + `","version":"2.1.159","gitBranch":"HEAD"}`,
+		`{"type":"ai-title","aiTitle":"AI title should not override custom title","sessionId":"` + sessionID + `"}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	otherCWD := filepath.Join(tmp, "other")
@@ -745,6 +752,9 @@ func TestClaudeNativeResumeMetadataUpdatesProjectVisibility(t *testing.T) {
 	}
 	if !info.Visible || info.TranscriptPath != transcriptPath || info.Command != "claude --resume "+sessionID {
 		t.Fatalf("unexpected resume info: %#v", info)
+	}
+	if !strings.Contains(info.VisibilityReason, "/resume picker") {
+		t.Fatalf("visibility reason does not mention picker materialization: %q", info.VisibilityReason)
 	}
 	raw, err := os.ReadFile(filepath.Join(home, ".claude.json"))
 	if err != nil {
@@ -774,6 +784,20 @@ func TestClaudeNativeResumeMetadataUpdatesProjectVisibility(t *testing.T) {
 	}
 	if hint["nativeResumeCommand"] != info.Command || hint["nativeResumeAvailable"] != true {
 		t.Fatalf("compat session hint = %#v", hint)
+	}
+	materialized, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(materialized), `"entrypoint":"sdk-cli"`) || !strings.Contains(string(materialized), `"entrypoint":"cli"`) {
+		t.Fatalf("transcript was not materialized for picker visibility:\n%s", string(materialized))
+	}
+	historyRaw, err := os.ReadFile(filepath.Join(home, ".claude", "history.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(historyRaw), `"sessionId":"`+sessionID+`"`) || !strings.Contains(string(historyRaw), "Bridge visible resume") {
+		t.Fatalf("history index missing visible session: %s", string(historyRaw))
 	}
 }
 

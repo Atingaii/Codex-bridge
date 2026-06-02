@@ -71,7 +71,9 @@ Claude exposes `claude --resume <session-id>` plus the project transcript path
 under `~/.claude/projects/<encoded-cwd>/`. After successful Claude turns,
 Bridge updates only the current cwd entry in `~/.claude.json` so native Claude
 project metadata points at the Bridge session without touching unrelated
-projects. It does not add hidden proof strategy gates,
+projects, and materializes the same Claude-written transcript so Claude Code's
+interactive `/resume` picker can show it from the run cwd. It does not add
+hidden proof strategy gates,
 automatic verifier turns, or remediation turns. Formal-proof guidance is opt-in
 through the persisted `profile=formal-proof` run setting selected in the
 orchestration UI; the default profile does not activate proof guidance based on

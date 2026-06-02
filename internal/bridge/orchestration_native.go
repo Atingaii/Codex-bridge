@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,8 @@ import (
 
 const nativeContextCompactionCommand = "/compact"
 const nativeContextCompactionTimeout = 90 * time.Second
+const claudeTranscriptStableWait = 2 * time.Second
+const claudeTranscriptStablePoll = 100 * time.Millisecond
 
 func (m *OrchestrationManager) runNativeContextCompaction(ctx context.Context, runID, turnID, role, cli string, enabled bool, session *orchestrationNativeSession, native any) {
 	if !enabled || session == nil {
@@ -161,6 +164,16 @@ func (m *OrchestrationManager) registerClaudeNativeResume(session *orchestration
 	if err := updateClaudeProjectLastSession(cwd, claude.sessionID); err != nil && info.VisibilityReason == "" {
 		info.VisibilityReason = "Claude transcript was checked, but Bridge could not update Claude project metadata: " + err.Error()
 	}
+	if err := materializeClaudePickerVisibility(cwd, claude.sessionID, runID); err != nil {
+		info.Visible = false
+		info.VisibilityReason = "Claude transcript exists, but Bridge could not materialize it for Claude Code /resume picker visibility: " + err.Error()
+	} else if info.Visible {
+		if refreshed := m.claudeNativeResumeInfo(claude.sessionID, cwd); refreshed != nil {
+			info = refreshed
+		}
+		info.Visible = true
+		info.VisibilityReason = "Claude wrote a project transcript for this session, and Bridge materialized it for the Claude Code /resume picker."
+	}
 	if err := writeClaudeSessionHint(claude, runID, cwd, info); err != nil && info.VisibilityReason == "" {
 		info.VisibilityReason = "Claude transcript was checked, but Bridge could not write the compatibility session hint: " + err.Error()
 	}
@@ -203,6 +216,12 @@ func verifyClaudeTranscript(path, sessionID string) (bool, string) {
 	}
 	if strings.TrimSpace(sessionID) != "" && !strings.Contains(string(data), `"sessionId":"`+sessionID+`"`) {
 		return false, "Claude transcript exists but does not contain the expected session id."
+	}
+	if strings.Contains(string(data), `"entrypoint":"cli"`) {
+		home, err := os.UserHomeDir()
+		if err == nil && claudeHistoryContainsSession(filepath.Join(home, ".claude", "history.jsonl"), sessionID) {
+			return true, "Claude wrote a project transcript for this session, and Bridge materialized it for the Claude Code /resume picker."
+		}
 	}
 	return true, "Claude wrote a project transcript for this session; direct native resume is available."
 }
@@ -247,6 +266,216 @@ func updateClaudeProjectLastSession(cwd, sessionID string) error {
 		return err
 	}
 	return os.WriteFile(path, append(out, '\n'), 0o600)
+}
+
+func materializeClaudePickerVisibility(cwd, sessionID, runID string) error {
+	cwd = strings.TrimSpace(cwd)
+	sessionID = strings.TrimSpace(sessionID)
+	if cwd == "" || sessionID == "" {
+		return nil
+	}
+	transcriptPath := claudeSessionFilePath(cwd, sessionID)
+	if strings.TrimSpace(transcriptPath) == "" {
+		return errors.New("Claude transcript path could not be resolved")
+	}
+	if err := waitForStableClaudeTranscript(transcriptPath, claudeTranscriptStableWait); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		return err
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return errors.New("Claude transcript is empty")
+	}
+	materialized, err := claudePickerVisibleTranscript(data)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(string(materialized), `"entrypoint":"cli"`) {
+		return errors.New("materialized transcript does not contain a cli entrypoint")
+	}
+	if err := os.WriteFile(transcriptPath, materialized, 0o600); err != nil {
+		return err
+	}
+	return appendClaudeHistoryIndex(cwd, sessionID, runID, materialized)
+}
+
+func waitForStableClaudeTranscript(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastSize int64 = -1
+	var lastMod time.Time
+	for {
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if info.Size() == lastSize && info.ModTime().Equal(lastMod) {
+			return nil
+		}
+		lastSize = info.Size()
+		lastMod = info.ModTime()
+		if time.Now().After(deadline) {
+			return nil
+		}
+		time.Sleep(claudeTranscriptStablePoll)
+	}
+}
+
+func claudePickerVisibleTranscript(data []byte) ([]byte, error) {
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	var out strings.Builder
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return nil, err
+		}
+		normalizeClaudePickerRecord(record)
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			return nil, err
+		}
+		out.Write(encoded)
+		out.WriteByte('\n')
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if out.Len() == 0 {
+		return nil, errors.New("Claude transcript has no JSONL records")
+	}
+	return []byte(out.String()), nil
+}
+
+func normalizeClaudePickerRecord(record map[string]any) {
+	if entrypoint, _ := record["entrypoint"].(string); entrypoint == "sdk-cli" {
+		record["entrypoint"] = "cli"
+	}
+	if record["userType"] == nil {
+		record["userType"] = "external"
+	}
+	if record["isSidechain"] == nil {
+		record["isSidechain"] = false
+	}
+	if record["version"] == nil {
+		record["version"] = "bridge"
+	}
+	if record["gitBranch"] == nil {
+		record["gitBranch"] = "HEAD"
+	}
+}
+
+func appendClaudeHistoryIndex(cwd, sessionID, runID string, transcript []byte) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(home, ".claude", "history.jsonl")
+	if claudeHistoryContainsSession(path, sessionID) {
+		return nil
+	}
+	display := claudeHistoryDisplay(runID, transcript)
+	entry := map[string]any{
+		"display":        display,
+		"pastedContents": map[string]any{},
+		"timestamp":      time.Now().UnixMilli(),
+		"project":        cwd,
+		"sessionId":      sessionID,
+	}
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(append(encoded, '\n')); err != nil {
+		return err
+	}
+	return nil
+}
+
+func claudeHistoryContainsSession(path, sessionID string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), `"sessionId":"`+sessionID+`"`)
+}
+
+func claudeHistoryDisplay(runID string, transcript []byte) string {
+	title := strings.TrimSpace(claudeTranscriptTitle(transcript))
+	if title != "" {
+		return title
+	}
+	if runID = strings.TrimSpace(runID); runID != "" {
+		return nativeSessionDisplayName(runID, "claude")
+	}
+	return "Codex Bridge Claude session"
+}
+
+func claudeTranscriptTitle(transcript []byte) string {
+	scanner := bufio.NewScanner(strings.NewReader(string(transcript)))
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			continue
+		}
+		if value, _ := record["customTitle"].(string); strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+		if value, _ := record["aiTitle"].(string); strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+		if value, _ := record["agentName"].(string); strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+		if typ, _ := record["type"].(string); typ != "user" {
+			continue
+		}
+		if msg, _ := record["message"].(map[string]any); msg != nil {
+			if content := claudeMessageContentText(msg["content"]); content != "" {
+				return trimForPrompt(content, 80)
+			}
+		}
+	}
+	return ""
+}
+
+func claudeMessageContentText(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		var parts []string
+		for _, item := range typed {
+			obj, _ := item.(map[string]any)
+			if obj == nil {
+				continue
+			}
+			if text, _ := obj["text"].(string); strings.TrimSpace(text) != "" {
+				parts = append(parts, strings.TrimSpace(text))
+			}
+		}
+		return strings.TrimSpace(strings.Join(parts, "\n"))
+	default:
+		return ""
+	}
 }
 
 func writeClaudeSessionHint(claude *orchestrationClaudeSession, runID, cwd string, info *protocol.NativeResumeInfo) error {

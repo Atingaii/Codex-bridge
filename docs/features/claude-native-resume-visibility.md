@@ -6,12 +6,12 @@
   same way Codex orchestration threads are recoverable.
 - Base resume metadata on Claude Code's real transcript files under
   `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`.
-- Surface a truthful resume command and visibility status to the browser.
+- Surface a truthful resume command and make the same session visible in the
+  Claude Code `/resume` picker from the run cwd.
 - Keep Codex and Claude native-resume reporting consistent in run-end data.
 
 ## Non-Goals
 
-- Do not rewrite Claude transcript JSONL contents.
 - Do not fabricate native CLI conversations that Claude Code did not write.
 - Do not mutate unrelated projects in `~/.claude.json`.
 - Do not depend on terminal UI scraping of the `/resume` picker.
@@ -42,10 +42,22 @@ encoding used by the existing ACP runner helper:
 After a successful Claude turn, Bridge verifies whether that JSONL exists,
 contains lines, and belongs to the expected session id. It then updates only the
 matching `projects[absCwd]` entry in `~/.claude.json` so the project points at
-the Bridge session as its latest native session. If the CLI still filters
-`sdk-cli` sessions from its interactive `/resume` picker, Bridge keeps the
-direct `claude --resume <session-id>` command visible in browser metadata rather
-than pretending picker visibility is guaranteed.
+the Bridge session as its latest native session.
+
+Claude Code 2.1.159 writes Bridge's headless stream-json turns with
+`entrypoint:"sdk-cli"`, while the interactive `/resume` picker filters those
+SDK/print sessions. Bridge therefore materializes the same Claude-written
+project transcript into picker-visible form after successful turns:
+
+- each JSONL record keeps the same session id, cwd, timestamps, messages, and
+  attachments;
+- records with `entrypoint:"sdk-cli"` are normalized to `entrypoint:"cli"`;
+- Bridge appends a `~/.claude/history.jsonl` index row for the same project and
+  session id when one is missing.
+
+This does not create a separate conversation or overwrite unrelated Claude
+projects. The transcript remains the native resume source, and the browser also
+shows the direct `claude --resume <session-id>` command.
 
 The old `~/.claude/sessions/<session-id>.json` compatibility file is kept only
 as a best-effort hint and must not be the source of truth. It should not remain
@@ -72,10 +84,13 @@ session.
 3. Add Claude transcript path calculation and JSONL verification.
 4. Update the current cwd entry in `~/.claude.json` after successful Claude
    turns.
-5. Replace the old registration call with transcript-based registration.
-6. Add browser-visible metadata fields without changing event kinds.
-7. Add tests for path encoding, `.claude.json` single-project update, metadata
-   generation, and stale-session behavior.
+5. Normalize the Claude-written stream transcript into `/resume` picker-visible
+   form and append the missing `history.jsonl` index row.
+6. Replace the old registration call with transcript-based registration.
+7. Add browser-visible metadata fields without changing event kinds.
+8. Add tests for path encoding, `.claude.json` single-project update,
+   transcript materialization, history indexing, metadata generation, and
+   stale-session behavior.
 
 ## Exit Gates
 
@@ -83,6 +98,9 @@ session.
 - `npm run build` in `frontend/`
 - `CGO_ENABLED=0 /usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .`
 - `make doc-lint`
+- Manual smoke from the target cwd:
+  `claude --resume <bridge-claude-session-title-or-search-term>` shows the
+  Bridge orchestration session in the picker.
 - Manual smoke from the target cwd:
   `claude --resume <bridge-claude-session-id>`.
 
@@ -93,8 +111,11 @@ The transcript JSONL is the real recoverable history. A sidecar session JSON can
 be stale or ignored by the picker.
 
 **Can Bridge guarantee `/resume` picker visibility?**  
-Not across Claude Code versions. Bridge can guarantee the transcript path and
-direct `claude --resume <id>` command when the native CLI wrote the history.
+For the current supported Claude Code stream-json behavior, yes: Bridge
+materializes the Claude-written transcript into the picker-visible `cli`
+entrypoint shape and adds the missing history index. If a future Claude Code
+version changes picker filtering, this manual smoke gate must catch it before
+release.
 
 **Why update `~/.claude.json` at all?**  
 Claude Code uses that file for per-project recent session metadata. Updating

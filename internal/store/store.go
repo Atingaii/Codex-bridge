@@ -1353,6 +1353,74 @@ func (s *Store) UpdateOrchestrationRunStatus(ctx context.Context, id, status, er
 	return err
 }
 
+func (s *Store) CancelOrchestrationRunIfStillCanceling(ctx context.Context, id, reason string) (OrchestrationEvent, bool, error) {
+	if id == "" {
+		return OrchestrationEvent{}, false, errors.New("run id is required")
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "orchestration cancellation timed out"
+	}
+	now := time.Now().Unix()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return OrchestrationEvent{}, false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_runs
+		SET status = ?, error = ?, finished_at = ?, updated_at = ?
+		WHERE id = ? AND status = ?
+	`, OrchestrationCanceled, reason, now, now, id, OrchestrationCanceling)
+	if err != nil {
+		return OrchestrationEvent{}, false, err
+	}
+	changed, err := res.RowsAffected()
+	if err != nil {
+		return OrchestrationEvent{}, false, err
+	}
+	if changed == 0 {
+		return OrchestrationEvent{}, false, nil
+	}
+
+	event := OrchestrationEvent{
+		ID:        NewID("evt"),
+		RunID:     id,
+		Kind:      "run.cancelled",
+		Source:    "bridge",
+		Content:   "取消超时：Bridge 已将该编排运行强制标记为已取消。",
+		Status:    OrchestrationCanceled,
+		Error:     reason,
+		CreatedAt: now,
+		RunConclusion: &protocol.RunConclusion{
+			Outcome:          "canceled",
+			Summary:          "取消超时：Bridge 已将该编排运行强制标记为已取消。",
+			UnmetObligations: []string{"The selected CLI endpoint did not acknowledge cancellation before the timeout."},
+		},
+	}
+	dataJSON, err := orchestrationEventDataJSON(event)
+	if err != nil {
+		return OrchestrationEvent{}, false, err
+	}
+	row := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) + 1 FROM orchestration_events WHERE run_id = ?`, event.RunID)
+	if err := row.Scan(&event.Seq); err != nil {
+		return OrchestrationEvent{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO orchestration_events
+			(id, run_id, seq, kind, source, severity, role, cli, turn_id, content, status, error, data_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, event.ID, event.RunID, event.Seq, event.Kind, nullString(event.Source), nullString(event.Severity), nullString(event.Role), nullString(event.CLI),
+		nullString(event.TurnID), nullString(event.Content), nullString(event.Status), nullString(event.Error),
+		nullString(dataJSON), now); err != nil {
+		return OrchestrationEvent{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return OrchestrationEvent{}, false, err
+	}
+	return event, true, nil
+}
+
 func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID, mode, firstCLI, profile, cwd, nativeContextCompaction string, maxTurns int, files []OrchestrationFile) error {
 	if id == "" || agentID == "" {
 		return errors.New("run id and agent id are required")

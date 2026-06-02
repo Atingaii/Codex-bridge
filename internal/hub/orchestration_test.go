@@ -55,6 +55,39 @@ func TestCancelOrchestrationStatusTransitions(t *testing.T) {
 	}
 }
 
+func TestCancelingOrchestrationTimesOutToCanceled(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationCanceling, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	s.scheduleOrchestrationCancelTimeout(run.ID, 0)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		loaded, err := st.OrchestrationRunByID(ctx, run.ID, userID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.Status == store.OrchestrationCanceled {
+			events, err := st.ListOrchestrationEvents(ctx, run.ID, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 1 || events[0].Kind != "run.cancelled" || events[0].Status != store.OrchestrationCanceled {
+				t.Fatalf("cancel timeout event = %#v", events)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("canceling orchestration did not time out to canceled")
+}
+
 func TestCancelCompletedOrchestrationIsNoop(t *testing.T) {
 	t.Parallel()
 
@@ -128,6 +161,39 @@ func TestCommandStatusDoesNotUpdateOrchestrationRunStatus(t *testing.T) {
 	}
 	if loaded.Status != store.OrchestrationCompleted {
 		t.Fatalf("run.end did not complete run, got %q", loaded.Status)
+	}
+}
+
+func TestLateTerminalEventDoesNotReviveCanceledOrchestration(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationCanceled, "canceled"); err != nil {
+		t.Fatal(err)
+	}
+
+	s.handleOrchestrationEvent(ctx, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+		RunID:   run.ID,
+		Kind:    "run.end",
+		Content: "late completed output",
+		Status:  "completed",
+	}))
+
+	loaded, err := st.OrchestrationRunByID(ctx, run.ID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != store.OrchestrationCanceled {
+		t.Fatalf("late run.end revived canceled run to %q", loaded.Status)
+	}
+	events, err := st.ListOrchestrationEvents(ctx, run.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("late terminal event should be ignored, got %#v", events)
 	}
 }
 

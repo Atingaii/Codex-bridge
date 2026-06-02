@@ -1297,6 +1297,59 @@ func TestOrchestrationCancelKillsCodexProcessGroup(t *testing.T) {
 	waitForProcessExit(t, pid)
 }
 
+func TestOrchestrationCancelStopsActiveClaudeInteractiveSession(t *testing.T) {
+	tmp := t.TempDir()
+	marker := filepath.Join(tmp, "claude.pid")
+	claudePath := filepath.Join(tmp, "claude")
+	if err := os.WriteFile(claudePath, []byte(fakeBlockingClaudeStreamScript(marker)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 32)
+	manager.AttachOut(out)
+
+	done := make(chan struct{}, 1)
+	go func() {
+		manager.Start(context.Background(), protocol.OrchestrationStartPayload{
+			RunID:    "orc_cancel_claude",
+			Mode:     "collaboration",
+			FirstCLI: "claude",
+			Prompt:   "start blocking claude",
+			MaxTurns: 1,
+			CWD:      tmp,
+		})
+		done <- struct{}{}
+	}()
+	<-done
+
+	if !waitForOrchestrationEvent(t, out, "turn.start", "claude", "Starting Claude") {
+		t.Fatal("Claude turn did not start")
+	}
+	pid := waitForPIDFile(t, marker)
+
+	cancelDone := make(chan struct{})
+	go func() {
+		manager.Cancel("orc_cancel_claude")
+		close(cancelDone)
+	}()
+	select {
+	case <-cancelDone:
+	case <-time.After(time.Second):
+		t.Fatal("Cancel blocked while Claude turn was active")
+	}
+
+	waitForProcessExit(t, pid)
+	if !waitForOrchestrationEvent(t, out, "run.cancelled", "", "") {
+		t.Fatal("run.cancelled was not emitted after Claude cancellation")
+	}
+}
+
 func TestOrchestrationEventsBufferWhileBridgeDisconnected(t *testing.T) {
 	manager := NewOrchestrationManager(&config.Config{})
 	firstOut := make(chan protocol.Envelope, 2)
@@ -2364,6 +2417,29 @@ for idx, line in enumerate(sys.stdin, start=1):
             text = "Claude native turn 2\n\nMsg: to=reviewer; intent=final-check; need=finish\nHandoff: status=needs_next; changed=none; verified=claude native reused; next=finish; risks=none"
     print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}, ensure_ascii=False), flush=True)
     print(json.dumps({"type": "result", "result": text}, ensure_ascii=False), flush=True)
+`
+}
+
+func fakeBlockingClaudeStreamScript(markerPath string) string {
+	markerPathRaw, _ := json.Marshal(markerPath)
+	return `#!/usr/bin/env python3
+import json
+import os
+import signal
+import sys
+import time
+
+marker_path = ` + string(markerPathRaw) + `
+with open(marker_path, "w", encoding="utf-8") as f:
+    f.write(str(os.getpid()))
+    f.flush()
+
+signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
+for line in sys.stdin:
+    json.loads(line)
+    print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "started"}]}}), flush=True)
+    while True:
+        time.sleep(1)
 `
 }
 

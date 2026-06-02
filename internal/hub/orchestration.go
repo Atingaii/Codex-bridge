@@ -43,6 +43,8 @@ type orchestrationStartRequest struct {
 	Files                   []protocol.AttachmentPayload
 }
 
+const orchestrationCancelAckTimeout = 5 * time.Second
+
 func (s *Server) handleListOrchestrations(w http.ResponseWriter, r *http.Request, uid string) {
 	runs, err := s.store.ListOrchestrationRuns(r.Context(), uid, 100)
 	if err != nil {
@@ -433,7 +435,12 @@ func (s *Server) handleCancelOrchestration(w http.ResponseWriter, r *http.Reques
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration run")
 		return
 	}
-	if orchestrationTerminalStatus(run.Status) || run.Status == store.OrchestrationCanceling {
+	if orchestrationTerminalStatus(run.Status) {
+		serverutil.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "status": run.Status})
+		return
+	}
+	if run.Status == store.OrchestrationCanceling {
+		s.scheduleOrchestrationCancelTimeout(run.ID, orchestrationCancelAckTimeout)
 		serverutil.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "status": run.Status})
 		return
 	}
@@ -457,7 +464,32 @@ func (s *Server) handleCancelOrchestration(w http.ResponseWriter, r *http.Reques
 	}
 	s.pool.BroadcastToOrchestrationBrowsers(run.ID, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", eventToPayload(event)))
 	_ = s.pool.SendToAgent(run.AgentID, protocol.MustEnvelope(protocol.TypeOrchestrationCancel, "", protocol.OrchestrationCancelPayload{RunID: run.ID}))
+	s.scheduleOrchestrationCancelTimeout(run.ID, orchestrationCancelAckTimeout)
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "status": store.OrchestrationCanceling})
+}
+
+func (s *Server) scheduleOrchestrationCancelTimeout(runID string, delay time.Duration) {
+	if strings.TrimSpace(runID) == "" {
+		return
+	}
+	go func() {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		reason := "selected CLI endpoint did not acknowledge cancellation before timeout"
+		event, changed, err := s.store.CancelOrchestrationRunIfStillCanceling(ctx, runID, reason)
+		if err != nil {
+			slog.Error("[hub] cancel orchestration timeout failed", "run_id", runID, "error", err)
+			return
+		}
+		if !changed {
+			return
+		}
+		slog.Warn("[hub] marked canceling orchestration canceled after timeout", "run_id", runID)
+		s.pool.BroadcastToOrchestrationBrowsers(runID, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", eventToPayload(event)))
+	}()
 }
 
 func orchestrationCancelableStatus(status string) bool {
@@ -769,6 +801,10 @@ func (s *Server) handleOrchestrationEvent(ctx context.Context, env protocol.Enve
 		status = runStatus
 	}
 	if runStatus != "" {
+		if existing, err := s.store.OrchestrationRunByIDAnyUser(ctx, payload.RunID); err == nil && orchestrationTerminalStatus(existing.Status) {
+			slog.Warn("[hub] ignored late terminal orchestration status", "run_id", payload.RunID, "kind", payload.Kind, "status", runStatus)
+			return
+		}
 		if err := s.store.UpdateOrchestrationRunStatus(ctx, payload.RunID, runStatus, payload.Error); err != nil {
 			slog.Error("[hub] update orchestration status failed", "run_id", payload.RunID, "error", err)
 		}

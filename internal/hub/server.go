@@ -170,11 +170,14 @@ func (s *Server) staticHandler() http.Handler {
 		case r.URL.Path == "/sw.js":
 			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
+		case r.URL.Path == "/app-recovery.js":
+			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
 		case strings.HasSuffix(r.URL.Path, ".webmanifest"):
 			w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 		case strings.HasSuffix(r.URL.Path, ".js"), strings.HasSuffix(r.URL.Path, ".css"):
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			w.Header().Set("Cache-Control", "public, max-age=60, stale-while-revalidate=300")
 		default:
 			w.Header().Set("Cache-Control", "no-store")
 		}

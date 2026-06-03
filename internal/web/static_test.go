@@ -16,6 +16,7 @@ func TestStaticUIContracts(t *testing.T) {
 	requiredIndex := []string{
 		"Codex Bridge",
 		`<div id="root"></div>`,
+		`/app-recovery.js`,
 		`type="module"`,
 		`/assets/`,
 		`/manifest.webmanifest`,
@@ -28,9 +29,11 @@ func TestStaticUIContracts(t *testing.T) {
 	}
 
 	requiredStaticFiles := []string{
+		"static/app-recovery.js",
 		"static/icon.svg",
 		"static/manifest.webmanifest",
 		"static/sw.js",
+		"static/assets/index-BWIkJOjq.js",
 	}
 	for _, name := range requiredStaticFiles {
 		if _, err := StaticFS.ReadFile(name); err != nil {

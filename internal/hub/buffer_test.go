@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
+	"github.com/tencent/codex-bridge/internal/web"
 )
 
 func TestAssistantBufferDeltaAndContentSemantics(t *testing.T) {
@@ -82,6 +84,43 @@ func TestStaticHandlerSPAFallbackRoutes(t *testing.T) {
 		for _, needle := range []string{"Codex Bridge", `<div id="root"></div>`, `type="module"`} {
 			if !strings.Contains(body, needle) {
 				t.Fatalf("%s route did not return SPA index, missing %q", path, needle)
+			}
+		}
+	}
+}
+
+func TestStaticHandlerCacheHeaders(t *testing.T) {
+	s := &Server{}
+	jsAssets, err := fs.Glob(web.StaticFS, "static/assets/*.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jsAssets) == 0 {
+		t.Fatal("missing embedded JS asset")
+	}
+	jsAssetPath := "/" + strings.TrimPrefix(jsAssets[0], "static/")
+
+	for _, tc := range []struct {
+		path        string
+		contentType string
+		cache       string
+	}{
+		{path: "/sw.js", contentType: "application/javascript", cache: "no-store"},
+		{path: "/app-recovery.js", contentType: "application/javascript", cache: "no-store"},
+		{path: jsAssetPath, cache: "public, max-age=60, stale-while-revalidate=300"},
+		{path: "/", cache: "no-store"},
+	} {
+		rr := httptest.NewRecorder()
+		s.staticHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s route status = %d", tc.path, rr.Code)
+		}
+		if got := rr.Header().Get("Cache-Control"); got != tc.cache {
+			t.Fatalf("%s Cache-Control = %q, want %q", tc.path, got, tc.cache)
+		}
+		if tc.contentType != "" {
+			if got := rr.Header().Get("Content-Type"); !strings.Contains(got, tc.contentType) {
+				t.Fatalf("%s Content-Type = %q, want substring %q", tc.path, got, tc.contentType)
 			}
 		}
 	}

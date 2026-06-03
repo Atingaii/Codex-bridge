@@ -72,6 +72,8 @@ import {
   sessionDateLabel,
   startWSHeartbeat,
   titleFromPrompt,
+  updateApprovalItemStatus,
+  upsertApprovalItem,
   upsertOrchestrationRun,
   visibleOrchestrationEvents,
 } from '../lib/utils';

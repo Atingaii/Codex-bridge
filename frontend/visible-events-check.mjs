@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 
 const utilsSource = readFileSync(new URL('./src/app/lib/utils.ts', import.meta.url), 'utf8');
 const orchestrationComponentsSource = readFileSync(new URL('./src/app/components/OrchestrationComponents.tsx', import.meta.url), 'utf8');
-const source = `${utilsSource}\n${orchestrationComponentsSource}`;
+const orchestrationWorkspaceSource = readFileSync(new URL('./src/app/pages/OrchestrationWorkspace.tsx', import.meta.url), 'utf8');
+const source = `${utilsSource}\n${orchestrationComponentsSource}\n${orchestrationWorkspaceSource}`;
 
 assert.match(source, /function orchestrationStatusContent\(event: OrchestrationEvent\)/);
 assert.match(source, /if \(\(event\.kind === 'run\.end' \|\| event\.kind === 'run\.error'\) && content\) return content;/);
@@ -21,6 +22,10 @@ assert.match(source, /group\.incomplete = terminalRun && !group\.complete && gro
 assert.match(source, /visible\.push\(statusVisibleEvent\(event, index, ':status'\)\);/);
 assert.doesNotMatch(source, /contentfulTurnEnds\.has\(orchestrationTurnKey\(event\)\)/);
 assert.match(source, /const rawContent = item\.content \|\| item\.error \|\| '';/);
+assert.match(utilsSource, /export function upsertApprovalItem\(/);
+assert.match(utilsSource, /export function updateApprovalItemStatus\(/);
+assert.match(orchestrationWorkspaceSource, /upsertApprovalItem,/);
+assert.match(orchestrationWorkspaceSource, /updateApprovalItemStatus,/);
 assert.doesNotMatch(source, /unresolvedAcceptanceSummary/);
 assert.doesNotMatch(source, /hasUnresolvedAcceptanceSignal/);
 assert.doesNotMatch(source, /Unmet acceptance|未满足验收/);

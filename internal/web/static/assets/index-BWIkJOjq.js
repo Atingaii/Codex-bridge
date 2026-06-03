@@ -16,6 +16,32 @@ function setLegacyAttempts(value) {
   }
 }
 
+function rootHasContent() {
+  var root = document.getElementById("root");
+  return Boolean(root && root.childElementCount > 0);
+}
+
+function renderFallback(reason) {
+  var root = document.getElementById("root");
+  if (!root || rootHasContent()) return;
+  var message = document.createElement("div");
+  message.style.cssText = "box-sizing:border-box;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#111827;background:#f9fafb;";
+  message.innerHTML = "<div style=\"max-width:520px\"><h1 style=\"margin:0 0 8px;font-size:18px\">Codex Bridge UI needs a refresh</h1><p style=\"margin:0;color:#4b5563\">The browser is still loading an old application bundle. Hard refresh this page or open it with a cache-busting query parameter. Reason: " + escapeHTML(reason || "legacy bundle") + ".</p></div>";
+  root.appendChild(message);
+}
+
+function escapeHTML(value) {
+  return String(value).replace(/[&<>\"']/g, function (char) {
+    return {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    }[char];
+  });
+}
+
 function clearBrowserState() {
   var tasks = [];
   if ("serviceWorker" in navigator && navigator.serviceWorker.getRegistrations) {
@@ -67,9 +93,12 @@ function loadStylesheet(src) {
   document.head.appendChild(link);
 }
 
-function reloadWithCacheBust() {
+function reloadWithCacheBust(reason) {
   var attempts = legacyAttempts();
-  if (attempts >= 1) return;
+  if (attempts >= 1) {
+    renderFallback(reason);
+    return;
+  }
   setLegacyAttempts(attempts + 1);
   clearBrowserState().finally(function () {
     var url = new URL(window.location.href);
@@ -86,7 +115,7 @@ fetch("/?_cb_legacy_bundle=" + Date.now(), { cache: "no-store" })
   .then(function (html) {
     var src = currentModuleSource(html);
     if (!src || src.indexOf("index-BWIkJOjq.js") >= 0) {
-      reloadWithCacheBust();
+      reloadWithCacheBust("current entry is still cached");
       return;
     }
     currentStylesheetSources(html).forEach(loadStylesheet);
@@ -95,5 +124,5 @@ fetch("/?_cb_legacy_bundle=" + Date.now(), { cache: "no-store" })
     return import(moduleURL.href);
   })
   .catch(function () {
-    reloadWithCacheBust();
+    reloadWithCacheBust("failed to load current UI entry");
   });

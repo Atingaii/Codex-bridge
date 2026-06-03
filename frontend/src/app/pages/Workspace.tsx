@@ -105,6 +105,7 @@ export function Workspace({
   const [sharingSessionId, setSharingSessionId] = useState('');
   const [shareCopiedSessionId, setShareCopiedSessionId] = useState('');
   const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const [refreshingAll, setRefreshingAll] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const messageScrollRef = useRef<HTMLDivElement | null>(null);
@@ -114,6 +115,7 @@ export function Workspace({
   const selectedAgentIdRef = useRef(selectedAgentId);
   const assistantItemIdRef = useRef<string | null>(null);
   const assistantTextRef = useRef('');
+  const refreshAllInFlightRef = useRef<Promise<void> | null>(null);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) || null;
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
@@ -443,15 +445,26 @@ export function Workspace({
   }, [clearActiveChat, selectLoadedSession, sessions]);
 
   const refreshAll = useCallback(async () => {
-    const [loadedAgents, loadedSessions] = await Promise.all([loadAgents(), loadSessions()]);
-    const savedAgentId = localStorage.getItem('codexBridge.selectedAgentId') || selectedAgentIdRef.current;
-    const agentId = preferredAgentID(loadedAgents, savedAgentId);
-    selectedAgentIdRef.current = agentId;
-    const activeSession = loadedSessions.find((session) => session.id === activeSessionIdRef.current);
-    if (activeSession && (!agentId || activeSession.agentId === agentId)) {
-      return;
-    }
-    await switchAgentSession(agentId, loadedSessions);
+    if (refreshAllInFlightRef.current) return refreshAllInFlightRef.current;
+    const task = (async () => {
+      setRefreshingAll(true);
+      try {
+        const [loadedAgents, loadedSessions] = await Promise.all([loadAgents(), loadSessions()]);
+        const savedAgentId = localStorage.getItem('codexBridge.selectedAgentId') || selectedAgentIdRef.current;
+        const agentId = preferredAgentID(loadedAgents, savedAgentId);
+        selectedAgentIdRef.current = agentId;
+        const activeSession = loadedSessions.find((session) => session.id === activeSessionIdRef.current);
+        if (activeSession && (!agentId || activeSession.agentId === agentId)) {
+          return;
+        }
+        await switchAgentSession(agentId, loadedSessions);
+      } finally {
+        refreshAllInFlightRef.current = null;
+        setRefreshingAll(false);
+      }
+    })();
+    refreshAllInFlightRef.current = task;
+    return task;
   }, [loadAgents, loadSessions, switchAgentSession]);
 
   useEffect(() => {
@@ -786,8 +799,16 @@ export function Workspace({
               className="hidden sm:inline-flex"
             />
 
-            <Button variant="ghost" size="icon" className="text-muted-foreground rounded-full h-8 w-8" onClick={() => refreshAll().catch((err) => appendSystem(err.message))}>
-              <RefreshCw className="h-4 w-4" />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="text-muted-foreground rounded-full h-8 w-8"
+              onClick={() => refreshAll().catch((err) => appendSystem(err.message))}
+              disabled={refreshingAll}
+              aria-label={t.refresh}
+              title={t.refresh}
+            >
+              <RefreshCw className={cn("h-4 w-4", refreshingAll && "animate-spin")} />
             </Button>
             <Button
               variant="secondary"

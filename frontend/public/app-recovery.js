@@ -54,6 +54,19 @@
     return Promise.all(tasks).catch(function () {});
   }
 
+  function isApplicationScript(target) {
+    if (!target || target === window || target.tagName !== "SCRIPT" || !target.src) {
+      return false;
+    }
+    try {
+      var url = new URL(target.src, window.location.href);
+      if (url.origin !== window.location.origin) return false;
+      return url.pathname.indexOf("/assets/") === 0 && /\.js$/.test(url.pathname);
+    } catch (_) {
+      return false;
+    }
+  }
+
   function reloadWithCacheBust(reason) {
     var attempts = recoveryAttempts();
     if (attempts >= 1) {
@@ -96,8 +109,11 @@
 
   window.addEventListener("error", function (event) {
     var target = event.target;
-    if (target && target !== window && target.tagName === "SCRIPT") {
+    if (!ready && !rootHasContent() && isApplicationScript(target)) {
       reloadWithCacheBust("script load failed");
+      return;
+    }
+    if (target && target !== window) {
       return;
     }
     if (!ready && !rootHasContent()) {

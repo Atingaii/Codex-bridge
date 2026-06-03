@@ -122,6 +122,7 @@ export function OrchestrationWorkspace({
   const [connectionStatus, setConnectionStatus] = useState(t.disconnected);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [collapsedTimelineGroups, setCollapsedTimelineGroups] = useState<Record<string, boolean>>({});
+  const [refreshingOrchestration, setRefreshingOrchestration] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -134,6 +135,7 @@ export function OrchestrationWorkspace({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const collapsedTimelineRunIdRef = useRef('');
+  const refreshOrchestrationInFlightRef = useRef<Promise<void> | null>(null);
 
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
   const onlineAgent = selectedAgent?.online ? selectedAgent : agents.find((agent) => agent.online);
@@ -417,19 +419,30 @@ export function OrchestrationWorkspace({
   }, [activateRun, clearActiveOrchestration, loadRun, runs]);
 
   const refreshOrchestration = useCallback(async () => {
-    const [loadedAgents, loadedRuns] = await Promise.all([loadAgents(), loadRuns()]);
-    const savedAgentId = localStorage.getItem('codexBridge.selectedAgentId') || selectedAgentIdRef.current;
-    const agentId = preferredAgentID(loadedAgents, savedAgentId);
-    selectedAgentIdRef.current = agentId;
-    setSelectedAgentId(agentId);
-    if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
-    else localStorage.removeItem('codexBridge.selectedAgentId');
-    const currentRun = loadedRuns.find((run) => run.id === activeRunIdRef.current);
-    if (currentRun && (!agentId || currentRun.agentId === agentId)) {
-      rememberActiveOrchestrationRunForAgent(currentRun.agentId, currentRun.id);
-      return;
-    }
-    await switchAgentRun(agentId, loadedRuns);
+    if (refreshOrchestrationInFlightRef.current) return refreshOrchestrationInFlightRef.current;
+    const task = (async () => {
+      setRefreshingOrchestration(true);
+      try {
+        const [loadedAgents, loadedRuns] = await Promise.all([loadAgents(), loadRuns()]);
+        const savedAgentId = localStorage.getItem('codexBridge.selectedAgentId') || selectedAgentIdRef.current;
+        const agentId = preferredAgentID(loadedAgents, savedAgentId);
+        selectedAgentIdRef.current = agentId;
+        setSelectedAgentId(agentId);
+        if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
+        else localStorage.removeItem('codexBridge.selectedAgentId');
+        const currentRun = loadedRuns.find((run) => run.id === activeRunIdRef.current);
+        if (currentRun && (!agentId || currentRun.agentId === agentId)) {
+          rememberActiveOrchestrationRunForAgent(currentRun.agentId, currentRun.id);
+          return;
+        }
+        await switchAgentRun(agentId, loadedRuns);
+      } finally {
+        refreshOrchestrationInFlightRef.current = null;
+        setRefreshingOrchestration(false);
+      }
+    })();
+    refreshOrchestrationInFlightRef.current = task;
+    return task;
   }, [loadAgents, loadRuns, switchAgentRun]);
 
   useEffect(() => {
@@ -749,8 +762,16 @@ export function OrchestrationWorkspace({
               {sharingRunId === activeRun?.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : shareCopiedRunId === activeRun?.id ? <Check className="h-3.5 w-3.5" /> : <Share2 className="h-3.5 w-3.5" />}
               <span>{shareCopiedRunId === activeRun?.id ? t.copied : t.shareRun}</span>
             </Button>
-            <Button variant="ghost" size="icon" className="text-muted-foreground rounded-full h-8 w-8" onClick={() => refreshOrchestration().catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration))}>
-              <RefreshCw className="h-4 w-4" />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="text-muted-foreground rounded-full h-8 w-8"
+              onClick={() => refreshOrchestration().catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration))}
+              disabled={refreshingOrchestration}
+              aria-label={t.refresh}
+              title={t.refresh}
+            >
+              <RefreshCw className={cn("h-4 w-4", refreshingOrchestration && "animate-spin")} />
             </Button>
           </div>
         </header>

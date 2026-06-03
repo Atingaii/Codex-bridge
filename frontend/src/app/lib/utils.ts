@@ -12,6 +12,7 @@ import type {
   OrchestrationEvent,
   OrchestrationFile,
   OrchestrationRun,
+  OrchestrationTimelineGroup,
   OrchestrationTimelineItem,
   OrchestrationTurnInfo,
   OrchestrationVisibleEvent,
@@ -191,7 +192,7 @@ export function mergeOrchestrationEvents(current: OrchestrationEvent[], incoming
       bridgeNoteData: event.bridgeNoteData || previous.bridgeNoteData,
       runConclusion: event.runConclusion || previous.runConclusion,
       data: event.data || previous.data,
-      timelineOrder: previous.timelineOrder || event.timelineOrder,
+      timelineOrder: firstNumber(previous.timelineOrder, event.timelineOrder),
     } : event);
   });
   return Array.from(merged.values()).sort(compareOrchestrationEvents);
@@ -214,7 +215,7 @@ export function upsertApprovalItem(current: ApprovalItemState[], approval: Appro
       return {
         ...item,
         approval,
-        timelineOrder: item.timelineOrder || timelineOrder,
+        timelineOrder: firstNumber(item.timelineOrder, timelineOrder),
         createdAt: item.createdAt || createdAt,
       };
     }
@@ -223,7 +224,7 @@ export function upsertApprovalItem(current: ApprovalItemState[], approval: Appro
       return {
         ...next,
         status: item.status || next.status,
-        timelineOrder: item.timelineOrder || timelineOrder,
+        timelineOrder: firstNumber(item.timelineOrder, timelineOrder),
         createdAt: item.createdAt || createdAt,
       };
     }
@@ -247,23 +248,35 @@ export function approvalStatusFromDecision(decision: 'accept' | 'decline' | 'can
   return decision === 'accept' ? 'accepted' : decision === 'decline' ? 'declined' : 'canceled';
 }
 
+function hasNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function firstNumber(...values: Array<number | undefined>) {
+  return values.find(hasNumber);
+}
+
+function minNumber(current?: number, next?: number) {
+  if (!hasNumber(next)) return current;
+  return hasNumber(current) ? Math.min(current, next) : next;
+}
+
 export function visibleEventTimelineOrder(event: OrchestrationVisibleEvent) {
-  if (event.timelineOrder) return event.timelineOrder;
+  if (hasNumber(event.timelineOrder)) return event.timelineOrder;
   if (event.type === 'command') return event.command.timelineOrder;
   if (event.type === 'message' && event.commands.length > 0) {
     return event.commands.reduce<number | undefined>((best, command) => {
-      if (!command.timelineOrder) return best;
-      return best ? Math.min(best, command.timelineOrder) : command.timelineOrder;
+      return minNumber(best, command.timelineOrder);
     }, undefined);
   }
   return undefined;
 }
 
 export function compareOrchestrationTimelineItems(a: OrchestrationTimelineItem, b: OrchestrationTimelineItem) {
-  if (a.timelineOrder && b.timelineOrder && a.timelineOrder !== b.timelineOrder) return a.timelineOrder - b.timelineOrder;
-  if (a.timelineOrder && !b.timelineOrder) return 1;
-  if (!a.timelineOrder && b.timelineOrder) return -1;
-  if (a.createdAt && b.createdAt && a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+  if (hasNumber(a.timelineOrder) && hasNumber(b.timelineOrder) && a.timelineOrder !== b.timelineOrder) return a.timelineOrder - b.timelineOrder;
+  if (hasNumber(a.timelineOrder) && !hasNumber(b.timelineOrder)) return 1;
+  if (!hasNumber(a.timelineOrder) && hasNumber(b.timelineOrder)) return -1;
+  if (hasNumber(a.createdAt) && hasNumber(b.createdAt) && a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
   if (a.sortIndex !== b.sortIndex) return a.sortIndex - b.sortIndex;
   return a.key.localeCompare(b.key);
 }
@@ -287,6 +300,169 @@ export function orchestrationTimelineItems(events: OrchestrationVisibleEvent[], 
       createdAt: approval.createdAt,
     })),
   ].sort(compareOrchestrationTimelineItems);
+}
+
+export function orchestrationTimelineGroups(
+  items: OrchestrationTimelineItem[],
+  run?: Pick<OrchestrationRun | PublicOrchestrationRun, 'id' | 'status' | 'maxTurns'> | null,
+  events: OrchestrationEvent[] = [],
+): OrchestrationTimelineGroup[] {
+  const groups: OrchestrationTimelineGroup[] = [];
+  const turnGroups = new Map<string, OrchestrationTimelineGroup>();
+  const terminalRun = terminalOrchestrationStatus(run?.status);
+  const activeRun = activeOrchestrationStatus(run?.status);
+  const completeTurnKeys = completedOrchestrationTurnGroupKeys(events, run?.id);
+
+  const ensureTurnGroup = (item: OrchestrationTimelineItem, meta: { runId?: string; turnId?: string; role?: string; cli?: string }) => {
+    const key = orchestrationTimelineTurnGroupKey(meta);
+    let group = turnGroups.get(key);
+    if (!group) {
+      const turnInfo = parseOrchestrationTurnInfo(meta.turnId);
+      group = {
+        type: 'turn',
+        key,
+        runId: meta.runId,
+        turnId: meta.turnId,
+        role: meta.role,
+        cli: meta.cli,
+        turnInfo: typeof turnInfo.ordinal === 'number' && run?.maxTurns ? { ...turnInfo, total: run.maxTurns } : turnInfo,
+        items: [],
+        messageCount: 0,
+        commandCount: 0,
+        approvalCount: 0,
+        statusCount: 0,
+        createdAt: item.createdAt,
+        timelineOrder: item.timelineOrder,
+        complete: false,
+        active: false,
+        incomplete: false,
+        hasError: false,
+      };
+      turnGroups.set(key, group);
+      groups.push(group);
+    }
+    return group;
+  };
+
+  items.forEach((item) => {
+    const meta = orchestrationTimelineItemTurnMeta(item);
+    if (!meta.turnId) {
+      groups.push(standaloneTimelineGroup(item));
+      return;
+    }
+    const group = ensureTurnGroup(item, meta);
+    addTimelineItemToGroup(group, item);
+  });
+
+  groups.forEach((group) => {
+    if (group.type !== 'turn') return;
+    group.items.sort(compareOrchestrationTimelineItems);
+    const lastItem = group.items[group.items.length - 1];
+    const lastEvent = lastItem?.type === 'event' ? lastItem.event : undefined;
+    const activeCommand = group.items.some((item) => item.type === 'event' && timelineEventIsActiveCommand(item.event));
+    group.complete = group.complete || completeTurnKeys.has(group.key);
+    group.active = activeCommand || (activeRun && Boolean(lastEvent && !group.complete && lastEvent.kind !== 'turn.end'));
+    group.incomplete = terminalRun && !group.complete && group.items.length > 0;
+    group.createdAt = group.items.reduce<number | undefined>((best, item) => {
+      return minNumber(best, item.createdAt);
+    }, group.createdAt);
+    group.timelineOrder = group.items.reduce<number | undefined>((best, item) => {
+      return minNumber(best, item.timelineOrder);
+    }, group.timelineOrder);
+  });
+
+  return groups.sort(compareOrchestrationTimelineGroups);
+}
+
+function orchestrationTimelineTurnGroupKey(meta: { runId?: string; turnId?: string; role?: string; cli?: string }) {
+  return `turn:${meta.runId || ''}:${meta.turnId || ''}:${meta.role || ''}:${meta.cli || ''}`;
+}
+
+function completedOrchestrationTurnGroupKeys(events: OrchestrationEvent[], runId?: string) {
+  const keys = new Set<string>();
+  events.forEach((event) => {
+    if (event.kind !== 'turn.end' || !event.turnId) return;
+    if (runId && event.runId !== runId) return;
+    keys.add(orchestrationTimelineTurnGroupKey({
+      runId: event.runId,
+      turnId: event.turnId,
+      role: event.role,
+      cli: event.cli,
+    }));
+  });
+  return keys;
+}
+
+function orchestrationTimelineItemTurnMeta(item: OrchestrationTimelineItem) {
+  if (item.type === 'event') {
+    return {
+      runId: item.event.runId,
+      turnId: item.event.turnId,
+      role: item.event.role,
+      cli: item.event.cli,
+    };
+  }
+  return {
+    runId: item.approval.approval.runId,
+    turnId: item.approval.approval.turnId || item.approval.approval.promptId,
+  };
+}
+
+function standaloneTimelineGroup(item: OrchestrationTimelineItem): OrchestrationTimelineGroup {
+  const hasError = item.type === 'event' ? timelineEventHasError(item.event) : false;
+  return {
+    type: 'standalone',
+    key: `standalone:${item.key}`,
+    runId: item.type === 'event' ? item.event.runId : item.approval.approval.runId,
+    items: [item],
+    messageCount: item.type === 'event' && item.event.type === 'message' ? 1 : 0,
+    commandCount: item.type === 'event' && item.event.type === 'command' ? 1 : 0,
+    approvalCount: item.type === 'approval' ? 1 : 0,
+    statusCount: item.type === 'event' && item.event.type === 'status' ? 1 : 0,
+    createdAt: item.createdAt,
+    timelineOrder: item.timelineOrder,
+    complete: true,
+    active: false,
+    incomplete: false,
+    hasError,
+  };
+}
+
+function addTimelineItemToGroup(group: OrchestrationTimelineGroup, item: OrchestrationTimelineItem) {
+  group.items.push(item);
+  group.createdAt = minNumber(group.createdAt, item.createdAt);
+  group.timelineOrder = minNumber(group.timelineOrder, item.timelineOrder);
+  if (item.type === 'approval') {
+    group.approvalCount += 1;
+    if (!item.approval.status || item.approval.status === 'pending') group.active = true;
+    return;
+  }
+  const event = item.event;
+  if (event.type === 'message') group.messageCount += 1;
+  if (event.type === 'command') group.commandCount += 1;
+  if (event.type === 'status') group.statusCount += 1;
+  if (event.kind === 'turn.end') group.complete = true;
+  if (timelineEventHasError(event)) group.hasError = true;
+  if (timelineEventIsActiveCommand(event)) group.active = true;
+}
+
+function timelineEventHasError(event: OrchestrationVisibleEvent) {
+  return Boolean(event.error) || event.status === 'error' || event.status === 'failed' || (event.type === 'command' && commandEventFailed(event.command));
+}
+
+function timelineEventIsActiveCommand(event: OrchestrationVisibleEvent) {
+  if (event.type !== 'command') return false;
+  const data = commandData(event.command);
+  const status = String(data.status || event.status || '').toLowerCase();
+  return event.kind === 'command.start' || status === 'running' || status === 'in_progress';
+}
+
+function compareOrchestrationTimelineGroups(a: OrchestrationTimelineGroup, b: OrchestrationTimelineGroup) {
+  if (hasNumber(a.timelineOrder) && hasNumber(b.timelineOrder) && a.timelineOrder !== b.timelineOrder) return a.timelineOrder - b.timelineOrder;
+  if (hasNumber(a.timelineOrder) && !hasNumber(b.timelineOrder)) return 1;
+  if (!hasNumber(a.timelineOrder) && hasNumber(b.timelineOrder)) return -1;
+  if (hasNumber(a.createdAt) && hasNumber(b.createdAt) && a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+  return a.key.localeCompare(b.key);
 }
 
 export function orchestrationToolID(event: OrchestrationEvent) {
@@ -319,7 +495,7 @@ export function mergeOrchestrationToolEvents(events: OrchestrationEvent[]): Orch
       error: event.error || previous.error,
       createdAt: event.createdAt || previous.createdAt,
       seq: event.seq || previous.seq,
-      timelineOrder: previous.timelineOrder || event.timelineOrder,
+      timelineOrder: firstNumber(previous.timelineOrder, event.timelineOrder),
     };
   });
   return merged;
@@ -599,7 +775,7 @@ export function mergeOrchestrationDeltaEvents(events: OrchestrationEvent[]): Orc
       error: event.error || previous.error,
       createdAt: previous.createdAt || event.createdAt,
       seq: previous.seq || event.seq,
-      timelineOrder: previous.timelineOrder || event.timelineOrder,
+      timelineOrder: firstNumber(previous.timelineOrder, event.timelineOrder),
     };
   });
   return merged;

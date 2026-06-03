@@ -515,6 +515,9 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			RunEndData: m.relayRunEndData(cli, sessionState, runCWD),
 			Data:       relayTurnEndData(cli, sessionState),
 		})
+		if turn < maxTurns {
+			m.runPostTurnNativeMaintenance(ctx, payload.RunID, turnID, role, cli, &sessionState)
+		}
 	}
 	finalContent := relayTerminalContent(history)
 	finalRunEndData := runEndDataWithNativeResume(&protocol.RunEndData{
@@ -538,6 +541,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			"nativeResume":       finalRunEndData.NativeResume,
 		},
 	})
+	m.runFinalNativeMaintenance(ctx, mode, firstCLI, maxTurns, &sessionState)
 }
 
 func stableOrchestrationSessionID(runID, cli string) string {

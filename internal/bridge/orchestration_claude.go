@@ -69,7 +69,6 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 	session := state.NativeSession
 	session.mu.Lock()
 	claude, err := m.ensureClaudeInteractiveSessionLocked(ctx, payload, state)
-	compactAfterTurn := protocol.NormalizeNativeContextCompaction(session.nativeContextCompaction) == protocol.NativeContextCompactionAfterTurn
 	sessionCWD := session.cwd
 	session.mu.Unlock()
 	if err != nil {
@@ -97,7 +96,6 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 	}
 	if err == nil {
 		m.registerClaudeNativeResume(state.NativeSession, claude, payload.RunID, sessionCWD)
-		m.runNativeContextCompaction(ctx, payload.RunID, turnID, role, "claude", compactAfterTurn, state.NativeSession, claude)
 	}
 	return content, tools, claude.mode, err
 }

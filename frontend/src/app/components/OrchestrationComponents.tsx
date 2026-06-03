@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, Check, ChevronDown, Command, GitBranch, RefreshCw, Terminal, User, X } from 'lucide-react';
-import type { Agent, BridgeCLICapability, OrchestrationEvent, OrchestrationVisibleEvent } from '../lib/types';
+import { Activity, AlertTriangle, Check, ChevronDown, Command, GitBranch, RefreshCw, Terminal, User, X } from 'lucide-react';
+import type { Agent, BridgeCLICapability, OrchestrationEvent, OrchestrationTimelineGroup, OrchestrationVisibleEvent } from '../lib/types';
 import type { UIText } from '../lib/i18n';
 import { Button } from './ui';
 import { OrchestrationFileList } from './OrchestrationFiles';
 import { MessageContent } from './chat/MessageContent';
+import { ApprovalCard } from './chat/ApprovalCard';
 import {
   cn,
   commandData,
@@ -13,6 +14,7 @@ import {
   orchestrationApprovalMode,
   orchestrationCapability,
   orchestrationEventKey,
+  orchestrationTurnLabel,
   stripMachineContractLines,
 } from '../lib/utils';
 
@@ -105,6 +107,134 @@ export function OrchestrationEventItem({ item, t }: { item: OrchestrationVisible
       </div>
     </div>
   );
+}
+
+export function defaultCollapsedTimelineGroups(groups: OrchestrationTimelineGroup[]) {
+  const collapsed: Record<string, boolean> = {};
+  const shouldCompact = groups.length > 4;
+  const latestTurnKey = latestTurnGroupKey(groups);
+  groups.forEach((group, index) => {
+    if (group.type !== 'turn') return;
+    const isLatest = group.key === latestTurnKey || index === groups.length - 1;
+    if (shouldCompact && !isLatest && group.complete && !group.active && !group.incomplete && !group.hasError) {
+      collapsed[group.key] = true;
+    }
+  });
+  return collapsed;
+}
+
+export function reconcileCollapsedTimelineGroups(current: Record<string, boolean>, groups: OrchestrationTimelineGroup[]) {
+  const next: Record<string, boolean> = {};
+  const known = new Set(groups.map((group) => group.key));
+  Object.entries(current).forEach(([key, value]) => {
+    if (known.has(key)) next[key] = value;
+  });
+  const latestTurnKey = latestTurnGroupKey(groups);
+  groups.forEach((group, index) => {
+    if (group.type !== 'turn' || Object.prototype.hasOwnProperty.call(next, group.key)) return;
+    const isLatest = group.key === latestTurnKey || index === groups.length - 1;
+    next[group.key] = groups.length > 40 && !isLatest && group.complete && !group.active && !group.incomplete && !group.hasError;
+  });
+  return next;
+}
+
+function latestTurnGroupKey(groups: OrchestrationTimelineGroup[]) {
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    if (groups[index].type === 'turn') return groups[index].key;
+  }
+  return '';
+}
+
+export function OrchestrationTimelineGroupItem({
+  group,
+  collapsed,
+  onToggle,
+  onApprovalDecision,
+  t,
+}: {
+  group: OrchestrationTimelineGroup;
+  collapsed: boolean;
+  onToggle: () => void;
+  onApprovalDecision: (requestId: string, decision: 'accept' | 'decline' | 'cancel') => void;
+  t: UIText;
+}) {
+  if (group.type === 'standalone') {
+    return (
+      <>
+        {group.items.map((item) => item.type === 'event'
+          ? <OrchestrationEventItem key={item.key} item={item.event} t={t} />
+          : <ApprovalCard key={item.key} item={item.approval} t={t} onDecision={onApprovalDecision} />)}
+      </>
+    );
+  }
+
+  const avatar = orchestrationAvatar({ kind: 'turn.delta', cli: group.cli }, t);
+  const turnLabel = orchestrationTurnLabel(group.turnInfo || {}, t) || group.turnId || t.thread;
+  const countLabel = orchestrationTimelineGroupCountLabel(group, t);
+  const stateLabel = group.incomplete ? t.turnMissingEnd : group.active ? t.running : group.hasError ? t.error : group.complete ? t.ready : t.status;
+
+  return (
+    <div className="space-y-2">
+      <button
+        type="button"
+        onClick={onToggle}
+        className={cn(
+          "mx-auto flex w-full max-w-4xl items-center gap-3 rounded-lg border bg-muted/15 px-3 py-2 text-left hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          group.incomplete || group.hasError ? "border-destructive/35" : "border-border/70",
+        )}
+        aria-expanded={!collapsed}
+        title={collapsed ? t.expandTurn : t.collapseTurn}
+      >
+        <div className={cn(
+          "flex h-6 w-6 shrink-0 items-center justify-center rounded-md border shadow-sm",
+          group.incomplete || group.hasError ? "border-destructive/25 bg-destructive/10 text-destructive" : avatar.className,
+        )}>
+          {group.incomplete || group.hasError ? <AlertTriangle className="h-3.5 w-3.5" /> : avatar.icon}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-xs font-semibold">{turnLabel}</span>
+            <span className="text-[10px] text-muted-foreground">{group.role || t.agent}{group.cli ? ` · ${avatar.label}` : ''}</span>
+            {group.createdAt && <span className="hidden text-[10px] text-muted-foreground sm:inline">{formatTime(group.createdAt)}</span>}
+          </div>
+          <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[10px] text-muted-foreground">
+            <span className="truncate">{countLabel}</span>
+            {(group.incomplete || group.hasError || group.active) && (
+              <span className={cn(
+                "shrink-0 rounded border px-1.5 py-0.5",
+                group.incomplete || group.hasError ? "border-destructive/25 text-destructive" : "border-border text-muted-foreground",
+              )}>
+                {stateLabel}
+              </span>
+            )}
+          </div>
+        </div>
+        <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", collapsed && "-rotate-90")} />
+      </button>
+      {!collapsed && (
+        <div className="space-y-3">
+          {group.items.map((item) => item.type === 'event'
+            ? <OrchestrationEventItem key={item.key} item={item.event} t={t} />
+            : <ApprovalCard key={item.key} item={item.approval} t={t} onDecision={onApprovalDecision} />)}
+          {group.incomplete && (
+            <div className="mx-auto flex w-full max-w-4xl items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{t.turnMissingEndDescription}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function orchestrationTimelineGroupCountLabel(group: OrchestrationTimelineGroup, t: UIText) {
+  const parts: string[] = [];
+  if (group.messageCount) parts.push(`${group.messageCount} ${t.messages}`);
+  if (group.commandCount) parts.push(`${group.commandCount} ${t.commands}`);
+  if (group.approvalCount) parts.push(`${group.approvalCount} ${t.approvals}`);
+  if (group.statusCount) parts.push(`${group.statusCount} ${t.status}`);
+  return parts.length ? parts.join(' · ') : t.noVisibleAnswer;
 }
 
 function orchestrationAvatar(event: Pick<OrchestrationEvent, 'kind' | 'cli'>, t: UIText) {

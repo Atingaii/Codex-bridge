@@ -234,6 +234,27 @@ export type OrchestrationTimelineItem =
   | { type: 'event'; key: string; event: OrchestrationVisibleEvent; sortIndex: number; timelineOrder?: number; createdAt?: number }
   | { type: 'approval'; key: string; approval: ApprovalItemState; sortIndex: number; timelineOrder?: number; createdAt?: number };
 
+export type OrchestrationTimelineGroup = {
+  type: 'turn' | 'standalone';
+  key: string;
+  runId?: string;
+  turnId?: string;
+  role?: string;
+  cli?: string;
+  turnInfo?: OrchestrationTurnInfo;
+  items: OrchestrationTimelineItem[];
+  messageCount: number;
+  commandCount: number;
+  approvalCount: number;
+  statusCount: number;
+  createdAt?: number;
+  timelineOrder?: number;
+  complete: boolean;
+  active: boolean;
+  incomplete: boolean;
+  hasError: boolean;
+};
+
 export type OrchestrationVisibleEvent =
   | {
       type: 'message';

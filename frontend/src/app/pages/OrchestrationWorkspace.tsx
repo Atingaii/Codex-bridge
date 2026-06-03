@@ -35,9 +35,13 @@ import type {
 } from '../lib/types';
 import type { Language, UIText } from '../lib/i18n';
 import { AgentSelector } from '../components/AgentSelector';
-import { ApprovalCard } from '../components/chat/ApprovalCard';
 import { OrchestrationFileRow } from '../components/OrchestrationFiles';
-import { CapabilityMatrix, OrchestrationEventItem } from '../components/OrchestrationComponents';
+import {
+  CapabilityMatrix,
+  OrchestrationTimelineGroupItem,
+  defaultCollapsedTimelineGroups,
+  reconcileCollapsedTimelineGroups,
+} from '../components/OrchestrationComponents';
 import { SettingsModal } from '../components/Settings';
 import { Button, Input } from '../components/ui';
 import {
@@ -56,6 +60,7 @@ import {
   orchestrationApprovalMode,
   orchestrationCapabilityProblems,
   orchestrationRunFilesFromEvents,
+  orchestrationTimelineGroups,
   orchestrationTimelineItems,
   orchestrationTurnInfoFromEvents,
   orchestrationTurnLabel,
@@ -114,6 +119,7 @@ export function OrchestrationWorkspace({
   const [creating, setCreating] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState(t.disconnected);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const [collapsedTimelineGroups, setCollapsedTimelineGroups] = useState<Record<string, boolean>>({});
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -125,6 +131,7 @@ export function OrchestrationWorkspace({
   const taskInputRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const collapsedTimelineRunIdRef = useRef('');
 
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
   const onlineAgent = selectedAgent?.online ? selectedAgent : agents.find((agent) => agent.online);
@@ -142,6 +149,7 @@ export function OrchestrationWorkspace({
   const currentTurnLabel = useMemo(() => orchestrationTurnLabel(currentTurnInfo, t), [currentTurnInfo, t]);
   const visibleApprovals = useMemo(() => approvals.filter((item) => item.approval.runId === activeRunId), [approvals, activeRunId]);
   const timelineItems = useMemo(() => orchestrationTimelineItems(visibleEvents, visibleApprovals), [visibleEvents, visibleApprovals]);
+  const timelineGroups = useMemo(() => orchestrationTimelineGroups(timelineItems, activeRun, events), [timelineItems, activeRun, events]);
   const orchestrationStreamStatus = activeRun && isRunning ? connectionStatus : t.idle;
   const continuingRun = Boolean(activeRun && !isRunning);
   const canCancelRun = canCancelOrchestrationStatus(activeRun?.status);
@@ -258,7 +266,7 @@ export function OrchestrationWorkspace({
   }, [closeWS, runs, t.idle]);
 
   const applyEvent = useCallback((event: OrchestrationEvent) => {
-    const nextEvent = { ...event, timelineOrder: event.timelineOrder || ++timelineOrderRef.current };
+    const nextEvent = { ...event, timelineOrder: typeof event.timelineOrder === 'number' ? event.timelineOrder : ++timelineOrderRef.current };
     setEvents((current) => {
       if (activeRunIdRef.current !== nextEvent.runId) return current;
       return mergeOrchestrationEvents(current, [nextEvent]);
@@ -447,6 +455,20 @@ export function OrchestrationWorkspace({
   }, [selectedAgentId]);
 
   useEffect(() => {
+    setCollapsedTimelineGroups((current) => {
+      if (collapsedTimelineRunIdRef.current !== activeRunId) {
+        if (!timelineGroups.length) {
+          collapsedTimelineRunIdRef.current = '';
+          return {};
+        }
+        collapsedTimelineRunIdRef.current = activeRunId;
+        return defaultCollapsedTimelineGroups(timelineGroups);
+      }
+      return reconcileCollapsedTimelineGroups(current, timelineGroups);
+    });
+  }, [activeRunId, timelineGroups]);
+
+  useEffect(() => {
     if (!selectedAgent?.id) {
       clearActiveOrchestration();
       return;
@@ -610,6 +632,10 @@ export function OrchestrationWorkspace({
     setFiles([]);
     setError('');
     window.setTimeout(() => taskInputRef.current?.focus(), 0);
+  };
+
+  const toggleTimelineGroup = (key: string) => {
+    setCollapsedTimelineGroups((current) => ({ ...current, [key]: !current[key] }));
   };
 
   return (
@@ -782,9 +808,16 @@ export function OrchestrationWorkspace({
                 </div>
               ) : (
                 <>
-                  {timelineItems.map((item) => item.type === 'event'
-                    ? <OrchestrationEventItem key={item.key} item={item.event} t={t} />
-                    : <ApprovalCard key={item.key} item={item.approval} t={t} onDecision={respondOrchestrationApproval} />)}
+                  {timelineGroups.map((group) => (
+                    <OrchestrationTimelineGroupItem
+                      key={group.key}
+                      group={group}
+                      collapsed={Boolean(collapsedTimelineGroups[group.key])}
+                      onToggle={() => toggleTimelineGroup(group.key)}
+                      onApprovalDecision={respondOrchestrationApproval}
+                      t={t}
+                    />
+                  ))}
                 </>
               )}
               <div ref={endRef} className="h-4" />

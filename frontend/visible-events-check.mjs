@@ -12,6 +12,12 @@ assert.match(source, /function isBridgeRelayNotice\(event: Pick<OrchestrationEve
 assert.match(source, /function canMergeAdjacentOrchestrationDelta\(previous: OrchestrationEvent \| undefined, event: OrchestrationEvent\)/);
 assert.match(source, /function orchestrationTurnDeltaContentByKey\(events: OrchestrationEvent\[\]\)/);
 assert.match(source, /function turnEndDisplayContent\(content: string, deltaContent: string\)/);
+assert.match(source, /export function orchestrationTimelineGroups\(\s*items: OrchestrationTimelineItem\[\]/);
+assert.match(source, /export function OrchestrationTimelineGroupItem\(/);
+assert.match(source, /turnMissingEndDescription/);
+assert.match(source, /function completedOrchestrationTurnGroupKeys\(events: OrchestrationEvent\[\], runId\?: string\)/);
+assert.match(source, /const completeTurnKeys = completedOrchestrationTurnGroupKeys\(events, run\?\.id\);/);
+assert.match(source, /group\.incomplete = terminalRun && !group\.complete && group\.items\.length > 0;/);
 assert.match(source, /visible\.push\(statusVisibleEvent\(event, index, ':status'\)\);/);
 assert.doesNotMatch(source, /contentfulTurnEnds\.has\(orchestrationTurnKey\(event\)\)/);
 assert.match(source, /const rawContent = item\.content \|\| item\.error \|\| '';/);

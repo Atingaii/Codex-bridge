@@ -494,7 +494,7 @@ func TestOrchestrationReusesNativeInteractiveSessionsAcrossSameCLITurns(t *testi
 		t.Fatalf("claude turn.start modes = %q", got)
 	}
 
-	codexRecords := readJSONLines(t, codexLogPath)
+	codexRecords := waitForJSONLineEventCount(t, codexLogPath, "thread_unsubscribe", 2)
 	var codexStarts, codexTurns, codexNames, codexResumes, codexUnsubscribes int
 	var codexPrompts []string
 	for _, record := range codexRecords {
@@ -601,29 +601,43 @@ func TestOrchestrationNativeContextCompactionAfterTurn(t *testing.T) {
 
 	events := drainOrchestrationEvents(t, out)
 	var compactionNotes int
+	turnEndIndex := map[string]int{}
+	firstCompactionIndex := map[string]int{}
 	var finalContent string
-	for _, event := range events {
+	for index, event := range events {
 		if event.Kind == "run.start" && event.RunStartData != nil && event.RunStartData.NativeContextCompaction != protocol.NativeContextCompactionAfterTurn {
 			t.Fatalf("run.start native compaction = %q", event.RunStartData.NativeContextCompaction)
+		}
+		if event.Kind == "turn.end" && event.TurnID != "" {
+			turnEndIndex[event.TurnID] = index
 		}
 		if event.BridgeNoteData != nil && event.BridgeNoteData.Category == "native-context-compaction" {
 			compactionNotes++
 			if event.BridgeNoteData.Command != nativeContextCompactionCommand {
 				t.Fatalf("compaction note command = %#v", event.BridgeNoteData)
 			}
+			if _, ok := firstCompactionIndex[event.TurnID]; !ok {
+				firstCompactionIndex[event.TurnID] = index
+			}
 		}
 		if event.Kind == "run.end" {
 			finalContent = event.Content
 		}
 	}
-	if compactionNotes != 4 {
-		t.Fatalf("native compaction notes = %d, want 4 events=%#v", compactionNotes, events)
+	if compactionNotes != 2 {
+		t.Fatalf("native compaction notes = %d, want 2 visible middle-turn notes events=%#v", compactionNotes, events)
+	}
+	for turnID, compactionIndex := range firstCompactionIndex {
+		turnIndex, ok := turnEndIndex[turnID]
+		if !ok || turnIndex > compactionIndex {
+			t.Fatalf("native compaction should be visible only after business turn.end for %s: turnEndIndex=%d compactionIndex=%d events=%#v", turnID, turnIndex, compactionIndex, events)
+		}
 	}
 	if strings.Contains(finalContent, "compacted") || strings.Contains(finalContent, nativeContextCompactionCommand) {
 		t.Fatalf("maintenance output leaked into final content: %q", finalContent)
 	}
 
-	codexRecords := readJSONLines(t, codexLogPath)
+	codexRecords := waitForJSONLineEvent(t, codexLogPath, "thread_compact")
 	var codexBusinessTurns, codexMaintenanceTurns int
 	for _, record := range codexRecords {
 		switch record["event"] {
@@ -683,6 +697,7 @@ func TestOrchestrationNativeContextCompactionFailureIsWarningOnly(t *testing.T) 
 	manager.run(context.Background(), protocol.OrchestrationStartPayload{
 		RunID:                   "orc_native_compact_warn",
 		Mode:                    "collaboration",
+		FirstCLI:                "codex",
 		Prompt:                  "finish despite maintenance warning",
 		MaxTurns:                2,
 		CWD:                     tmp,
@@ -690,7 +705,7 @@ func TestOrchestrationNativeContextCompactionFailureIsWarningOnly(t *testing.T) 
 	})
 
 	events := drainOrchestrationEvents(t, out)
-	if !orchestrationEventsContain(events, "run.end", "", "Codex native") {
+	if !orchestrationEventsContain(events, "run.end", "", "Claude native") {
 		t.Fatalf("run did not complete after compaction failure: %#v", events)
 	}
 	var warnings int
@@ -704,6 +719,72 @@ func TestOrchestrationNativeContextCompactionFailureIsWarningOnly(t *testing.T) 
 	}
 	if warnings != 1 {
 		t.Fatalf("compaction warning count = %d events=%#v", warnings, events)
+	}
+}
+
+func TestOrchestrationFinalTurnEndAndRunEndDoNotWaitForVisibleCompaction(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	codexPath := filepath.Join(tmp, "codex")
+	codexLogPath := filepath.Join(tmp, "codex_log.jsonl")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexInteractiveRelayScriptWithHangingCompact(codexLogPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "workspace-write"
+	cfg.Bridge.ApprovalPolicy = "untrusted"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+	defer manager.CloseAll()
+
+	done := make(chan struct{})
+	go func() {
+		manager.run(context.Background(), protocol.OrchestrationStartPayload{
+			RunID:                   "orc_final_compact_hang",
+			Mode:                    "collaboration",
+			FirstCLI:                "codex",
+			Prompt:                  "finish without tail clipping",
+			MaxTurns:                1,
+			CWD:                     tmp,
+			NativeContextCompaction: protocol.NativeContextCompactionAfterTurn,
+		})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("manager.run waited for final native maintenance before returning")
+	}
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.end", "codex", "Codex final before hanging compact") {
+		t.Fatalf("final turn.end should be emitted before final native maintenance can hang: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "run.end", "", "Codex final before hanging compact") {
+		t.Fatalf("run.end should be emitted before final native maintenance can hang: %#v", events)
+	}
+	for _, event := range events {
+		if event.BridgeNoteData != nil && event.BridgeNoteData.Category == "native-context-compaction" {
+			t.Fatalf("final native maintenance should not append visible compaction notes after run.end: %#v", events)
+		}
+	}
+
+	codexRecords := waitForJSONLineEvent(t, codexLogPath, "thread_compact")
+	var codexBusinessTurns, codexMaintenanceTurns int
+	for _, record := range codexRecords {
+		switch record["event"] {
+		case "turn_start":
+			codexBusinessTurns++
+		case "thread_compact":
+			codexMaintenanceTurns++
+		}
+	}
+	if codexBusinessTurns != 1 || codexMaintenanceTurns != 1 {
+		t.Fatalf("codex business=%d maintenance=%d records=%#v", codexBusinessTurns, codexMaintenanceTurns, codexRecords)
 	}
 }
 
@@ -2208,6 +2289,34 @@ func readJSONLines(t *testing.T, path string) []map[string]any {
 	return out
 }
 
+func waitForJSONLineEvent(t *testing.T, path, eventName string) []map[string]any {
+	t.Helper()
+	return waitForJSONLineEventCount(t, path, eventName, 1)
+}
+
+func waitForJSONLineEventCount(t *testing.T, path, eventName string, want int) []map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	var last []map[string]any
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			last = readJSONLines(t, path)
+			var got int
+			for _, record := range last {
+				if record["event"] == eventName {
+					got++
+				}
+			}
+			if got >= want {
+				return last
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d %q event(s) in %s records=%#v", want, eventName, path, last)
+	return nil
+}
+
 func stringFromNestedText(value any) string {
 	params, _ := value.(map[string]any)
 	input, _ := params["input"].([]any)
@@ -2544,6 +2653,56 @@ for line in sys.stdin:
         emit({"id": msg["id"], "result": {"turn": {"id": "turn_%d" % turn_count, "status": "inProgress"}}})
         emit({"method": "item/agentMessage/delta", "params": {"threadId": params.get("threadId"), "turnId": "turn_%d" % turn_count, "delta": text}})
         emit({"method": "turn/completed", "params": {"threadId": params.get("threadId"), "turn": {"id": "turn_%d" % turn_count, "status": "completed"}}})
+	`
+}
+
+func fakeCodexInteractiveRelayScriptWithHangingCompact(logPath string) string {
+	logPathRaw, _ := json.Marshal(logPath)
+	return `#!/usr/bin/env python3
+import json
+import sys
+import time
+
+log_path = ` + string(logPathRaw) + `
+thread_id = "thr_native"
+
+def log(obj):
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+def emit(obj):
+    print(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+if len(sys.argv) < 2 or sys.argv[1] != "app-server":
+    print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
+    sys.exit(1)
+
+log({"event": "process_start", "argv": sys.argv[1:]})
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
+    elif method == "thread/start":
+        log({"event": "thread_start", "threadId": thread_id})
+        emit({"id": msg["id"], "result": {"thread": {"id": thread_id}}})
+    elif method == "thread/name/set":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "thread/unsubscribe":
+        log({"event": "thread_unsubscribe", "threadId": params.get("threadId")})
+        emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
+    elif method == "thread/compact/start":
+        log({"event": "thread_compact", "threadId": params.get("threadId")})
+        emit({"id": msg["id"], "result": {}})
+        time.sleep(0.35)
+        emit({"method": "thread/compacted", "params": {"threadId": params.get("threadId"), "turnId": "compact_1"}})
+    elif method == "turn/start":
+        log({"event": "turn_start", "threadId": params.get("threadId"), "params": params})
+        text = "Codex final before hanging compact\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=final event first; next=none; risks=none"
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_1", "status": "inProgress"}}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": params.get("threadId"), "turnId": "turn_1", "delta": text}})
+        emit({"method": "turn/completed", "params": {"threadId": params.get("threadId"), "turn": {"id": "turn_1", "status": "completed"}}})
 `
 }
 

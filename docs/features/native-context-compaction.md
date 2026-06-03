@@ -47,13 +47,19 @@ Maintenance turn lifecycle:
 
 1. The normal CLI turn completes successfully and Bridge emits its usual
    `turn.delta` stream for the business answer.
-2. Bridge sends a `turn.delta` bridge note with
+2. Bridge emits the usual business `turn.end` event before starting visible
+   maintenance, so browser timelines do not stop at a maintenance-in-progress
+   note if compaction is slow or interrupted.
+3. For non-final turns, Bridge sends a `turn.delta` bridge note with
    `bridgeNoteData.category=native-context-compaction`.
-3. Bridge runs the native maintenance operation with a bounded timeout.
-4. On success, Bridge emits an info bridge note. On failure or timeout, Bridge
+4. Bridge runs the native maintenance operation with a bounded timeout.
+5. On success, Bridge emits an info bridge note. On failure or timeout, Bridge
    emits a warning bridge note and keeps the orchestration run successful.
-5. Bridge then emits the usual business `turn.end` event.
-6. Codex still calls `thread/unsubscribe` after the maintenance attempt so the
+6. Final-turn Codex maintenance runs after `run.end` as a silent best-effort
+   operation. It does not append visible compaction notes after the terminal run
+   event, because those notes can otherwise look like an interrupted final
+   answer.
+7. Codex still calls `thread/unsubscribe` after the maintenance attempt so the
    thread is flushed for native resume.
 
 Bridge uses the same lifecycle for Codex and Claude Code, but only uses native
@@ -88,7 +94,8 @@ and does not contribute to `run.conclusion`.
 3. Add the field to Hub create/continue requests and Bridge start payloads.
 4. Add frontend controls and persist the selected value per run.
 5. Add Codex native maintenance and Claude safe-skip helpers.
-6. Run maintenance after successful turn-end events and before Codex thread
+6. Run visible maintenance only after successful non-final turn-end events, and
+   run final-turn maintenance silently after `run.end` before Codex thread
    unsubscribe.
 7. Add tests for disabled, enabled, and failure-does-not-fail-run behavior.
 

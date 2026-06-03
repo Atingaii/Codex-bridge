@@ -51,7 +51,6 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 		return "", nil, firstNonEmpty(state.CodexThreadID, ""), "codex-interactive-error", err
 	}
 	resumeMode := codex.mode
-	compactAfterTurn := protocol.NormalizeNativeContextCompaction(session.nativeContextCompaction) == protocol.NativeContextCompactionAfterTurn
 	req := RunnerRequest{
 		Content:        prompt,
 		RemoteThreadID: codex.threadID,
@@ -92,10 +91,6 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 	scope.setTurnID(appServerTurnIDFromResponse(res))
 	select {
 	case result := <-done:
-		if result.err == nil {
-			m.runNativeContextCompaction(ctx, payload.RunID, turnID, role, "codex", compactAfterTurn, session, codex)
-			m.flushCodexInteractiveThread(session, codex)
-		}
 		return strings.TrimSpace(result.result.Content), tools, codex.threadID, resumeMode, result.err
 	case <-ctx.Done():
 		return "", tools, codex.threadID, resumeMode, ctx.Err()

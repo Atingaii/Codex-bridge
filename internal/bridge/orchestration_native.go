@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 const nativeContextCompactionCommand = "/compact"
 const nativeContextCompactionTimeout = 90 * time.Second
+const finalNativeMaintenanceTimeout = 5 * time.Second
 const claudeTranscriptStableWait = 2 * time.Second
 const claudeTranscriptStablePoll = 100 * time.Millisecond
 
@@ -44,6 +46,50 @@ func (m *OrchestrationManager) runNativeContextCompaction(ctx context.Context, r
 		return
 	}
 	m.emitNativeContextCompactionNote(runID, turnID, role, cli, "info", fmt.Sprintf("Bridge compacted %s native context.", nativeDisplayName(cli)), "", "")
+}
+
+func (m *OrchestrationManager) runPostTurnNativeMaintenance(ctx context.Context, runID, turnID, role, cli string, state *orchestrationSessionState) {
+	if state == nil || state.NativeSession == nil {
+		return
+	}
+	session := state.NativeSession
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	compactAfterTurn := protocol.NormalizeNativeContextCompaction(session.nativeContextCompaction) == protocol.NativeContextCompactionAfterTurn
+	switch cli {
+	case "codex":
+		codex := session.codex
+		m.runNativeContextCompaction(ctx, runID, turnID, role, cli, compactAfterTurn, session, codex)
+		m.flushCodexInteractiveThread(session, codex)
+	case "claude":
+		claude := session.claude
+		m.runNativeContextCompaction(ctx, runID, turnID, role, cli, compactAfterTurn, session, claude)
+	}
+}
+
+func (m *OrchestrationManager) runFinalNativeMaintenance(ctx context.Context, mode, firstCLI string, maxTurns int, state *orchestrationSessionState) {
+	if state == nil || state.NativeSession == nil || maxTurns <= 0 {
+		return
+	}
+	_, cli := roleForTurnWithFirstCLI(mode, firstCLI, maxTurns)
+	if cli != "codex" {
+		return
+	}
+	session := state.NativeSession
+	go func() {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		codex := session.codex
+		ctx, cancel := context.WithTimeout(context.Background(), finalNativeMaintenanceTimeout)
+		defer cancel()
+		if protocol.NormalizeNativeContextCompaction(session.nativeContextCompaction) == protocol.NativeContextCompactionAfterTurn {
+			if result := m.compactCodexInteractiveThread(ctx, session, codex); result.Err != nil {
+				slog.Warn("[bridge] final codex native context compaction failed after run.end", "run_id", session.runID, "error", result.Err)
+			}
+		}
+		m.flushCodexInteractiveThread(session, codex)
+	}()
 }
 
 func (m *OrchestrationManager) emitNativeContextCompactionNote(runID, turnID, role, cli, severity, content, errText, detail string) {

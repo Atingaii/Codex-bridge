@@ -4,18 +4,26 @@ import { api } from '../lib/api';
 import type { PublicSharePayload } from '../lib/types';
 import type { UIText } from '../lib/i18n';
 import { MessageItem } from '../components/chat/MessageItem';
-import { OrchestrationEventItem } from '../components/OrchestrationComponents';
+import {
+  OrchestrationTimelineGroupItem,
+  defaultCollapsedTimelineGroups,
+  reconcileCollapsedTimelineGroups,
+} from '../components/OrchestrationComponents';
 import { Button } from '../components/ui';
-import { sessionDateLabel, visibleOrchestrationEvents } from '../lib/utils';
+import { orchestrationTimelineGroups, orchestrationTimelineItems, sessionDateLabel, visibleOrchestrationEvents } from '../lib/utils';
 
 export function PublicSharePage({ shareID, t }: { shareID: string; t: UIText }) {
   const [payload, setPayload] = useState<PublicSharePayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [collapsedTimelineGroups, setCollapsedTimelineGroups] = useState<Record<string, boolean>>({});
+  const collapsedTimelineShareKeyRef = React.useRef('');
   const visibleEvents = useMemo(() => {
     if (!payload?.run) return [];
     return visibleOrchestrationEvents(payload.events || [], payload.run.id, payload.run, t);
   }, [payload, t]);
+  const timelineItems = useMemo(() => orchestrationTimelineItems(visibleEvents, []), [visibleEvents]);
+  const timelineGroups = useMemo(() => orchestrationTimelineGroups(timelineItems, payload?.run, payload?.events || []), [timelineItems, payload?.run, payload?.events]);
 
   useEffect(() => {
     let stopped = false;
@@ -43,12 +51,31 @@ export function PublicSharePage({ shareID, t }: { shareID: string; t: UIText }) 
     };
   }, [shareID, t.failedLoadShare]);
 
+  useEffect(() => {
+    const key = `${shareID}:${payload?.run?.id || ''}`;
+    setCollapsedTimelineGroups((current) => {
+      if (collapsedTimelineShareKeyRef.current !== key) {
+        if (!timelineGroups.length) {
+          collapsedTimelineShareKeyRef.current = '';
+          return {};
+        }
+        collapsedTimelineShareKeyRef.current = key;
+        return defaultCollapsedTimelineGroups(timelineGroups);
+      }
+      return reconcileCollapsedTimelineGroups(current, timelineGroups);
+    });
+  }, [shareID, payload?.run?.id, timelineGroups]);
+
   const title = payload?.share.title || payload?.session?.title || payload?.run?.title || t.publicShare;
   const isOrchestration = payload?.share.kind === 'orchestration';
   const messages = payload?.messages || [];
   const goToLogin = () => {
     window.location.href = '/';
   };
+  const toggleTimelineGroup = (key: string) => {
+    setCollapsedTimelineGroups((current) => ({ ...current, [key]: !current[key] }));
+  };
+  const ignoreApprovalDecision = () => undefined;
 
   return (
     <div className="h-screen w-full flex bg-background text-foreground overflow-hidden font-sans">
@@ -143,7 +170,16 @@ export function PublicSharePage({ shareID, t }: { shareID: string; t: UIText }) 
               </div>
             ) : isOrchestration ? (
               visibleEvents.length > 0 ? (
-                visibleEvents.map((event) => <OrchestrationEventItem key={event.key} item={event} t={t} />)
+                timelineGroups.map((group) => (
+                  <OrchestrationTimelineGroupItem
+                    key={group.key}
+                    group={group}
+                    collapsed={Boolean(collapsedTimelineGroups[group.key])}
+                    onToggle={() => toggleTimelineGroup(group.key)}
+                    onApprovalDecision={ignoreApprovalDecision}
+                    t={t}
+                  />
+                ))
               ) : payload?.run?.prompt ? (
                 <MessageItem
                   msg={{ id: `${payload.run.id}:prompt`, type: 'message', role: 'user', content: payload.run.prompt, createdAt: payload.run.createdAt }}

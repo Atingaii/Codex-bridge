@@ -130,6 +130,21 @@ build is still running.
 When the user scrolls away from the latest orchestration event, the timeline
 shows a floating jump-to-bottom control; if the user is already at the bottom,
 new events continue to follow automatically.
+Long orchestration transcripts are grouped by `turnId`, role, and CLI in
+`frontend/src/app/lib/utils.ts:orchestrationTimelineGroups` and rendered through
+`frontend/src/app/components/OrchestrationComponents.tsx:OrchestrationTimelineGroupItem`.
+Each turn group can be collapsed from the browser timeline and from public
+orchestration shares. Historical completed turns may default to collapsed in
+long transcripts, while the latest turn, active commands, failed turns, and
+terminal turns missing a `turn.end` event stay expanded. If a terminal run has
+visible turn output but no `turn.end`, the group header shows an explicit
+missing-end state so native-context compaction or process interruption is not
+mistaken for a final CLI summary.
+Bridge emits successful business `turn.end` events before visible native
+context-compaction notes, and final-turn native maintenance runs silently after
+`run.end`. This keeps long runs from visually ending on an in-progress
+maintenance note such as native context compaction when the CLI or Bridge is
+interrupted.
 
 User message cards render attached file metadata from `event.data.files`.
 The right-side file panel also shows `OrchestrationRun.files` for the selected

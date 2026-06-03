@@ -61,6 +61,13 @@ context in the same `runID`.
   `turn.end` / `run.end` events carry the CLI's visible content. If the CLI
   returns no text, Bridge reports that absence rather than adding an independent
   proof assessment.
+- If a relay CLI turn has produced command events or partial visible text but
+  exits before a final text response, Bridge treats it as an interrupted turn
+  rather than an immediate run failure. It waits a short idle window, continues
+  the same turn up to three times, and preserves the already emitted command
+  events. If the continuation budget is exhausted, Bridge emits a visible
+  warning, marks that turn as warning severity, skips post-turn native
+  maintenance for that turn, and advances to the next scheduled relay turn.
 - Command events include timing metadata so long-running checks such as
   Isabelle, Coq, and Lean builds show when the command started and how long it
   has been running or took to finish.
@@ -140,6 +147,11 @@ terminal turns missing a `turn.end` event stay expanded. If a terminal run has
 visible turn output but no `turn.end`, the group header shows an explicit
 missing-end state so native-context compaction or process interruption is not
 mistaken for a final CLI summary.
+Inside an expanded turn group,
+`frontend/src/app/components/OrchestrationComponents.tsx:groupedOrchestrationTimelineItems`
+combines consecutive command timeline items into one expandable command batch.
+Message or approval items break the batch, so command order remains readable
+without making long proof/build loops dominate the page.
 Bridge emits successful business `turn.end` events before visible native
 context-compaction notes, and final-turn native maintenance runs silently after
 `run.end`. This keeps long runs from visually ending on an in-progress
@@ -213,6 +225,11 @@ state.
 23. Preserve the orchestration profile across create, refresh, and continue.
 24. Emit and render structured `run.conclusion` events for completed, failed,
     and canceled runs.
+25. Continue interrupted relay turns with visible command/text output up to
+    three times before marking that turn as warning and moving to the next
+    scheduled turn.
+26. Group consecutive command entries inside expanded turn groups so long
+    transcripts remain scannable while preserving every command detail.
 
 ## Exit Gates
 
@@ -256,6 +273,15 @@ state.
   after command cards.
 - A turn that ends with only command output still leaves those command events
   visible and the run reaches a terminal browser-visible state.
+- A relay turn that repeatedly loses its final text after command or partial
+  output emits visible retry notices, exhausts after three continuation
+  attempts, skips native post-turn compaction, and the run proceeds to the next
+  turn without a `run.error`.
+- A relay turn that completes during a continuation remains the same visible
+  turn and emits a successful `turn.end` / `run.end` instead of starting a new
+  run.
+- Consecutive command entries within a turn render as one expandable command
+  batch; a message or approval between commands prevents cross-item merging.
 - Selecting a completed run does not show the browser event stream as connected.
 - Continuing a Codex-first run sends `FirstCLI=codex` in the resumed
   `orchestration_start` payload unless the user intentionally changes it.

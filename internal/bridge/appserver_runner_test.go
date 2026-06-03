@@ -354,6 +354,9 @@ for line in sys.stdin:
         emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
     elif method == "thread/start":
         emit({"id": msg["id"], "result": {"thread": {"id": "thr_app"}}})
+    elif method == "thread/resume":
+        params = msg.get("params") or {}
+        emit({"id": msg["id"], "result": {"thread": {"id": params.get("threadId") or "thr_app"}}})
     elif method == "thread/name/set":
         emit({"id": msg["id"], "result": {}})
     elif method == "thread/unsubscribe":
@@ -388,6 +391,9 @@ for line in sys.stdin:
         emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
     elif method == "thread/start":
         emit({"id": msg["id"], "result": {"thread": {"id": "thr_app"}}})
+    elif method == "thread/resume":
+        params = msg.get("params") or {}
+        emit({"id": msg["id"], "result": {"thread": {"id": params.get("threadId") or "thr_app"}}})
     elif method == "thread/name/set":
         emit({"id": msg["id"], "result": {}})
     elif method == "thread/unsubscribe":

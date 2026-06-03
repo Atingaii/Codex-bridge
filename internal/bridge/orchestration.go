@@ -81,6 +81,11 @@ type workspaceChangeReport struct {
 
 var safeOrchestrationFileName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
+const (
+	orchestrationTurnContinuationMaxAttempts = 3
+	orchestrationTurnContinuationIdleWait    = 200 * time.Millisecond
+)
+
 func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
 	return &OrchestrationManager{
 		cfg:         cfg,
@@ -432,42 +437,8 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 				"resumeMode": plannedRelayResumeMode(cli, sessionState),
 			},
 		})
-		content, tools, err := m.runRelayCLI(ctx, payload, turnID, role, cli, prompt, &sessionState)
-		recordCommandFingerprints(&sessionState, runCWD, tools)
-		record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
+		record, turnStatus, err := m.runRelayTurnWithContinuations(ctx, payload, turnID, role, cli, prompt, &sessionState, runCWD)
 		if err != nil {
-			if recoverableRelayCLIError(cli, content, err) {
-				warning := visibleCLIError(err)
-				m.resetCodexInteractiveSessionAfterRecoverableError(&sessionState)
-				history = append(history, record)
-				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-					Kind:     "turn.delta",
-					Source:   "bridge",
-					Severity: "warning",
-					TurnID:   turnID,
-					Role:     role,
-					CLI:      cli,
-					Content:  "Codex app-server reported an empty tail error after visible output; Bridge kept the visible reply and continued the orchestration.",
-					Error:    warning,
-					Data: map[string]any{
-						"relayOnly":   true,
-						"recoverable": true,
-						"error":       warning,
-						"category":    "codex-empty-tail-error-after-visible-output",
-					},
-				})
-				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-					Kind:       "turn.end",
-					TurnID:     turnID,
-					Role:       role,
-					CLI:        cli,
-					Content:    record.Content,
-					Status:     "success",
-					RunEndData: m.relayRunEndData(cli, sessionState, runCWD),
-					Data:       relayTurnEndData(cli, sessionState),
-				})
-				continue
-			}
 			record.Err = visibleCLIError(err)
 			history = append(history, record)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -505,17 +476,21 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			return
 		}
 		history = append(history, record)
+		content := record.Content
+		if strings.TrimSpace(content) == "" {
+			content = relayTerminalContent([]orchestrationTurn{record})
+		}
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:       "turn.end",
 			TurnID:     turnID,
 			Role:       role,
 			CLI:        cli,
-			Content:    record.Content,
-			Status:     "success",
+			Content:    content,
+			Status:     turnStatus,
 			RunEndData: m.relayRunEndData(cli, sessionState, runCWD),
 			Data:       relayTurnEndData(cli, sessionState),
 		})
-		if turn < maxTurns {
+		if turn < maxTurns && turnStatus == "success" {
 			m.runPostTurnNativeMaintenance(ctx, payload.RunID, turnID, role, cli, &sessionState)
 		}
 	}
@@ -542,6 +517,227 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		},
 	})
 	m.runFinalNativeMaintenance(ctx, mode, firstCLI, maxTurns, &sessionState)
+}
+
+func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, prompt string, state *orchestrationSessionState, runCWD string) (orchestrationTurn, string, error) {
+	var combined orchestrationTurn
+	status := "success"
+	nextPrompt := prompt
+	var lastErr error
+	for attempt := 0; attempt <= orchestrationTurnContinuationMaxAttempts; attempt++ {
+		if attempt > 0 {
+			if err := waitOrchestrationTurnContinuationIdle(ctx); err != nil {
+				return combined, status, err
+			}
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:     "turn.delta",
+				Source:   "bridge",
+				Severity: "info",
+				TurnID:   turnID,
+				Role:     role,
+				CLI:      cli,
+				Content:  fmt.Sprintf("CLI did not return a final text response; Bridge is continuing this same turn (%d/%d).", attempt, orchestrationTurnContinuationMaxAttempts),
+				Data: map[string]any{
+					"relayOnly": true,
+					"category":  "turn-continuation-retry",
+					"attempt":   attempt,
+					"max":       orchestrationTurnContinuationMaxAttempts,
+				},
+			})
+		}
+		content, tools, err := m.runRelayCLI(ctx, payload, turnID, role, cli, nextPrompt, state)
+		recordCommandFingerprints(state, runCWD, tools)
+		record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
+		if err != nil {
+			record.Err = visibleCLIError(err)
+		}
+		combined = mergeOrchestrationTurnAttempts(combined, record)
+		if err == nil && !orchestrationTurnNeedsContinuation(record, err) {
+			return combined, status, nil
+		}
+		if err == nil && strings.TrimSpace(record.Content) == "" && len(record.Tools) == 0 {
+			return combined, status, nil
+		}
+		if recoverableRelayCLIError(cli, content, err) {
+			warning := visibleCLIError(err)
+			m.resetCodexInteractiveSessionAfterRecoverableError(state)
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:     "turn.delta",
+				Source:   "bridge",
+				Severity: "warning",
+				TurnID:   turnID,
+				Role:     role,
+				CLI:      cli,
+				Content:  "Codex app-server reported an empty tail error after visible output; Bridge kept the visible reply and continued the orchestration.",
+				Error:    warning,
+				Data: map[string]any{
+					"relayOnly":   true,
+					"recoverable": true,
+					"error":       warning,
+					"category":    "codex-empty-tail-error-after-visible-output",
+				},
+			})
+			return combined, status, nil
+		}
+		if !shouldContinueInterruptedRelayTurn(record, err) {
+			return combined, status, err
+		}
+		lastErr = err
+		if attempt >= orchestrationTurnContinuationMaxAttempts {
+			if combined.Err == "" {
+				combined.Err = visibleCLIError(err)
+			}
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:     "turn.delta",
+				Source:   "bridge",
+				Severity: "warning",
+				TurnID:   turnID,
+				Role:     role,
+				CLI:      cli,
+				Content:  fmt.Sprintf("CLI still did not return a final text response after %d continuation attempts; Bridge is preserving this turn's command events and moving to the next turn.", orchestrationTurnContinuationMaxAttempts),
+				Error:    combined.Err,
+				Data: map[string]any{
+					"relayOnly": true,
+					"category":  "turn-continuation-exhausted",
+					"attempts":  orchestrationTurnContinuationMaxAttempts,
+				},
+			})
+			return combined, "warning", nil
+		}
+		m.resetNativeInteractiveSessionForContinuation(cli, state)
+		nextPrompt = composeInterruptedTurnContinuationPrompt(prompt, combined, attempt+1, orchestrationTurnContinuationMaxAttempts)
+	}
+	return combined, status, lastErr
+}
+
+func waitOrchestrationTurnContinuationIdle(ctx context.Context) error {
+	timer := time.NewTimer(orchestrationTurnContinuationIdleWait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func mergeOrchestrationTurnAttempts(current, next orchestrationTurn) orchestrationTurn {
+	if current.TurnID == "" {
+		return next
+	}
+	if strings.TrimSpace(next.Content) != "" {
+		current.Content = mergeOrchestrationTurnContent(current.Content, next.Content)
+	}
+	if strings.TrimSpace(next.Handoff) != "" {
+		current.Handoff = next.Handoff
+	}
+	if strings.TrimSpace(next.Err) != "" {
+		current.Err = next.Err
+	}
+	current.Tools = append(current.Tools, next.Tools...)
+	return current
+}
+
+func mergeOrchestrationTurnContent(current, next string) string {
+	current = strings.TrimSpace(current)
+	next = strings.TrimSpace(next)
+	if current == "" {
+		return next
+	}
+	if next == "" {
+		return current
+	}
+	if strings.HasPrefix(next, current) {
+		return next
+	}
+	if strings.HasSuffix(current, next) {
+		return current
+	}
+	return current + "\n\n" + next
+}
+
+func orchestrationTurnNeedsContinuation(record orchestrationTurn, err error) bool {
+	return err != nil || strings.TrimSpace(record.Content) == ""
+}
+
+func shouldContinueInterruptedRelayTurn(record orchestrationTurn, err error) bool {
+	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return false
+	}
+	if strings.TrimSpace(record.Content) != "" || len(record.Tools) > 0 {
+		return true
+	}
+	return false
+}
+
+func (m *OrchestrationManager) resetNativeInteractiveSessionForContinuation(cli string, state *orchestrationSessionState) {
+	if state == nil || state.NativeSession == nil {
+		return
+	}
+	session := state.NativeSession
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	switch cli {
+	case "codex":
+		codex := session.codex
+		if codex == nil {
+			return
+		}
+		if codex.threadID != "" {
+			state.CodexThreadID = codex.threadID
+		}
+		if codex.client != nil {
+			codex.client.close()
+		}
+		session.codex = nil
+	case "claude":
+		claude := session.claude
+		if claude == nil {
+			return
+		}
+		_ = claude.stdin.Close()
+		if claude.cmd != nil && claude.cmd.Process != nil {
+			_ = terminateProcessGroup(claude.cmd.Process.Pid)
+		}
+		if claude.cmd != nil {
+			_ = claude.cmd.Wait()
+		}
+		if claude.release != nil {
+			claude.release()
+		}
+		session.claude = nil
+	}
+}
+
+func composeInterruptedTurnContinuationPrompt(original string, record orchestrationTurn, attempt, max int) string {
+	var b strings.Builder
+	b.WriteString("Codex Bridge is continuing the same orchestration turn because the previous CLI invocation returned command events or partial visible output but no complete final text response. Do not treat this as a new user request, and do not discard completed work.\n\n")
+	b.WriteString(orchestrationLanguageRule)
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("Continuation attempt: %d of %d.\n\n", attempt, max))
+	if strings.TrimSpace(record.Content) != "" {
+		b.WriteString("Visible output already produced in this turn:\n")
+		b.WriteString(trimForPrompt(record.Content, 3000))
+		b.WriteString("\n\n")
+	}
+	if len(record.Tools) > 0 {
+		b.WriteString("Command events already observed in this turn:\n")
+		for _, line := range relayCommandSummaries(record.Tools, 8) {
+			b.WriteString("- ")
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+	}
+	if strings.TrimSpace(record.Err) != "" {
+		b.WriteString("Last interruption detail:\n")
+		b.WriteString(trimForPrompt(record.Err, 1200))
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Continue from the current state and finish this same turn with a concise visible response and handoff summary. If a command failed, explain how you handled it or what remains blocked instead of ending on the raw command event.\n\n")
+	b.WriteString("Original turn prompt:\n")
+	b.WriteString(trimForPrompt(original, 12000))
+	return b.String()
 }
 
 func stableOrchestrationSessionID(runID, cli string) string {

@@ -15,6 +15,8 @@ assert.match(source, /function orchestrationTurnDeltaContentByKey\(events: Orche
 assert.match(source, /function turnEndDisplayContent\(content: string, deltaContent: string\)/);
 assert.match(source, /export function orchestrationTimelineGroups\(\s*items: OrchestrationTimelineItem\[\]/);
 assert.match(source, /export function OrchestrationTimelineGroupItem\(/);
+assert.match(source, /export function groupedOrchestrationTimelineItems\(items: OrchestrationTimelineItem\[\]\)/);
+assert.match(source, /<CommandEventBatch key=\{block\.key\} items=\{block\.items\} t=\{t\} \/>/);
 assert.match(source, /turnMissingEndDescription/);
 assert.match(source, /function completedOrchestrationTurnGroupKeys\(events: OrchestrationEvent\[\], runId\?: string\)/);
 assert.match(source, /const completeTurnKeys = completedOrchestrationTurnGroupKeys\(events, run\?\.id\);/);
@@ -29,6 +31,47 @@ assert.match(orchestrationWorkspaceSource, /updateApprovalItemStatus,/);
 assert.doesNotMatch(source, /unresolvedAcceptanceSummary/);
 assert.doesNotMatch(source, /hasUnresolvedAcceptanceSignal/);
 assert.doesNotMatch(source, /Unmet acceptance|未满足验收/);
+
+function groupedTimelineItems(items) {
+  const blocks = [];
+  let pendingCommands = [];
+  const flushCommands = () => {
+    if (pendingCommands.length === 0) return;
+    if (pendingCommands.length === 1) {
+      blocks.push({ type: 'item', item: pendingCommands[0] });
+    } else {
+      blocks.push({
+        type: 'command-batch',
+        key: `command-batch:${pendingCommands[0].key}:${pendingCommands[pendingCommands.length - 1].key}`,
+        items: pendingCommands,
+      });
+    }
+    pendingCommands = [];
+  };
+  items.forEach((item) => {
+    if (item.type === 'event' && item.event.type === 'command') {
+      pendingCommands.push(item);
+      return;
+    }
+    flushCommands();
+    blocks.push({ type: 'item', item });
+  });
+  flushCommands();
+  return blocks;
+}
+
+const timelineBlocks = groupedTimelineItems([
+  { type: 'event', key: 'm1', event: { type: 'message' } },
+  { type: 'event', key: 'c1', event: { type: 'command' } },
+  { type: 'event', key: 'c2', event: { type: 'command' } },
+  { type: 'approval', key: 'a1', approval: {} },
+  { type: 'event', key: 'c3', event: { type: 'command' } },
+]);
+
+assert.deepEqual(timelineBlocks.map((block) => block.type), ['item', 'command-batch', 'item', 'item']);
+assert.equal(timelineBlocks[1].items.length, 2);
+assert.equal(timelineBlocks[1].key, 'command-batch:c1:c2');
+assert.equal(timelineBlocks[3].item.key, 'c3');
 
 function stringsTrim(value) {
   return typeof value === 'string' ? value.trim() : '';

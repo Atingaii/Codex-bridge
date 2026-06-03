@@ -788,13 +788,13 @@ func TestOrchestrationFinalTurnEndAndRunEndDoNotWaitForVisibleCompaction(t *test
 	}
 }
 
-func TestOrchestrationFailedCommandTailStopsBeforeCompactionAndNextTurn(t *testing.T) {
+func TestOrchestrationFailedCommandTailContinuesAfterRetryBudget(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
 	t.Setenv("HOME", home)
 	claudePath := filepath.Join(tmp, "claude")
 	codexPath := filepath.Join(tmp, "codex")
-	if err := os.WriteFile(claudePath, []byte(fakeClaudePrintScript("Claude should not run")), 0o755); err != nil {
+	if err := os.WriteFile(claudePath, []byte(fakeClaudePrintScript("Claude continued after interrupted Codex turn")), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerFailedCommandScript(false)), 0o755); err != nil {
@@ -828,21 +828,72 @@ func TestOrchestrationFailedCommandTailStopsBeforeCompactionAndNextTurn(t *testi
 	if !orchestrationEventsContain(events, "command.end", "codex", "Unable to unify") {
 		t.Fatalf("missing failed command event: %#v", events)
 	}
-	if !orchestrationEventsContain(events, "turn.end", "codex", "without a follow-up response") {
-		t.Fatalf("codex error turn.end did not expose failed-tail cause: %#v", events)
+	if !orchestrationEventsContain(events, "turn.delta", "codex", "Bridge is preserving this turn's command events and moving to the next turn") {
+		t.Fatalf("codex retry budget exhaustion was not visible: %#v", events)
 	}
-	if !orchestrationEventsContain(events, "run.error", "codex", "coqc -R . LinLattice HWQ_U/L0Proof.v") {
-		t.Fatalf("run.error did not expose failed command: %#v", events)
+	if !orchestrationEventsContain(events, "turn.start", "claude", "Starting Claude") {
+		t.Fatalf("orchestration did not enter the next turn after retry budget: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "run.end", "", "Claude continued after interrupted Codex turn") {
+		t.Fatalf("orchestration did not complete after next turn: %#v", events)
 	}
 	for _, event := range events {
 		if event.BridgeNoteData != nil && event.BridgeNoteData.Category == "native-context-compaction" {
-			t.Fatalf("failed business turn should not trigger native compaction: %#v", event)
+			t.Fatalf("interrupted business turn should not trigger native compaction: %#v", event)
 		}
-		if event.Kind == "turn.start" && event.CLI == "claude" {
-			t.Fatalf("failed Codex turn should stop before next Claude turn: %#v", event)
+		if event.Kind == "run.error" {
+			t.Fatalf("retry exhaustion should not fail the run: %#v", event)
 		}
-		if event.Kind == "turn.end" && event.CLI == "codex" && (event.Severity != "error" || event.Error == "") {
-			t.Fatalf("failed Codex turn should carry error severity and detail: %#v", event)
+		if event.Kind == "turn.end" && event.CLI == "codex" && event.Severity != "warning" {
+			t.Fatalf("exhausted Codex turn should be marked warning: %#v", event)
+		}
+	}
+}
+
+func TestOrchestrationInterruptedTurnContinuationCanCompleteSameTurn(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeInterruptedThenFinalScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexExecScript("Codex should not run")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_retry_success",
+		Mode:     "collaboration",
+		Prompt:   "continue same turn",
+		MaxTurns: 1,
+		CWD:      tmp,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "claude", "Bridge is continuing this same turn (1/3)") {
+		t.Fatalf("missing continuation retry notice: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "turn.end", "claude", "Claude completed after continuation") {
+		t.Fatalf("turn did not complete from the continuation attempt: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "run.end", "", "Claude completed after continuation") {
+		t.Fatalf("run did not complete after continuation: %#v", events)
+	}
+	for _, event := range events {
+		if event.Kind == "run.error" {
+			t.Fatalf("continuation success should not fail run: %#v", event)
+		}
+		if event.Kind == "turn.end" && event.CLI == "claude" && event.Status != "success" {
+			t.Fatalf("completed continuation should be successful: %#v", event)
 		}
 	}
 }
@@ -2358,6 +2409,34 @@ if "--input-format=stream-json" in sys.argv:
     for line in sys.stdin:
         print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
         print(json.dumps({"type":"result","result":text}), flush=True)
+    raise SystemExit(0)
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
+print(json.dumps({"type":"result","result":text}), flush=True)
+`
+}
+
+func fakeClaudeInterruptedThenFinalScript() string {
+	return `#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+state = pathlib.Path(sys.argv[0]).with_suffix(".state")
+count = int(state.read_text(encoding="utf-8")) if state.exists() else 0
+state.write_text(str(count + 1), encoding="utf-8")
+if count == 0:
+    text = "Claude started then lost final text."
+    for line in sys.stdin:
+        json.loads(line)
+        print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
+        raise SystemExit(0)
+    print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
+    raise SystemExit(0)
+text = "Claude completed after continuation"
+for line in sys.stdin:
+    json.loads(line)
+    print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
+    print(json.dumps({"type":"result","result":text}), flush=True)
     raise SystemExit(0)
 print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
 print(json.dumps({"type":"result","result":text}), flush=True)

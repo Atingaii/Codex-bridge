@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Activity, AlertTriangle, Check, ChevronDown, Command, GitBranch, RefreshCw, Terminal, User, X } from 'lucide-react';
-import type { Agent, BridgeCLICapability, OrchestrationEvent, OrchestrationTimelineGroup, OrchestrationVisibleEvent } from '../lib/types';
+import type { Agent, BridgeCLICapability, OrchestrationEvent, OrchestrationTimelineGroup, OrchestrationTimelineItem, OrchestrationVisibleEvent } from '../lib/types';
 import type { UIText } from '../lib/i18n';
 import { Button } from './ui';
 import { OrchestrationFileList } from './OrchestrationFiles';
@@ -126,6 +126,7 @@ export function defaultCollapsedTimelineGroups(groups: OrchestrationTimelineGrou
 export function reconcileCollapsedTimelineGroups(current: Record<string, boolean>, groups: OrchestrationTimelineGroup[]) {
   const next: Record<string, boolean> = {};
   const known = new Set(groups.map((group) => group.key));
+  const shouldCompact = groups.length > 4;
   Object.entries(current).forEach(([key, value]) => {
     if (known.has(key)) next[key] = value;
   });
@@ -133,7 +134,7 @@ export function reconcileCollapsedTimelineGroups(current: Record<string, boolean
   groups.forEach((group, index) => {
     if (group.type !== 'turn' || Object.prototype.hasOwnProperty.call(next, group.key)) return;
     const isLatest = group.key === latestTurnKey || index === groups.length - 1;
-    next[group.key] = groups.length > 40 && !isLatest && group.complete && !group.active && !group.incomplete && !group.hasError;
+    next[group.key] = shouldCompact && !isLatest && group.complete && !group.active && !group.incomplete && !group.hasError;
   });
   return next;
 }
@@ -213,9 +214,15 @@ export function OrchestrationTimelineGroupItem({
       </button>
       {!collapsed && (
         <div className="space-y-3">
-          {group.items.map((item) => item.type === 'event'
-            ? <OrchestrationEventItem key={item.key} item={item.event} t={t} />
-            : <ApprovalCard key={item.key} item={item.approval} t={t} onDecision={onApprovalDecision} />)}
+          {groupedOrchestrationTimelineItems(group.items).map((block) => {
+            if (block.type === 'command-batch') {
+              return <CommandEventBatch key={block.key} items={block.items} t={t} />;
+            }
+            const item = block.item;
+            return item.type === 'event'
+              ? <OrchestrationEventItem key={item.key} item={item.event} t={t} />
+              : <ApprovalCard key={item.key} item={item.approval} t={t} onDecision={onApprovalDecision} />;
+          })}
           {group.incomplete && (
             <div className="mx-auto flex w-full max-w-4xl items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -226,6 +233,94 @@ export function OrchestrationTimelineGroupItem({
       )}
     </div>
   );
+}
+
+type CommandTimelineItem = Extract<OrchestrationTimelineItem, { type: 'event' }> & {
+  event: Extract<OrchestrationVisibleEvent, { type: 'command' }>;
+};
+
+type TimelineRenderBlock =
+  | { type: 'item'; item: OrchestrationTimelineItem }
+  | { type: 'command-batch'; key: string; items: CommandTimelineItem[] };
+
+export function groupedOrchestrationTimelineItems(items: OrchestrationTimelineItem[]): TimelineRenderBlock[] {
+  const blocks: TimelineRenderBlock[] = [];
+  let pendingCommands: CommandTimelineItem[] = [];
+  const flushCommands = () => {
+    if (pendingCommands.length === 0) return;
+    if (pendingCommands.length === 1) {
+      blocks.push({ type: 'item', item: pendingCommands[0] });
+    } else {
+      blocks.push({
+        type: 'command-batch',
+        key: `command-batch:${pendingCommands[0].key}:${pendingCommands[pendingCommands.length - 1].key}`,
+        items: pendingCommands,
+      });
+    }
+    pendingCommands = [];
+  };
+  items.forEach((item) => {
+    if (isCommandTimelineItem(item)) {
+      pendingCommands.push(item);
+      return;
+    }
+    flushCommands();
+    blocks.push({ type: 'item', item });
+  });
+  flushCommands();
+  return blocks;
+}
+
+function isCommandTimelineItem(item: OrchestrationTimelineItem): item is CommandTimelineItem {
+  return item.type === 'event' && item.event.type === 'command';
+}
+
+function CommandEventBatch({ items, t }: { items: CommandTimelineItem[]; t: UIText }) {
+  const commands = items.map((item) => item.event.command);
+  const hasActive = commands.some(commandEventIsActive);
+  const hasError = commands.some(commandEventHasError);
+  const open = hasActive || hasError;
+  return (
+    <details className="mx-auto w-full max-w-4xl overflow-hidden rounded-lg border border-border/70 bg-card/50" open={open}>
+      <summary className="flex cursor-pointer items-center gap-2 bg-muted/20 px-3 py-2 text-xs marker:content-none hover:bg-muted/35">
+        {hasActive ? (
+          <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+        ) : hasError ? (
+          <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
+        ) : (
+          <Command className="h-3.5 w-3.5 text-muted-foreground" />
+        )}
+        <span className="font-semibold">{t.commands}</span>
+        <span className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">{items.length}</span>
+        <code className="min-w-0 flex-1 truncate text-[11px] font-normal text-muted-foreground">
+          {commandData(commands[0]).command || t.commandEvent}
+        </code>
+        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+      </summary>
+      <div className="space-y-2 border-t border-border p-2">
+        {items.map((item) => (
+          <CommandEvent
+            key={item.key}
+            event={item.event.command}
+            t={t}
+            open={commandEventIsActive(item.event.command) || commandEventHasError(item.event.command)}
+          />
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function commandEventIsActive(event: OrchestrationEvent) {
+  const data = commandData(event);
+  const status = String(data.status || event.status || '').toLowerCase();
+  return event.kind === 'command.start' || status === 'running' || status === 'in_progress';
+}
+
+function commandEventHasError(event: OrchestrationEvent) {
+  const data = commandData(event);
+  const status = String(data.status || event.status || '').toLowerCase();
+  return Boolean(event.error) || status === 'failed' || status === 'error' || (typeof data.exitCode === 'number' && data.exitCode !== 0);
 }
 
 function orchestrationTimelineGroupCountLabel(group: OrchestrationTimelineGroup, t: UIText) {

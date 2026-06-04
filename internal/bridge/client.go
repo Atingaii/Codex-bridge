@@ -183,6 +183,7 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 			c.orchestrations.CloseAll()
 			return nil
 		case err := <-done:
+			c.orchestrations.CloseAll()
 			return err
 		case <-ticker.C:
 			payload := protocol.HeartbeatPayload{

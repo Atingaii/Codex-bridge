@@ -283,6 +283,20 @@ func newOrchestrationTurnRecord(turnID, role, cli, content string, tools []Runne
 	}
 }
 
+func orchestrationTurnHasFinalConclusion(record orchestrationTurn) bool {
+	content := strings.TrimSpace(record.Content)
+	if content == "" {
+		return false
+	}
+	if strings.TrimSpace(record.Handoff) != "" {
+		return true
+	}
+	if lastMarkerIndexFold(content, finalConclusionMarkers()) >= 0 {
+		return true
+	}
+	return false
+}
+
 func scrubOrchestrationTurnContent(content string) string {
 	content = strings.TrimSpace(content)
 	if content == "" {
@@ -295,9 +309,7 @@ func scrubOrchestrationTurnContent(content string) string {
 }
 
 func conclusionTrimIndex(content string) int {
-	if idx := lastMarkerIndexFold(content, []string{
-		"最终结论", "最终总结", "final conclusion", "final summary",
-	}); idx >= 0 && shouldTrimConclusionPrefix(content[:idx]) {
+	if idx := lastMarkerIndexFold(content, finalConclusionMarkers()); idx >= 0 && shouldTrimConclusionPrefix(content[:idx]) {
 		return idx
 	}
 	if idx := lastMarkerIndexFold(content, []string{
@@ -514,7 +526,17 @@ func sanitizePromptText(value string) string {
 func handoffSummaryMarkers() []string {
 	return []string{
 		"交接总结", "交接摘要", "handoff summary",
+		"Handoff:",
+		"Handoff summary:",
 		"最终结论", "最终总结", "final conclusion", "final summary",
+	}
+}
+
+func finalConclusionMarkers() []string {
+	return []string{
+		"最终结论", "最终总结", "最终测试结果", "本轮结论", "审查结论",
+		"结论：", "结论:",
+		"final conclusion", "final summary", "conclusion:",
 	}
 }
 

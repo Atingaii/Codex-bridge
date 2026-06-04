@@ -536,7 +536,7 @@ func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context
 				TurnID:   turnID,
 				Role:     role,
 				CLI:      cli,
-				Content:  fmt.Sprintf("CLI did not return a final text response; Bridge is continuing this same turn (%d/%d).", attempt, orchestrationTurnContinuationMaxAttempts),
+				Content:  fmt.Sprintf("CLI did not return a final conclusion or handoff summary; Bridge is continuing this same turn (%d/%d).", attempt, orchestrationTurnContinuationMaxAttempts),
 				Data: map[string]any{
 					"relayOnly": true,
 					"category":  "turn-continuation-retry",
@@ -555,10 +555,7 @@ func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context
 		if err == nil && !orchestrationTurnNeedsContinuation(record, err) {
 			return combined, status, nil
 		}
-		if err == nil && strings.TrimSpace(record.Content) == "" && len(record.Tools) == 0 {
-			return combined, status, nil
-		}
-		if recoverableRelayCLIError(cli, content, err) {
+		if recoverableRelayCLIError(cli, content, err) && orchestrationTurnHasFinalConclusion(record) {
 			warning := visibleCLIError(err)
 			m.resetCodexInteractiveSessionAfterRecoverableError(state)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -594,7 +591,7 @@ func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context
 				TurnID:   turnID,
 				Role:     role,
 				CLI:      cli,
-				Content:  fmt.Sprintf("CLI still did not return a final text response after %d continuation attempts; Bridge is preserving this turn's command events and moving to the next turn.", orchestrationTurnContinuationMaxAttempts),
+				Content:  fmt.Sprintf("CLI still did not return a final conclusion or handoff summary after %d continuation attempts; Bridge is preserving this turn's command events and moving to the next turn.", orchestrationTurnContinuationMaxAttempts),
 				Error:    combined.Err,
 				Data: map[string]any{
 					"relayOnly": true,
@@ -657,17 +654,20 @@ func mergeOrchestrationTurnContent(current, next string) string {
 }
 
 func orchestrationTurnNeedsContinuation(record orchestrationTurn, err error) bool {
-	return err != nil || strings.TrimSpace(record.Content) == ""
+	if err != nil {
+		return true
+	}
+	return !orchestrationTurnHasFinalConclusion(record)
 }
 
 func shouldContinueInterruptedRelayTurn(record orchestrationTurn, err error) bool {
 	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 		return false
 	}
-	if strings.TrimSpace(record.Content) != "" || len(record.Tools) > 0 {
+	if err == nil {
 		return true
 	}
-	return false
+	return strings.TrimSpace(record.Content) != "" || len(record.Tools) > 0
 }
 
 func (m *OrchestrationManager) resetNativeInteractiveSessionForContinuation(cli string, state *orchestrationSessionState) {
@@ -711,7 +711,7 @@ func (m *OrchestrationManager) resetNativeInteractiveSessionForContinuation(cli 
 
 func composeInterruptedTurnContinuationPrompt(original string, record orchestrationTurn, attempt, max int) string {
 	var b strings.Builder
-	b.WriteString("Codex Bridge is continuing the same orchestration turn because the previous CLI invocation returned command events or partial visible output but no complete final text response. Do not treat this as a new user request, and do not discard completed work.\n\n")
+	b.WriteString("Codex Bridge is continuing the same orchestration turn because the previous CLI invocation returned command events or partial visible output but no final conclusion or handoff summary. Do not treat this as a new user request, and do not discard completed work.\n\n")
 	b.WriteString(orchestrationLanguageRule)
 	b.WriteString("\n\n")
 	b.WriteString(fmt.Sprintf("Continuation attempt: %d of %d.\n\n", attempt, max))
@@ -734,7 +734,7 @@ func composeInterruptedTurnContinuationPrompt(original string, record orchestrat
 		b.WriteString(trimForPrompt(record.Err, 1200))
 		b.WriteString("\n\n")
 	}
-	b.WriteString("Continue from the current state and finish this same turn with a concise visible response and handoff summary. If a command failed, explain how you handled it or what remains blocked instead of ending on the raw command event.\n\n")
+	b.WriteString("Continue from the current state and finish this same turn with a concise final conclusion and handoff summary. If a command failed, explain how you handled it or what remains blocked instead of ending on the raw command event.\n\n")
 	b.WriteString("Original turn prompt:\n")
 	b.WriteString(trimForPrompt(original, 12000))
 	return b.String()

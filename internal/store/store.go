@@ -301,6 +301,15 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 		`, OrchestrationFailed, reason, now, now, runs[i].ID, OrchestrationQueued, OrchestrationRunning); err != nil {
 			return nil, err
 		}
+		turnEnd, ok, err := orchestrationDisconnectTurnEndEvent(ctx, tx, runs[i].ID, reason, now)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			if _, err := insertOrchestrationEventTx(ctx, tx, turnEnd, now); err != nil {
+				return nil, err
+			}
+		}
 		eventContent := orchestrationDisconnectRunErrorContent(tx, runs[i].ID, reason)
 		event := OrchestrationEvent{
 			ID:       NewID("evt"),
@@ -318,21 +327,7 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 			},
 			CreatedAt: now,
 		}
-		dataJSON, err := orchestrationEventDataJSON(event)
-		if err != nil {
-			return nil, err
-		}
-		row := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) + 1 FROM orchestration_events WHERE run_id = ?`, event.RunID)
-		if err := row.Scan(&event.Seq); err != nil {
-			return nil, err
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO orchestration_events
-				(id, run_id, seq, kind, source, severity, role, cli, turn_id, content, status, error, data_json, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, event.ID, event.RunID, event.Seq, event.Kind, nullString(event.Source), nullString(event.Severity), nullString(event.Role), nullString(event.CLI),
-			nullString(event.TurnID), nullString(event.Content), nullString(event.Status), nullString(event.Error),
-			nullString(dataJSON), now); err != nil {
+		if _, err := insertOrchestrationEventTx(ctx, tx, event, now); err != nil {
 			return nil, err
 		}
 	}
@@ -340,6 +335,89 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 		return nil, err
 	}
 	return runs, nil
+}
+
+func orchestrationDisconnectTurnEndEvent(ctx context.Context, tx *sql.Tx, runID, reason string, now int64) (OrchestrationEvent, bool, error) {
+	var turnID, role, cli string
+	err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(turn_id,''), COALESCE(role,''), COALESCE(cli,'')
+		FROM orchestration_events
+		WHERE run_id = ? AND COALESCE(turn_id,'') <> ''
+		ORDER BY seq DESC
+		LIMIT 1
+	`, runID).Scan(&turnID, &role, &cli)
+	if errors.Is(err, sql.ErrNoRows) {
+		return OrchestrationEvent{}, false, nil
+	}
+	if err != nil {
+		return OrchestrationEvent{}, false, err
+	}
+	var completed int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(1)
+		FROM orchestration_events
+		WHERE run_id = ? AND turn_id = ? AND kind = 'turn.end'
+	`, runID, turnID).Scan(&completed); err != nil {
+		return OrchestrationEvent{}, false, err
+	}
+	if completed > 0 {
+		return OrchestrationEvent{}, false, nil
+	}
+	content := strings.Join([]string{
+		"本轮因 Bridge 连接在任务仍在运行时断开而收尾为错误。",
+		"原因：" + reason,
+		"已保留断开前到达的命令和输出事件；待 Bridge 重新在线后可继续同一任务。",
+	}, "\n")
+	return OrchestrationEvent{
+		ID:        NewID("evt"),
+		RunID:     runID,
+		Kind:      "turn.end",
+		Source:    "bridge",
+		Severity:  "error",
+		Role:      role,
+		CLI:       cli,
+		TurnID:    turnID,
+		Content:   content,
+		Status:    "error",
+		Error:     reason,
+		CreatedAt: now,
+	}, true, nil
+}
+
+func insertOrchestrationEventTx(ctx context.Context, tx *sql.Tx, event OrchestrationEvent, now int64) (OrchestrationEvent, error) {
+	if event.ID == "" {
+		event.ID = NewID("evt")
+	}
+	if event.CreatedAt == 0 {
+		event.CreatedAt = now
+	}
+	event.Source = normalizeOrchestrationEventSource(event.Source, event.Kind)
+	if event.Severity == "" {
+		event.Severity = severityFromLegacyStatus(event.Status)
+		if event.Severity != "" {
+			event.Status = ""
+		}
+	}
+	dataJSON, err := orchestrationEventDataJSON(event)
+	if err != nil {
+		return OrchestrationEvent{}, err
+	}
+	if event.Seq <= 0 {
+		row := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) + 1 FROM orchestration_events WHERE run_id = ?`, event.RunID)
+		if err := row.Scan(&event.Seq); err != nil {
+			return OrchestrationEvent{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO orchestration_events
+			(id, run_id, seq, kind, source, severity, role, cli, turn_id, content, status, error, data_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, event.ID, event.RunID, event.Seq, event.Kind, nullString(event.Source), nullString(event.Severity), nullString(event.Role), nullString(event.CLI),
+		nullString(event.TurnID), nullString(event.Content), nullString(event.Status), nullString(event.Error),
+		nullString(dataJSON), event.CreatedAt); err != nil {
+		return OrchestrationEvent{}, err
+	}
+	return event, nil
 }
 
 func orchestrationDisconnectRunErrorContent(tx *sql.Tx, runID, reason string) string {

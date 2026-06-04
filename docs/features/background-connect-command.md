@@ -100,9 +100,13 @@ Frontend static caching must not keep an old setup-command UI after a restart.
 activation without precaching `/`. The SPA entry also loads
 `frontend/public/app-recovery.js`, which clears service workers and Cache
 Storage before one cache-busted reload if the main UI bundle fails during
-startup. Hub serves that recovery script and `sw.js` with `Cache-Control:
-no-store`, and serves hashed JS/CSS assets with a short revalidation window so
-a bad bundle cannot stay pinned in the browser after Bridge has been updated.
+startup. The same recovery script also detects known stale entry bundles such as
+`index-BWIkJOjq.js` and `index-BzGp0PoF.js` in an old entry document and forces
+one cache-busted reload before that stale frontend can continue rendering old
+state-reduction logic. Hub serves that recovery script and `sw.js` with
+`Cache-Control: no-store`, and serves hashed JS/CSS assets with a short
+revalidation window so a bad bundle cannot stay pinned in the browser after
+Bridge has been updated.
 `frontend/public/assets/index-BWIkJOjq.js` is a compatibility shim for the
 previous white-screen bundle; if an old entry document still requests it, the
 shim fetches the latest entry document, loads the current stylesheet, and

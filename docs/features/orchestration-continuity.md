@@ -58,16 +58,19 @@ context in the same `runID`.
   selected run is active, the frontend reconnects and reloads persisted events
   so progress that arrived during the gap is rendered.
 - The final turn should leave a user-readable conclusion, and successful
-  `turn.end` / `run.end` events carry the CLI's visible content. If the CLI
+  `turn.end` / `run.end` events carry the CLI's visible content. A relay turn is
+  complete only when the visible reply contains a final conclusion or handoff
+  summary such as `最终结论`, `最终测试结果`, `交接总结`, or `Handoff:`. If the CLI
   returns no text, Bridge reports that absence rather than adding an independent
   proof assessment.
-- If a relay CLI turn has produced command events or partial visible text but
-  exits before a final text response, Bridge treats it as an interrupted turn
-  rather than an immediate run failure. It waits a short idle window, continues
-  the same turn up to three times, and preserves the already emitted command
-  events. If the continuation budget is exhausted, Bridge emits a visible
-  warning, marks that turn as warning severity, skips post-turn native
-  maintenance for that turn, and advances to the next scheduled relay turn.
+- If a relay CLI turn has produced command events, partial visible text, or
+  progress-only text but exits before a final conclusion or handoff summary,
+  Bridge treats it as an interrupted turn rather than an immediate success. It
+  waits a short idle window, continues the same turn up to three times, and
+  preserves the already emitted command events. If the continuation budget is
+  exhausted, Bridge emits a visible warning, marks that turn as warning
+  severity, skips post-turn native maintenance for that turn, and advances to
+  the next scheduled relay turn.
 - Command events include timing metadata so long-running checks such as
   Isabelle, Coq, and Lean builds show when the command started and how long it
   has been running or took to finish.
@@ -82,8 +85,10 @@ context in the same `runID`.
   Generic default-profile runs do not get that guidance based only on prompt
   wording.
 - If a Bridge disconnects or restarts while an orchestration run is active, Hub
-  marks that run failed and appends a `run.error` event instead of leaving the
-  browser stuck in `running`.
+  marks that run failed instead of leaving the browser stuck in `running`. If
+  the latest business turn has visible events but no `turn.end`, Hub first
+  appends an error-severity `turn.end` for that turn and then appends
+  `run.error`.
 - Bridge-launched Codex and Claude CLI turns run in managed process groups.
   Canceling a run cancels the direct CLI process and its child process tree so
   Hub can receive `run.cancelled` instead of leaving the page in `canceling`.
@@ -137,9 +142,12 @@ build is still running.
 When the user scrolls away from the latest orchestration event, the timeline
 shows a floating jump-to-bottom control; if the user is already at the bottom,
 new events continue to follow automatically.
-Long orchestration transcripts are grouped by `turnId`, role, and CLI in
-`frontend/src/app/lib/utils.ts:orchestrationTimelineGroups` and rendered through
+Long orchestration transcripts are grouped by stable run and `turnId` identity
+in `frontend/src/app/lib/utils.ts:orchestrationTimelineGroups` and rendered
+through
 `frontend/src/app/components/OrchestrationComponents.tsx:OrchestrationTimelineGroupItem`.
+Role and CLI fields label the group header but do not decide whether command
+events and the later `turn.end` belong to the same visible turn.
 Each turn group can be collapsed from the browser timeline and from public
 orchestration shares. Historical completed turns may default to collapsed in
 long transcripts, while the latest turn, active commands, failed turns, and
@@ -171,9 +179,12 @@ when Hub has one, so attached file paths match the CLI execution directory
 across follow-up prompts and Bridge reconnects.
 Successful turn-end events carry the final turn content so the UI can show the
 CLI answer after command events instead of visually ending on the last
-`command.end` card. Bridge does not append proof-specific acceptance summaries
-or final verifier conclusions; if a CLI response is sparse, the browser still
-shows the recorded command events and relay terminal message.
+`command.end` card. Bridge only emits a successful relay `turn.end` after the
+CLI has supplied a final conclusion or handoff summary; progress-only text such
+as "next I will..." is retried in the same turn first. Bridge does not append
+proof-specific acceptance summaries or final verifier conclusions; if a CLI
+response is sparse, the browser still shows the recorded command events and
+relay terminal message.
 The browser event stream is only kept open for active runs. Completed, failed,
 or canceled runs are read from persisted Hub events and show the stream as idle,
 so the stream indicator cannot be confused with the selected worker's online
@@ -201,8 +212,9 @@ state.
     render that metadata in the timeline and selected-run side panel.
 12. Include typed command metadata in Bridge-emitted command events and show
     active runtime or completed duration in the frontend timeline.
-13. Mark active orchestration runs failed with a visible `run.error` event when
-    their Bridge connection disconnects or restarts.
+13. Mark active orchestration runs failed when their Bridge connection
+    disconnects or restarts, and close the latest unended visible turn with an
+    error-severity `turn.end` before the visible `run.error`.
 14. Preserve run-level file metadata across follow-up prompts and merge new
     follow-up uploads without duplicating existing file entries.
 15. Emit successful `turn.end` content and render contentful turn-end events as
@@ -259,7 +271,8 @@ state.
 - Uploaded files appear beside the user message that submitted them, and prior
   selected-run files remain visible in the side panel after send.
 - Active orchestration runs do not remain permanently `running` after their
-  Bridge disconnects or restarts.
+  Bridge disconnects or restarts, and the latest visible turn is not left
+  without a terminal `turn.end`.
 - Canceling an active orchestration kills the CLI process tree and eventually
   persists `run.cancelled`.
 - A direct Codex turn that has completed its command events but stops emitting
@@ -277,6 +290,9 @@ state.
   output emits visible retry notices, exhausts after three continuation
   attempts, skips native post-turn compaction, and the run proceeds to the next
   turn without a `run.error`.
+- A relay turn that returns only progress text without a final conclusion or
+  handoff summary is treated the same way: Bridge retries the same visible turn
+  before warning and advancing to the next scheduled turn.
 - A relay turn that completes during a continuation remains the same visible
   turn and emits a successful `turn.end` / `run.end` instead of starting a new
   run.

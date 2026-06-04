@@ -850,6 +850,64 @@ func TestOrchestrationFailedCommandTailContinuesAfterRetryBudget(t *testing.T) {
 	}
 }
 
+func TestOrchestrationProgressOnlyTurnRequiresFinalConclusion(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	codexProgress := "我会继续补 balanced-count 不变式，下一步先拆旧前缀和最后一个新 call。"
+	claudeFinal := "最终结论：已接续处理缺少收尾的 Codex 轮次。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=orchestration continuation; next=none; risks=none"
+	if err := os.WriteFile(codexPath, []byte(fakeCodexExecScript(codexProgress)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claudePath, []byte(fakeClaudePrintScript(claudeFinal)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+	defer manager.CloseAll()
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:                   "orc_progress_only_tail",
+		Mode:                    "collaboration",
+		FirstCLI:                "codex",
+		Prompt:                  "continue proof",
+		MaxTurns:                2,
+		CWD:                     tmp,
+		NativeContextCompaction: protocol.NativeContextCompactionAfterTurn,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "codex", "Bridge is continuing this same turn (1/3)") {
+		t.Fatalf("missing continuation retry notice for progress-only output: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "turn.delta", "codex", "final conclusion or handoff summary after 3 continuation attempts") {
+		t.Fatalf("missing retry exhaustion notice for progress-only output: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "turn.start", "claude", "Starting Claude") {
+		t.Fatalf("orchestration did not move to the next turn after retry exhaustion: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "run.end", "", "已接续处理缺少收尾的 Codex 轮次") {
+		t.Fatalf("orchestration did not complete after next turn: %#v", events)
+	}
+	for _, event := range events {
+		if event.Kind == "turn.end" && event.CLI == "codex" && event.Status == "success" {
+			t.Fatalf("progress-only Codex turn should not be marked success: %#v", event)
+		}
+		if event.BridgeNoteData != nil && event.BridgeNoteData.Category == "native-context-compaction" {
+			t.Fatalf("progress-only Codex turn should not trigger native compaction: %#v", event)
+		}
+	}
+}
+
 func TestOrchestrationInterruptedTurnContinuationCanCompleteSameTurn(t *testing.T) {
 	tmp := t.TempDir()
 	claudePath := filepath.Join(tmp, "claude")
@@ -1196,7 +1254,7 @@ func TestOrchestrationCodexEmptyTailErrorAfterVisibleOutputCompletesSilently(t *
 	tmp := t.TempDir()
 	codexPath := filepath.Join(tmp, "codex")
 	claudePath := filepath.Join(tmp, "claude")
-	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerEmptyErrorScript()), 0o755); err != nil {
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerEmptyErrorWithFinalConclusionScript()), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	claudeText := "Claude continued after Codex visible output\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=claude continued; next=none; risks=none"
@@ -1296,16 +1354,14 @@ func TestLongCommandObserverWritesToSameClaudeStreamAndEmitsBridgeNote(t *testin
 	if got := stdin.String(); !strings.Contains(got, "Codex Bridge observer note") || !strings.Contains(got, "python -m slow_build --workspace demo") {
 		t.Fatalf("nudge was not written to Claude stream: %s", got)
 	}
-	events := drainOrchestrationEvents(t, out)
-	if !orchestrationEventsContain(events, "turn.delta", "claude", "Bridge sent a long-command observer note") {
+	event, ok := waitForOrchestrationEventPayload(t, out, "turn.delta", "claude", "Bridge sent a long-command observer note")
+	if !ok {
 		t.Fatal("frontend-visible observer event was not emitted")
 	}
-	for _, event := range events {
-		if event.Kind == "turn.delta" && event.Source == "bridge" && event.BridgeNoteData != nil && event.BridgeNoteData.InjectedText != "" {
-			return
-		}
+	if event.Source == "bridge" && event.BridgeNoteData != nil && event.BridgeNoteData.InjectedText != "" {
+		return
 	}
-	t.Fatalf("observer event did not carry structured injected text: %#v", events)
+	t.Fatalf("observer event did not carry structured injected text: %#v", event)
 }
 
 func TestClaudeStreamFailedToolWithoutFollowupFails(t *testing.T) {
@@ -2266,6 +2322,11 @@ func stringMapValue(data map[string]any, key string) string {
 }
 
 func waitForOrchestrationEvent(t *testing.T, out <-chan protocol.Envelope, kind, cli, content string) bool {
+	_, ok := waitForOrchestrationEventPayload(t, out, kind, cli, content)
+	return ok
+}
+
+func waitForOrchestrationEventPayload(t *testing.T, out <-chan protocol.Envelope, kind, cli, content string) (protocol.OrchestrationEventPayload, bool) {
 	t.Helper()
 	deadline := time.After(time.Second)
 	for {
@@ -2279,10 +2340,10 @@ func waitForOrchestrationEvent(t *testing.T, out <-chan protocol.Envelope, kind,
 				t.Fatal(err)
 			}
 			if orchestrationEventsContain([]protocol.OrchestrationEventPayload{event}, kind, cli, content) {
-				return true
+				return event, true
 			}
 		case <-deadline:
-			return false
+			return protocol.OrchestrationEventPayload{}, false
 		}
 	}
 }
@@ -2415,6 +2476,47 @@ print(json.dumps({"type":"result","result":text}), flush=True)
 `
 }
 
+func fakeCodexAppServerEmptyErrorWithFinalConclusionScript() string {
+	text := strings.Join([]string{
+		"rewrite Habs direction was wrong",
+		"",
+		"最终结论：已完成可见修正，尾部 app-server 空错误不应覆盖这个结论。",
+		"",
+		"Msg: to=reviewer; intent=review; need=continue",
+		"Handoff: status=needs_next; changed=none; verified=codex visible output; next=continue; risks=none",
+	}, "\n")
+	raw, _ := json.Marshal(text)
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+text = ` + string(raw) + `
+
+def emit(obj):
+    print(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": "thr_empty_error_final"}}})
+    elif method == "thread/resume":
+        emit({"id": msg["id"], "result": {"thread": {"id": params.get("threadId") or "thr_empty_error_final"}}})
+    elif method == "thread/name/set":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
+    elif method == "turn/start":
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_1", "status": "inProgress"}}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": params.get("threadId") or "thr_empty_error_final", "turnId": "turn_1", "delta": text}})
+        emit({"method": "error", "params": {"message": ""}})
+        sys.exit(0)
+`
+}
+
 func fakeClaudeInterruptedThenFinalScript() string {
 	return `#!/usr/bin/env python3
 import json
@@ -2432,7 +2534,7 @@ if count == 0:
         raise SystemExit(0)
     print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
     raise SystemExit(0)
-text = "Claude completed after continuation"
+text = "最终结论：Claude completed after continuation\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=continuation; next=none; risks=none"
 for line in sys.stdin:
     json.loads(line)
     print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)

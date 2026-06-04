@@ -182,6 +182,7 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{
 		RunID:   orchestration.ID,
 		Kind:    "turn.delta",
+		TurnID:  "turn-1",
 		Role:    "implementer",
 		CLI:     "claude",
 		Content: "已创建可见项目目录并定位 ROOT 的 HWQ-U 布局。",
@@ -206,13 +207,23 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(orchestrationEvents) != 2 || orchestrationEvents[1].Kind != "run.error" || orchestrationEvents[1].Error != "offline orchestration" {
+	if len(orchestrationEvents) != 3 ||
+		orchestrationEvents[1].Kind != "turn.end" ||
+		orchestrationEvents[1].TurnID != "turn-1" ||
+		orchestrationEvents[1].Status != "error" ||
+		orchestrationEvents[1].Severity != "error" ||
+		orchestrationEvents[1].Error != "offline orchestration" ||
+		orchestrationEvents[2].Kind != "run.error" ||
+		orchestrationEvents[2].Error != "offline orchestration" {
 		t.Fatalf("offline orchestration events = %#v", orchestrationEvents)
 	}
-	if !strings.Contains(orchestrationEvents[1].Content, "Bridge 连接") ||
-		!strings.Contains(orchestrationEvents[1].Content, "不是证明任务已经通过或失败的验收结论") ||
-		!strings.Contains(orchestrationEvents[1].Content, "已创建可见项目目录") {
-		t.Fatalf("offline orchestration run.error content missing diagnostic context: %q", orchestrationEvents[1].Content)
+	if !strings.Contains(orchestrationEvents[1].Content, "本轮因 Bridge 连接") {
+		t.Fatalf("offline orchestration turn.end content missing disconnect context: %q", orchestrationEvents[1].Content)
+	}
+	if !strings.Contains(orchestrationEvents[2].Content, "Bridge 连接") ||
+		!strings.Contains(orchestrationEvents[2].Content, "不是证明任务已经通过或失败的验收结论") ||
+		!strings.Contains(orchestrationEvents[2].Content, "已创建可见项目目录") {
+		t.Fatalf("offline orchestration run.error content missing diagnostic context: %q", orchestrationEvents[2].Content)
 	}
 	if err := st.DeleteAgent(ctx, agent.ID); err != nil {
 		t.Fatal(err)

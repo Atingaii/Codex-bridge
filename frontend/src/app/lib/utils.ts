@@ -312,6 +312,7 @@ export function orchestrationTimelineGroups(
   const terminalRun = terminalOrchestrationStatus(run?.status);
   const activeRun = activeOrchestrationStatus(run?.status);
   const completeTurnKeys = completedOrchestrationTurnGroupKeys(events, run?.id);
+  const terminalClosedTurnKeys = terminalClosedOrchestrationTurnGroupKeys(events, run?.id);
 
   const ensureTurnGroup = (item: OrchestrationTimelineItem, meta: { runId?: string; turnId?: string; role?: string; cli?: string }) => {
     const key = orchestrationTimelineTurnGroupKey(meta);
@@ -340,6 +341,9 @@ export function orchestrationTimelineGroups(
       };
       turnGroups.set(key, group);
       groups.push(group);
+    } else {
+      group.role = group.role || meta.role;
+      group.cli = group.cli || meta.cli;
     }
     return group;
   };
@@ -360,7 +364,9 @@ export function orchestrationTimelineGroups(
     const lastItem = group.items[group.items.length - 1];
     const lastEvent = lastItem?.type === 'event' ? lastItem.event : undefined;
     const activeCommand = group.items.some((item) => item.type === 'event' && timelineEventIsActiveCommand(item.event));
-    group.complete = group.complete || completeTurnKeys.has(group.key);
+    const closedByTerminalRun = terminalClosedTurnKeys.has(group.key);
+    group.complete = group.complete || completeTurnKeys.has(group.key) || closedByTerminalRun;
+    if (closedByTerminalRun) group.hasError = true;
     group.active = activeCommand || (activeRun && Boolean(lastEvent && !group.complete && lastEvent.kind !== 'turn.end'));
     group.incomplete = terminalRun && !group.complete && group.items.length > 0;
     group.createdAt = group.items.reduce<number | undefined>((best, item) => {
@@ -374,8 +380,8 @@ export function orchestrationTimelineGroups(
   return groups.sort(compareOrchestrationTimelineGroups);
 }
 
-function orchestrationTimelineTurnGroupKey(meta: { runId?: string; turnId?: string; role?: string; cli?: string }) {
-  return `turn:${meta.runId || ''}:${meta.turnId || ''}:${meta.role || ''}:${meta.cli || ''}`;
+function orchestrationTimelineTurnGroupKey(meta: { runId?: string; turnId?: string }) {
+  return `turn:${meta.runId || ''}:${meta.turnId || ''}`;
 }
 
 function completedOrchestrationTurnGroupKeys(events: OrchestrationEvent[], runId?: string) {
@@ -383,13 +389,27 @@ function completedOrchestrationTurnGroupKeys(events: OrchestrationEvent[], runId
   events.forEach((event) => {
     if (event.kind !== 'turn.end' || !event.turnId) return;
     if (runId && event.runId !== runId) return;
-    keys.add(orchestrationTimelineTurnGroupKey({
-      runId: event.runId,
-      turnId: event.turnId,
-      role: event.role,
-      cli: event.cli,
-    }));
+    keys.add(orchestrationTimelineTurnGroupKey({ runId: event.runId, turnId: event.turnId }));
   });
+  return keys;
+}
+
+function terminalClosedOrchestrationTurnGroupKeys(events: OrchestrationEvent[], runId?: string) {
+  const keys = new Set<string>();
+  const completed = completedOrchestrationTurnGroupKeys(events, runId);
+  let latestTurn: { runId?: string; turnId?: string } | null = null;
+  events
+    .filter((event) => !runId || event.runId === runId)
+    .slice()
+    .sort(compareOrchestrationEvents)
+    .forEach((event) => {
+      if (event.turnId) {
+        latestTurn = { runId: event.runId, turnId: event.turnId };
+      }
+      if ((event.kind !== 'run.error' && event.kind !== 'run.cancelled') || !latestTurn?.turnId) return;
+      const key = orchestrationTimelineTurnGroupKey(latestTurn);
+      if (!completed.has(key)) keys.add(key);
+    });
   return keys;
 }
 

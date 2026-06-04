@@ -2027,7 +2027,7 @@ func TestCleanOrchestrationTurnContentTrimsRepeatedProgressBeforeConclusion(t *t
 		"我先只核对已报告变更的 ROOT 和 Termination.thy。",
 		"我会只核对最终产物和验证记录，不做新的大范围证明工作。",
 		"结论：上述内容不是完整、正确的终止性证明，只能算是一个可编译的证明框架。",
-	}, "")
+	}, "\n")
 	cleaned := cleanOrchestrationTurnContent(content)
 	if !strings.HasPrefix(cleaned, "结论：上述内容") {
 		t.Fatalf("cleaned content kept progress prefix:\n%s", cleaned)
@@ -2066,8 +2066,23 @@ func TestExtractHandoffSummaryFindsTrailingSection(t *testing.T) {
 			want:    "定理已证明，go build 通过。",
 		},
 		{
+			name:    "markdown conclusion heading",
+			content: "前面是执行过程。\n\n## 最终结论\n定理已证明，go build 通过。",
+			want:    "定理已证明，go build 通过。",
+		},
+		{
+			name:    "machine handoff label",
+			content: "Msg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=parser; verified=go test ./...; next=none; risks=none",
+			want:    "status=resolved; changed=parser; verified=go test ./...; next=none; risks=none",
+		},
+		{
 			name:    "none",
 			content: "just some prose without any summary marker.",
+			want:    "",
+		},
+		{
+			name:    "inline marker mention",
+			content: "我检查了文件。sed 后段没有输出，说明文件比交接摘要里的行号更短。随后立即跑 coqc。",
 			want:    "",
 		},
 	}
@@ -2075,6 +2090,32 @@ func TestExtractHandoffSummaryFindsTrailingSection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := extractHandoffSummary(tc.content); got != tc.want {
 				t.Fatalf("extractHandoffSummary = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOrchestrationTurnFinalConclusionRequiresAnchoredMarker(t *testing.T) {
+	progressOnly := "我检查了文件。sed 后段没有输出，说明文件比交接摘要里的行号更短。随后立即跑 coqc。"
+	record := newOrchestrationTurnRecord("turn_inline", "reviewer", "codex", progressOnly, nil)
+	if record.Handoff != "" {
+		t.Fatalf("inline marker mention produced handoff %q", record.Handoff)
+	}
+	if orchestrationTurnHasFinalConclusion(record) {
+		t.Fatalf("inline marker mention should not be treated as final conclusion")
+	}
+
+	for _, content := range []string{
+		"完成了修复。\n\n交接总结：已修复并通过 go test ./...，下一步无需处理。",
+		"完成了修复。\n\n## 最终结论\n已修复并通过 go test ./...。",
+		"结论：仍有阻塞，需要继续处理。",
+		"Msg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=go test ./...; next=none; risks=none",
+		"Final conclusion\nThe issue is resolved and tests pass.",
+	} {
+		t.Run(content, func(t *testing.T) {
+			record := newOrchestrationTurnRecord("turn_final", "reviewer", "codex", content, nil)
+			if !orchestrationTurnHasFinalConclusion(record) {
+				t.Fatalf("anchored marker was not treated as final conclusion: %#v", record)
 			}
 		})
 	}

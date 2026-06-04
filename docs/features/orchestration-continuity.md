@@ -62,7 +62,9 @@ context in the same `runID`.
   complete only when the visible reply contains a final conclusion or handoff
   summary such as `最终结论`, `最终测试结果`, `交接总结`, or `Handoff:`. If the CLI
   returns no text, Bridge reports that absence rather than adding an independent
-  proof assessment.
+  proof assessment. Bridge matches those completion markers only as anchored
+  section headings or labels, so body text that merely mentions a phrase such as
+  `交接摘要` does not trigger native context compaction.
 - If a relay CLI turn has produced command events, partial visible text, or
   progress-only text but exits before a final conclusion or handoff summary,
   Bridge treats it as an interrupted turn rather than an immediate success. It

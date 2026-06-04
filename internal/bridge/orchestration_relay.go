@@ -6,6 +6,7 @@ import (
 	"github.com/tencent/codex-bridge/internal/bridge/profiles/registry"
 	"github.com/tencent/codex-bridge/internal/protocol"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -291,7 +292,7 @@ func orchestrationTurnHasFinalConclusion(record orchestrationTurn) bool {
 	if strings.TrimSpace(record.Handoff) != "" {
 		return true
 	}
-	if lastMarkerIndexFold(content, finalConclusionMarkers()) >= 0 {
+	if _, ok := lastAnchoredMarkerMatch(content, finalConclusionMarkers()); ok {
 		return true
 	}
 	return false
@@ -309,26 +310,15 @@ func scrubOrchestrationTurnContent(content string) string {
 }
 
 func conclusionTrimIndex(content string) int {
-	if idx := lastMarkerIndexFold(content, finalConclusionMarkers()); idx >= 0 && shouldTrimConclusionPrefix(content[:idx]) {
-		return idx
+	if match, ok := lastAnchoredMarkerMatch(content, finalConclusionMarkers()); ok && shouldTrimConclusionPrefix(content[:match.markerStart]) {
+		return match.markerStart
 	}
-	if idx := lastMarkerIndexFold(content, []string{
+	if match, ok := lastAnchoredMarkerMatch(content, []string{
 		"审查结论", "本轮结论", "结论：", "结论:", "conclusion:", "summary:",
-	}); idx >= 0 && shouldTrimConclusionPrefix(content[:idx]) {
-		return idx
+	}); ok && shouldTrimConclusionPrefix(content[:match.markerStart]) {
+		return match.markerStart
 	}
 	return -1
-}
-
-func lastMarkerIndexFold(content string, markers []string) int {
-	lower := strings.ToLower(content)
-	best := -1
-	for _, marker := range markers {
-		if idx := strings.LastIndex(lower, strings.ToLower(marker)); idx > best {
-			best = idx
-		}
-	}
-	return best
 }
 
 func shouldTrimConclusionPrefix(prefix string) bool {
@@ -540,26 +530,148 @@ func finalConclusionMarkers() []string {
 	}
 }
 
-func extractHandoffSummary(content string) string {
-	idx := lastMarkerIndexFold(content, handoffSummaryMarkers())
-	if idx < 0 {
-		return ""
-	}
-	rest := content[idx:]
-	for _, marker := range handoffSummaryMarkers() {
-		if len(rest) >= len(marker) && strings.EqualFold(rest[:len(marker)], marker) {
-			rest = rest[len(marker):]
+type anchoredMarkerMatch struct {
+	sectionStart int
+	markerStart  int
+	markerEnd    int
+	payloadStart int
+}
+
+func lastAnchoredMarkerMatch(content string, markers []string) (anchoredMarkerMatch, bool) {
+	var best anchoredMarkerMatch
+	found := false
+	for lineStart := 0; lineStart <= len(content); {
+		lineEnd := len(content)
+		nextLineStart := len(content) + 1
+		if newline := strings.IndexByte(content[lineStart:], '\n'); newline >= 0 {
+			lineEnd = lineStart + newline
+			nextLineStart = lineEnd + 1
+		}
+		line := content[lineStart:lineEnd]
+		if strings.HasSuffix(line, "\r") {
+			line = line[:len(line)-1]
+		}
+		if markerOffset, markerLen, ok := anchoredMarkerInLine(line, markers); ok {
+			match := anchoredMarkerMatch{
+				sectionStart: lineStart,
+				markerStart:  lineStart + markerOffset,
+				markerEnd:    lineStart + markerOffset + markerLen,
+			}
+			match.payloadStart = markerPayloadStart(content, match.markerEnd)
+			if !found || match.sectionStart > best.sectionStart || (match.sectionStart == best.sectionStart && match.markerEnd > best.markerEnd) {
+				best = match
+				found = true
+			}
+		}
+		if nextLineStart > len(content) {
 			break
 		}
+		lineStart = nextLineStart
 	}
-	rest = strings.TrimLeft(rest, "：: \t\r\n")
-	return strings.TrimSpace(rest)
+	return best, found
+}
+
+func anchoredMarkerInLine(line string, markers []string) (int, int, bool) {
+	offset := anchoredMarkerCandidateOffset(line)
+	candidate := line[offset:]
+	bestLen := 0
+	for _, marker := range markers {
+		normalized := normalizedConclusionMarker(marker)
+		if normalized == "" || len(candidate) < len(normalized) {
+			continue
+		}
+		if !strings.EqualFold(candidate[:len(normalized)], normalized) {
+			continue
+		}
+		if !anchoredMarkerBoundary(candidate[len(normalized):]) {
+			continue
+		}
+		if len(normalized) > bestLen {
+			bestLen = len(normalized)
+		}
+	}
+	if bestLen == 0 {
+		return 0, 0, false
+	}
+	return offset, bestLen, true
+}
+
+func anchoredMarkerCandidateOffset(line string) int {
+	i := 0
+	for i < len(line) {
+		next := skipASCIISpace(line, i)
+		if next != i {
+			i = next
+			continue
+		}
+		switch line[i] {
+		case '#':
+			for i < len(line) && line[i] == '#' {
+				i++
+			}
+		case '-':
+			i++
+		case '*':
+			for i < len(line) && line[i] == '*' {
+				i++
+			}
+		default:
+			return i
+		}
+		i = skipASCIISpace(line, i)
+	}
+	return i
+}
+
+func skipASCIISpace(value string, start int) int {
+	for start < len(value) {
+		switch value[start] {
+		case ' ', '\t':
+			start++
+		default:
+			return start
+		}
+	}
+	return start
+}
+
+func normalizedConclusionMarker(marker string) string {
+	return strings.TrimRight(strings.TrimSpace(marker), "：:")
+}
+
+func anchoredMarkerBoundary(rest string) bool {
+	rest = strings.TrimLeft(rest, "*")
+	if rest == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(rest)
+	return r == ':' || r == '：' || unicode.IsSpace(r)
+}
+
+func markerPayloadStart(content string, start int) int {
+	for start < len(content) {
+		r, size := utf8.DecodeRuneInString(content[start:])
+		if r == ':' || r == '：' || r == '*' || unicode.IsSpace(r) {
+			start += size
+			continue
+		}
+		break
+	}
+	return start
+}
+
+func extractHandoffSummary(content string) string {
+	match, ok := lastAnchoredMarkerMatch(content, handoffSummaryMarkers())
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(content[match.payloadStart:])
 }
 
 func contentWithoutHandoffSummary(content string) string {
-	idx := lastMarkerIndexFold(content, handoffSummaryMarkers())
-	if idx < 0 {
+	match, ok := lastAnchoredMarkerMatch(content, handoffSummaryMarkers())
+	if !ok {
 		return content
 	}
-	return strings.TrimSpace(content[:idx])
+	return strings.TrimSpace(content[:match.sectionStart])
 }

@@ -908,6 +908,68 @@ func TestOrchestrationProgressOnlyTurnRequiresFinalConclusion(t *testing.T) {
 	}
 }
 
+// TestOrchestrationInlineMarkerMentionDoesNotEndTurn is the end-to-end regression
+// guard for the anchored-marker fix. The Codex output mentions "交接摘要" inline as
+// part of normal reasoning ("…比交接摘要里的行号更短…") without ever writing a real
+// 交接总结/最终结论 section. Before the fix, the naive full-text substring match
+// treated that mention as a finished handoff, so the turn was marked success and
+// immediately /compact-ed mid-work. With anchored detection the turn must instead be
+// continued, and must NOT trigger native context compaction.
+func TestOrchestrationInlineMarkerMentionDoesNotEndTurn(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	codexInlineMention := "我检查了文件。sed 后段没有输出，说明文件比交接摘要里的行号更短。随后立即跑 coqc。"
+	claudeFinal := "最终结论：已接续处理缺少收尾的 Codex 轮次。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=orchestration continuation; next=none; risks=none"
+	if err := os.WriteFile(codexPath, []byte(fakeCodexExecScript(codexInlineMention)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claudePath, []byte(fakeClaudePrintScript(claudeFinal)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+	defer manager.CloseAll()
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:                   "orc_inline_marker_mention",
+		Mode:                    "collaboration",
+		FirstCLI:                "codex",
+		Prompt:                  "continue proof",
+		MaxTurns:                2,
+		CWD:                     tmp,
+		NativeContextCompaction: protocol.NativeContextCompactionAfterTurn,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "codex", "Bridge is continuing this same turn (1/3)") {
+		t.Fatalf("inline marker mention should be continued, not treated as a finished handoff: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "turn.start", "claude", "Starting Claude") {
+		t.Fatalf("orchestration did not move to the next turn after exhausting continuations: %#v", events)
+	}
+	if !orchestrationEventsContain(events, "run.end", "", "已接续处理缺少收尾的 Codex 轮次") {
+		t.Fatalf("orchestration did not complete after next turn: %#v", events)
+	}
+	for _, event := range events {
+		if event.Kind == "turn.end" && event.CLI == "codex" && event.Status == "success" {
+			t.Fatalf("inline marker mention must not mark the Codex turn success: %#v", event)
+		}
+		if event.BridgeNoteData != nil && event.BridgeNoteData.Category == "native-context-compaction" {
+			t.Fatalf("inline marker mention must not trigger native compaction: %#v", event)
+		}
+	}
+}
+
 func TestOrchestrationInterruptedTurnContinuationCanCompleteSameTurn(t *testing.T) {
 	tmp := t.TempDir()
 	claudePath := filepath.Join(tmp, "claude")

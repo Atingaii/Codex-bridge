@@ -37,6 +37,7 @@ type publicOrchestrationRunResponse struct {
 	ID                      string                    `json:"id"`
 	Title                   string                    `json:"title"`
 	Mode                    string                    `json:"mode"`
+	WorkerPair              string                    `json:"workerPair,omitempty"`
 	FirstCLI                string                    `json:"firstCli,omitempty"`
 	Profile                 string                    `json:"profile,omitempty"`
 	NativeContextCompaction string                    `json:"nativeContextCompaction,omitempty"`
@@ -214,6 +215,7 @@ func publicOrchestrationRun(run store.OrchestrationRun) publicOrchestrationRunRe
 		ID:                      run.ID,
 		Title:                   run.Title,
 		Mode:                    run.Mode,
+		WorkerPair:              run.WorkerPair,
 		FirstCLI:                run.FirstCLI,
 		Profile:                 run.Profile,
 		NativeContextCompaction: run.NativeContextCompaction,
@@ -263,7 +265,7 @@ func publicOrchestrationEvents(events []store.OrchestrationEvent) []publicOrches
 			CommandData:   publicCommandData(event.CommandData),
 			RunStartData:  publicRunStartData(event.RunStartData),
 			TurnStartData: publicTurnStartData(event.TurnStartData),
-			RunEndData:    event.RunEndData,
+			RunEndData:    publicRunEndData(event.RunEndData),
 			RunConclusion: event.RunConclusion,
 			Data:          publicOrchestrationEventData(event.Data),
 			CreatedAt:     event.CreatedAt,
@@ -273,6 +275,11 @@ func publicOrchestrationEvents(events []store.OrchestrationEvent) []publicOrches
 }
 
 func publicOrchestrationEventHidden(event store.OrchestrationEvent) bool {
+	// turn.end is lifecycle, not an internal log row: failed turns carry
+	// severity "error" but the public timeline still needs the turn closed.
+	if event.Kind == "turn.end" {
+		return false
+	}
 	if event.Severity != "" {
 		return true
 	}
@@ -309,7 +316,19 @@ func publicRunStartData(data *protocol.RunStartData) *protocol.RunStartData {
 		return nil
 	}
 	copy := *data
+	copy.CWD = ""
 	return &copy
+}
+
+// publicRunEndData keeps only the worker pair. Native resume commands, thread
+// and session ids, transcript paths, and the run cwd describe the Bridge
+// host's filesystem and live CLI state — none of that belongs in an anonymous
+// share.
+func publicRunEndData(data *protocol.RunEndData) *protocol.RunEndData {
+	if data == nil {
+		return nil
+	}
+	return &protocol.RunEndData{WorkerPair: data.WorkerPair}
 }
 
 func publicTurnStartData(data *protocol.TurnStartData) *protocol.TurnStartData {

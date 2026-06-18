@@ -19,6 +19,7 @@ import type {
   PublicOrchestrationRun,
   Session,
   UploadAttachment,
+  WorkerPair,
 } from './types';
 
 export function cn(...inputs: ClassValue[]) {
@@ -1111,13 +1112,18 @@ export function orchestrationCapability(agent: Agent | null | undefined, cli: 'c
   return agent?.capabilities?.orchestration?.[cli];
 }
 
-export function orchestrationCapabilityProblems(agent: Agent | null | undefined, t: UIText) {
+export function normalizeOrchestrationWorkerPair(value?: string): WorkerPair {
+  return value === 'codex-codex' ? 'codex-codex' : 'claude-codex';
+}
+
+export function orchestrationCapabilityProblems(agent: Agent | null | undefined, t: UIText, workerPair: WorkerPair = 'claude-codex') {
   if (!agent) return [t.noBridgeConnected];
   if (!agent.online) return [t.agentOffline];
   if (orchestrationApprovalMode(agent) !== 'review-required') return [];
   const problems: string[] = [];
-  if (!orchestrationCapability(agent, 'claude')?.browserApproval) problems.push(t.claudeOrchestrationApprovalMissing);
-  if (!orchestrationCapability(agent, 'codex')?.browserApproval) problems.push(t.codexOrchestrationApprovalMissing);
+  const required = normalizeOrchestrationWorkerPair(workerPair) === 'codex-codex' ? ['codex'] : ['claude', 'codex'];
+  if (required.includes('claude') && !orchestrationCapability(agent, 'claude')?.browserApproval) problems.push(t.claudeOrchestrationApprovalMissing);
+  if (required.includes('codex') && !orchestrationCapability(agent, 'codex')?.browserApproval) problems.push(t.codexOrchestrationApprovalMissing);
   return problems;
 }
 

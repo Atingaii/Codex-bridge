@@ -56,19 +56,24 @@ Codex CLI / Claude CLI
 ```
 
 The Bridge keeps orchestration deterministic while preserving native CLI
-continuity. For each active orchestration run, Bridge keeps one long-lived
-Codex app-server thread and one long-lived Claude Code stream-json session,
-then sends later turns for the same run back into those native conversations.
-Direct orchestration is a pass-through relay: the run's persisted `first_cli`
-selection decides whether Claude or Codex receives the browser task first,
-Bridge streams CLI deltas, typed command events, and terminal status to the
-browser, and the next CLI receives the previous CLI's visible result plus
-useful command context. Bridge persists the Codex thread id and stable Claude
+continuity. Each run persists a narrow `worker_pair`: `claude-codex` keeps the
+default Claude Code + Codex relay, while `codex-codex` runs two Codex
+participants in separate worker slots. For Claude + Codex runs, Bridge keeps
+one long-lived Codex app-server thread and one long-lived Claude Code
+stream-json session. For Codex + Codex runs, Bridge keeps independent
+`codex-a` and `codex-b` app-server threads so each participant has distinct
+native context. Direct orchestration is a pass-through relay: the run's
+persisted `worker_pair` and `first_cli` settings decide which worker receives
+the browser task first, Bridge streams CLI deltas, typed command events, and
+terminal status to the browser, and the next worker receives the previous
+worker's visible result plus useful command context. Bridge persists the legacy
+Codex thread id, the `codex_thread_ids_json` slot map, and the stable Claude
 session id so follow-up prompts can resume native history after a Bridge
 restart where the CLI supports it. Run-end data also carries direct native
-resume metadata for both CLIs: Codex exposes `codex resume <thread-id>`, and
-Claude exposes `claude --resume <session-id>` plus the project transcript path
-under `~/.claude/projects/<encoded-cwd>/`. After successful Claude turns,
+resume metadata for the participating CLIs: Codex exposes
+`codex resume <thread-id>` for each persisted Codex slot, and Claude exposes
+`claude --resume <session-id>` plus the project transcript path under
+`~/.claude/projects/<encoded-cwd>/`. After successful Claude turns,
 Bridge updates only the current cwd entry in `~/.claude.json` so native Claude
 project metadata points at the Bridge session without touching unrelated
 projects, and materializes the same Claude-written transcript so Claude Code's
@@ -149,9 +154,12 @@ share records for chat sessions or orchestration runs; anonymous viewers fetch
 sanitized persisted transcripts through `GET /api/public/shares/<share>`. The
 Bridge is not contacted for public reads, and the frontend `/share/<share>`
 route renders before login bootstrap. Orchestration share sanitization in
-`internal/hub/share.go:publicOrchestrationEvents` drops severity events,
-internal Bridge notes, and `TurnStartData.PromptText`, while preserving public
-run lifecycle and structured conclusion events.
+`internal/hub/share.go:publicOrchestrationEvents` drops severity events (except
+`turn.end`, whose lifecycle status stays public so failed turns close visibly),
+internal Bridge notes, `TurnStartData.PromptText`, `RunStartData.CWD`, and all
+of `RunEndData` except the worker pair — native resume commands, thread and
+session ids, transcript paths, and the run cwd never reach anonymous viewers —
+while preserving public run lifecycle and structured conclusion events.
 
 ## Decisions
 
@@ -208,7 +216,7 @@ Chat continuity:
    before `hub.browser_lease_ttl` expires calls
    `internal/hub/browser_lease.go:tryReattach`, sends the existing
    `open_session` frame again, and lets
-   `internal/bridge/session.go:SessionManager.Open` rebind the browser output
+   `internal/bridge/session.go:Open` rebind the browser output
    channel to the existing Bridge-side session. TTL expiry sends
    `close_session`; explicit session deletion still closes immediately.
    Setting `hub.browser_close_session: true` opts back into the legacy
@@ -219,12 +227,13 @@ Orchestration continuity:
 1. New tasks create an `orchestration_runs` row.
 2. Follow-up tasks call `/api/orchestrations/{runID}/prompts` and stay on the
    run's original `agentId`; switching CLI endpoint requires an explicit new
-   run. The same persisted `first_cli` value is reused unless the request
-   explicitly changes it.
+   run. The same persisted `worker_pair` and `first_cli` values are reused
+   unless the request explicitly changes them.
 3. Hub compacts prior `orchestration_events` into context.
 4. Hub also restores native CLI state from `orchestration_runs`: the latest
-   Codex thread id, whether Claude reached a successful turn, and the locked
-   absolute run cwd reported by Bridge. The persisted
+   legacy Codex thread id, Codex thread ids by worker slot, whether Claude
+   reached a successful turn, and the locked absolute run cwd reported by
+   Bridge. The persisted
    `native_context_compaction` setting is restored with the same run.
 5. Bridge receives the same `runID` with `Resume=true`, reuses any live
    run-scoped native sessions, can resume Codex and Claude by persisted native
@@ -232,6 +241,15 @@ Orchestration continuity:
    locked run cwd.
 6. The frontend stores the last selected run id locally and restores it on
    `/orchestrate`.
+
+Interrupted-run recovery: a Hub restart loses every in-memory bridge
+connection, so `internal/hub/server.go:recoverInterruptedRuns` runs once at
+startup and settles rows the previous process left behind — non-terminal chat
+`runs` and queued/running `orchestration_runs` become `failed` with a
+restart reason and a `run.error` conclusion event, and `canceling` runs settle
+as `canceled`. Follow-up prompts claim a terminal run back to `running`
+atomically (`store.ClaimOrchestrationRunForContinue`), so two concurrent
+continues cannot double-start the same run on the Bridge.
 
 Chat session isolation:
 
@@ -251,9 +269,10 @@ SQLite tables:
 - `messages`
 - `runs`
 - `enroll_tokens`
-- `orchestration_runs` (including persisted mode, `first_cli`, `profile`, cwd,
-  max turns, status, native CLI continuity state, native context compaction
-  preference, locked runtime cwd, and uploaded file metadata)
+- `orchestration_runs` (including persisted mode, `worker_pair`, `first_cli`,
+  `profile`, cwd, max turns, status, native CLI continuity state,
+  `codex_thread_ids_json`, native context compaction preference, locked runtime
+  cwd, and uploaded file metadata)
 - `orchestration_events` (including `source`, `severity`, lifecycle status,
   and typed event payload JSON)
 - `conversation_shares`

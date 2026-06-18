@@ -32,6 +32,7 @@ import type {
   ShareInfo,
   UploadAttachment,
   UserAccount,
+  WorkerPair,
 } from '../lib/types';
 import type { Language, UIText } from '../lib/i18n';
 import { AgentSelector } from '../components/AgentSelector';
@@ -57,6 +58,7 @@ import {
   isNearBottom,
   mergeOrchestrationEvents,
   mergeOrchestrationFiles,
+  normalizeOrchestrationWorkerPair,
   orchestrationApprovalMode,
   orchestrationCapabilityProblems,
   orchestrationRunFilesFromEvents,
@@ -78,6 +80,8 @@ import {
   visibleOrchestrationEvents,
 } from '../lib/utils';
 
+const orchestrationEventPageSize = 300;
+
 export function OrchestrationWorkspace({
   user,
   onLogout,
@@ -87,6 +91,7 @@ export function OrchestrationWorkspace({
   setLanguage,
   t,
   canOpenMain,
+  path,
   navigate,
 }: {
   user: UserAccount;
@@ -97,15 +102,18 @@ export function OrchestrationWorkspace({
   setLanguage: (value: Language) => void;
   t: UIText;
   canOpenMain: boolean;
-  navigate: (path: string) => void;
+  path: string;
+  navigate: (path: string, options?: { replace?: boolean }) => void;
 }) {
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentsLoaded, setAgentsLoaded] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState(() => localStorage.getItem('codexBridge.selectedAgentId') || '');
   const [runs, setRuns] = useState<OrchestrationRun[]>([]);
   const [activeRunId, setActiveRunId] = useState('');
   const [events, setEvents] = useState<OrchestrationEvent[]>([]);
   const [approvals, setApprovals] = useState<ApprovalItemState[]>([]);
   const [mode, setMode] = useState<'collaboration' | 'debate'>('collaboration');
+  const [workerPair, setWorkerPair] = useState<WorkerPair>('claude-codex');
   const [firstCli, setFirstCli] = useState<'claude' | 'codex'>('claude');
   const [profile, setProfile] = useState<'default' | 'formal-proof'>('default');
   const [nativeContextCompaction, setNativeContextCompaction] = useState<NativeContextCompaction>('off');
@@ -123,6 +131,8 @@ export function OrchestrationWorkspace({
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [collapsedTimelineGroups, setCollapsedTimelineGroups] = useState<Record<string, boolean>>({});
   const [refreshingOrchestration, setRefreshingOrchestration] = useState(false);
+  const [loadingOlderEvents, setLoadingOlderEvents] = useState(false);
+  const [hasOlderEventsByRun, setHasOlderEventsByRun] = useState<Record<string, boolean>>({});
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -136,6 +146,10 @@ export function OrchestrationWorkspace({
   const endRef = useRef<HTMLDivElement | null>(null);
   const collapsedTimelineRunIdRef = useRef('');
   const refreshOrchestrationInFlightRef = useRef<Promise<void> | null>(null);
+  const eventMaxSeqByRunRef = useRef<Record<string, number>>({});
+  const eventMinSeqByRunRef = useRef<Record<string, number>>({});
+  const orchestrationBootedRef = useRef(false);
+  const pathRunId = useMemo(() => orchestrationRunIdFromPath(path), [path]);
 
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
   const onlineAgent = selectedAgent?.online ? selectedAgent : agents.find((agent) => agent.online);
@@ -157,7 +171,8 @@ export function OrchestrationWorkspace({
   const orchestrationStreamStatus = activeRun && isRunning ? connectionStatus : t.idle;
   const continuingRun = Boolean(activeRun && !isRunning);
   const canCancelRun = canCancelOrchestrationStatus(activeRun?.status);
-  const capabilityProblems = useMemo(() => orchestrationCapabilityProblems(selectedAgent, t), [selectedAgent, t]);
+  const hasOlderEvents = Boolean(activeRunId && hasOlderEventsByRun[activeRunId]);
+  const capabilityProblems = useMemo(() => orchestrationCapabilityProblems(selectedAgent, t, workerPair), [selectedAgent, t, workerPair]);
   const workingDirs = useMemo(() => {
     return Array.from(new Set((selectedAgent?.workingDirs || []).map((dir) => dir.trim()).filter(Boolean)));
   }, [selectedAgent]);
@@ -166,6 +181,7 @@ export function OrchestrationWorkspace({
     const data = await api<{ agents: Agent[] }>('/api/agents');
     const nextAgents = data.agents || [];
     setAgents(nextAgents);
+    setAgentsLoaded(true);
     setSelectedAgentId((current) => {
       const next = preferredAgentID(nextAgents, current);
       selectedAgentIdRef.current = next;
@@ -180,6 +196,7 @@ export function OrchestrationWorkspace({
     const data = await api<{ agents: Agent[] }>('/api/agents');
     const nextAgents = data.agents || [];
     setAgents(nextAgents);
+    setAgentsLoaded(true);
     setSelectedAgentId((current) => {
       const next = preferredAgentID(nextAgents, current);
       selectedAgentIdRef.current = next;
@@ -189,10 +206,17 @@ export function OrchestrationWorkspace({
     });
   }, []);
 
-  const loadRuns = useCallback(async () => {
-    const data = await api<{ runs: OrchestrationRun[] }>('/api/orchestrations');
-    setRuns(data.runs || []);
-    return data.runs || [];
+  const loadRuns = useCallback(async (agentId = '') => {
+    const params = new URLSearchParams();
+    params.set('limit', '50');
+    if (agentId) params.set('agentId', agentId);
+    const data = await api<{ runs: OrchestrationRun[] }>(`/api/orchestrations?${params.toString()}`);
+    const incoming = data.runs || [];
+    setRuns((current) => {
+      if (!agentId) return incoming;
+      return mergeOrchestrationRunsPreservingOtherAgents(current, incoming, agentId);
+    });
+    return incoming;
   }, []);
 
   const loadRun = useCallback(async (runId: string) => {
@@ -201,11 +225,41 @@ export function OrchestrationWorkspace({
     return data.run;
   }, []);
 
-  const loadRunEvents = useCallback(async (runId: string, replace = false) => {
-    const data = await api<{ events: OrchestrationEvent[] }>(`/api/orchestrations/${encodeURIComponent(runId)}/events`);
+  const loadRunEvents = useCallback(async (runId: string, replace = false, mode: 'latest' | 'after' | 'before' = 'latest') => {
+    const params = new URLSearchParams();
+    if (mode === 'after') {
+      const afterSeq = eventMaxSeqByRunRef.current[runId] || 0;
+      if (afterSeq > 0) params.set('afterSeq', String(afterSeq));
+      params.set('limit', '1000');
+    } else if (mode === 'before') {
+      const beforeSeq = eventMinSeqByRunRef.current[runId] || 0;
+      if (beforeSeq <= 1) return [];
+      params.set('beforeSeq', String(beforeSeq));
+      params.set('limit', String(orchestrationEventPageSize));
+    } else {
+      params.set('limit', String(orchestrationEventPageSize));
+    }
+    const query = params.toString();
+    const data = await api<{ events: OrchestrationEvent[] }>(`/api/orchestrations/${encodeURIComponent(runId)}/events${query ? `?${query}` : ''}`);
     const incoming = data.events || [];
     if (replace) {
       timelineOrderRef.current = 0;
+    }
+    const nextMaxSeq = maxOrchestrationEventSeq(incoming, replace ? 0 : eventMaxSeqByRunRef.current[runId] || 0);
+    if (replace || nextMaxSeq > 0) {
+      eventMaxSeqByRunRef.current[runId] = nextMaxSeq;
+    }
+    const currentMinSeq = replace ? 0 : eventMinSeqByRunRef.current[runId] || 0;
+    const nextMinSeq = minOrchestrationEventSeq(incoming, currentMinSeq);
+    if (replace) {
+      eventMinSeqByRunRef.current[runId] = nextMinSeq;
+    } else if (nextMinSeq > 0) {
+      eventMinSeqByRunRef.current[runId] = currentMinSeq > 0 ? Math.min(currentMinSeq, nextMinSeq) : nextMinSeq;
+    }
+    if (replace || mode === 'before') {
+      const lowestSeq = eventMinSeqByRunRef.current[runId] || 0;
+      const hasOlder = incoming.length >= orchestrationEventPageSize && lowestSeq > 1;
+      setHasOlderEventsByRun((current) => ({ ...current, [runId]: hasOlder }));
     }
     setEvents((current) => {
       if (activeRunIdRef.current !== runId) return current;
@@ -213,6 +267,27 @@ export function OrchestrationWorkspace({
     });
     return incoming;
   }, []);
+
+  const loadOlderEvents = useCallback(async () => {
+    const runId = activeRunIdRef.current;
+    if (!runId || loadingOlderEvents || !hasOlderEventsByRun[runId]) return;
+    const container = scrollRef.current;
+    const previousScrollHeight = container?.scrollHeight || 0;
+    const previousScrollTop = container?.scrollTop || 0;
+    setLoadingOlderEvents(true);
+    stickToBottomRef.current = false;
+    try {
+      await loadRunEvents(runId, false, 'before');
+      window.requestAnimationFrame(() => {
+        const nextContainer = scrollRef.current;
+        if (!nextContainer || activeRunIdRef.current !== runId) return;
+        const delta = nextContainer.scrollHeight - previousScrollHeight;
+        nextContainer.scrollTop = previousScrollTop + Math.max(0, delta);
+      });
+    } finally {
+      if (activeRunIdRef.current === runId) setLoadingOlderEvents(false);
+    }
+  }, [hasOlderEventsByRun, loadRunEvents, loadingOlderEvents]);
 
   const scrollTimelineToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
     const container = scrollRef.current;
@@ -265,12 +340,19 @@ export function OrchestrationWorkspace({
     setEvents([]);
     setApprovals([]);
     timelineOrderRef.current = 0;
+    setLoadingOlderEvents(false);
     setConnectionStatus(t.idle);
     setShowScrollBottom(false);
-  }, [closeWS, runs, t.idle]);
+    if (window.location.pathname.startsWith('/orchestrate/runs/')) {
+      navigate('/orchestrate', { replace: true });
+    }
+  }, [closeWS, navigate, runs, t.idle]);
 
   const applyEvent = useCallback((event: OrchestrationEvent) => {
     const nextEvent = { ...event, timelineOrder: typeof event.timelineOrder === 'number' ? event.timelineOrder : ++timelineOrderRef.current };
+    if (typeof nextEvent.seq === 'number' && Number.isFinite(nextEvent.seq)) {
+      eventMaxSeqByRunRef.current[nextEvent.runId] = Math.max(eventMaxSeqByRunRef.current[nextEvent.runId] || 0, nextEvent.seq);
+    }
     setEvents((current) => {
       if (activeRunIdRef.current !== nextEvent.runId) return current;
       return mergeOrchestrationEvents(current, [nextEvent]);
@@ -295,7 +377,7 @@ export function OrchestrationWorkspace({
       reconnectAttemptsRef.current = 0;
       setConnectionStatus(t.connected);
       stopHeartbeat = startWSHeartbeat(ws);
-      void loadRunEvents(runId).catch(() => undefined);
+      void loadRunEvents(runId, false, 'after').catch(() => undefined);
     };
     ws.onmessage = (message) => {
       if (wsRef.current !== ws) return;
@@ -330,7 +412,7 @@ export function OrchestrationWorkspace({
       reconnectTimerRef.current = window.setTimeout(() => {
         reconnectTimerRef.current = null;
         if (activeRunIdRef.current !== runId) return;
-        void Promise.all([loadRun(runId), loadRunEvents(runId)])
+        void Promise.all([loadRun(runId), loadRunEvents(runId, false, 'after')])
           .then(([run]) => {
             if (activeRunIdRef.current === runId && activeOrchestrationStatus(run.status)) connectRun(runId);
           })
@@ -341,11 +423,12 @@ export function OrchestrationWorkspace({
     };
   }, [applyEvent, clearReconnect, closeWS, loadRun, loadRunEvents, startWSHeartbeat, t.connected, t.connecting, t.connectionError, t.disconnected]);
 
-  const activateRun = useCallback(async (run: OrchestrationRun) => {
+  const activateRun = useCallback(async (run: OrchestrationRun, options: { syncURL?: boolean; replaceURL?: boolean } = {}) => {
     const runAgentId = run.agentId || selectedAgentIdRef.current;
     timelineOrderRef.current = 0;
     activeRunIdRef.current = run.id;
     setActiveRunId(run.id);
+    setLoadingOlderEvents(false);
     setRuns((current) => upsertOrchestrationRun(current, run));
     localStorage.setItem(activeOrchestrationRunStorageKey, run.id);
     if (runAgentId) {
@@ -357,14 +440,19 @@ export function OrchestrationWorkspace({
     setEvents((current) => current.filter((event) => event.runId === run.id));
     setApprovals((current) => current.filter((item) => item.approval.runId === run.id));
     setMode(run.mode === 'debate' ? 'debate' : 'collaboration');
-    setFirstCli(run.firstCli === 'codex' ? 'codex' : 'claude');
+    const nextWorkerPair = normalizeOrchestrationWorkerPair(run.workerPair);
+    setWorkerPair(nextWorkerPair);
+    setFirstCli(nextWorkerPair === 'codex-codex' || run.firstCli === 'codex' ? 'codex' : 'claude');
     setProfile(run.profile === 'formal-proof' ? 'formal-proof' : 'default');
     setNativeContextCompaction(run.nativeContextCompaction === 'after-turn' ? 'after-turn' : 'off');
     setCwd(run.cwd || '');
     setMaxTurns(run.maxTurns || 4);
     stickToBottomRef.current = true;
     setShowScrollBottom(false);
-    await loadRunEvents(run.id, true);
+    if (options.syncURL !== false) {
+      navigate(orchestrationRunPath(run.id), { replace: options.replaceURL });
+    }
+    await loadRunEvents(run.id, true, 'latest');
     if (activeRunIdRef.current !== run.id) return;
     if (activeOrchestrationStatus(run.status)) {
       connectRun(run.id);
@@ -372,9 +460,9 @@ export function OrchestrationWorkspace({
       closeWS();
       setConnectionStatus(t.idle);
     }
-  }, [closeWS, connectRun, loadRunEvents, t.idle]);
+  }, [closeWS, connectRun, loadRunEvents, navigate, t.idle]);
 
-  const selectRun = useCallback(async (runId: string) => {
+  const selectRun = useCallback(async (runId: string, options: { syncURL?: boolean; replaceURL?: boolean } = {}) => {
     timelineOrderRef.current = 0;
     activeRunIdRef.current = runId;
     setActiveRunId(runId);
@@ -382,7 +470,7 @@ export function OrchestrationWorkspace({
     setApprovals((current) => current.filter((item) => item.approval.runId === runId));
     const run = await loadRun(runId);
     if (activeRunIdRef.current !== runId) return;
-    await activateRun(run);
+    await activateRun(run, options);
   }, [activateRun, loadRun]);
 
   const respondOrchestrationApproval = useCallback((requestId: string, decision: 'accept' | 'decline' | 'cancel') => {
@@ -402,10 +490,21 @@ export function OrchestrationWorkspace({
     const scopedRuns = availableRuns.filter((run) => run.agentId === agentId);
     const rememberedRunId = readActiveOrchestrationRunByAgent()[agentId] || '';
     const legacyRunId = localStorage.getItem(activeOrchestrationRunStorageKey) || '';
-    const nextRun =
+    let nextRun =
       scopedRuns.find((run) => run.id === rememberedRunId) ||
-      scopedRuns.find((run) => run.id === legacyRunId) ||
-      scopedRuns[0];
+      scopedRuns.find((run) => run.id === legacyRunId);
+    if (!nextRun) {
+      const missingRunId = rememberedRunId || legacyRunId;
+      if (missingRunId) {
+        try {
+          const loaded = await loadRun(missingRunId);
+          if (loaded.agentId === agentId) nextRun = loaded;
+        } catch {
+          // Fall back to the visible recent list below.
+        }
+      }
+    }
+    if (!nextRun) nextRun = scopedRuns[0];
     if (!nextRun) {
       clearActiveOrchestration();
       forgetActiveOrchestrationRunForAgent(agentId);
@@ -423,13 +522,22 @@ export function OrchestrationWorkspace({
     const task = (async () => {
       setRefreshingOrchestration(true);
       try {
-        const [loadedAgents, loadedRuns] = await Promise.all([loadAgents(), loadRuns()]);
-        const savedAgentId = localStorage.getItem('codexBridge.selectedAgentId') || selectedAgentIdRef.current;
-        const agentId = preferredAgentID(loadedAgents, savedAgentId);
+        const loadedAgents = await loadAgents();
+        let directRun: OrchestrationRun | null = null;
+        if (pathRunId) {
+          directRun = await loadRun(pathRunId);
+        }
+        const savedAgentId = directRun?.agentId || localStorage.getItem('codexBridge.selectedAgentId') || selectedAgentIdRef.current;
+        const agentId = directRun?.agentId || preferredAgentID(loadedAgents, savedAgentId);
         selectedAgentIdRef.current = agentId;
         setSelectedAgentId(agentId);
         if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
         else localStorage.removeItem('codexBridge.selectedAgentId');
+        const loadedRuns = await loadRuns(agentId);
+        if (directRun) {
+          await activateRun(directRun, { syncURL: false });
+          return;
+        }
         const currentRun = loadedRuns.find((run) => run.id === activeRunIdRef.current);
         if (currentRun && (!agentId || currentRun.agentId === agentId)) {
           rememberActiveOrchestrationRunForAgent(currentRun.agentId, currentRun.id);
@@ -439,16 +547,22 @@ export function OrchestrationWorkspace({
       } finally {
         refreshOrchestrationInFlightRef.current = null;
         setRefreshingOrchestration(false);
+        orchestrationBootedRef.current = true;
       }
     })();
     refreshOrchestrationInFlightRef.current = task;
     return task;
-  }, [loadAgents, loadRuns, switchAgentRun]);
+  }, [activateRun, loadAgents, loadRun, loadRuns, pathRunId, switchAgentRun]);
 
   useEffect(() => {
     refreshOrchestration().catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
     return () => closeWS();
   }, []);
+
+  useEffect(() => {
+    if (!orchestrationBootedRef.current || !pathRunId || pathRunId === activeRunIdRef.current) return;
+    selectRun(pathRunId, { syncURL: false }).catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
+  }, [pathRunId, selectRun, t.failedLoadOrchestration]);
 
   useEffect(() => {
     let stopped = false;
@@ -484,6 +598,10 @@ export function OrchestrationWorkspace({
   }, [activeRunId, timelineGroups]);
 
   useEffect(() => {
+    // Before the first /api/agents response lands, selectedAgent is always
+    // empty; clearing then would wipe the remembered run and strip a deep-link
+    // URL on every page load.
+    if (!agentsLoaded) return;
     if (!selectedAgent?.id) {
       clearActiveOrchestration();
       return;
@@ -491,14 +609,14 @@ export function OrchestrationWorkspace({
     const currentRun = runs.find((run) => run.id === activeRunIdRef.current);
     if (currentRun?.agentId === selectedAgent.id) return;
     switchAgentRun(selectedAgent.id).catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
-  }, [clearActiveOrchestration, runs, selectedAgent?.id, switchAgentRun, t.failedLoadOrchestration]);
+  }, [agentsLoaded, clearActiveOrchestration, runs, selectedAgent?.id, switchAgentRun, t.failedLoadOrchestration]);
 
   useEffect(() => {
     if (!activeRunId || !activeOrchestrationStatus(activeRun?.status)) return;
     let stopped = false;
     const syncActiveRun = async () => {
       try {
-        await Promise.all([loadRun(activeRunId), loadRunEvents(activeRunId)]);
+        await Promise.all([loadRun(activeRunId), loadRunEvents(activeRunId, false, 'after')]);
       } catch {
         // The websocket remains the primary live path; polling is a quiet fallback.
       }
@@ -572,7 +690,8 @@ export function OrchestrationWorkspace({
         method: 'POST',
         body: JSON.stringify({
           mode,
-          firstCli,
+          workerPair,
+          firstCli: workerPair === 'codex-codex' ? 'codex' : firstCli,
           profile,
           nativeContextCompaction,
           prompt: task,
@@ -639,6 +758,45 @@ export function OrchestrationWorkspace({
   const openSettings = (focus: 'cli' | '' = '') => {
     setSettingsFocus(focus);
     setSettingsOpen(true);
+  };
+
+  const selectWorkerPair = (nextWorkerPair: WorkerPair) => {
+    setWorkerPair(nextWorkerPair);
+    if (nextWorkerPair === 'codex-codex') {
+      setFirstCli('codex');
+    }
+  };
+
+  const renderWorkerPairSelector = (placement: 'toolbar' | 'panel') => {
+    const isToolbar = placement === 'toolbar';
+    const disabled = creating || isRunning;
+    return (
+      <div className={isToolbar ? "flex shrink-0 items-center gap-2" : "space-y-2"}>
+        {isToolbar ? (
+          <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.workerPair}</span>
+        ) : (
+          <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.workerPair}</label>
+        )}
+        <div className={cn("grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1", isToolbar ? "w-[15rem]" : "w-full")}>
+          <button
+            className={cn("h-8 rounded-md px-2 text-xs font-medium", workerPair === 'claude-codex' ? "bg-background shadow-sm" : "text-muted-foreground")}
+            onClick={() => selectWorkerPair('claude-codex')}
+            disabled={disabled}
+            aria-pressed={workerPair === 'claude-codex'}
+          >
+            {t.workerPairClaudeCodex}
+          </button>
+          <button
+            className={cn("h-8 rounded-md px-2 text-xs font-medium", workerPair === 'codex-codex' ? "bg-background shadow-sm" : "text-muted-foreground")}
+            onClick={() => selectWorkerPair('codex-codex')}
+            disabled={disabled}
+            aria-pressed={workerPair === 'codex-codex'}
+          >
+            {t.workerPairCodexCodex}
+          </button>
+        </div>
+      </div>
+    );
   };
 
   const startDraftRun = () => {
@@ -777,6 +935,7 @@ export function OrchestrationWorkspace({
         </header>
 
         <div className="bg-muted/30 border-b border-border px-4 py-2 flex items-center gap-4 text-xs text-muted-foreground overflow-x-auto whitespace-nowrap elegant-scrollbar">
+          {renderWorkerPairSelector('toolbar')}
           <AgentSelector
             agents={agents}
             selectedAgentId={selectedAgentId}
@@ -831,6 +990,21 @@ export function OrchestrationWorkspace({
                 </div>
               ) : (
                 <>
+                  {hasOlderEvents && (
+                    <div className="flex justify-center pb-1">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        type="button"
+                        className="gap-1.5 rounded-lg border border-border bg-background/80 text-muted-foreground shadow-sm hover:text-foreground"
+                        onClick={() => loadOlderEvents().catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration))}
+                        disabled={loadingOlderEvents}
+                      >
+                        <RefreshCw className={cn("h-3.5 w-3.5", loadingOlderEvents && "animate-spin")} />
+                        {loadingOlderEvents ? t.loadingEarlierEvents : t.loadEarlierEvents}
+                      </Button>
+                    </div>
+                  )}
                   {timelineGroups.map((group) => (
                     <OrchestrationTimelineGroupItem
                       key={group.key}
@@ -867,22 +1041,24 @@ export function OrchestrationWorkspace({
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.mode}</label>
                   <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1">
-                    <button className={cn("h-8 rounded-md text-xs font-medium", mode === 'collaboration' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setMode('collaboration')}>
+                    <button className={cn("h-8 rounded-md text-xs font-medium", mode === 'collaboration' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setMode('collaboration')} disabled={creating || isRunning}>
                       {t.collaborate}
                     </button>
-                    <button className={cn("h-8 rounded-md text-xs font-medium", mode === 'debate' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setMode('debate')}>
+                    <button className={cn("h-8 rounded-md text-xs font-medium", mode === 'debate' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setMode('debate')} disabled={creating || isRunning}>
                       {t.debate}
                     </button>
                   </div>
                 </div>
 
+                {renderWorkerPairSelector('panel')}
+
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.firstCli}</label>
                   <div className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1">
-                    <button className={cn("h-8 rounded-md text-xs font-medium", firstCli === 'claude' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setFirstCli('claude')} disabled={creating || isRunning}>
+                    <button className={cn("h-8 rounded-md text-xs font-medium", workerPair !== 'codex-codex' && firstCli === 'claude' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setFirstCli('claude')} disabled={creating || isRunning || workerPair === 'codex-codex'}>
                       Claude
                     </button>
-                    <button className={cn("h-8 rounded-md text-xs font-medium", firstCli === 'codex' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setFirstCli('codex')} disabled={creating || isRunning}>
+                    <button className={cn("h-8 rounded-md text-xs font-medium", (workerPair === 'codex-codex' || firstCli === 'codex') ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setFirstCli('codex')} disabled={creating || isRunning}>
                       Codex
                     </button>
                   </div>
@@ -1065,4 +1241,37 @@ export function OrchestrationWorkspace({
       )}
     </div>
   );
+}
+
+function orchestrationRunPath(runId: string) {
+  return `/orchestrate/runs/${encodeURIComponent(runId)}`;
+}
+
+function orchestrationRunIdFromPath(path: string) {
+  const match = path.match(/^\/orchestrate\/runs\/([^/?#]+)/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+function maxOrchestrationEventSeq(events: OrchestrationEvent[], initial = 0) {
+  return events.reduce((max, event) => {
+    if (typeof event.seq !== 'number' || !Number.isFinite(event.seq)) return max;
+    return Math.max(max, event.seq);
+  }, initial);
+}
+
+function minOrchestrationEventSeq(events: OrchestrationEvent[], initial = 0) {
+  return events.reduce((min, event) => {
+    if (typeof event.seq !== 'number' || !Number.isFinite(event.seq)) return min;
+    if (min <= 0) return event.seq;
+    return Math.min(min, event.seq);
+  }, initial);
+}
+
+function mergeOrchestrationRunsPreservingOtherAgents(current: OrchestrationRun[], incoming: OrchestrationRun[], agentId: string) {
+  const merged = new Map<string, OrchestrationRun>();
+  current.forEach((run) => {
+    if (run.agentId !== agentId) merged.set(run.id, run);
+  });
+  incoming.forEach((run) => merged.set(run.id, run));
+  return Array.from(merged.values()).sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
 }

@@ -31,21 +31,25 @@ context in the same `runID`.
 - Follow-up prompts stay on the run's original `agentId`; switching CLI
   endpoint requires an explicit new run so the compacted context is not handed
   to a different machine unexpectedly.
-- Follow-up prompts also preserve the run's persisted `firstCli` value unless a
-  request explicitly changes it, so the visible relay schedule after refresh
-  matches the originally selected first-turn CLI.
+- Follow-up prompts also preserve the run's persisted `workerPair` and
+  `firstCli` values unless a request explicitly changes them, so the visible
+  relay schedule after refresh matches the originally selected worker layout
+  and first-turn CLI.
 - Follow-up prompts preserve the run's persisted orchestration `profile`.
   `default` is the generic relay profile; `formal-proof` is explicit opt-in for
   proof-assistant guidance. The default profile does not silently enable formal
   proof instructions based on keywords in the user prompt.
 - Follow-up prompts restore native CLI continuity where possible. Hub persists
-  the Codex thread id reported by Bridge because it is non-deterministic, stores
-  whether Claude reached a successful `turn.end`, and records the absolute run
-  cwd reported by `run.start`. Resumed `orchestration_start` payloads send those
-  values back so Bridge can reuse live run-scoped native sessions while it is
-  running, resume the saved Codex app-server thread after restart where
-  possible, choose Claude `--resume` only for an actually started session, and
-  keep all later turns in the locked absolute working directory.
+  the legacy Codex thread id and the Codex thread id map reported by Bridge
+  because app-server thread ids are non-deterministic. Claude + Codex runs use
+  the `codex` slot; Codex + Codex runs use separate `codex-a` and `codex-b`
+  slots. Hub also stores whether Claude reached a successful `turn.end` and
+  records the absolute run cwd reported by `run.start`. Resumed
+  `orchestration_start` payloads send those values back so Bridge can reuse live
+  run-scoped native sessions while it is running, resume saved Codex app-server
+  thread(s) after restart where possible, choose Claude `--resume` only for an
+  actually started session, and keep all later turns in the locked absolute
+  working directory.
 - Native CLI resume is best-effort. Bridge always keeps Hub's compacted
   context in the prompt as the required continuity fallback, exposes the chosen
   resume path through `event.data.resumeMode`, retries Codex fresh when resume
@@ -123,7 +127,12 @@ There are two explicit states in the UI:
 
 The selected orchestration run id is stored in browser local storage so a page
 refresh or returning to `/orchestrate` restores the same run when it still
-exists. The New Run button clears that selection intentionally.
+exists. The selected run is also reflected in the browser URL as
+`/orchestrate/runs/{runID}`. Opening that URL directly loads the referenced run
+when the authenticated user owns it, and the static UI fallback in
+`internal/hub/server.go:staticHandler` serves the same app shell for that deep
+link. The New Run button clears that selection intentionally and returns the
+browser to `/orchestrate`.
 
 `turn.start` is rendered as a lightweight status item and carries diagnostic
 metadata such as `resumeMode` in typed `TurnStartData`; it must not echo the
@@ -191,6 +200,16 @@ The browser event stream is only kept open for active runs. Completed, failed,
 or canceled runs are read from persisted Hub events and show the stream as idle,
 so the stream indicator cannot be confused with the selected worker's online
 state.
+Event history refreshes use `afterSeq` against
+`internal/hub/orchestration.go:handleOrchestrationEvents` once a run has been
+loaded, so active-run polling does not repeatedly transfer the whole transcript.
+Initial timeline loads request only the latest event page, and older transcript
+history is fetched on demand with `beforeSeq` from the same endpoint. This keeps
+slow historical runs from forcing SQLite to return, the network to transfer, and
+the browser to render the full transcript before the newest result is usable.
+The initial run list can be scoped by endpoint through
+`internal/hub/orchestration.go:handleListOrchestrations` to avoid loading other
+endpoints' runs before the user switches to them.
 
 ## Implementation Steps
 
@@ -230,9 +249,10 @@ state.
     terminal, visible events.
 19. For Isabelle-looking tasks, keep the prompt-level timeout boundary visible
     and leave execution strategy to the CLI.
-20. Preserve first-turn CLI selection across create, refresh, and continue so a
-    Codex-first smoke remains Codex-first.
-21. Persist Codex thread id, Claude-started state, and absolute run cwd from
+20. Preserve worker-pair and first-turn CLI selection across create, refresh,
+    and continue so Codex-first and Codex + Codex runs keep their selected
+    relay schedule.
+21. Persist Codex thread id(s), Claude-started state, and absolute run cwd from
     Bridge events, then include them in resumed `orchestration_start` payloads.
 22. Materialize uploaded files under the locked absolute run cwd when a run is
     resumed.
@@ -244,6 +264,12 @@ state.
     scheduled turn.
 26. Group consecutive command entries inside expanded turn groups so long
     transcripts remain scannable while preserving every command detail.
+27. Reflect selected runs in `/orchestrate/runs/{runID}` and load that run
+    directly on refresh before falling back to local-storage selection.
+28. Scope orchestration run-list loading by endpoint and fetch event history
+    incrementally with `afterSeq` during active-run polling and reconnects.
+29. Load only the latest timeline event page when selecting a run, and expose a
+    load-older control that fetches earlier persisted events with `beforeSeq`.
 
 ## Exit Gates
 
@@ -251,6 +277,8 @@ state.
 - The Bridge receives an `orchestration_start` payload with `Resume=true`.
 - The compacted context contains prior user messages and recent agent output.
 - Refreshing `/orchestrate` reselects the last selected run when it exists.
+- Clicking a run updates the address bar to `/orchestrate/runs/{runID}`, and
+  refreshing that URL reloads the same run.
 - Explicit New Run still creates a new run.
 - If a live WebSocket drops during an active run, the page reconnects and
   reloads events.
@@ -262,6 +290,11 @@ state.
   dates.
 - Persisted assistant deltas and command outputs returned from `/events` are
   visible in the timeline, with token-sized deltas merged into one turn entry.
+- Active-run refreshes request only events newer than the highest loaded `seq`
+  instead of reloading the whole event window.
+- Selecting a long historical run requests a bounded latest event page first;
+  older transcript events are requested only when the user activates the
+  load-older control.
 - Running command cards show elapsed time, and completed command cards show
   total duration.
 - Command cards read command details from typed `CommandData`; the frontend
@@ -303,10 +336,14 @@ state.
 - Selecting a completed run does not show the browser event stream as connected.
 - Continuing a Codex-first run sends `FirstCLI=codex` in the resumed
   `orchestration_start` payload unless the user intentionally changes it.
+- Continuing a Codex + Codex run sends `WorkerPair=codex-codex`,
+  `FirstCLI=codex`, and the saved `codexThreadIds` map in the resumed
+  `orchestration_start` payload unless the user intentionally changes the
+  worker pair.
 - Continuing a formal-proof run sends `Profile=formal-proof` in the resumed
   `orchestration_start` payload unless the user intentionally changes it.
-- A resumed run sends the saved Codex thread id, Claude-started state, and
-  locked absolute run cwd to Bridge.
+- A resumed run sends the saved legacy Codex thread id, Codex thread ids by
+  worker slot, Claude-started state, and locked absolute run cwd to Bridge.
 - The first Codex turn in a resumed run uses Codex app-server `thread/resume`
   when Hub has a saved thread id; the first Claude turn uses `--resume` only
   after a prior Claude turn reached `turn.end`.

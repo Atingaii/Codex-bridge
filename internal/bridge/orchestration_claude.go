@@ -25,11 +25,62 @@ type orchestrationClaudeSession struct {
 	cmd            *exec.Cmd
 	stdin          io.WriteCloser
 	stdout         *bufio.Reader
-	stderr         *bytes.Buffer
+	stderr         *syncBuffer
 	sessionID      string
 	mode           string
 	approvalServer *claudeApprovalServer
 	release        func()
+	// exited is closed by the exit-monitor goroutine that owns cmd.Wait. It is
+	// how turn paths detect a dead CLI process and how teardown reaps it
+	// without a concurrent double-Wait.
+	exited chan struct{}
+}
+
+// syncBuffer is a mutex-guarded bytes.Buffer: exec's pipe copier writes stderr
+// from its own goroutine while turn error paths read it mid-process.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func claudeSessionExited(claude *orchestrationClaudeSession) bool {
+	if claude == nil || claude.exited == nil {
+		return false
+	}
+	select {
+	case <-claude.exited:
+		return true
+	default:
+		return false
+	}
+}
+
+// waitClaudeSessionExit blocks until the exit monitor reaps the process. The
+// monitor goroutine owns cmd.Wait, so teardown must not call Wait itself.
+func waitClaudeSessionExit(claude *orchestrationClaudeSession) {
+	if claude == nil || claude.cmd == nil {
+		return
+	}
+	if claude.exited == nil {
+		_ = claude.cmd.Wait()
+		return
+	}
+	select {
+	case <-claude.exited:
+	case <-time.After(10 * time.Second):
+	}
 }
 
 const defaultLongCommandObserverAfter = 2 * time.Minute
@@ -75,6 +126,7 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 		return "", nil, "claude-interactive-error", err
 	}
 	if err := writeClaudeStreamUserMessage(claude.stdin, prompt); err != nil {
+		m.resetClaudeSessionIfDead(session, claude, payload.RunID)
 		return "", nil, claude.mode, err
 	}
 	if claude.approvalServer != nil {
@@ -94,16 +146,49 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 			err = errors.New(msg)
 		}
 	}
+	if err != nil {
+		m.resetClaudeSessionIfDead(session, claude, payload.RunID)
+	}
 	if err == nil {
 		m.registerClaudeNativeResume(state.NativeSession, claude, payload.RunID, sessionCWD)
 	}
 	return content, tools, claude.mode, err
 }
 
+// resetClaudeSessionIfDead drops a cached interactive session whose CLI
+// process has exited so the next turn respawns it, instead of leaving every
+// following turn to fail against the same broken pipes.
+func (m *OrchestrationManager) resetClaudeSessionIfDead(session *orchestrationNativeSession, claude *orchestrationClaudeSession, runID string) {
+	if !claudeSessionExited(claude) {
+		return
+	}
+	session.mu.Lock()
+	if session.claude == claude {
+		session.claude = nil
+	}
+	session.mu.Unlock()
+	_ = claude.stdin.Close()
+	if claude.release != nil {
+		claude.release()
+	}
+	slog.Warn("[bridge] claude interactive session process died; next turn will respawn", "run_id", runID)
+}
+
 func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.Context, payload protocol.OrchestrationStartPayload, state *orchestrationSessionState) (*orchestrationClaudeSession, error) {
 	session := state.NativeSession
 	if session.claude != nil && session.claude.stdin != nil && session.claude.stdout != nil {
-		return session.claude, nil
+		if !claudeSessionExited(session.claude) {
+			return session.claude, nil
+		}
+		// The CLI process died between turns; tear the cached session down and
+		// respawn instead of writing every following turn into a broken pipe.
+		stale := session.claude
+		session.claude = nil
+		_ = stale.stdin.Close()
+		if stale.release != nil {
+			stale.release()
+		}
+		slog.Warn("[bridge] claude interactive session process exited; respawning", "run_id", payload.RunID)
 	}
 	resume := state.ClaudeSessionStarted
 	args := m.claudeArgsWithStreamInput(payload, state.ClaudeSessionID, resume)
@@ -127,8 +212,8 @@ func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.
 		releaseApprovalServer()
 		return nil, err
 	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stderr := &syncBuffer{}
+	cmd.Stderr = stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		releaseApprovalServer()
@@ -146,12 +231,17 @@ func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.
 		cmd:            cmd,
 		stdin:          stdin,
 		stdout:         bufio.NewReaderSize(stdout, 64*1024),
-		stderr:         &stderr,
+		stderr:         stderr,
 		sessionID:      state.ClaudeSessionID,
 		mode:           mode,
 		approvalServer: approvalServer,
 		release:        releaseApprovalServer,
+		exited:         make(chan struct{}),
 	}
+	go func(c *orchestrationClaudeSession) {
+		_ = c.cmd.Wait()
+		close(c.exited)
+	}(claude)
 	session.claude = claude
 	return claude, nil
 }
@@ -641,15 +731,27 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 	activeNudges := make(map[string]context.CancelFunc)
 	activeTools := make(map[string]bool)
 	var idleCloseCancel context.CancelFunc
+	// streamCloseMu guards streamInputClosed: closeStreamInput runs from both
+	// the main scan goroutine and the spawned idle-close goroutine, which
+	// otherwise race on the flag and the one-shot Input.Close.
+	var streamCloseMu sync.Mutex
 	streamInputClosed := false
+	isStreamInputClosed := func() bool {
+		streamCloseMu.Lock()
+		defer streamCloseMu.Unlock()
+		return streamInputClosed
+	}
 	closeStreamInput := func(reason string) {
 		if options.ReturnAfterResult {
 			return
 		}
+		streamCloseMu.Lock()
 		if streamInputClosed {
+			streamCloseMu.Unlock()
 			return
 		}
 		streamInputClosed = true
+		streamCloseMu.Unlock()
 		closeClaudeStreamInput(options.Input)
 		if reason != "" {
 			m.emit(runID, protocol.OrchestrationEventPayload{
@@ -671,7 +773,7 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 		}
 	}
 	scheduleIdleClose := func() {
-		if !options.CanNudge || options.Input == nil || streamInputClosed || len(activeTools) > 0 {
+		if !options.CanNudge || options.Input == nil || isStreamInputClosed() || len(activeTools) > 0 {
 			return
 		}
 		if idleCloseCancel != nil {

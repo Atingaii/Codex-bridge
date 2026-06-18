@@ -35,7 +35,7 @@
   browser socket leaves.
 - Reconnecting with the same `sid` calls `tryReattach` before sending the normal
   `open_session` frame. The Bridge already reuses the same live session in
-  `internal/bridge/session.go:SessionManager.Open`, so no Bridge protocol
+  `internal/bridge/session.go:Open`, so no Bridge protocol
   change is needed.
 
 ## Implementation Steps
@@ -62,7 +62,7 @@
 **Q: Why keep sending `open_session` on reconnect?**
 
 Because `open_session` is the existing reattach signal for the Bridge session
-layer. When the `sid` already exists, `internal/bridge/session.go:SessionManager.Open`
+layer. When the `sid` already exists, `internal/bridge/session.go:Open`
 updates the browser output channel and returns the existing `remote_thread_id`
 and native resume metadata without spawning a new runner process.
 

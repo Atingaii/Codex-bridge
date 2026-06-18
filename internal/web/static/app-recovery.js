@@ -3,7 +3,9 @@
   var legacyEntryRecoveryKey = "codexBridge.legacyEntryRecoveryAttempts.v1";
   var legacyEntryNames = [
     "index-BWIkJOjq.js",
-    "index-BzGp0PoF.js"
+    "index-BzGp0PoF.js",
+    "index-C6X5HJo4.js",
+    "index-D5GosAf8.js"
   ];
   var ready = false;
   var legacyRecoveryStarted = false;

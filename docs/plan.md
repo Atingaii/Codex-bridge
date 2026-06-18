@@ -44,12 +44,14 @@ Let a single user talk from any browser to Codex CLI running on a private machin
   returned thread id, and review-required chat uses the `codex app-server` runner
   (`internal/bridge/appserver_runner.go`) with `initialize` / `thread/start` /
   `turn/start` / streamed deltas / `turn/interrupt`.
-- Orchestration is a native-session relay: one long-lived Codex app-server thread and
-  one long-lived Claude Code stream-json session per run, reused across turns so the
-  user can `resume` them from the workspace. The Bridge only relays output and turn
-  context; it does not inject verifier/remediation/assessment turns. Formal-proof is
-  opt-in *prompt guidance* via `internal/bridge/profiles/registry` +
-  `internal/bridge/profiles/formalproof`.
+- Orchestration is a native-session relay: Claude + Codex runs keep one
+  long-lived Codex app-server thread and one long-lived Claude Code stream-json
+  session per run, while Codex + Codex runs keep independent `codex-a` and
+  `codex-b` app-server threads. Native sessions are reused across turns so the
+  user can `resume` them from the workspace. The Bridge only relays output and
+  turn context; it does not inject verifier/remediation/assessment turns.
+  Formal-proof is opt-in *prompt guidance* via
+  `internal/bridge/profiles/registry` + `internal/bridge/profiles/formalproof`.
 
 ## Maintenance Log
 

@@ -363,7 +363,7 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	if loaded.Status != OrchestrationCompleted || loaded.FinishedAt == 0 {
 		t.Fatalf("unexpected loaded run: %+v", loaded)
 	}
-	if err := st.UpdateOrchestrationRunSettings(ctx, run.ID, agent.ID, run.Mode, "claude", run.Profile, run.CWD, "after-turn", run.MaxTurns, run.Files); err != nil {
+	if err := st.UpdateOrchestrationRunSettings(ctx, run.ID, agent.ID, run.Mode, run.WorkerPair, "claude", run.Profile, run.CWD, "after-turn", run.MaxTurns, run.Files); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, OrchestrationRunning, ""); err != nil {
@@ -391,6 +391,19 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	}
 	if loaded.CodexThreadID != "thread_1" || !loaded.ClaudeStarted || loaded.RunCWD != "/abs/repo" {
 		t.Fatalf("session state not preserved: %+v", loaded)
+	}
+	if loaded.CodexThreadIDs["codex"] != "thread_1" {
+		t.Fatalf("legacy codex thread map not preserved: %+v", loaded.CodexThreadIDs)
+	}
+	if err := st.UpdateOrchestrationRunSessionState(ctx, run.ID, "", map[string]string{"codex-a": "thread_a", "codex-b": "thread_b"}, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = st.OrchestrationRunByID(ctx, run.ID, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CodexThreadIDs["codex"] != "thread_1" || loaded.CodexThreadIDs["codex-a"] != "thread_a" || loaded.CodexThreadIDs["codex-b"] != "thread_b" {
+		t.Fatalf("codex thread map not merged: %+v", loaded.CodexThreadIDs)
 	}
 }
 
@@ -427,6 +440,101 @@ func TestListOrchestrationEventsReturnsLatestWindowInAscendingOrder(t *testing.T
 	}
 	if len(events) != 3 || events[0].Seq != 3 || events[1].Seq != 4 || events[2].Seq != 5 {
 		t.Fatalf("unexpected latest window: %+v", events)
+	}
+	events, err = st.ListOrchestrationEventsAfter(ctx, run.ID, 3, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Seq != 4 || events[1].Seq != 5 {
+		t.Fatalf("unexpected after-seq window: %+v", events)
+	}
+	events, err = st.ListOrchestrationEventsAfter(ctx, run.ID, 3, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Seq != 4 {
+		t.Fatalf("unexpected limited after-seq window: %+v", events)
+	}
+	events, err = st.ListOrchestrationEventsBefore(ctx, run.ID, 4, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[0].Seq != 1 || events[1].Seq != 2 || events[2].Seq != 3 {
+		t.Fatalf("unexpected before-seq window: %+v", events)
+	}
+	events, err = st.ListOrchestrationEventsBefore(ctx, run.ID, 4, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Seq != 2 || events[1].Seq != 3 {
+		t.Fatalf("unexpected limited before-seq window: %+v", events)
+	}
+}
+
+func TestListOrchestrationRunsByAgentFiltersAndLimits(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	user, err := st.UpsertUser(ctx, "admin", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentA, err := st.UpsertAgent(ctx, "bridge-a", "machine-runs-a", "host", "inst-a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentB, err := st.UpsertAgent(ctx, "bridge-b", "machine-runs-b", "host", "inst-b", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateOrchestrationRun(ctx, CreateOrchestrationRunParams{
+		UserID:   user.ID,
+		AgentID:  agentA.ID,
+		Title:    "A1",
+		Mode:     "collaboration",
+		Prompt:   "agent a first",
+		MaxTurns: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateOrchestrationRun(ctx, CreateOrchestrationRunParams{
+		UserID:   user.ID,
+		AgentID:  agentA.ID,
+		Title:    "A2",
+		Mode:     "collaboration",
+		Prompt:   "agent a second",
+		MaxTurns: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateOrchestrationRun(ctx, CreateOrchestrationRunParams{
+		UserID:   user.ID,
+		AgentID:  agentB.ID,
+		Title:    "B1",
+		Mode:     "collaboration",
+		Prompt:   "agent b only",
+		MaxTurns: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runs, err := st.ListOrchestrationRunsByAgent(ctx, user.ID, agentA.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("agent A runs = %+v", runs)
+	}
+	for _, run := range runs {
+		if run.AgentID != agentA.ID {
+			t.Fatalf("run from wrong agent returned: %+v", run)
+		}
+	}
+	limited, err := st.ListOrchestrationRunsByAgent(ctx, user.ID, agentA.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limited) != 1 || limited[0].AgentID != agentA.ID {
+		t.Fatalf("limited agent A runs = %+v", limited)
 	}
 }
 
@@ -554,4 +662,176 @@ func openTestStore(t *testing.T) *Store {
 
 func intPtr(value int) *int {
 	return &value
+}
+
+func createTestOrchestrationRun(t *testing.T, st *Store, userID, agentID, title string) OrchestrationRun {
+	t.Helper()
+	run, err := st.CreateOrchestrationRun(context.Background(), CreateOrchestrationRunParams{
+		UserID:   userID,
+		AgentID:  agentID,
+		Title:    title,
+		Mode:     "collaboration",
+		FirstCLI: "codex",
+		Prompt:   "task",
+		MaxTurns: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+func TestMarkUnfinishedOrchestrationRunsFailedAtBoot(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	user, err := st.UpsertUser(ctx, "admin", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgent(ctx, "bridge", "machine-boot", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	running := createTestOrchestrationRun(t, st, user.ID, agent.ID, "running")
+	if err := st.UpdateOrchestrationRunStatus(ctx, running.ID, OrchestrationRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+	canceling := createTestOrchestrationRun(t, st, user.ID, agent.ID, "canceling")
+	if err := st.UpdateOrchestrationRunStatus(ctx, canceling.ID, OrchestrationCanceling, ""); err != nil {
+		t.Fatal(err)
+	}
+	completed := createTestOrchestrationRun(t, st, user.ID, agent.ID, "completed")
+	if err := st.UpdateOrchestrationRunStatus(ctx, completed.ID, OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	marked, err := st.MarkUnfinishedOrchestrationRunsFailed(ctx, "hub restarted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(marked) != 1 || marked[0].ID != running.ID {
+		t.Fatalf("marked runs = %#v, want only %s", marked, running.ID)
+	}
+
+	swept, err := st.OrchestrationRunByID(ctx, running.ID, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swept.Status != OrchestrationFailed || swept.Error != "hub restarted" || swept.FinishedAt == 0 {
+		t.Fatalf("boot-swept running run = %#v", swept)
+	}
+	events, err := st.ListOrchestrationEvents(ctx, running.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawRunError := false
+	for _, event := range events {
+		if event.Kind == "run.error" && event.RunConclusion != nil {
+			sawRunError = true
+		}
+	}
+	if !sawRunError {
+		t.Fatalf("boot sweep left no run.error conclusion event: %#v", events)
+	}
+
+	settled, err := st.OrchestrationRunByID(ctx, canceling.ID, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled.Status != OrchestrationCanceled || settled.FinishedAt == 0 {
+		t.Fatalf("boot-swept canceling run = %#v", settled)
+	}
+
+	untouched, err := st.OrchestrationRunByID(ctx, completed.ID, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if untouched.Status != OrchestrationCompleted {
+		t.Fatalf("completed run changed by boot sweep: %#v", untouched)
+	}
+}
+
+func TestClaimOrchestrationRunForContinue(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	user, err := st.UpsertUser(ctx, "admin", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgent(ctx, "bridge", "machine-claim", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := createTestOrchestrationRun(t, st, user.ID, agent.ID, "claim")
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, err := st.ClaimOrchestrationRunForContinue(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Fatal("expected first claim of a terminal run to succeed")
+	}
+	claimedRun, err := st.OrchestrationRunByID(ctx, run.ID, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimedRun.Status != OrchestrationRunning {
+		t.Fatalf("claimed run status = %q, want running", claimedRun.Status)
+	}
+
+	again, err := st.ClaimOrchestrationRunForContinue(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again {
+		t.Fatal("expected second claim of an active run to fail")
+	}
+}
+
+func TestAddOrchestrationEventKeepsTurnEndStatus(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	user, err := st.UpsertUser(ctx, "admin", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgent(ctx, "bridge", "machine-status", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := createTestOrchestrationRun(t, st, user.ID, agent.ID, "status")
+
+	turnEnd, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{
+		RunID:  run.ID,
+		Kind:   "turn.end",
+		TurnID: "turn-1",
+		CLI:    "claude",
+		Status: "error",
+		Error:  "claude exited",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turnEnd.Status != "error" || turnEnd.Severity != "error" {
+		t.Fatalf("turn.end migration = status %q severity %q, want both error", turnEnd.Status, turnEnd.Severity)
+	}
+
+	note, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{
+		RunID:   run.ID,
+		Kind:    "turn.delta",
+		TurnID:  "turn-1",
+		CLI:     "claude",
+		Status:  "warning",
+		Content: "legacy log row",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note.Status != "" || note.Severity != "warning" {
+		t.Fatalf("legacy migration = status %q severity %q, want empty/warning", note.Status, note.Severity)
+	}
 }

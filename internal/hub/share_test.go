@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tencent/codex-bridge/internal/protocol"
 	"github.com/tencent/codex-bridge/internal/store"
 )
 
@@ -141,6 +142,45 @@ func TestPublicOrchestrationShareSanitizesRunAndEventData(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
+		RunID:        run.ID,
+		Kind:         "run.start",
+		Source:       "bridge",
+		RunStartData: &protocol.RunStartData{CWD: "/root/secret-project", WorkerPair: "claude-codex", Mode: "collaboration"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
+		RunID:  run.ID,
+		Kind:   "turn.end",
+		TurnID: "turn-1",
+		CLI:    "claude",
+		Status: "error",
+		Error:  "claude exited mid-turn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
+		RunID:  run.ID,
+		Kind:   "run.end",
+		Source: "bridge",
+		Status: store.OrchestrationCompleted,
+		RunEndData: &protocol.RunEndData{
+			WorkerPair:      "claude-codex",
+			CodexThreadID:   "thread-secret-1",
+			ClaudeSessionID: "claude-session-secret",
+			NativeResume: []protocol.NativeResumeInfo{{
+				CLI:            "claude",
+				ID:             "claude-session-secret",
+				Command:        "claude --resume claude-session-secret",
+				CWD:            "/root/secret-project",
+				TranscriptPath: "/root/.claude/projects/x/transcript.jsonl",
+				Visible:        true,
+			}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	body := authedJSON(t, s, userID, http.MethodPost, "/api/orchestrations/"+run.ID+"/share", nil, http.StatusCreated)
 	shareID := body["share"].(map[string]any)["id"].(string)
@@ -151,12 +191,16 @@ func TestPublicOrchestrationShareSanitizesRunAndEventData(t *testing.T) {
 		t.Fatalf("public orchestration status = %d, want %d, body = %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 	raw := rr.Body.String()
-	for _, forbidden := range []string{"userId", "agentId", "secret", "do-not-share", "file-body-secret"} {
+	for _, forbidden := range []string{
+		"userId", "agentId", "secret", "do-not-share", "file-body-secret",
+		"thread-secret-1", "claude-session-secret", "/root/secret-project",
+		"transcript.jsonl", "--resume",
+	} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("public orchestration share leaked %q: %s", forbidden, raw)
 		}
 	}
-	for _, want := range []string{"go test ./...", "Model.thy", `"events"`} {
+	for _, want := range []string{"go test ./...", "Model.thy", `"events"`, `"turn.end"`, "claude exited mid-turn", "claude-codex"} {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("public orchestration share missing %q: %s", want, raw)
 		}

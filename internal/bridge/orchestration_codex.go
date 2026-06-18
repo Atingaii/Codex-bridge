@@ -10,6 +10,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,16 +40,17 @@ func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.Or
 	return content, tools, err
 }
 
-func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, string, string, error) {
+func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, workerSlot, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, string, string, error) {
 	if state == nil || state.NativeSession == nil {
 		return m.runCodexWithThread(ctx, payload, turnID, role, prompt, "")
 	}
+	workerSlot = normalizeCodexWorkerSlot(workerSlot)
 	session := state.NativeSession
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	codex, err := m.ensureCodexInteractiveSessionLocked(ctx, payload, state)
+	codex, err := m.ensureCodexInteractiveSessionLocked(ctx, payload, workerSlot, state)
 	if err != nil {
-		return "", nil, firstNonEmpty(state.CodexThreadID, ""), "codex-interactive-error", err
+		return "", nil, state.codexThreadID(workerSlot), "codex-interactive-error", err
 	}
 	resumeMode := codex.mode
 	req := RunnerRequest{
@@ -66,12 +68,24 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 			cwd:     m.cwd(payload),
 		},
 	}
+	var toolsMu sync.Mutex
 	var tools []RunnerToolEvent
 	toolStarts := make(map[string]time.Time)
+	snapshotTools := func() []RunnerToolEvent {
+		toolsMu.Lock()
+		defer toolsMu.Unlock()
+		return append([]RunnerToolEvent(nil), tools...)
+	}
 	done := make(chan appServerTurnResult, 1)
 	runner := NewCodexAppServerRunner(m.cfg)
 	scope := newAppServerTurnScope(codex.threadID)
-	go runner.readEvents(ctx, codex.client, req, scope, func(update RunnerUpdate) {
+	// The reader goroutine must not outlive this turn: without the turn-scoped
+	// cancel, a failed turn/start would leave it emitting deltas for a turn
+	// that already ended. The mutex covers tools/toolStarts, which the reader
+	// callback mutates while the error paths below read them.
+	turnCtx, cancelTurn := context.WithCancel(ctx)
+	defer cancelTurn()
+	go runner.readEvents(turnCtx, codex.client, req, scope, func(update RunnerUpdate) {
 		if update.Delta != "" {
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: update.Delta})
 		}
@@ -79,33 +93,35 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: update.Content})
 		}
 		if update.Tool != nil {
+			toolsMu.Lock()
 			stampToolTiming(update.Tool, toolStarts)
 			tools = append(tools, *update.Tool)
+			toolsMu.Unlock()
 			m.emitTool(payload.RunID, turnID, role, "codex", update.Tool)
 		}
 	}, done)
 	res, err := codex.client.request(ctx, "turn/start", runner.turnStartParams(codex.threadID, prompt, req))
 	if err != nil {
-		return "", tools, codex.threadID, resumeMode, err
+		return "", snapshotTools(), codex.threadID, resumeMode, err
 	}
 	scope.setTurnID(appServerTurnIDFromResponse(res))
 	select {
 	case result := <-done:
-		return strings.TrimSpace(result.result.Content), tools, codex.threadID, resumeMode, result.err
+		return strings.TrimSpace(result.result.Content), snapshotTools(), codex.threadID, resumeMode, result.err
 	case <-ctx.Done():
-		return "", tools, codex.threadID, resumeMode, ctx.Err()
+		return "", snapshotTools(), codex.threadID, resumeMode, ctx.Err()
 	}
 }
 
-func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.Context, payload protocol.OrchestrationStartPayload, state *orchestrationSessionState) (*orchestrationCodexSession, error) {
+func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.Context, payload protocol.OrchestrationStartPayload, workerSlot string, state *orchestrationSessionState) (*orchestrationCodexSession, error) {
 	session := state.NativeSession
-	if session.codex != nil && session.codex.client != nil && session.codex.threadID != "" {
-		codex := session.codex
-		state.CodexThreadID = codex.threadID
+	workerSlot = normalizeCodexWorkerSlot(workerSlot)
+	if codex := session.codexSessionLocked(workerSlot); codex != nil && codex.client != nil && codex.threadID != "" {
+		state.setCodexThreadID(workerSlot, codex.threadID)
 		if codex.client.isClosed() {
-			session.codex = nil
-			state.CodexThreadID = codex.threadID
-			return m.ensureCodexInteractiveSessionLocked(ctx, payload, state)
+			session.setCodexSessionLocked(workerSlot, nil)
+			state.setCodexThreadID(workerSlot, codex.threadID)
+			return m.ensureCodexInteractiveSessionLocked(ctx, payload, workerSlot, state)
 		}
 		if codex.loaded {
 			return codex, nil
@@ -116,7 +132,7 @@ func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.C
 			CWD:            m.cwd(payload),
 		})); err != nil {
 			codex.client.close()
-			session.codex = nil
+			session.setCodexSessionLocked(workerSlot, nil)
 			return nil, err
 		}
 		codex.loaded = true
@@ -125,7 +141,7 @@ func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.C
 	}
 	runner := NewCodexAppServerRunner(m.cfg)
 	req := RunnerRequest{
-		RemoteThreadID: state.CodexThreadID,
+		RemoteThreadID: state.codexThreadID(workerSlot),
 		RunID:          payload.RunID,
 		CWD:            m.cwd(payload),
 	}
@@ -143,7 +159,7 @@ func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.C
 		client.close()
 		return nil, err
 	}
-	threadID := strings.TrimSpace(state.CodexThreadID)
+	threadID := strings.TrimSpace(state.codexThreadID(workerSlot))
 	mode := "codex-interactive-thread"
 	if threadID == "" {
 		res, err := client.request(ctx, "thread/start", runner.threadStartParams(req))
@@ -158,7 +174,7 @@ func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.C
 		}
 		_, _ = client.request(ctx, "thread/name/set", map[string]any{
 			"threadId": threadID,
-			"name":     nativeSessionDisplayName(payload.RunID, "codex"),
+			"name":     nativeSessionDisplayName(payload.RunID, workerSlot),
 		})
 	} else if _, err := client.request(ctx, "thread/resume", runner.threadResumeParams(threadID, req)); err != nil {
 		client.close()
@@ -166,9 +182,10 @@ func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.C
 	} else {
 		mode = "codex-interactive-resume"
 	}
-	session.codex = &orchestrationCodexSession{client: client, threadID: threadID, mode: mode, loaded: true}
-	state.CodexThreadID = threadID
-	return session.codex, nil
+	codex := &orchestrationCodexSession{client: client, threadID: threadID, mode: mode, loaded: true}
+	session.setCodexSessionLocked(workerSlot, codex)
+	state.setCodexThreadID(workerSlot, threadID)
+	return codex, nil
 }
 
 func (m *OrchestrationManager) flushCodexInteractiveThread(session *orchestrationNativeSession, codex *orchestrationCodexSession) {

@@ -172,17 +172,26 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 		c.orchestrations.DetachOut(writec)
 		close(writeDone)
 	}()
+	// Detach before CloseAll on every exit path: the cancellation events that
+	// CloseAll triggers must land in the managers' pending buffers (flushed on
+	// reconnect), not in a write channel whose writer goroutine already died.
 	for {
 		select {
 		case <-ctx.Done():
+			c.sessions.DetachOut(writec)
+			c.orchestrations.DetachOut(writec)
 			c.sessions.CloseAll()
 			c.orchestrations.CloseAll()
 			return ctx.Err()
 		case <-c.shutdown:
+			c.sessions.DetachOut(writec)
+			c.orchestrations.DetachOut(writec)
 			c.sessions.CloseAll()
 			c.orchestrations.CloseAll()
 			return nil
 		case err := <-done:
+			c.sessions.DetachOut(writec)
+			c.orchestrations.DetachOut(writec)
 			c.orchestrations.CloseAll()
 			return err
 		case <-ticker.C:

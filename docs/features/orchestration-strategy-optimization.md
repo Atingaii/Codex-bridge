@@ -229,7 +229,7 @@ discharged.
 The Bridge must avoid sending full raw previous outputs unless they are short.
 Each prior turn in the next prompt should be capped and should prefer parsed
 handoff fields when the agent provided them. The visible `Handoff:` line remains
-the compatibility surface, while `internal/bridge/orchestration_relay.go:parseHandoffFields`
+the compatibility surface, while `internal/bridge/orchestration_relay.go:extractHandoffSummary`
 stores the important values as structured turn state for later prompts.
 Compact prior turns include both successful verification commands and failed
 command summaries so the next CLI can see what has already been tried.

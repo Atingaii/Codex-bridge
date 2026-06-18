@@ -53,12 +53,16 @@ export default function App() {
     }
   }, [path, user]);
 
-  const navigate = useCallback((nextPath: string) => {
+  const navigate = useCallback((nextPath: string, options: { replace?: boolean } = {}) => {
     if (user && !user.isAdmin && !nextPath.startsWith('/orchestrate') && !nextPath.startsWith('/conversation-snapshot') && !nextPath.startsWith('/share/')) {
       nextPath = '/orchestrate';
     }
     if (window.location.pathname !== nextPath) {
-      window.history.pushState({}, '', nextPath);
+      if (options.replace) {
+        window.history.replaceState({}, '', nextPath);
+      } else {
+        window.history.pushState({}, '', nextPath);
+      }
       setPath(nextPath);
     }
   }, [user]);
@@ -94,6 +98,7 @@ export default function App() {
         setLanguage={setLanguage}
         t={t}
         canOpenMain={Boolean(user.isAdmin)}
+        path={path}
         navigate={navigate}
       />
     );

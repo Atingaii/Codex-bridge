@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ type orchestrationCreateRequest struct {
 	AgentID                 string                       `json:"agentId"`
 	Title                   string                       `json:"title"`
 	Mode                    string                       `json:"mode"`
+	WorkerPair              string                       `json:"workerPair"`
 	FirstCLI                string                       `json:"firstCli"`
 	Profile                 string                       `json:"profile"`
 	NativeContextCompaction string                       `json:"nativeContextCompaction"`
@@ -33,6 +35,7 @@ type orchestrationStartRequest struct {
 	AgentID                 string
 	Title                   string
 	Mode                    string
+	WorkerPair              string
 	FirstCLI                string
 	Profile                 string
 	NativeContextCompaction string
@@ -46,7 +49,15 @@ type orchestrationStartRequest struct {
 const orchestrationCancelAckTimeout = 5 * time.Second
 
 func (s *Server) handleListOrchestrations(w http.ResponseWriter, r *http.Request, uid string) {
-	runs, err := s.store.ListOrchestrationRuns(r.Context(), uid, 100)
+	limit := boundedQueryLimit(r, "limit", 50, 200)
+	agentID := strings.TrimSpace(r.URL.Query().Get("agentId"))
+	var runs []store.OrchestrationRun
+	var err error
+	if agentID != "" {
+		runs, err = s.store.ListOrchestrationRunsByAgent(r.Context(), uid, agentID, limit)
+	} else {
+		runs, err = s.store.ListOrchestrationRuns(r.Context(), uid, limit)
+	}
 	if err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to list orchestration runs")
 		return
@@ -65,6 +76,7 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		AgentID:                 req.AgentID,
 		Title:                   req.Title,
 		Mode:                    req.Mode,
+		WorkerPair:              req.WorkerPair,
 		FirstCLI:                req.FirstCLI,
 		Profile:                 req.Profile,
 		NativeContextCompaction: req.NativeContextCompaction,
@@ -86,7 +98,7 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		serverutil.WriteError(w, status, "BAD_AGENT", err.Error())
 		return
 	}
-	if err := s.validateOrchestrationCapabilities(agentID); err != nil {
+	if err := s.validateOrchestrationCapabilities(agentID, normalized.WorkerPair); err != nil {
 		serverutil.WriteError(w, http.StatusConflict, "ORCHESTRATION_CAPABILITY_UNAVAILABLE", err.Error())
 		return
 	}
@@ -96,6 +108,7 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		AgentID:                 agentID,
 		Title:                   normalized.Title,
 		Mode:                    normalized.Mode,
+		WorkerPair:              normalized.WorkerPair,
 		FirstCLI:                normalized.FirstCLI,
 		Profile:                 normalized.Profile,
 		NativeContextCompaction: normalized.NativeContextCompaction,
@@ -141,6 +154,7 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		AgentID:                 req.AgentID,
 		Title:                   req.Title,
 		Mode:                    req.Mode,
+		WorkerPair:              req.WorkerPair,
 		FirstCLI:                req.FirstCLI,
 		Profile:                 req.Profile,
 		NativeContextCompaction: req.NativeContextCompaction,
@@ -158,6 +172,9 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 	}
 	if startReq.Mode == "" {
 		startReq.Mode = run.Mode
+	}
+	if startReq.WorkerPair == "" {
+		startReq.WorkerPair = run.WorkerPair
 	}
 	if startReq.FirstCLI == "" {
 		startReq.FirstCLI = run.FirstCLI
@@ -187,7 +204,7 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		serverutil.WriteError(w, status, "BAD_AGENT", err.Error())
 		return
 	}
-	if err := s.validateOrchestrationCapabilities(agentID); err != nil {
+	if err := s.validateOrchestrationCapabilities(agentID, normalized.WorkerPair); err != nil {
 		serverutil.WriteError(w, http.StatusConflict, "ORCHESTRATION_CAPABILITY_UNAVAILABLE", err.Error())
 		return
 	}
@@ -200,12 +217,22 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	contextSummary := compactOrchestrationContext(run, events)
-	if err := s.store.UpdateOrchestrationRunSettings(r.Context(), run.ID, agentID, normalized.Mode, normalized.FirstCLI, normalized.Profile, normalized.CWD, normalized.NativeContextCompaction, normalized.MaxTurns, files); err != nil {
+	claimed, err := s.store.ClaimOrchestrationRunForContinue(r.Context(), run.ID)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to claim orchestration run")
+		return
+	}
+	if !claimed {
+		serverutil.WriteError(w, http.StatusConflict, "RUN_ACTIVE", "orchestration run is still active")
+		return
+	}
+	if err := s.store.UpdateOrchestrationRunSettings(r.Context(), run.ID, agentID, normalized.Mode, normalized.WorkerPair, normalized.FirstCLI, normalized.Profile, normalized.CWD, normalized.NativeContextCompaction, normalized.MaxTurns, files); err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to update orchestration run")
 		return
 	}
 	run.AgentID = agentID
 	run.Mode = normalized.Mode
+	run.WorkerPair = normalized.WorkerPair
 	run.FirstCLI = normalized.FirstCLI
 	run.Profile = normalized.Profile
 	run.NativeContextCompaction = normalized.NativeContextCompaction
@@ -239,7 +266,11 @@ func (s *Server) normalizeOrchestrationStart(w http.ResponseWriter, req orchestr
 		serverutil.WriteError(w, http.StatusBadRequest, "BAD_MODE", "mode must be collaboration or debate")
 		return req, false
 	}
+	req.WorkerPair = protocol.NormalizeOrchestrationWorkerPair(req.WorkerPair)
 	req.FirstCLI = normalizeOrchestrationFirstCLI(req.FirstCLI)
+	if req.WorkerPair == protocol.WorkerPairCodexCodex {
+		req.FirstCLI = "codex"
+	}
 	req.Profile = normalizeOrchestrationProfile(req.Profile)
 	req.NativeContextCompaction = protocol.NormalizeNativeContextCompaction(req.NativeContextCompaction)
 	if req.MaxTurns <= 0 {
@@ -276,6 +307,7 @@ func (s *Server) startOrchestration(ctx context.Context, run store.Orchestration
 	payload := protocol.OrchestrationStartPayload{
 		RunID:                   run.ID,
 		Mode:                    req.Mode,
+		WorkerPair:              req.WorkerPair,
 		FirstCLI:                req.FirstCLI,
 		Prompt:                  req.Prompt,
 		Context:                 strings.Join(cleanContextParts(contextParts), "\n\n"),
@@ -286,6 +318,7 @@ func (s *Server) startOrchestration(ctx context.Context, run store.Orchestration
 		CWD:                     req.CWD,
 		Files:                   req.Files,
 		CodexThreadID:           orchestrationResumeString(resume, run.CodexThreadID),
+		CodexThreadIDs:          orchestrationResumeStringMap(resume, run.CodexThreadIDs),
 		ClaudeStarted:           resume && run.ClaudeStarted,
 		RunCWD:                  orchestrationResumeString(resume, run.RunCWD),
 		Profile:                 req.Profile,
@@ -311,7 +344,7 @@ func (s *Server) startOrchestration(ctx context.Context, run store.Orchestration
 	return nil
 }
 
-func (s *Server) validateOrchestrationCapabilities(agentID string) error {
+func (s *Server) validateOrchestrationCapabilities(agentID, workerPair string) error {
 	if agentID == "" {
 		return errors.New("agent id is required")
 	}
@@ -319,7 +352,8 @@ func (s *Server) validateOrchestrationCapabilities(agentID string) error {
 	if !ok {
 		return errors.New("selected CLI endpoint is offline or did not advertise orchestration approval capabilities")
 	}
-	missingCLI := missingOrchestrationCLIs(caps)
+	required := orchestrationRequiredCLIs(workerPair)
+	missingCLI := missingOrchestrationCLIs(caps, required)
 	if len(missingCLI) > 0 {
 		return fmt.Errorf("selected CLI endpoint cannot execute %s; reconnect the endpoint after installing the missing CLI commands or fixing its service PATH", strings.Join(missingCLI, " and "))
 	}
@@ -329,19 +363,28 @@ func (s *Server) validateOrchestrationCapabilities(agentID string) error {
 	if strings.EqualFold(caps.Metadata["approvalMode"], permissionProfileAutoExecute) {
 		return nil
 	}
-	missing := missingOrchestrationBrowserApproval(caps)
+	missing := missingOrchestrationBrowserApproval(caps, required)
 	if len(missing) > 0 {
 		return fmt.Errorf("review-required orchestration needs browser approval for %s; reconnect the endpoint with a review-required bridge that supports app-server orchestration", strings.Join(missing, " and "))
 	}
 	return nil
 }
 
-func missingOrchestrationCLIs(caps *protocol.BridgeCapabilities) []string {
+func orchestrationRequiredCLIs(workerPair string) []string {
+	switch protocol.NormalizeOrchestrationWorkerPair(workerPair) {
+	case protocol.WorkerPairCodexCodex:
+		return []string{"codex"}
+	default:
+		return []string{"claude", "codex"}
+	}
+}
+
+func missingOrchestrationCLIs(caps *protocol.BridgeCapabilities, required []string) []string {
 	if caps == nil {
-		return []string{"Claude", "Codex"}
+		return cliDisplayNames(required)
 	}
 	var missing []string
-	for _, cli := range []string{"claude", "codex"} {
+	for _, cli := range required {
 		capability, ok := caps.Orchestration[cli]
 		if !ok || !capability.Available {
 			missing = append(missing, cliDisplayName(cli))
@@ -350,18 +393,26 @@ func missingOrchestrationCLIs(caps *protocol.BridgeCapabilities) []string {
 	return missing
 }
 
-func missingOrchestrationBrowserApproval(caps *protocol.BridgeCapabilities) []string {
+func missingOrchestrationBrowserApproval(caps *protocol.BridgeCapabilities, required []string) []string {
 	if caps == nil {
-		return []string{"Claude", "Codex"}
+		return cliDisplayNames(required)
 	}
 	var missing []string
-	for _, cli := range []string{"claude", "codex"} {
+	for _, cli := range required {
 		capability, ok := caps.Orchestration[cli]
 		if !ok || !capability.Available || !capability.BrowserApproval {
 			missing = append(missing, cliDisplayName(cli))
 		}
 	}
 	return missing
+}
+
+func cliDisplayNames(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, cliDisplayName(value))
+	}
+	return out
 }
 
 func cliDisplayName(cli string) string {
@@ -417,7 +468,30 @@ func (s *Server) handleOrchestrationEvents(w http.ResponseWriter, r *http.Reques
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration run")
 		return
 	}
-	events, err := s.store.ListOrchestrationEvents(r.Context(), runID, 10000)
+	limit := boundedQueryLimit(r, "limit", 10000, 10000)
+	afterSeq, hasAfterSeq, ok := int64QueryParam(w, r, "afterSeq")
+	if !ok {
+		return
+	}
+	beforeSeq, hasBeforeSeq, ok := int64QueryParam(w, r, "beforeSeq")
+	if !ok {
+		return
+	}
+	if hasAfterSeq && hasBeforeSeq {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_QUERY", "afterSeq and beforeSeq cannot be used together")
+		return
+	}
+	if (hasAfterSeq || hasBeforeSeq) && limit > 1000 {
+		limit = 1000
+	}
+	var events []store.OrchestrationEvent
+	if hasAfterSeq {
+		events, err = s.store.ListOrchestrationEventsAfter(r.Context(), runID, afterSeq, limit)
+	} else if hasBeforeSeq {
+		events, err = s.store.ListOrchestrationEventsBefore(r.Context(), runID, beforeSeq, limit)
+	} else {
+		events, err = s.store.ListOrchestrationEvents(r.Context(), runID, limit)
+	}
 	if err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to list orchestration events")
 		return
@@ -520,6 +594,53 @@ func orchestrationResumeString(resume bool, value string) string {
 		return ""
 	}
 	return value
+}
+
+func orchestrationResumeStringMap(resume bool, values map[string]string) map[string]string {
+	if !resume || len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func boundedQueryLimit(r *http.Request, name string, defaultLimit, maxLimit int) int {
+	value := strings.TrimSpace(r.URL.Query().Get(name))
+	if value == "" {
+		return defaultLimit
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 {
+		return defaultLimit
+	}
+	if n > maxLimit {
+		return maxLimit
+	}
+	return n
+}
+
+func int64QueryParam(w http.ResponseWriter, r *http.Request, name string) (int64, bool, bool) {
+	value := strings.TrimSpace(r.URL.Query().Get(name))
+	if value == "" {
+		return 0, false, true
+	}
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n < 0 {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_QUERY", name+" must be a non-negative integer")
+		return 0, true, false
+	}
+	return n, true, true
 }
 
 func compactOrchestrationContext(run store.OrchestrationRun, events []store.OrchestrationEvent) string {
@@ -680,6 +801,39 @@ func stringFromMap(data map[string]any, key string) string {
 	}
 	value, _ := data[key].(string)
 	return value
+}
+
+func stringMapFromMap(data map[string]any, key string) map[string]string {
+	if data == nil {
+		return nil
+	}
+	raw, ok := data[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	out := map[string]string{}
+	switch typed := raw.(type) {
+	case map[string]string:
+		for key, value := range typed {
+			key = strings.TrimSpace(key)
+			value = strings.TrimSpace(value)
+			if key != "" && value != "" {
+				out[key] = value
+			}
+		}
+	case map[string]any:
+		for key, value := range typed {
+			key = strings.TrimSpace(key)
+			valueString := strings.TrimSpace(fmt.Sprint(value))
+			if key != "" && valueString != "" {
+				out[key] = valueString
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func lastN(values []string, n int) []string {
@@ -851,17 +1005,22 @@ func (s *Server) updateOrchestrationRunSessionFromEvent(ctx context.Context, pay
 				slog.Error("[hub] update orchestration run cwd failed", "run_id", payload.RunID, "error", err)
 			}
 		}
-	case "turn.end":
+	case "turn.end", "run.end":
 		codexThreadID := stringFromMap(payload.Data, "codexThreadId")
 		if codexThreadID == "" {
 			codexThreadID = stringFromMap(payload.Data, "threadId")
 		}
+		codexThreadIDs := stringMapFromMap(payload.Data, "codexThreadIds")
 		if codexThreadID == "" && payload.RunEndData != nil {
 			codexThreadID = payload.RunEndData.CodexThreadID
 		}
-		claudeStarted := strings.EqualFold(payload.CLI, "claude") && !strings.EqualFold(payload.Status, "error")
-		if codexThreadID != "" || claudeStarted {
-			if err := s.store.UpdateOrchestrationRunSession(ctx, payload.RunID, codexThreadID, claudeStarted, ""); err != nil {
+		if len(codexThreadIDs) == 0 && payload.RunEndData != nil {
+			codexThreadIDs = payload.RunEndData.CodexThreadIDs
+		}
+		claudeStarted := payload.Kind == "turn.end" && strings.EqualFold(payload.CLI, "claude") &&
+			!strings.EqualFold(payload.Status, "error") && !strings.EqualFold(payload.Severity, "error")
+		if codexThreadID != "" || len(codexThreadIDs) > 0 || claudeStarted {
+			if err := s.store.UpdateOrchestrationRunSessionState(ctx, payload.RunID, codexThreadID, codexThreadIDs, claudeStarted, ""); err != nil {
 				slog.Error("[hub] update orchestration run session failed", "run_id", payload.RunID, "error", err)
 			}
 		}

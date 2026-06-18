@@ -34,7 +34,7 @@ land in PR-2.
 
 ## Current State
 
-- Chat: `internal/bridge/session.go:SessionManager.Prompt` calls
+- Chat: `internal/bridge/session.go:Prompt` calls
   `Runner.Prompt` once per browser turn. `CodexExecRunner` and
   `CodexAppServerRunner` each spawn a process per prompt (the app-server runner
   keeps the process only for the duration of one turn, then closes it).

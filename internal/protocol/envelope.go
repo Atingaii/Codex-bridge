@@ -204,6 +204,7 @@ type ApprovalResponsePayload struct {
 type OrchestrationStartPayload struct {
 	RunID                   string              `json:"runId"`
 	Mode                    string              `json:"mode"`
+	WorkerPair              string              `json:"workerPair,omitempty"`
 	FirstCLI                string              `json:"firstCli,omitempty"`
 	Prompt                  string              `json:"prompt"`
 	Context                 string              `json:"context,omitempty"`
@@ -214,6 +215,7 @@ type OrchestrationStartPayload struct {
 	CWD                     string              `json:"cwd,omitempty"`
 	Files                   []AttachmentPayload `json:"files,omitempty"`
 	CodexThreadID           string              `json:"codexThreadId,omitempty"`
+	CodexThreadIDs          map[string]string   `json:"codexThreadIds,omitempty"`
 	ClaudeStarted           bool                `json:"claudeStarted,omitempty"`
 	RunCWD                  string              `json:"runCwd,omitempty"`
 	Profile                 string              `json:"profile,omitempty"`
@@ -274,6 +276,7 @@ type CommandData struct {
 type RunStartData struct {
 	CWD                     string `json:"cwd,omitempty"`
 	Mode                    string `json:"mode,omitempty"`
+	WorkerPair              string `json:"workerPair,omitempty"`
 	FirstCLI                string `json:"firstCli,omitempty"`
 	MaxTurnsRequested       int    `json:"maxTurnsRequested,omitempty"`
 	MaxTurnsApplied         int    `json:"maxTurnsApplied,omitempty"`
@@ -284,6 +287,7 @@ type RunStartData struct {
 
 type TurnStartData struct {
 	CLI        string `json:"cli,omitempty"`
+	WorkerSlot string `json:"workerSlot,omitempty"`
 	Turn       int    `json:"turn,omitempty"`
 	MaxTurns   int    `json:"maxTurns,omitempty"`
 	PromptText string `json:"promptText,omitempty"`
@@ -293,7 +297,9 @@ type TurnStartData struct {
 
 type RunEndData struct {
 	CodexThreadID      string             `json:"codexThreadId,omitempty"`
+	CodexThreadIDs     map[string]string  `json:"codexThreadIds,omitempty"`
 	ClaudeSessionID    string             `json:"claudeSessionId,omitempty"`
+	WorkerPair         string             `json:"workerPair,omitempty"`
 	NativeResume       []NativeResumeInfo `json:"nativeResume,omitempty"`
 	CodexNativeResume  *NativeResumeInfo  `json:"codexNativeResume,omitempty"`
 	ClaudeNativeResume *NativeResumeInfo  `json:"claudeNativeResume,omitempty"`
@@ -319,6 +325,8 @@ type NativeResumeInfo struct {
 const (
 	NativeContextCompactionOff       = "off"
 	NativeContextCompactionAfterTurn = "after-turn"
+	WorkerPairClaudeCodex            = "claude-codex"
+	WorkerPairCodexCodex             = "codex-codex"
 )
 
 func NormalizeNativeContextCompaction(value string) string {
@@ -327,6 +335,15 @@ func NormalizeNativeContextCompaction(value string) string {
 		return NativeContextCompactionAfterTurn
 	default:
 		return NativeContextCompactionOff
+	}
+}
+
+func NormalizeOrchestrationWorkerPair(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case WorkerPairCodexCodex:
+		return WorkerPairCodexCodex
+	default:
+		return WorkerPairClaudeCodex
 	}
 }
 

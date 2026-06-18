@@ -136,12 +136,14 @@ func (s *Store) Migrate(ctx context.Context) error {
 			agent_id TEXT NOT NULL,
 			title TEXT NOT NULL,
 			mode TEXT NOT NULL CHECK(mode IN ('collaboration','debate')),
+			worker_pair TEXT NOT NULL DEFAULT 'claude-codex' CHECK(worker_pair IN ('claude-codex','codex-codex')),
 			first_cli TEXT CHECK(first_cli IN ('claude','codex')),
 			profile TEXT NOT NULL DEFAULT 'default',
 			prompt TEXT NOT NULL,
 			cwd TEXT,
 			run_cwd TEXT DEFAULT '',
 			codex_thread_id TEXT DEFAULT '',
+			codex_thread_ids_json TEXT DEFAULT '{}',
 			claude_started INTEGER NOT NULL DEFAULT 0,
 			native_context_compaction TEXT NOT NULL DEFAULT 'off',
 			max_turns INTEGER NOT NULL,
@@ -154,13 +156,16 @@ func (s *Store) Migrate(ctx context.Context) error {
 			FOREIGN KEY (user_id) REFERENCES users(id),
 			FOREIGN KEY (agent_id) REFERENCES agents(id)
 		);`,
+		`ALTER TABLE orchestration_runs ADD COLUMN worker_pair TEXT NOT NULL DEFAULT 'claude-codex' CHECK(worker_pair IN ('claude-codex','codex-codex'));`,
 		`ALTER TABLE orchestration_runs ADD COLUMN first_cli TEXT CHECK(first_cli IN ('claude','codex'));`,
 		`ALTER TABLE orchestration_runs ADD COLUMN profile TEXT NOT NULL DEFAULT 'default';`,
 		`ALTER TABLE orchestration_runs ADD COLUMN run_cwd TEXT DEFAULT '';`,
 		`ALTER TABLE orchestration_runs ADD COLUMN codex_thread_id TEXT DEFAULT '';`,
+		`ALTER TABLE orchestration_runs ADD COLUMN codex_thread_ids_json TEXT DEFAULT '{}';`,
 		`ALTER TABLE orchestration_runs ADD COLUMN claude_started INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE orchestration_runs ADD COLUMN native_context_compaction TEXT NOT NULL DEFAULT 'off';`,
 		`CREATE INDEX IF NOT EXISTS idx_orchestration_runs_user_updated ON orchestration_runs(user_id, updated_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_orchestration_runs_user_agent_updated ON orchestration_runs(user_id, agent_id, updated_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS orchestration_events (
 			id TEXT PRIMARY KEY,
 			run_id TEXT NOT NULL,
@@ -256,6 +261,46 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 	if reason == "" {
 		reason = "bridge disconnected while orchestration run was active"
 	}
+	return s.markActiveOrchestrationRunsFailed(ctx, agentID, reason)
+}
+
+// MarkUnfinishedOrchestrationRunsFailed closes out every orchestration run left
+// in a non-terminal state, regardless of agent. It runs once at Hub startup so
+// runs interrupted by a Hub restart cannot stay "running" forever; canceling
+// runs are settled as canceled because their in-memory cancel timeout died with
+// the previous Hub process.
+func (s *Store) MarkUnfinishedOrchestrationRunsFailed(ctx context.Context, reason string) ([]OrchestrationRun, error) {
+	if reason == "" {
+		reason = "hub restarted while orchestration run was active"
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM orchestration_runs WHERE status = ?`, OrchestrationCanceling)
+	if err != nil {
+		return nil, err
+	}
+	var cancelingIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		cancelingIDs = append(cancelingIDs, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, id := range cancelingIDs {
+		if _, _, err := s.CancelOrchestrationRunIfStillCanceling(ctx, id, reason); err != nil {
+			return nil, err
+		}
+	}
+	return s.markActiveOrchestrationRunsFailed(ctx, "", reason)
+}
+
+func (s *Store) markActiveOrchestrationRunsFailed(ctx context.Context, agentID, reason string) ([]OrchestrationRun, error) {
 	now := time.Now().Unix()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -263,14 +308,20 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 	}
 	defer tx.Rollback()
 
+	where := `status IN (?, ?)`
+	args := []any{OrchestrationQueued, OrchestrationRunning}
+	if agentID != "" {
+		where = `agent_id = ? AND ` + where
+		args = append([]any{agentID}, args...)
+	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), COALESCE(native_context_compaction,'off'), max_turns, status,
-			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
-		WHERE agent_id = ? AND status IN (?, ?)
+		WHERE `+where+`
 		ORDER BY updated_at ASC, created_at ASC
-	`, agentID, OrchestrationQueued, OrchestrationRunning)
+	`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -394,7 +445,9 @@ func insertOrchestrationEventTx(ctx context.Context, tx *sql.Tx, event Orchestra
 	event.Source = normalizeOrchestrationEventSource(event.Source, event.Kind)
 	if event.Severity == "" {
 		event.Severity = severityFromLegacyStatus(event.Status)
-		if event.Severity != "" {
+		// turn.end carries a semantic lifecycle status (success/error/warning),
+		// not a log level; keep it so error guards and timelines stay correct.
+		if event.Severity != "" && event.Kind != "turn.end" {
 			event.Status = ""
 		}
 	}
@@ -1161,12 +1214,14 @@ type OrchestrationRun struct {
 	AgentID                 string              `json:"agentId"`
 	Title                   string              `json:"title"`
 	Mode                    string              `json:"mode"`
+	WorkerPair              string              `json:"workerPair,omitempty"`
 	FirstCLI                string              `json:"firstCli,omitempty"`
 	Profile                 string              `json:"profile"`
 	Prompt                  string              `json:"prompt"`
 	CWD                     string              `json:"cwd,omitempty"`
 	RunCWD                  string              `json:"runCwd,omitempty"`
 	CodexThreadID           string              `json:"codexThreadId,omitempty"`
+	CodexThreadIDs          map[string]string   `json:"codexThreadIds,omitempty"`
 	ClaudeStarted           bool                `json:"claudeStarted,omitempty"`
 	NativeContextCompaction string              `json:"nativeContextCompaction,omitempty"`
 	MaxTurns                int                 `json:"maxTurns"`
@@ -1206,10 +1261,12 @@ type CreateOrchestrationRunParams struct {
 	AgentID                 string
 	Title                   string
 	Mode                    string
+	WorkerPair              string
 	FirstCLI                string
 	Profile                 string
 	Prompt                  string
 	CWD                     string
+	CodexThreadIDs          map[string]string
 	NativeContextCompaction string
 	MaxTurns                int
 	Files                   []OrchestrationFile
@@ -1314,7 +1371,11 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 	if params.Mode != "collaboration" && params.Mode != "debate" {
 		return OrchestrationRun{}, errors.New("mode must be collaboration or debate")
 	}
+	params.WorkerPair = normalizeOrchestrationWorkerPair(params.WorkerPair)
 	params.FirstCLI = normalizeOrchestrationFirstCLI(params.FirstCLI)
+	if params.WorkerPair == protocol.WorkerPairCodexCodex {
+		params.FirstCLI = "codex"
+	}
 	params.Prompt = strings.TrimSpace(params.Prompt)
 	if params.Prompt == "" {
 		return OrchestrationRun{}, errors.New("prompt is required")
@@ -1338,6 +1399,11 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 	if err != nil {
 		return OrchestrationRun{}, err
 	}
+	codexThreadIDs := cleanStringMap(params.CodexThreadIDs)
+	codexThreadIDsJSON, err := json.Marshal(codexThreadIDs)
+	if err != nil {
+		return OrchestrationRun{}, err
+	}
 	now := time.Now().Unix()
 	run := OrchestrationRun{
 		ID:                      NewID("orc"),
@@ -1345,10 +1411,12 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 		AgentID:                 params.AgentID,
 		Title:                   params.Title,
 		Mode:                    params.Mode,
+		WorkerPair:              params.WorkerPair,
 		FirstCLI:                params.FirstCLI,
 		Profile:                 params.Profile,
 		Prompt:                  params.Prompt,
 		CWD:                     params.CWD,
+		CodexThreadIDs:          codexThreadIDs,
 		NativeContextCompaction: params.NativeContextCompaction,
 		MaxTurns:                params.MaxTurns,
 		Status:                  OrchestrationQueued,
@@ -1358,9 +1426,9 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO orchestration_runs
-			(id, user_id, agent_id, title, mode, first_cli, profile, prompt, cwd, native_context_compaction, max_turns, status, files_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, run.ID, run.UserID, run.AgentID, run.Title, run.Mode, run.FirstCLI, run.Profile, run.Prompt, nullString(run.CWD), run.NativeContextCompaction, run.MaxTurns, run.Status, string(filesJSON), now, now)
+			(id, user_id, agent_id, title, mode, worker_pair, first_cli, profile, prompt, cwd, codex_thread_ids_json, native_context_compaction, max_turns, status, files_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, run.ID, run.UserID, run.AgentID, run.Title, run.Mode, run.WorkerPair, run.FirstCLI, run.Profile, run.Prompt, nullString(run.CWD), string(codexThreadIDsJSON), run.NativeContextCompaction, run.MaxTurns, run.Status, string(filesJSON), now, now)
 	if err != nil {
 		return OrchestrationRun{}, err
 	}
@@ -1369,9 +1437,9 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 
 func (s *Store) OrchestrationRunByID(ctx context.Context, id, userID string) (OrchestrationRun, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), COALESCE(native_context_compaction,'off'), max_turns, status,
-			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE id = ? AND user_id = ?
 	`, id, userID)
@@ -1380,9 +1448,9 @@ func (s *Store) OrchestrationRunByID(ctx context.Context, id, userID string) (Or
 
 func (s *Store) OrchestrationRunByIDAnyUser(ctx context.Context, id string) (OrchestrationRun, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), COALESCE(native_context_compaction,'off'), max_turns, status,
-			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE id = ?
 	`, id)
@@ -1394,14 +1462,42 @@ func (s *Store) ListOrchestrationRuns(ctx context.Context, userID string, limit 
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(claude_started,0), COALESCE(native_context_compaction,'off'), max_turns, status,
-			COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
 		FROM orchestration_runs
 		WHERE user_id = ?
 		ORDER BY updated_at DESC, created_at DESC
 		LIMIT ?
 	`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OrchestrationRun
+	for rows.Next() {
+		run, err := scanOrchestrationRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListOrchestrationRunsByAgent(ctx context.Context, userID, agentID string, limit int) ([]OrchestrationRun, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+		FROM orchestration_runs
+		WHERE user_id = ? AND agent_id = ?
+		ORDER BY updated_at DESC, created_at DESC
+		LIMIT ?
+	`, userID, agentID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1429,6 +1525,29 @@ func (s *Store) UpdateOrchestrationRunStatus(ctx context.Context, id, status, er
 		WHERE id = ?
 	`, status, nullString(errText), finishedAt, now, id)
 	return err
+}
+
+// ClaimOrchestrationRunForContinue atomically moves a terminal run back to
+// running. Exactly one of several concurrent follow-up prompts wins the claim,
+// so the same run cannot be double-started on the Bridge.
+func (s *Store) ClaimOrchestrationRunForContinue(ctx context.Context, id string) (bool, error) {
+	if id == "" {
+		return false, errors.New("run id is required")
+	}
+	now := time.Now().Unix()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE orchestration_runs
+		SET status = ?, error = NULL, updated_at = ?
+		WHERE id = ? AND status IN (?, ?, ?)
+	`, OrchestrationRunning, now, id, OrchestrationCompleted, OrchestrationFailed, OrchestrationCanceled)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (s *Store) CancelOrchestrationRunIfStillCanceling(ctx context.Context, id, reason string) (OrchestrationEvent, bool, error) {
@@ -1499,14 +1618,18 @@ func (s *Store) CancelOrchestrationRunIfStillCanceling(ctx context.Context, id, 
 	return event, true, nil
 }
 
-func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID, mode, firstCLI, profile, cwd, nativeContextCompaction string, maxTurns int, files []OrchestrationFile) error {
+func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID, mode, workerPair, firstCLI, profile, cwd, nativeContextCompaction string, maxTurns int, files []OrchestrationFile) error {
 	if id == "" || agentID == "" {
 		return errors.New("run id and agent id are required")
 	}
 	if mode != "collaboration" && mode != "debate" {
 		return errors.New("mode must be collaboration or debate")
 	}
+	workerPair = normalizeOrchestrationWorkerPair(workerPair)
 	firstCLI = normalizeOrchestrationFirstCLI(firstCLI)
+	if workerPair == protocol.WorkerPairCodexCodex {
+		firstCLI = "codex"
+	}
 	if maxTurns <= 0 {
 		maxTurns = 4
 	}
@@ -1522,24 +1645,64 @@ func (s *Store) UpdateOrchestrationRunSettings(ctx context.Context, id, agentID,
 	now := time.Now().Unix()
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE orchestration_runs
-		SET agent_id = ?, mode = ?, first_cli = ?, profile = ?, cwd = ?, native_context_compaction = ?, max_turns = ?, files_json = ?, finished_at = NULL, updated_at = ?
+		SET agent_id = ?, mode = ?, worker_pair = ?, first_cli = ?, profile = ?, cwd = ?, native_context_compaction = ?, max_turns = ?, files_json = ?, finished_at = NULL, updated_at = ?
 		WHERE id = ?
-	`, agentID, mode, firstCLI, profile, nullString(cwd), nativeContextCompaction, maxTurns, string(filesJSON), now, id)
+	`, agentID, mode, workerPair, firstCLI, profile, nullString(cwd), nativeContextCompaction, maxTurns, string(filesJSON), now, id)
 	return err
 }
 
 func (s *Store) UpdateOrchestrationRunSession(ctx context.Context, id, codexThreadID string, claudeStarted bool, runCWD string) error {
+	return s.UpdateOrchestrationRunSessionState(ctx, id, codexThreadID, nil, claudeStarted, runCWD)
+}
+
+func (s *Store) UpdateOrchestrationRunSessionState(ctx context.Context, id, codexThreadID string, codexThreadIDs map[string]string, claudeStarted bool, runCWD string) error {
 	if id == "" {
 		return errors.New("run id is required")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	codexThreadIDs = cleanStringMap(codexThreadIDs)
+	if codexThreadID != "" && len(codexThreadIDs) == 0 {
+		codexThreadIDs["codex"] = codexThreadID
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var codexThreadIDsJSON string
+	if len(codexThreadIDs) > 0 {
+		var currentJSON string
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(codex_thread_ids_json,'{}') FROM orchestration_runs WHERE id = ?`, id).Scan(&currentJSON); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		current := map[string]string{}
+		_ = json.Unmarshal([]byte(currentJSON), &current)
+		merged := cleanStringMap(current)
+		for key, value := range codexThreadIDs {
+			merged[key] = value
+		}
+		raw, err := json.Marshal(merged)
+		if err != nil {
+			return err
+		}
+		codexThreadIDsJSON = string(raw)
+		if codexThreadID == "" {
+			codexThreadID = firstNonEmpty(merged["codex"], merged["codex-a"], merged["codex-b"])
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE orchestration_runs
 		SET codex_thread_id = CASE WHEN ? <> '' THEN ? ELSE codex_thread_id END,
+			codex_thread_ids_json = CASE WHEN ? <> '' THEN ? ELSE codex_thread_ids_json END,
 			claude_started = CASE WHEN ? = 1 THEN 1 ELSE claude_started END,
 			run_cwd = CASE WHEN ? <> '' AND run_cwd = '' THEN ? ELSE run_cwd END
 		WHERE id = ?
-	`, codexThreadID, codexThreadID, boolInt(claudeStarted), runCWD, runCWD, id)
-	return err
+	`, codexThreadID, codexThreadID, codexThreadIDsJSON, codexThreadIDsJSON, boolInt(claudeStarted), runCWD, runCWD, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) AddOrchestrationEvent(ctx context.Context, event OrchestrationEvent) (OrchestrationEvent, error) {
@@ -1554,7 +1717,9 @@ func (s *Store) AddOrchestrationEvent(ctx context.Context, event OrchestrationEv
 	event.Source = normalizeOrchestrationEventSource(event.Source, event.Kind)
 	if event.Severity == "" {
 		event.Severity = severityFromLegacyStatus(event.Status)
-		if event.Severity != "" {
+		// turn.end carries a semantic lifecycle status (success/error/warning),
+		// not a log level; keep it so error guards and timelines stay correct.
+		if event.Severity != "" && event.Kind != "turn.end" {
 			event.Status = ""
 		}
 	}
@@ -1624,12 +1789,75 @@ func (s *Store) ListOrchestrationEvents(ctx context.Context, runID string, limit
 	return out, rows.Err()
 }
 
+func (s *Store) ListOrchestrationEventsAfter(ctx context.Context, runID string, afterSeq int64, limit int) ([]OrchestrationEvent, error) {
+	if limit <= 0 {
+		limit = 1000
+	} else if limit > 10000 {
+		limit = 10000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, run_id, seq, kind, COALESCE(source,''), COALESCE(severity,''), COALESCE(role,''), COALESCE(cli,''), COALESCE(turn_id,''),
+			COALESCE(content,''), COALESCE(status,''), COALESCE(error,''), COALESCE(data_json,''), created_at
+		FROM orchestration_events
+		WHERE run_id = ? AND seq > ?
+		ORDER BY seq ASC
+		LIMIT ?
+	`, runID, afterSeq, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OrchestrationEvent
+	for rows.Next() {
+		event, err := scanOrchestrationEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListOrchestrationEventsBefore(ctx context.Context, runID string, beforeSeq int64, limit int) ([]OrchestrationEvent, error) {
+	if limit <= 0 {
+		limit = 1000
+	} else if limit > 10000 {
+		limit = 10000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, run_id, seq, kind, COALESCE(source,''), COALESCE(severity,''), COALESCE(role,''), COALESCE(cli,''), COALESCE(turn_id,''),
+			COALESCE(content,''), COALESCE(status,''), COALESCE(error,''), COALESCE(data_json,''), created_at
+		FROM (
+			SELECT id, run_id, seq, kind, source, severity, role, cli, turn_id, content, status, error, data_json, created_at
+			FROM orchestration_events
+			WHERE run_id = ? AND seq < ?
+			ORDER BY seq DESC
+			LIMIT ?
+		)
+		ORDER BY seq ASC
+	`, runID, beforeSeq, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OrchestrationEvent
+	for rows.Next() {
+		event, err := scanOrchestrationEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
 func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (OrchestrationRun, error) {
 	var run OrchestrationRun
 	var filesJSON string
+	var codexThreadIDsJSON string
 	var claudeStarted int
-	if err := row.Scan(&run.ID, &run.UserID, &run.AgentID, &run.Title, &run.Mode, &run.FirstCLI, &run.Profile, &run.Prompt, &run.CWD,
-		&run.RunCWD, &run.CodexThreadID, &claudeStarted, &run.NativeContextCompaction, &run.MaxTurns, &run.Status, &run.Error, &filesJSON, &run.CreatedAt, &run.UpdatedAt, &run.FinishedAt); err != nil {
+	if err := row.Scan(&run.ID, &run.UserID, &run.AgentID, &run.Title, &run.Mode, &run.WorkerPair, &run.FirstCLI, &run.Profile, &run.Prompt, &run.CWD,
+		&run.RunCWD, &run.CodexThreadID, &codexThreadIDsJSON, &claudeStarted, &run.NativeContextCompaction, &run.MaxTurns, &run.Status, &run.Error, &filesJSON, &run.CreatedAt, &run.UpdatedAt, &run.FinishedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return OrchestrationRun{}, ErrNotFound
 		}
@@ -1638,11 +1866,47 @@ func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (Orchestrati
 	if strings.TrimSpace(filesJSON) != "" {
 		_ = json.Unmarshal([]byte(filesJSON), &run.Files)
 	}
+	if strings.TrimSpace(codexThreadIDsJSON) != "" {
+		_ = json.Unmarshal([]byte(codexThreadIDsJSON), &run.CodexThreadIDs)
+	}
+	run.CodexThreadIDs = cleanStringMap(run.CodexThreadIDs)
+	if run.CodexThreadID != "" && len(run.CodexThreadIDs) == 0 {
+		run.CodexThreadIDs = map[string]string{"codex": run.CodexThreadID}
+	}
+	run.WorkerPair = normalizeOrchestrationWorkerPair(run.WorkerPair)
 	run.FirstCLI = normalizeOrchestrationFirstCLI(run.FirstCLI)
+	if run.WorkerPair == protocol.WorkerPairCodexCodex {
+		run.FirstCLI = "codex"
+	}
 	run.Profile = normalizeOrchestrationProfile(run.Profile)
 	run.NativeContextCompaction = protocol.NormalizeNativeContextCompaction(run.NativeContextCompaction)
 	run.ClaudeStarted = claudeStarted != 0
 	return run, nil
+}
+
+func cleanStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func boolInt(value bool) int {
@@ -1659,6 +1923,10 @@ func normalizeOrchestrationFirstCLI(value string) string {
 	default:
 		return "claude"
 	}
+}
+
+func normalizeOrchestrationWorkerPair(value string) string {
+	return protocol.NormalizeOrchestrationWorkerPair(value)
 }
 
 func normalizeOrchestrationProfile(value string) string {
@@ -1708,7 +1976,9 @@ func scanOrchestrationEvent(row interface{ Scan(dest ...any) error }) (Orchestra
 	event.Source = normalizeOrchestrationEventSource(event.Source, event.Kind)
 	if event.Severity == "" {
 		event.Severity = severityFromLegacyStatus(event.Status)
-		if event.Severity != "" {
+		// turn.end carries a semantic lifecycle status (success/error/warning),
+		// not a log level; keep it so error guards and timelines stay correct.
+		if event.Severity != "" && event.Kind != "turn.end" {
 			event.Status = ""
 		}
 	}

@@ -147,7 +147,10 @@ func (m *OrchestrationManager) emit(runID string, event protocol.OrchestrationEv
 	sourceProvided := strings.TrimSpace(event.Source) != ""
 	if event.Severity == "" {
 		event.Severity = severityFromLegacyStatus(event.Status)
-		if event.Severity != "" {
+		// turn.end carries a semantic lifecycle status (success/error/warning),
+		// not a log level; the hub's claude_started error guard and the public
+		// timeline both need it preserved.
+		if event.Severity != "" && event.Kind != "turn.end" {
 			event.Status = ""
 		}
 	}
@@ -232,19 +235,17 @@ func severityFromLegacyStatus(status string) string {
 	}
 }
 
+// orchestrationSendTimeout bounds how long an orchestration event may wait for
+// space in the outbound write queue before falling back to the pending buffer.
+// A queue that stays full this long means the hub connection is dead or wedged.
+const orchestrationSendTimeout = 3 * time.Second
+
 func (m *OrchestrationManager) send(env protocol.Envelope) {
 	m.mu.Lock()
 	out := m.output
-	buffered := false
-	if out == nil && env.Type == protocol.TypeOrchestrationEvent {
-		m.pending = append(m.pending, env)
-		if len(m.pending) > 1000 {
-			m.pending = m.pending[len(m.pending)-1000:]
-		}
-		buffered = true
-	}
-	m.mu.Unlock()
 	if out == nil {
+		buffered := m.bufferPendingLocked(env)
+		m.mu.Unlock()
 		if buffered {
 			slog.Warn("[bridge] orchestration event buffered: bridge disconnected", "type", env.Type)
 		} else {
@@ -252,5 +253,49 @@ func (m *OrchestrationManager) send(env protocol.Envelope) {
 		}
 		return
 	}
-	send(out, env)
+	m.mu.Unlock()
+	if env.Type != protocol.TypeOrchestrationEvent {
+		send(out, env)
+		return
+	}
+	// Orchestration events must not be silently dropped on a full queue:
+	// losing a terminal run.end/run.cancelled wedges the hub-side run forever.
+	// Apply bounded backpressure; if the connection was replaced while we
+	// waited, retry against the fresh channel, otherwise buffer for the next
+	// reconnect flush.
+	for {
+		select {
+		case out <- env:
+			return
+		default:
+		}
+		timer := time.NewTimer(orchestrationSendTimeout)
+		select {
+		case out <- env:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		m.mu.Lock()
+		current := m.output
+		if current == nil || current == out {
+			m.bufferPendingLocked(env)
+			m.mu.Unlock()
+			slog.Warn("[bridge] orchestration event buffered: outbound queue saturated", "type", env.Type)
+			return
+		}
+		out = current
+		m.mu.Unlock()
+	}
+}
+
+func (m *OrchestrationManager) bufferPendingLocked(env protocol.Envelope) bool {
+	if env.Type != protocol.TypeOrchestrationEvent {
+		return false
+	}
+	m.pending = append(m.pending, env)
+	if len(m.pending) > 1000 {
+		m.pending = m.pending[len(m.pending)-1000:]
+	}
+	return true
 }

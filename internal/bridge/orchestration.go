@@ -37,13 +37,21 @@ type orchestrationApproval struct {
 
 type orchestrationRunHandle struct {
 	cancel context.CancelFunc
+	// done is closed when the run goroutine has fully exited. Start waits on it
+	// before launching a replacement goroutine for the same run id so a
+	// superseded run cannot interleave stale terminal events after the new
+	// run's start.
+	done chan struct{}
 }
 
 type orchestrationSessionState struct {
+	WorkerPair           string
 	CodexThreadID        string
+	CodexThreadIDs       map[string]string
 	ClaudeSessionID      string
 	ClaudeSessionStarted bool
 	CodexResumeMode      string
+	CodexResumeModes     map[string]string
 	ClaudeResumeMode     string
 	NativeSession        *orchestrationNativeSession
 	CommandFingerprints  map[string]bridgeprofiles.CommandFingerprint
@@ -54,7 +62,7 @@ type orchestrationNativeSession struct {
 	cwd                     string
 	nativeContextCompaction string
 	mu                      sync.Mutex
-	codex                   *orchestrationCodexSession
+	codex                   map[string]*orchestrationCodexSession
 	claude                  *orchestrationClaudeSession
 }
 
@@ -84,6 +92,9 @@ var safeOrchestrationFileName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 const (
 	orchestrationTurnContinuationMaxAttempts = 3
 	orchestrationTurnContinuationIdleWait    = 200 * time.Millisecond
+	orchestrationCodexDefaultSlot            = "codex"
+	orchestrationCodexSlotA                  = "codex-a"
+	orchestrationCodexSlotB                  = "codex-b"
 )
 
 func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
@@ -124,22 +135,33 @@ func (m *OrchestrationManager) Start(parent context.Context, payload protocol.Or
 		return
 	}
 	ctx, cancel := context.WithCancel(parent)
-	m.mu.Lock()
-	var oldSession *orchestrationNativeSession
-	if old := m.runs[payload.RunID]; old != nil {
-		old.cancel()
-		oldSession = m.sessions[payload.RunID]
+	// Cancel and join any goroutine still owning this run id before starting
+	// the replacement: otherwise its stale terminal events interleave after
+	// the new run.start and the hub records the wrong final status.
+	for {
+		m.mu.Lock()
+		old := m.runs[payload.RunID]
+		if old == nil {
+			break
+		}
+		oldSession := m.sessions[payload.RunID]
 		delete(m.sessions, payload.RunID)
+		m.mu.Unlock()
+		old.cancel()
+		if oldSession != nil {
+			oldSession.close()
+		}
+		if old.done != nil {
+			<-old.done
+		}
 	}
-	handle := &orchestrationRunHandle{cancel: cancel}
+	handle := &orchestrationRunHandle{cancel: cancel, done: make(chan struct{})}
 	m.runs[payload.RunID] = handle
 	delete(m.conclusions, payload.RunID)
 	m.mu.Unlock()
-	if oldSession != nil {
-		oldSession.close()
-	}
 
 	go func() {
+		defer close(handle.done)
 		defer func() {
 			cancel()
 			m.mu.Lock()
@@ -183,6 +205,9 @@ func (m *OrchestrationManager) CloseAll() {
 		sessions = append(sessions, session)
 		delete(m.sessions, runID)
 	}
+	for runID := range m.conclusions {
+		delete(m.conclusions, runID)
+	}
 	m.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
@@ -203,7 +228,7 @@ func (m *OrchestrationManager) nativeSession(runID, cwd string) *orchestrationNa
 	}
 	session := m.sessions[runID]
 	if session == nil {
-		session = &orchestrationNativeSession{runID: runID, cwd: cwd}
+		session = &orchestrationNativeSession{runID: runID, cwd: cwd, codex: map[string]*orchestrationCodexSession{}}
 		m.sessions[runID] = session
 	} else if cwd != "" {
 		session.cwd = cwd
@@ -223,27 +248,180 @@ func (m *OrchestrationManager) closeNativeSession(runID string) {
 
 func (s *orchestrationNativeSession) close() {
 	s.mu.Lock()
-	codex := s.codex
+	var codexSessions []*orchestrationCodexSession
+	for _, codex := range s.codex {
+		if codex != nil {
+			codexSessions = append(codexSessions, codex)
+		}
+	}
 	claude := s.claude
 	s.codex = nil
 	s.claude = nil
 	s.mu.Unlock()
-	if codex != nil && codex.client != nil {
-		codex.client.unsubscribeThreadWithTimeout(codex.threadID)
-		codex.client.close()
+	for _, codex := range codexSessions {
+		if codex.client != nil {
+			codex.client.unsubscribeThreadWithTimeout(codex.threadID)
+			codex.client.close()
+		}
 	}
 	if claude != nil {
 		_ = claude.stdin.Close()
 		if claude.cmd != nil && claude.cmd.Process != nil {
 			_ = terminateProcessGroup(claude.cmd.Process.Pid)
 		}
-		if claude.cmd != nil {
-			_ = claude.cmd.Wait()
-		}
+		waitClaudeSessionExit(claude)
 		if claude.release != nil {
 			claude.release()
 		}
 	}
+}
+
+func (s *orchestrationNativeSession) codexSessionLocked(workerSlot string) *orchestrationCodexSession {
+	if s == nil {
+		return nil
+	}
+	slot := normalizeCodexWorkerSlot(workerSlot)
+	return s.codex[slot]
+}
+
+func (s *orchestrationNativeSession) setCodexSessionLocked(workerSlot string, codex *orchestrationCodexSession) {
+	if s == nil {
+		return
+	}
+	if s.codex == nil {
+		s.codex = map[string]*orchestrationCodexSession{}
+	}
+	slot := normalizeCodexWorkerSlot(workerSlot)
+	if codex == nil {
+		delete(s.codex, slot)
+		return
+	}
+	s.codex[slot] = codex
+}
+
+func (s *orchestrationSessionState) setCodexThreadID(workerSlot, threadID string) {
+	if s == nil {
+		return
+	}
+	workerSlot = normalizeCodexWorkerSlot(workerSlot)
+	threadID = strings.TrimSpace(threadID)
+	if s.CodexThreadIDs == nil {
+		s.CodexThreadIDs = map[string]string{}
+	}
+	if threadID == "" {
+		delete(s.CodexThreadIDs, workerSlot)
+		s.refreshLegacyCodexThreadID()
+		return
+	}
+	s.CodexThreadIDs[workerSlot] = threadID
+	s.refreshLegacyCodexThreadID()
+}
+
+func (s *orchestrationSessionState) codexThreadID(workerSlot string) string {
+	if s == nil {
+		return ""
+	}
+	workerSlot = normalizeCodexWorkerSlot(workerSlot)
+	if threadID := strings.TrimSpace(s.CodexThreadIDs[workerSlot]); threadID != "" {
+		return threadID
+	}
+	if workerSlot == orchestrationCodexDefaultSlot {
+		return strings.TrimSpace(s.CodexThreadID)
+	}
+	return ""
+}
+
+func (s *orchestrationSessionState) codexThreadIDsCopy() map[string]string {
+	if s == nil {
+		return nil
+	}
+	out := make(map[string]string, len(s.CodexThreadIDs)+1)
+	for key, value := range s.CodexThreadIDs {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 && strings.TrimSpace(s.CodexThreadID) != "" {
+		out[orchestrationCodexDefaultSlot] = strings.TrimSpace(s.CodexThreadID)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (s *orchestrationSessionState) refreshLegacyCodexThreadID() {
+	if s == nil {
+		return
+	}
+	s.CodexThreadID = firstNonEmpty(
+		s.CodexThreadIDs[orchestrationCodexDefaultSlot],
+		s.CodexThreadIDs[orchestrationCodexSlotA],
+		s.CodexThreadIDs[orchestrationCodexSlotB],
+		s.CodexThreadID,
+	)
+}
+
+func orchestrationDefaultCodexSlot(workerPair string) string {
+	if protocol.NormalizeOrchestrationWorkerPair(workerPair) == protocol.WorkerPairCodexCodex {
+		return orchestrationCodexSlotA
+	}
+	return orchestrationCodexDefaultSlot
+}
+
+func (s *orchestrationSessionState) setCodexResumeMode(workerSlot, mode string) {
+	if s == nil {
+		return
+	}
+	workerSlot = normalizeCodexWorkerSlot(workerSlot)
+	mode = strings.TrimSpace(mode)
+	if s.CodexResumeModes == nil {
+		s.CodexResumeModes = map[string]string{}
+	}
+	if mode == "" {
+		delete(s.CodexResumeModes, workerSlot)
+		if workerSlot == orchestrationCodexDefaultSlot {
+			s.CodexResumeMode = ""
+		}
+		return
+	}
+	s.CodexResumeModes[workerSlot] = mode
+	if workerSlot == orchestrationCodexDefaultSlot || s.CodexResumeMode == "" {
+		s.CodexResumeMode = mode
+	}
+}
+
+func (s orchestrationSessionState) codexResumeMode(workerSlot string) string {
+	workerSlot = normalizeCodexWorkerSlot(workerSlot)
+	if mode := strings.TrimSpace(s.CodexResumeModes[workerSlot]); mode != "" {
+		return mode
+	}
+	if workerSlot == orchestrationCodexDefaultSlot {
+		return strings.TrimSpace(s.CodexResumeMode)
+	}
+	return ""
+}
+
+func cleanCodexThreadIDs(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 type orchestrationApprovalRequester struct {
@@ -341,7 +519,11 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	if mode != "collaboration" && mode != "debate" {
 		mode = "collaboration"
 	}
+	workerPair := protocol.NormalizeOrchestrationWorkerPair(payload.WorkerPair)
 	firstCLI := normalizeRelayFirstCLI(payload.FirstCLI)
+	if workerPair == protocol.WorkerPairCodexCodex {
+		firstCLI = "codex"
+	}
 	maxTurns := payload.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 2
@@ -360,13 +542,22 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	nativeSession.nativeContextCompaction = nativeContextCompaction
 	nativeSession.mu.Unlock()
 	sessionState := orchestrationSessionState{
+		WorkerPair:          workerPair,
+		CodexThreadIDs:      cleanCodexThreadIDs(payload.CodexThreadIDs),
+		CodexResumeModes:    map[string]string{},
 		ClaudeSessionID:     stableOrchestrationSessionID(payload.RunID, "claude"),
 		NativeSession:       nativeSession,
 		CommandFingerprints: map[string]bridgeprofiles.CommandFingerprint{},
 	}
 	if payload.Resume {
 		sessionState.CodexThreadID = payload.CodexThreadID
+		if sessionState.CodexThreadID != "" && len(sessionState.CodexThreadIDs) == 0 {
+			sessionState.setCodexThreadID(orchestrationDefaultCodexSlot(workerPair), sessionState.CodexThreadID)
+		}
 		sessionState.ClaudeSessionStarted = payload.ClaudeStarted
+	}
+	if sessionState.CodexThreadID == "" {
+		sessionState.CodexThreadID = firstNonEmpty(sessionState.CodexThreadIDs[orchestrationCodexDefaultSlot], sessionState.CodexThreadIDs[orchestrationCodexSlotA])
 	}
 	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 		Kind:    "run.start",
@@ -375,6 +566,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		RunStartData: &protocol.RunStartData{
 			CWD:                     runCWD,
 			Mode:                    mode,
+			WorkerPair:              workerPair,
 			FirstCLI:                firstCLI,
 			MaxTurnsRequested:       maxTurnsRequested,
 			MaxTurnsApplied:         maxTurns,
@@ -385,6 +577,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		Data: map[string]any{
 			"cwd":                     runCWD,
 			"mode":                    mode,
+			"workerPair":              workerPair,
 			"firstCli":                firstCLI,
 			"maxTurns":                maxTurns,
 			"maxTurnsRequested":       maxTurnsRequested,
@@ -405,39 +598,43 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			})
 			return
 		}
-		role, cli := roleForTurnWithFirstCLI(mode, firstCLI, turn)
+		turnPlan := roleForTurnWithWorkerPair(mode, workerPair, firstCLI, turn)
+		role, cli, workerSlot := turnPlan.Role, turnPlan.CLI, turnPlan.WorkerSlot
 		turnID := fmt.Sprintf("%s-%02d", payload.RunID, turn)
 		if payload.PromptSeq > 0 {
 			turnID = fmt.Sprintf("%s-p%03d-%02d", payload.RunID, payload.PromptSeq, turn)
 		}
-		clearRelayResumeMode(cli, &sessionState)
-		prompt := composeRelayPromptWithFirstCLI(mode, firstCLI, profile, payload.Prompt, payload.Context, payload.Resume, role, cli, turn, maxTurns, history)
+		clearRelayResumeMode(cli, workerSlot, &sessionState)
+		prompt := composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, payload.Prompt, payload.Context, payload.Resume, role, cli, workerSlot, turn, maxTurns, history)
+		resumeMode := plannedRelayResumeMode(cli, workerSlot, sessionState)
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:    "turn.start",
 			TurnID:  turnID,
 			Role:    role,
 			CLI:     cli,
-			Content: orchestrationTurnStartContent(cli, &sessionState, turn, maxTurns, role),
+			Content: orchestrationTurnStartContent(cli, workerSlot, &sessionState, turn, maxTurns, role),
 			TurnStartData: &protocol.TurnStartData{
 				CLI:        cli,
+				WorkerSlot: workerSlot,
 				Turn:       turn,
 				MaxTurns:   maxTurns,
 				PromptText: prompt,
 				Profile:    profile,
-				ResumeMode: plannedRelayResumeMode(cli, sessionState),
+				ResumeMode: resumeMode,
 			},
 			Data: map[string]any{
 				"cwd":        m.cwd(payload),
 				"cli":        cli,
+				"workerSlot": workerSlot,
 				"turn":       turn,
 				"maxTurns":   maxTurns,
 				"promptText": prompt,
 				"profile":    profile,
 				"relayOnly":  true,
-				"resumeMode": plannedRelayResumeMode(cli, sessionState),
+				"resumeMode": resumeMode,
 			},
 		})
-		record, turnStatus, err := m.runRelayTurnWithContinuations(ctx, payload, turnID, role, cli, prompt, &sessionState, runCWD)
+		record, turnStatus, err := m.runRelayTurnWithContinuations(ctx, payload, turnID, role, cli, workerSlot, prompt, &sessionState, runCWD)
 		if err != nil {
 			record.Err = visibleCLIError(err)
 			history = append(history, record)
@@ -449,8 +646,8 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 				Content:    relayTerminalContent([]orchestrationTurn{record}),
 				Status:     "error",
 				Error:      record.Err,
-				RunEndData: m.relayRunEndData(cli, sessionState, runCWD),
-				Data:       relayTurnEndData(cli, sessionState),
+				RunEndData: m.relayRunEndData(cli, workerSlot, workerPair, sessionState, runCWD),
+				Data:       relayTurnEndData(cli, workerSlot, sessionState),
 			})
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -487,18 +684,20 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			CLI:        cli,
 			Content:    content,
 			Status:     turnStatus,
-			RunEndData: m.relayRunEndData(cli, sessionState, runCWD),
-			Data:       relayTurnEndData(cli, sessionState),
+			RunEndData: m.relayRunEndData(cli, workerSlot, workerPair, sessionState, runCWD),
+			Data:       relayTurnEndData(cli, workerSlot, sessionState),
 		})
 		if turn < maxTurns && turnStatus == "success" {
-			m.runPostTurnNativeMaintenance(ctx, payload.RunID, turnID, role, cli, &sessionState)
+			m.runPostTurnNativeMaintenance(ctx, payload.RunID, turnID, role, cli, workerSlot, &sessionState)
 		}
 	}
 	finalContent := relayTerminalContent(history)
 	finalRunEndData := runEndDataWithNativeResume(&protocol.RunEndData{
+		WorkerPair:         workerPair,
 		CodexThreadID:      sessionState.CodexThreadID,
+		CodexThreadIDs:     cleanCodexThreadIDs(sessionState.CodexThreadIDs),
 		ClaudeSessionID:    sessionState.ClaudeSessionID,
-		CodexNativeResume:  codexNativeResumeInfo(sessionState.CodexThreadID, runCWD),
+		CodexNativeResume:  codexNativeResumeInfoForSlot(orchestrationDefaultCodexSlot(workerPair), sessionState.CodexThreadID, runCWD),
 		ClaudeNativeResume: m.claudeNativeResumeInfo(sessionState.ClaudeSessionID, runCWD),
 	}, runCWD)
 	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -509,17 +708,19 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		RunConclusion: runConclusionForStatus(store.OrchestrationCompleted, finalContent, history),
 		Data: map[string]any{
 			"relayOnly":          true,
+			"workerPair":         workerPair,
 			"codexThreadId":      sessionState.CodexThreadID,
+			"codexThreadIds":     cleanCodexThreadIDs(sessionState.CodexThreadIDs),
 			"claudeSessionId":    sessionState.ClaudeSessionID,
 			"codexNativeResume":  finalRunEndData.CodexNativeResume,
 			"claudeNativeResume": finalRunEndData.ClaudeNativeResume,
 			"nativeResume":       finalRunEndData.NativeResume,
 		},
 	})
-	m.runFinalNativeMaintenance(ctx, mode, firstCLI, maxTurns, &sessionState)
+	m.runFinalNativeMaintenance(ctx, workerPair, mode, firstCLI, maxTurns, &sessionState)
 }
 
-func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, prompt string, state *orchestrationSessionState, runCWD string) (orchestrationTurn, string, error) {
+func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, workerSlot, prompt string, state *orchestrationSessionState, runCWD string) (orchestrationTurn, string, error) {
 	var combined orchestrationTurn
 	status := "success"
 	nextPrompt := prompt
@@ -545,9 +746,9 @@ func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context
 				},
 			})
 		}
-		content, tools, err := m.runRelayCLI(ctx, payload, turnID, role, cli, nextPrompt, state)
+		content, tools, err := m.runRelayCLI(ctx, payload, turnID, role, cli, workerSlot, nextPrompt, state)
 		recordCommandFingerprints(state, runCWD, tools)
-		record := newOrchestrationTurnRecord(turnID, role, cli, content, tools)
+		record := newOrchestrationTurnRecordWithSlot(turnID, role, cli, workerSlot, content, tools)
 		if err != nil {
 			record.Err = visibleCLIError(err)
 		}
@@ -557,7 +758,7 @@ func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context
 		}
 		if recoverableRelayCLIError(cli, content, err) && orchestrationTurnHasFinalConclusion(record) {
 			warning := visibleCLIError(err)
-			m.resetCodexInteractiveSessionAfterRecoverableError(state)
+			m.resetCodexInteractiveSessionAfterRecoverableError(workerSlot, state)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 				Kind:     "turn.delta",
 				Source:   "bridge",
@@ -601,7 +802,7 @@ func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context
 			})
 			return combined, "warning", nil
 		}
-		m.resetNativeInteractiveSessionForContinuation(cli, state)
+		m.resetNativeInteractiveSessionForContinuation(cli, workerSlot, state)
 		nextPrompt = composeInterruptedTurnContinuationPrompt(prompt, combined, attempt+1, orchestrationTurnContinuationMaxAttempts)
 	}
 	return combined, status, lastErr
@@ -670,7 +871,7 @@ func shouldContinueInterruptedRelayTurn(record orchestrationTurn, err error) boo
 	return strings.TrimSpace(record.Content) != "" || len(record.Tools) > 0
 }
 
-func (m *OrchestrationManager) resetNativeInteractiveSessionForContinuation(cli string, state *orchestrationSessionState) {
+func (m *OrchestrationManager) resetNativeInteractiveSessionForContinuation(cli, workerSlot string, state *orchestrationSessionState) {
 	if state == nil || state.NativeSession == nil {
 		return
 	}
@@ -679,17 +880,18 @@ func (m *OrchestrationManager) resetNativeInteractiveSessionForContinuation(cli 
 	defer session.mu.Unlock()
 	switch cli {
 	case "codex":
-		codex := session.codex
+		workerSlot = normalizeCodexWorkerSlot(workerSlot)
+		codex := session.codexSessionLocked(workerSlot)
 		if codex == nil {
 			return
 		}
 		if codex.threadID != "" {
-			state.CodexThreadID = codex.threadID
+			state.setCodexThreadID(workerSlot, codex.threadID)
 		}
 		if codex.client != nil {
 			codex.client.close()
 		}
-		session.codex = nil
+		session.setCodexSessionLocked(workerSlot, nil)
 	case "claude":
 		claude := session.claude
 		if claude == nil {
@@ -699,9 +901,7 @@ func (m *OrchestrationManager) resetNativeInteractiveSessionForContinuation(cli 
 		if claude.cmd != nil && claude.cmd.Process != nil {
 			_ = terminateProcessGroup(claude.cmd.Process.Pid)
 		}
-		if claude.cmd != nil {
-			_ = claude.cmd.Wait()
-		}
+		waitClaudeSessionExit(claude)
 		if claude.release != nil {
 			claude.release()
 		}

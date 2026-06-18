@@ -129,6 +129,8 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	s.recoverInterruptedRuns(ctx)
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -153,6 +155,28 @@ func (s *Server) Run(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return s.httpSrv.Shutdown(shutdownCtx)
+}
+
+// recoverInterruptedRuns settles every chat run and orchestration run that the
+// previous Hub process left in a non-terminal state. Without this boot sweep a
+// Hub restart strands those rows as "running" forever: the disconnect sweeps in
+// ws_bridge.go only fire while the Hub stays alive.
+func (s *Server) recoverInterruptedRuns(ctx context.Context) {
+	sweepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if n, err := s.store.MarkUnfinishedRunsFailed(sweepCtx, "hub restarted while run was active"); err != nil {
+		slog.Error("[hub] boot sweep for chat runs failed", "error", err)
+	} else if n > 0 {
+		slog.Warn("[hub] marked interrupted chat runs failed at startup", "count", n)
+	}
+	runs, err := s.store.MarkUnfinishedOrchestrationRunsFailed(sweepCtx, "hub restarted while orchestration run was active")
+	if err != nil {
+		slog.Error("[hub] boot sweep for orchestration runs failed", "error", err)
+		return
+	}
+	if len(runs) > 0 {
+		slog.Warn("[hub] marked interrupted orchestration runs failed at startup", "count", len(runs))
+	}
 }
 
 func (s *Server) staticHandler() http.Handler {

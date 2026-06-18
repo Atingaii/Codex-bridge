@@ -1781,7 +1781,9 @@ func httpClient(t *testing.T) *http.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &http.Client{Jar: jar, Timeout: 5 * time.Second}
+	// Login runs bcrypt at production cost; under -race that takes multiple
+	// seconds per request, so the client timeout must stay well above it.
+	return &http.Client{Jar: jar, Timeout: 30 * time.Second}
 }
 
 func waitAgents(t *testing.T, client *http.Client, baseURL string) {

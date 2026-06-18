@@ -663,6 +663,54 @@ func TestCreateOrchestrationForwardsFirstCLI(t *testing.T) {
 	}
 }
 
+func TestCreateCodexCodexOrchestrationRequiresOnlyCodexCapability(t *testing.T) {
+	t.Parallel()
+
+	s, _, userID, agentID := newOrchestrationTestServer(t)
+	conn := &BridgeConn{
+		agentID: agentID,
+		capabilities: &protocol.BridgeCapabilities{
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"codex": {Available: true, BrowserApproval: true},
+			},
+		},
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 2),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	body := createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId":    agentID,
+		"prompt":     "run codex codex smoke",
+		"workerPair": "codex-codex",
+		"firstCli":   "claude",
+		"maxTurns":   2,
+	}, http.StatusCreated)
+	run := body["run"].(map[string]any)
+	if run["workerPair"] != "codex-codex" || run["firstCli"] != "codex" {
+		t.Fatalf("run worker pair/firstCli = %#v", run)
+	}
+
+	env := <-conn.send
+	payload, err := protocol.Decode[protocol.OrchestrationStartPayload](env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.WorkerPair != protocol.WorkerPairCodexCodex || payload.FirstCLI != "codex" {
+		t.Fatalf("payload worker pair/first cli = %#v", payload)
+	}
+
+	createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId":    agentID,
+		"prompt":     "run claude codex smoke",
+		"workerPair": "claude-codex",
+		"maxTurns":   2,
+	}, http.StatusConflict)
+}
+
 func TestContinueOrchestrationDefaultsFirstCLIFromRun(t *testing.T) {
 	t.Parallel()
 
@@ -717,6 +765,68 @@ func TestContinueOrchestrationDefaultsFirstCLIFromRun(t *testing.T) {
 	}
 	if payload.FirstCLI != "codex" {
 		t.Fatalf("continued payload first cli = %q", payload.FirstCLI)
+	}
+}
+
+func TestContinueCodexCodexRestoresWorkerPairAndThreadIDs(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run, err := st.CreateOrchestrationRun(ctx, store.CreateOrchestrationRunParams{
+		UserID:     userID,
+		AgentID:    agentID,
+		Title:      "codex pair",
+		Mode:       "collaboration",
+		WorkerPair: protocol.WorkerPairCodexCodex,
+		FirstCLI:   "claude",
+		Prompt:     "prove with two codex workers",
+		MaxTurns:   4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateOrchestrationRunSessionState(ctx, run.ID, "", map[string]string{"codex-a": "thread_a", "codex-b": "thread_b"}, false, "/abs/codex-pair"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := &BridgeConn{
+		agentID: agentID,
+		capabilities: &protocol.BridgeCapabilities{
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"codex": {Available: true, BrowserApproval: true},
+			},
+		},
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 2),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	body := continueOrchestration(t, s, userID, run.ID, map[string]any{
+		"prompt":   "continue codex pair",
+		"maxTurns": 4,
+	}, http.StatusOK)
+	loaded := body["run"].(map[string]any)
+	if loaded["workerPair"] != "codex-codex" || loaded["firstCli"] != "codex" {
+		t.Fatalf("continued run worker pair/firstCli = %#v", loaded)
+	}
+
+	env := <-conn.send
+	payload, err := protocol.Decode[protocol.OrchestrationStartPayload](env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.WorkerPair != protocol.WorkerPairCodexCodex || payload.FirstCLI != "codex" || !payload.Resume {
+		t.Fatalf("continued payload basics = %#v", payload)
+	}
+	if payload.CodexThreadID != "thread_a" || payload.CodexThreadIDs["codex-a"] != "thread_a" || payload.CodexThreadIDs["codex-b"] != "thread_b" || payload.RunCWD != "/abs/codex-pair" {
+		t.Fatalf("continued payload session state = %#v", payload)
 	}
 }
 
@@ -894,6 +1004,121 @@ func TestBridgeHeartbeatRefreshesWorkingDirs(t *testing.T) {
 	}
 }
 
+func TestListOrchestrationsFiltersByAgentAndLimit(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	other, err := st.UpsertAgent(ctx, "other", "machine-list-other", "host", "instance-other", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, params := range []store.CreateOrchestrationRunParams{
+		{UserID: userID, AgentID: agentID, Title: "A1", Mode: "collaboration", Prompt: "agent one first", MaxTurns: 2},
+		{UserID: userID, AgentID: agentID, Title: "A2", Mode: "collaboration", Prompt: "agent one second", MaxTurns: 2},
+		{UserID: userID, AgentID: other.ID, Title: "B1", Mode: "collaboration", Prompt: "agent two only", MaxTurns: 2},
+	} {
+		if _, err := st.CreateOrchestrationRun(ctx, params); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	body := getJSON(t, s, userID, "/api/orchestrations?agentId="+agentID+"&limit=1", http.StatusOK)
+	rawRuns, ok := body["runs"].([]any)
+	if !ok || len(rawRuns) != 1 {
+		t.Fatalf("runs body = %#v", body)
+	}
+	run := rawRuns[0].(map[string]any)
+	if run["agentId"] != agentID {
+		t.Fatalf("filtered run has wrong agent: %#v", run)
+	}
+}
+
+func TestOrchestrationEventsSeqWindowHTTP(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+	for i := 0; i < 5; i++ {
+		if _, err := st.AddOrchestrationEvent(ctx, store.OrchestrationEvent{RunID: run.ID, Kind: "turn.delta", Content: "event"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	body := getJSON(t, s, userID, "/api/orchestrations/"+run.ID+"/events?afterSeq=3&limit=10", http.StatusOK)
+	rawEvents, ok := body["events"].([]any)
+	if !ok || len(rawEvents) != 2 {
+		t.Fatalf("events body = %#v", body)
+	}
+	if rawEvents[0].(map[string]any)["seq"] != float64(4) || rawEvents[1].(map[string]any)["seq"] != float64(5) {
+		t.Fatalf("unexpected event seqs = %#v", rawEvents)
+	}
+
+	body = getJSON(t, s, userID, "/api/orchestrations/"+run.ID+"/events?beforeSeq=4&limit=2", http.StatusOK)
+	rawEvents, ok = body["events"].([]any)
+	if !ok || len(rawEvents) != 2 {
+		t.Fatalf("before events body = %#v", body)
+	}
+	if rawEvents[0].(map[string]any)["seq"] != float64(2) || rawEvents[1].(map[string]any)["seq"] != float64(3) {
+		t.Fatalf("unexpected before event seqs = %#v", rawEvents)
+	}
+
+	errorBody := getJSON(t, s, userID, "/api/orchestrations/"+run.ID+"/events?afterSeq=bad", http.StatusBadRequest)
+	if errorBody["code"] != "BAD_QUERY" {
+		t.Fatalf("bad query body = %#v", errorBody)
+	}
+	errorBody = getJSON(t, s, userID, "/api/orchestrations/"+run.ID+"/events?afterSeq=3&beforeSeq=4", http.StatusBadRequest)
+	if errorBody["code"] != "BAD_QUERY" {
+		t.Fatalf("mixed query body = %#v", errorBody)
+	}
+}
+
+func TestRecoverInterruptedRunsAtBoot(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	s.recoverInterruptedRuns(ctx)
+
+	recovered, err := st.OrchestrationRunByID(ctx, run.ID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Status != store.OrchestrationFailed || recovered.FinishedAt == 0 {
+		t.Fatalf("boot recovery left run = %#v, want failed", recovered)
+	}
+}
+
+func TestContinueOrchestrationRejectsConcurrentClaims(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the loser of two concurrent follow-up prompts: the winner has
+	// already claimed the run back to running by the time the loser reaches
+	// the atomic claim.
+	claimed, err := st.ClaimOrchestrationRunForContinue(ctx, run.ID)
+	if err != nil || !claimed {
+		t.Fatalf("setup claim = %v, %v", claimed, err)
+	}
+
+	payload := map[string]any{"prompt": "follow-up"}
+	body := authedJSON(t, s, userID, http.MethodPost, "/api/orchestrations/"+run.ID+"/prompts", payload, http.StatusConflict)
+	if body["code"] != "RUN_ACTIVE" {
+		t.Fatalf("continue while active body = %#v", body)
+	}
+}
+
 func newOrchestrationTestServer(t *testing.T) (*Server, *store.Store, string, string) {
 	t.Helper()
 
@@ -936,6 +1161,27 @@ func createOrchestrationRun(t *testing.T, st *store.Store, userID, agentID strin
 		t.Fatal(err)
 	}
 	return run
+}
+
+func getJSON(t *testing.T, s *Server, userID, path string, wantStatus int) map[string]any {
+	t.Helper()
+
+	token, _, err := s.signer.Sign(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.AddCookie(&http.Cookie{Name: accessCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != wantStatus {
+		t.Fatalf("GET %s status = %d, want %d, body = %s", path, rr.Code, wantStatus, rr.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode GET body: %v: %s", err, rr.Body.String())
+	}
+	return body
 }
 
 func cancelOrchestration(t *testing.T, s *Server, userID, runID string, wantStatus int) map[string]any {

@@ -75,12 +75,14 @@ export type OrchestrationFile = {
 };
 
 export type NativeContextCompaction = 'off' | 'after-turn';
+export type WorkerPair = 'claude-codex' | 'codex-codex';
 
 export type OrchestrationRun = {
   id: string;
   agentId: string;
   title: string;
   mode: 'collaboration' | 'debate';
+  workerPair?: WorkerPair;
   firstCli?: 'claude' | 'codex';
   profile?: 'default' | 'formal-proof';
   nativeContextCompaction?: NativeContextCompaction;
@@ -138,6 +140,7 @@ export type CommandData = {
 export type RunStartData = {
   cwd?: string;
   mode?: string;
+  workerPair?: WorkerPair;
   firstCli?: string;
   maxTurnsRequested?: number;
   maxTurnsApplied?: number;
@@ -148,6 +151,7 @@ export type RunStartData = {
 
 export type TurnStartData = {
   cli?: string;
+  workerSlot?: string;
   turn?: number;
   maxTurns?: number;
   promptText?: string;
@@ -157,7 +161,9 @@ export type TurnStartData = {
 
 export type RunEndData = {
   codexThreadId?: string;
+  codexThreadIds?: Record<string, string>;
   claudeSessionId?: string;
+  workerPair?: WorkerPair;
   nativeResume?: NativeResumeInfo[];
   codexNativeResume?: NativeResumeInfo;
   claudeNativeResume?: NativeResumeInfo;
@@ -359,6 +365,7 @@ export type PublicOrchestrationRun = {
   id: string;
   title: string;
   mode: 'collaboration' | 'debate';
+  workerPair?: WorkerPair;
   firstCli?: 'claude' | 'codex';
   profile?: 'default' | 'formal-proof';
   nativeContextCompaction?: NativeContextCompaction;

@@ -94,7 +94,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    `sid` in `leaseIdleLeased` until `hub.browser_lease_ttl` expires, and
    `internal/hub/browser_lease.go:tryReattach` cancels that timer when the same
    `sid` reconnects.
-7. `internal/bridge/session.go:SessionManager.Open` is the Bridge-side reattach
+7. `internal/bridge/session.go:Open` is the Bridge-side reattach
    point: if the `sid` already exists, it updates the output channel and reuses
    the existing runner/session instead of spawning a new process.
 
@@ -181,13 +181,14 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 
 1. `internal/hub/orchestration.go:handleCreateOrchestration` creates a new run.
 2. `internal/hub/orchestration.go:handleContinueOrchestration` appends a prompt
-   to the same run, preserves or updates persisted settings such as `firstCli`,
-   and compacts previous events into context.
+   to the same run, preserves or updates persisted settings such as
+   `workerPair` and `firstCli`, and compacts previous events into context.
 3. `internal/hub/orchestration.go:startOrchestration` restores saved Codex
-   thread id, Claude-started state, and locked run cwd into
+   thread id(s), Claude-started state, and locked run cwd into
    `internal/protocol.OrchestrationStartPayload` for resumed runs.
 4. `internal/hub/orchestration.go:handleOrchestrationEvent` persists those
-   native CLI continuity fields from `run.start` and `turn.end` events.
+   native CLI continuity fields from `run.start`, `turn.end`, and `run.end`
+   events.
 5. `internal/bridge/orchestration.go:run` executes turns using the prompt plus
    compacted context, restored CLI state, and locked cwd.
 6. `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
@@ -201,57 +202,62 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 
 ### Change Orchestration Strategy
 
-1. `internal/hub/orchestration.go:normalizeOrchestrationFirstCLI`,
+1. `internal/protocol/envelope.go:NormalizeOrchestrationWorkerPair`,
+   `internal/hub/orchestration.go:normalizeOrchestrationStart`,
+   `internal/store/store.go:OrchestrationRun`, and
+   `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
+   carry the persisted worker pair (`claude-codex` or `codex-codex`).
+2. `internal/hub/orchestration.go:normalizeOrchestrationFirstCLI`,
    `internal/store/store.go:OrchestrationRun`, and
    `internal/protocol.OrchestrationStartPayload` carry the persisted first-turn
-   CLI selection.
-2. `internal/hub/orchestration.go:normalizeOrchestrationProfile`,
+   CLI selection. Codex + Codex normalizes this to Codex.
+3. `internal/hub/orchestration.go:normalizeOrchestrationProfile`,
    `internal/store/store.go:normalizeOrchestrationProfile`,
    `internal/protocol.OrchestrationStartPayload`, and
    `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
    carry the persisted orchestration profile (`default` or `formal-proof`).
-3. `internal/protocol/envelope.go:NormalizeNativeContextCompaction`,
+4. `internal/protocol/envelope.go:NormalizeNativeContextCompaction`,
    `internal/store/store.go:OrchestrationRun`,
    `internal/hub/orchestration.go:normalizeOrchestrationStart`, and
    `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
    carry the persisted native context compaction preference (`off` or
    `after-turn`).
-4. `internal/bridge/orchestration_relay.go:roleForTurnWithFirstCLI` controls which
-   CLI owns each turn.
-5. `internal/bridge/orchestration_relay.go:composeRelayPromptWithFirstCLI` controls
-   the pass-through prompt sent to Claude/Codex. Only
+5. `internal/bridge/orchestration_relay.go:roleForTurnWithWorkerPair` controls
+   which CLI and worker slot owns each turn.
+6. `internal/bridge/orchestration_relay.go:composeRelayPromptWithWorkerSlot`
+   controls the pass-through prompt sent to Claude/Codex. Only
    `profile=formal-proof` enables formal-proof prompt guidance; the default
    profile does not silently activate it from prompt keywords.
-6. `internal/bridge/profiles/registry` is the neutral boundary for
+7. `internal/bridge/profiles/registry` is the neutral boundary for
    profile-specific orchestration behavior. Formal-proof prompt fragments,
    assessments, manual-build carry-over, command fingerprint decisions, and
    benchmark-specific detectors live under
    `internal/bridge/profiles/formalproof/`.
-7. `internal/bridge/orchestration_relay.go:formatRelayPriorTurn` controls how much
+8. `internal/bridge/orchestration_relay.go:formatRelayPriorTurn` controls how much
    prior visible output and command context is sent to the next CLI.
-8. `internal/bridge/orchestration_relay.go:runRelayCLI`,
+9. `internal/bridge/orchestration_relay.go:runRelayCLI`,
    `internal/bridge/orchestration_codex.go:runCodexInteractive`, and
    `internal/bridge/orchestration_claude.go:runClaudeInteractive` preserve the
-   run-scoped native Codex app-server thread, Claude stream-json process,
-   stable Claude session id, and Codex thread id when launching the next CLI
-   turn.
-9. `internal/bridge/orchestration_native.go:runNativeContextCompaction` runs
+   run-scoped native Codex app-server thread(s), Claude stream-json process,
+   stable Claude session id, and Codex thread id(s) when launching the next CLI
+   turn. Codex + Codex uses separate `codex-a` and `codex-b` sessions.
+10. `internal/bridge/orchestration_native.go:runNativeContextCompaction` runs
    native compaction only through verified CLI control channels, records skip
    Bridge notes for unsupported surfaces, and emits warning-only Bridge notes on
    failure.
-10. `internal/bridge/orchestration_native.go:runEndDataWithNativeResume` and
+11. `internal/bridge/orchestration_native.go:runEndDataWithNativeResume` and
    `internal/bridge/orchestration_relay.go:relayRunEndData` attach Codex and
    Claude native resume metadata to run-end payloads.
-11. `internal/bridge/orchestration.go:cwd` locks resumed runs to the absolute
+12. `internal/bridge/orchestration.go:cwd` locks resumed runs to the absolute
    run cwd reported by Bridge, and
    `internal/bridge/orchestration.go:PrepareOrchestrationPromptFiles` writes
    uploaded files under that cwd.
-12. `internal/bridge/orchestration_relay.go:relayTerminalContent` controls terminal
+13. `internal/bridge/orchestration_relay.go:relayTerminalContent` controls terminal
    run content without adding a hidden verifier or remediation turn.
-13. Keep event kinds compatible with
+14. Keep event kinds compatible with
    `frontend/src/app/lib/utils.ts:visibleOrchestrationEvents`, including
    terminal run summary rendering for `run.end` / `run.error`.
-14. Update
+15. Update
    [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
 
 ### Change Orchestration Event Protocol

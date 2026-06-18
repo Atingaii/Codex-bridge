@@ -11,16 +11,23 @@ import (
 )
 
 type orchestrationTurn struct {
-	TurnID  string
-	Role    string
-	CLI     string
-	Content string
-	Handoff string
-	Err     string
-	Tools   []RunnerToolEvent
+	TurnID     string
+	Role       string
+	CLI        string
+	WorkerSlot string
+	Content    string
+	Handoff    string
+	Err        string
+	Tools      []RunnerToolEvent
 }
 
-func (m *OrchestrationManager) runRelayCLI(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, error) {
+type orchestrationTurnAssignment struct {
+	Role       string
+	CLI        string
+	WorkerSlot string
+}
+
+func (m *OrchestrationManager) runRelayCLI(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, workerSlot, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, error) {
 	switch cli {
 	case "claude":
 		if state == nil {
@@ -36,22 +43,23 @@ func (m *OrchestrationManager) runRelayCLI(ctx context.Context, payload protocol
 		if state == nil {
 			return m.runCodex(ctx, payload, turnID, role, prompt)
 		}
-		content, tools, threadID, resumeMode, err := m.runCodexInteractive(ctx, payload, turnID, role, prompt, state)
-		state.CodexResumeMode = resumeMode
+		workerSlot = normalizeCodexWorkerSlot(workerSlot)
+		content, tools, threadID, resumeMode, err := m.runCodexInteractive(ctx, payload, turnID, role, workerSlot, prompt, state)
+		state.setCodexResumeMode(workerSlot, resumeMode)
 		if threadID != "" {
-			state.CodexThreadID = threadID
+			state.setCodexThreadID(workerSlot, threadID)
 		}
 		return content, tools, err
 	}
 }
 
-func clearRelayResumeMode(cli string, state *orchestrationSessionState) {
+func clearRelayResumeMode(cli, workerSlot string, state *orchestrationSessionState) {
 	if state == nil {
 		return
 	}
 	switch cli {
 	case "codex":
-		state.CodexResumeMode = ""
+		state.setCodexResumeMode(workerSlot, "")
 	case "claude":
 		state.ClaudeResumeMode = ""
 	}
@@ -91,35 +99,43 @@ func recoverableRelayCLIError(cli, content string, err error) bool {
 	return cli == "codex" && strings.TrimSpace(content) != "" && isAppServerEmptyErrorAfterVisibleOutput(err)
 }
 
-func (m *OrchestrationManager) resetCodexInteractiveSessionAfterRecoverableError(state *orchestrationSessionState) {
+func (m *OrchestrationManager) resetCodexInteractiveSessionAfterRecoverableError(workerSlot string, state *orchestrationSessionState) {
 	if state == nil || state.NativeSession == nil {
 		return
 	}
 	session := state.NativeSession
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	codex := session.codex
+	workerSlot = normalizeCodexWorkerSlot(workerSlot)
+	codex := session.codexSessionLocked(workerSlot)
 	if codex == nil {
 		return
 	}
 	if codex.threadID != "" {
-		state.CodexThreadID = codex.threadID
+		state.setCodexThreadID(workerSlot, codex.threadID)
 	}
 	if codex.client != nil {
 		codex.client.close()
 	}
-	session.codex = nil
+	session.setCodexSessionLocked(workerSlot, nil)
 }
 
-func relayTurnEndData(cli string, state orchestrationSessionState) map[string]any {
+func relayTurnEndData(cli, workerSlot string, state orchestrationSessionState) map[string]any {
 	data := map[string]any{"relayOnly": true}
+	if workerSlot != "" {
+		data["workerSlot"] = workerSlot
+	}
 	switch cli {
 	case "codex":
-		if state.CodexResumeMode != "" {
-			data["resumeMode"] = state.CodexResumeMode
+		workerSlot = normalizeCodexWorkerSlot(workerSlot)
+		if resumeMode := state.codexResumeMode(workerSlot); resumeMode != "" {
+			data["resumeMode"] = resumeMode
 		}
-		if state.CodexThreadID != "" {
-			data["codexThreadId"] = state.CodexThreadID
+		if threadID := state.codexThreadID(workerSlot); threadID != "" {
+			data["codexThreadId"] = threadID
+		}
+		if threadIDs := state.codexThreadIDsCopy(); len(threadIDs) > 0 {
+			data["codexThreadIds"] = threadIDs
 		}
 	case "claude":
 		if state.ClaudeResumeMode != "" {
@@ -132,31 +148,36 @@ func relayTurnEndData(cli string, state orchestrationSessionState) map[string]an
 	return data
 }
 
-func (m *OrchestrationManager) relayRunEndData(cli string, state orchestrationSessionState, cwd string) *protocol.RunEndData {
-	data := &protocol.RunEndData{}
+func (m *OrchestrationManager) relayRunEndData(cli, workerSlot, workerPair string, state orchestrationSessionState, cwd string) *protocol.RunEndData {
+	data := &protocol.RunEndData{WorkerPair: protocol.NormalizeOrchestrationWorkerPair(workerPair)}
 	switch cli {
 	case "codex":
-		data.CodexThreadID = state.CodexThreadID
-		data.CodexNativeResume = codexNativeResumeInfo(state.CodexThreadID, cwd)
+		workerSlot = normalizeCodexWorkerSlot(workerSlot)
+		data.CodexThreadID = state.codexThreadID(workerSlot)
+		data.CodexThreadIDs = state.codexThreadIDsCopy()
+		data.CodexNativeResume = codexNativeResumeInfoForSlot(workerSlot, data.CodexThreadID, cwd)
 	case "claude":
 		data.ClaudeSessionID = state.ClaudeSessionID
 		data.ClaudeNativeResume = m.claudeNativeResumeInfo(state.ClaudeSessionID, cwd)
 	}
 	data = runEndDataWithNativeResume(data, cwd)
-	if data.CodexThreadID == "" && data.ClaudeSessionID == "" {
+	if data.CodexThreadID == "" && len(data.CodexThreadIDs) == 0 && data.ClaudeSessionID == "" {
 		return nil
 	}
 	return data
 }
 
-func orchestrationTurnStartContent(cli string, state *orchestrationSessionState, turn, maxTurns int, role string) string {
+func orchestrationTurnStartContent(cli, workerSlot string, state *orchestrationSessionState, turn, maxTurns int, role string) string {
 	mode := ""
 	if state != nil {
-		mode = plannedRelayResumeMode(cli, *state)
+		mode = plannedRelayResumeMode(cli, workerSlot, *state)
 	}
 	label := cliDisplay(cli)
 	if role != "" {
 		label = cliDisplay(cli) + " " + role
+	}
+	if cli == "codex" && workerSlot != "" && normalizeCodexWorkerSlot(workerSlot) != orchestrationCodexDefaultSlot {
+		label = label + " (" + normalizeCodexWorkerSlot(workerSlot) + ")"
 	}
 	if turn > 0 && maxTurns > 0 {
 		label = fmt.Sprintf("%s turn %d/%d", label, turn, maxTurns)
@@ -197,22 +218,28 @@ func cliDisplay(cli string) string {
 	}
 }
 
-func plannedRelayResumeMode(cli string, state orchestrationSessionState) string {
+func plannedRelayResumeMode(cli, workerSlot string, state orchestrationSessionState) string {
 	switch cli {
 	case "codex":
-		if state.CodexResumeMode != "" {
-			return state.CodexResumeMode
-		}
-		if state.NativeSession != nil && state.NativeSession.codex != nil && state.NativeSession.codex.mode != "" {
-			return state.NativeSession.codex.mode
+		workerSlot = normalizeCodexWorkerSlot(workerSlot)
+		if resumeMode := state.codexResumeMode(workerSlot); resumeMode != "" {
+			return resumeMode
 		}
 		if state.NativeSession != nil {
-			if state.CodexThreadID != "" {
+			state.NativeSession.mu.Lock()
+			codex := state.NativeSession.codexSessionLocked(workerSlot)
+			state.NativeSession.mu.Unlock()
+			if codex != nil && codex.mode != "" {
+				return codex.mode
+			}
+		}
+		if state.NativeSession != nil {
+			if state.codexThreadID(workerSlot) != "" {
 				return "codex-interactive-resume"
 			}
 			return "codex-interactive-thread"
 		}
-		if state.CodexThreadID != "" {
+		if state.codexThreadID(workerSlot) != "" {
 			return "codex-thread-resume"
 		}
 		return "codex-fresh"
@@ -236,6 +263,27 @@ func plannedRelayResumeMode(cli string, state orchestrationSessionState) string 
 	default:
 		return ""
 	}
+}
+
+func roleForTurnWithWorkerPair(mode, workerPair, firstCLI string, turn int) orchestrationTurnAssignment {
+	if protocol.NormalizeOrchestrationWorkerPair(workerPair) == protocol.WorkerPairCodexCodex {
+		if mode == "debate" {
+			if turn%2 == 1 {
+				return orchestrationTurnAssignment{Role: "proposer", CLI: "codex", WorkerSlot: orchestrationCodexSlotA}
+			}
+			return orchestrationTurnAssignment{Role: "critic", CLI: "codex", WorkerSlot: orchestrationCodexSlotB}
+		}
+		if turn%2 == 1 {
+			return orchestrationTurnAssignment{Role: "implementer", CLI: "codex", WorkerSlot: orchestrationCodexSlotA}
+		}
+		return orchestrationTurnAssignment{Role: "reviewer", CLI: "codex", WorkerSlot: orchestrationCodexSlotB}
+	}
+	role, cli := roleForTurnWithFirstCLI(mode, firstCLI, turn)
+	return orchestrationTurnAssignment{Role: role, CLI: cli, WorkerSlot: workerSlotForCLI(cli)}
+}
+
+func relayTurnPlan(workerPair, mode, firstCLI string, turn int) orchestrationTurnAssignment {
+	return roleForTurnWithWorkerPair(mode, workerPair, firstCLI, turn)
 }
 
 func roleForTurnWithFirstCLI(mode, firstCLI string, turn int) (string, string) {
@@ -263,6 +311,28 @@ func roleForTurnWithFirstCLI(mode, firstCLI string, turn int) (string, string) {
 	return "reviewer", "codex"
 }
 
+func workerSlotForCLI(cli string) string {
+	switch strings.ToLower(strings.TrimSpace(cli)) {
+	case "codex":
+		return orchestrationCodexDefaultSlot
+	case "claude":
+		return "claude"
+	default:
+		return strings.TrimSpace(cli)
+	}
+}
+
+func normalizeCodexWorkerSlot(workerSlot string) string {
+	switch strings.ToLower(strings.TrimSpace(workerSlot)) {
+	case orchestrationCodexSlotA:
+		return orchestrationCodexSlotA
+	case orchestrationCodexSlotB:
+		return orchestrationCodexSlotB
+	default:
+		return orchestrationCodexDefaultSlot
+	}
+}
+
 func normalizeRelayFirstCLI(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "codex":
@@ -273,14 +343,19 @@ func normalizeRelayFirstCLI(value string) string {
 }
 
 func newOrchestrationTurnRecord(turnID, role, cli, content string, tools []RunnerToolEvent) orchestrationTurn {
+	return newOrchestrationTurnRecordWithSlot(turnID, role, cli, workerSlotForCLI(cli), content, tools)
+}
+
+func newOrchestrationTurnRecordWithSlot(turnID, role, cli, workerSlot, content string, tools []RunnerToolEvent) orchestrationTurn {
 	content = scrubOrchestrationTurnContent(content)
 	return orchestrationTurn{
-		TurnID:  turnID,
-		Role:    role,
-		CLI:     cli,
-		Content: content,
-		Handoff: extractHandoffSummary(content),
-		Tools:   tools,
+		TurnID:     turnID,
+		Role:       role,
+		CLI:        cli,
+		WorkerSlot: workerSlot,
+		Content:    content,
+		Handoff:    extractHandoffSummary(content),
+		Tools:      tools,
 	}
 }
 
@@ -362,13 +437,17 @@ func oneLine(value string) string {
 const orchestrationLanguageRule = "Language rule: write all user-visible prose, including the 交接总结 handoff summary, in Chinese by default unless the user explicitly asks for another language."
 
 func composeRelayPromptWithFirstCLI(mode, firstCLI, profile, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {
+	return composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, contextSummary, resume, role, cli, workerSlotForCLI(cli), turn, maxTurns, history)
+}
+
+func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, contextSummary string, resume bool, role, cli, workerSlot string, turn, maxTurns int, history []orchestrationTurn) string {
 	profile = normalizeOrchestrationProfile(profile)
 	profileActive := registry.UsesSpecialRules(profile)
 	var b strings.Builder
 	b.WriteString("Codex Bridge is relaying this browser orchestration like a human handoff between local CLIs. Treat this as a real user instruction, use your normal capabilities, and do not wait for Bridge to validate strategy choices.\n\n")
 	b.WriteString(orchestrationLanguageRule)
 	b.WriteString("\n\n")
-	if priorSameCLITurns(history, cli) > 0 {
+	if priorSameWorkerTurns(history, cli, workerSlot) > 0 {
 		b.WriteString("You are receiving this message in the same native " + cli + " conversation used for your earlier turn(s) in this orchestration run. Keep using your existing local context and remembered work from that native session. Do not assume shell process state persists unless your CLI explicitly preserves it between turns.\n\n")
 	}
 	if turn == 1 && profileActive && maxTurns >= 4 {
@@ -485,6 +564,22 @@ func priorSameCLITurns(history []orchestrationTurn, cli string) int {
 	count := 0
 	for _, item := range history {
 		if strings.EqualFold(item.CLI, cli) {
+			count++
+		}
+	}
+	return count
+}
+
+func priorSameWorkerTurns(history []orchestrationTurn, cli, workerSlot string) int {
+	if strings.EqualFold(cli, "codex") {
+		workerSlot = normalizeCodexWorkerSlot(workerSlot)
+	}
+	if workerSlot == "" {
+		return priorSameCLITurns(history, cli)
+	}
+	count := 0
+	for _, item := range history {
+		if strings.EqualFold(item.CLI, cli) && strings.EqualFold(item.WorkerSlot, workerSlot) {
 			count++
 		}
 	}

@@ -48,7 +48,7 @@ func (m *OrchestrationManager) runNativeContextCompaction(ctx context.Context, r
 	m.emitNativeContextCompactionNote(runID, turnID, role, cli, "info", fmt.Sprintf("Bridge compacted %s native context.", nativeDisplayName(cli)), "", "")
 }
 
-func (m *OrchestrationManager) runPostTurnNativeMaintenance(ctx context.Context, runID, turnID, role, cli string, state *orchestrationSessionState) {
+func (m *OrchestrationManager) runPostTurnNativeMaintenance(ctx context.Context, runID, turnID, role, cli, workerSlot string, state *orchestrationSessionState) {
 	if state == nil || state.NativeSession == nil {
 		return
 	}
@@ -59,7 +59,7 @@ func (m *OrchestrationManager) runPostTurnNativeMaintenance(ctx context.Context,
 	compactAfterTurn := protocol.NormalizeNativeContextCompaction(session.nativeContextCompaction) == protocol.NativeContextCompactionAfterTurn
 	switch cli {
 	case "codex":
-		codex := session.codex
+		codex := session.codexSessionLocked(workerSlot)
 		m.runNativeContextCompaction(ctx, runID, turnID, role, cli, compactAfterTurn, session, codex)
 		m.flushCodexInteractiveThread(session, codex)
 	case "claude":
@@ -68,19 +68,19 @@ func (m *OrchestrationManager) runPostTurnNativeMaintenance(ctx context.Context,
 	}
 }
 
-func (m *OrchestrationManager) runFinalNativeMaintenance(ctx context.Context, mode, firstCLI string, maxTurns int, state *orchestrationSessionState) {
+func (m *OrchestrationManager) runFinalNativeMaintenance(ctx context.Context, workerPair, mode, firstCLI string, maxTurns int, state *orchestrationSessionState) {
 	if state == nil || state.NativeSession == nil || maxTurns <= 0 {
 		return
 	}
-	_, cli := roleForTurnWithFirstCLI(mode, firstCLI, maxTurns)
-	if cli != "codex" {
+	turnPlan := roleForTurnWithWorkerPair(mode, workerPair, firstCLI, maxTurns)
+	if turnPlan.CLI != "codex" {
 		return
 	}
 	session := state.NativeSession
 	go func() {
 		session.mu.Lock()
 		defer session.mu.Unlock()
-		codex := session.codex
+		codex := session.codexSessionLocked(turnPlan.WorkerSlot)
 		ctx, cancel := context.WithTimeout(context.Background(), finalNativeMaintenanceTimeout)
 		defer cancel()
 		if protocol.NormalizeNativeContextCompaction(session.nativeContextCompaction) == protocol.NativeContextCompactionAfterTurn {
@@ -130,17 +130,28 @@ func nativeDisplayName(cli string) string {
 }
 
 func codexNativeResumeInfo(threadID, cwd string) *protocol.NativeResumeInfo {
+	return codexNativeResumeInfoForSlot(orchestrationCodexDefaultSlot, threadID, cwd)
+}
+
+func codexNativeResumeInfoForSlot(workerSlot, threadID, cwd string) *protocol.NativeResumeInfo {
 	threadID = strings.TrimSpace(threadID)
 	if threadID == "" {
 		return nil
 	}
+	workerSlot = normalizeCodexWorkerSlot(workerSlot)
+	cli := "codex"
+	reason := "Codex app-server returned a persisted native thread id."
+	if workerSlot != orchestrationCodexDefaultSlot {
+		cli = workerSlot
+		reason = "Codex app-server returned a persisted native thread id for " + workerSlot + "."
+	}
 	return &protocol.NativeResumeInfo{
-		CLI:              "codex",
+		CLI:              cli,
 		ID:               threadID,
 		Command:          "codex resume " + threadID,
 		CWD:              cwd,
 		Visible:          true,
-		VisibilityReason: "Codex app-server returned a persisted native thread id.",
+		VisibilityReason: reason,
 	}
 }
 
@@ -172,15 +183,53 @@ func runEndDataWithNativeResume(data *protocol.RunEndData, cwd string) *protocol
 		return nil
 	}
 	if data.CodexThreadID != "" && data.CodexNativeResume == nil {
-		data.CodexNativeResume = codexNativeResumeInfo(data.CodexThreadID, cwd)
+		data.CodexNativeResume = codexNativeResumeInfoForSlot(codexThreadSlotForLegacyID(data.CodexThreadID, data.CodexThreadIDs), data.CodexThreadID, cwd)
 	}
 	if data.CodexNativeResume != nil {
 		data.NativeResume = appendNativeResumeInfo(data.NativeResume, *data.CodexNativeResume)
+	}
+	for _, slot := range orderedCodexThreadSlots(data.CodexThreadIDs) {
+		if info := codexNativeResumeInfoForSlot(slot, data.CodexThreadIDs[slot], cwd); info != nil {
+			data.NativeResume = appendNativeResumeInfo(data.NativeResume, *info)
+		}
 	}
 	if data.ClaudeNativeResume != nil {
 		data.NativeResume = appendNativeResumeInfo(data.NativeResume, *data.ClaudeNativeResume)
 	}
 	return data
+}
+
+func codexThreadSlotForLegacyID(threadID string, threadIDs map[string]string) string {
+	threadID = strings.TrimSpace(threadID)
+	for _, slot := range orderedCodexThreadSlots(threadIDs) {
+		if strings.TrimSpace(threadIDs[slot]) == threadID {
+			return slot
+		}
+	}
+	return orchestrationCodexDefaultSlot
+}
+
+func orderedCodexThreadSlots(threadIDs map[string]string) []string {
+	if len(threadIDs) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(threadIDs))
+	var slots []string
+	for _, slot := range []string{orchestrationCodexDefaultSlot, orchestrationCodexSlotA, orchestrationCodexSlotB} {
+		if strings.TrimSpace(threadIDs[slot]) != "" {
+			slots = append(slots, slot)
+			seen[slot] = true
+		}
+	}
+	for slot, threadID := range threadIDs {
+		slot = strings.TrimSpace(slot)
+		if slot == "" || seen[slot] || strings.TrimSpace(threadID) == "" {
+			continue
+		}
+		slots = append(slots, slot)
+		seen[slot] = true
+	}
+	return slots
 }
 
 func appendNativeResumeInfo(values []protocol.NativeResumeInfo, value protocol.NativeResumeInfo) []protocol.NativeResumeInfo {

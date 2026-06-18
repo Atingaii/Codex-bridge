@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -562,6 +563,102 @@ func TestOrchestrationReusesNativeInteractiveSessionsAcrossSameCLITurns(t *testi
 	}
 	if len(claudePrompts) != 2 || !strings.Contains(claudePrompts[1], "same native claude conversation") {
 		t.Fatalf("second claude prompt missing same-native notice: %#v", claudePrompts)
+	}
+}
+
+func TestCodexCodexOrchestrationUsesIndependentCodexSlots(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	codexLogPath := filepath.Join(tmp, "codex_log.jsonl")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexInteractiveRelayScriptWithPIDThreads(codexLogPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "workspace-write"
+	cfg.Bridge.ApprovalPolicy = "untrusted"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 256)
+	manager.AttachOut(out)
+	defer manager.CloseAll()
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:      "orc_codex_codex",
+		Mode:       "collaboration",
+		WorkerPair: protocol.WorkerPairCodexCodex,
+		Prompt:     "finish codex codex worker pair",
+		MaxTurns:   4,
+		CWD:        tmp,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	var runStart protocol.OrchestrationEventPayload
+	var runEnd protocol.OrchestrationEventPayload
+	var turnSlots []string
+	turnThreadIDs := map[string]string{}
+	for _, event := range events {
+		switch event.Kind {
+		case "run.start":
+			runStart = event
+		case "turn.start":
+			if event.TurnStartData != nil {
+				turnSlots = append(turnSlots, event.TurnStartData.WorkerSlot)
+			}
+		case "turn.end":
+			if event.CLI == "codex" {
+				turnThreadIDs[stringMapValue(event.Data, "workerSlot")] = stringMapValue(event.Data, "codexThreadId")
+			}
+		case "run.end":
+			runEnd = event
+		}
+	}
+	if runStart.RunStartData == nil || runStart.RunStartData.WorkerPair != protocol.WorkerPairCodexCodex || runStart.RunStartData.FirstCLI != "codex" {
+		t.Fatalf("run.start worker pair/first cli = %#v", runStart)
+	}
+	if got := strings.Join(turnSlots, ","); got != "codex-a,codex-b,codex-a,codex-b" {
+		t.Fatalf("turn worker slots = %q", got)
+	}
+	threadA := turnThreadIDs[orchestrationCodexSlotA]
+	threadB := turnThreadIDs[orchestrationCodexSlotB]
+	if threadA == "" || threadB == "" || threadA == threadB {
+		t.Fatalf("codex slot thread ids = %#v", turnThreadIDs)
+	}
+	if runEnd.RunEndData == nil || runEnd.RunEndData.CodexThreadIDs[orchestrationCodexSlotA] != threadA || runEnd.RunEndData.CodexThreadIDs[orchestrationCodexSlotB] != threadB {
+		t.Fatalf("run.end codex thread map = %#v, want %s/%s", runEnd.RunEndData, threadA, threadB)
+	}
+	if len(runEnd.RunEndData.NativeResume) < 2 {
+		t.Fatalf("run.end native resume missing codex slots: %#v", runEnd.RunEndData.NativeResume)
+	}
+
+	records := waitForJSONLineEventCount(t, codexLogPath, "thread_resume", 2)
+	var starts, turns, resumes int
+	threadNames := map[string]string{}
+	threadTurns := map[string]int{}
+	for _, record := range records {
+		switch record["event"] {
+		case "thread_start":
+			starts++
+		case "thread_name":
+			threadID, _ := record["threadId"].(string)
+			name, _ := record["name"].(string)
+			threadNames[threadID] = name
+		case "thread_resume":
+			resumes++
+		case "turn_start":
+			turns++
+			threadID, _ := record["threadId"].(string)
+			threadTurns[threadID]++
+		}
+	}
+	if starts != 2 || turns != 4 || resumes != 2 {
+		t.Fatalf("codex-codex starts=%d turns=%d resumes=%d records=%#v", starts, turns, resumes, records)
+	}
+	if threadNames[threadA] != nativeSessionDisplayName("orc_codex_codex", orchestrationCodexSlotA) || threadNames[threadB] != nativeSessionDisplayName("orc_codex_codex", orchestrationCodexSlotB) {
+		t.Fatalf("codex thread names = %#v", threadNames)
+	}
+	if threadTurns[threadA] != 2 || threadTurns[threadB] != 2 {
+		t.Fatalf("codex turns by thread = %#v", threadTurns)
 	}
 }
 
@@ -1373,7 +1470,7 @@ func TestLongCommandObserverWritesToSameClaudeStreamAndEmitsBridgeNote(t *testin
 	out := make(chan protocol.Envelope, 16)
 	manager.AttachOut(out)
 	stdoutReader, stdoutWriter := io.Pipe()
-	var stdin bytes.Buffer
+	stdin := &syncWriteCloser{}
 
 	done := make(chan struct{})
 	var content string
@@ -1382,7 +1479,7 @@ func TestLongCommandObserverWritesToSameClaudeStreamAndEmitsBridgeNote(t *testin
 	go func() {
 		defer close(done)
 		content, tools, scanErr = manager.scanClaudeJSONLWithOptions(stdoutReader, "orc_nudge", "orc_nudge-01", "implementer", claudeScanOptions{
-			Input:      &stdin,
+			Input:      stdin,
 			CanNudge:   true,
 			NudgeAfter: 10 * time.Millisecond,
 			LongCommandObserver: longCommandObserverConfig{
@@ -1587,7 +1684,7 @@ func TestClaudeStreamInputClosesAfterIdleWindowWithoutInterruptingProcess(t *tes
 	out := make(chan protocol.Envelope, 16)
 	manager.AttachOut(out)
 	stdoutReader, stdoutWriter := io.Pipe()
-	stdin := &trackingWriteCloser{}
+	stdin := &syncWriteCloser{}
 
 	done := make(chan struct{})
 	var scanErr error
@@ -1602,7 +1699,7 @@ func TestClaudeStreamInputClosesAfterIdleWindowWithoutInterruptingProcess(t *tes
 
 	fmt.Fprintln(stdoutWriter, `{"type":"assistant","message":{"content":[{"type":"text","text":"开始处理"}]}}`)
 	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && !stdin.closed {
+	for time.Now().Before(deadline) && !stdin.isClosed() {
 		time.Sleep(10 * time.Millisecond)
 	}
 	fmt.Fprintln(stdoutWriter, `{"type":"result","result":"开始处理"}`)
@@ -1612,7 +1709,7 @@ func TestClaudeStreamInputClosesAfterIdleWindowWithoutInterruptingProcess(t *tes
 	if scanErr != nil {
 		t.Fatal(scanErr)
 	}
-	if !stdin.closed {
+	if !stdin.isClosed() {
 		t.Fatal("Claude stream input was not closed after idle window")
 	}
 	if !waitForOrchestrationEvent(t, out, "turn.delta", "claude", "Bridge closed Claude stream input after an idle window") {
@@ -2451,14 +2548,38 @@ func waitForOrchestrationEventPayload(t *testing.T, out <-chan protocol.Envelope
 	}
 }
 
-type trackingWriteCloser struct {
-	bytes.Buffer
+// syncWriteCloser is a thread-safe stand-in for the Claude stream-input pipe.
+// The scan goroutine writes nudge notes and closes it while the test goroutine
+// polls its contents, so the buffer and closed flag must be mutex-guarded.
+type syncWriteCloser struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
 	closed bool
 }
 
-func (w *trackingWriteCloser) Close() error {
+func (w *syncWriteCloser) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *syncWriteCloser) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.closed = true
 	return nil
+}
+
+func (w *syncWriteCloser) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+func (w *syncWriteCloser) isClosed() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.closed
 }
 
 func orchestrationEventContainsText(event protocol.OrchestrationEventPayload, want string) bool {
@@ -2884,6 +3005,61 @@ for line in sys.stdin:
         emit({"id": msg["id"], "result": {"turn": {"id": "turn_%d" % turn_count, "status": "inProgress"}}})
         emit({"method": "item/agentMessage/delta", "params": {"threadId": params.get("threadId"), "turnId": "turn_%d" % turn_count, "delta": text}})
         emit({"method": "turn/completed", "params": {"threadId": params.get("threadId"), "turn": {"id": "turn_%d" % turn_count, "status": "completed"}}})
+`
+}
+
+func fakeCodexInteractiveRelayScriptWithPIDThreads(logPath string) string {
+	logPathRaw, _ := json.Marshal(logPath)
+	return `#!/usr/bin/env python3
+import json
+import os
+import sys
+
+log_path = ` + string(logPathRaw) + `
+thread_id = "thr_native_%d" % os.getpid()
+turn_count = 0
+
+def log(obj):
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+def emit(obj):
+    print(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+if len(sys.argv) < 2 or sys.argv[1] != "app-server":
+    print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
+    sys.exit(1)
+
+log({"event": "process_start", "argv": sys.argv[1:], "threadId": thread_id})
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"}})
+    elif method == "thread/start":
+        log({"event": "thread_start", "threadId": thread_id})
+        emit({"id": msg["id"], "result": {"thread": {"id": thread_id}}})
+    elif method == "thread/resume":
+        resume_id = params.get("threadId") or thread_id
+        log({"event": "thread_resume", "threadId": resume_id, "processThreadId": thread_id})
+        emit({"id": msg["id"], "result": {"thread": {"id": resume_id}}})
+    elif method == "thread/name/set":
+        log({"event": "thread_name", "threadId": params.get("threadId"), "name": params.get("name")})
+        emit({"id": msg["id"], "result": {}})
+    elif method == "thread/unsubscribe":
+        log({"event": "thread_unsubscribe", "threadId": params.get("threadId")})
+        emit({"id": msg["id"], "result": {"status": "unsubscribed"}})
+    elif method == "turn/start":
+        turn_count += 1
+        current_thread = params.get("threadId")
+        log({"event": "turn_start", "threadId": current_thread, "params": params})
+        text = "Codex %s turn %d\n\nMsg: to=peer; intent=continue; need=next\nHandoff: status=needs_next; changed=none; verified=codex slot; next=continue; risks=none" % (current_thread, turn_count)
+        if turn_count >= 2:
+            text = "Codex %s final\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=codex slot reused; next=none; risks=none" % current_thread
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_%d" % turn_count, "status": "inProgress"}}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": current_thread, "turnId": "turn_%d" % turn_count, "delta": text}})
+        emit({"method": "turn/completed", "params": {"threadId": current_thread, "turn": {"id": "turn_%d" % turn_count, "status": "completed"}}})
 `
 }
 

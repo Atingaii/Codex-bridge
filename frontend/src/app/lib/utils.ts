@@ -1169,11 +1169,282 @@ export function escapeBasic(value: string) {
   })[ch] || ch);
 }
 
+type TableAlignment = 'left' | 'center' | 'right';
+
+const codeBlockClass = 'my-3 overflow-x-auto rounded-lg border border-border bg-muted/70 p-3 text-xs leading-relaxed text-foreground dark:bg-[#0f172a] dark:text-slate-200 elegant-scrollbar';
+const paragraphClass = 'my-2 first:mt-0 last:mb-0';
+const tableWrapClass = 'my-3 overflow-x-auto rounded-lg border border-border elegant-scrollbar';
+const tableClass = 'w-full min-w-max border-collapse text-sm';
+const tableHeadCellClass = 'border-b border-border bg-muted/70 px-3 py-2 text-left font-semibold text-foreground align-top';
+const tableCellClass = 'border-border px-3 py-2 align-top text-foreground/90';
+const listClass = 'my-3 space-y-1 pl-5';
+const blockquoteClass = 'my-3 border-l-2 border-border pl-3 text-muted-foreground';
+const horizontalRuleClass = 'my-4 border-t border-border';
+
+export function renderMarkdown(text: string) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  const blocks: string[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    if (isBlankLine(lines[index])) {
+      index += 1;
+      continue;
+    }
+
+    const fence = lines[index].match(/^\s*```([A-Za-z0-9_.+#-]*)\s*$/);
+    if (fence) {
+      const codeLines: string[] = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      blocks.push(`<pre class="${codeBlockClass}"><code>${escapeBasic(codeLines.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    const table = readMarkdownTable(lines, index);
+    if (table) {
+      blocks.push(renderMarkdownTable(table));
+      index = table.nextIndex;
+      continue;
+    }
+
+    const heading = lines[index].match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      const level = heading[1].length;
+      blocks.push(`<h${level} class="${headingClass(level)}">${renderInlineMarkdown(heading[2])}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    if (isHorizontalRule(lines[index])) {
+      blocks.push(`<hr class="${horizontalRuleClass}" />`);
+      index += 1;
+      continue;
+    }
+
+    if (/^\s{0,3}>\s?/.test(lines[index])) {
+      const quoteLines: string[] = [];
+      while (index < lines.length && (/^\s{0,3}>\s?/.test(lines[index]) || isBlankLine(lines[index]))) {
+        quoteLines.push(lines[index].replace(/^\s{0,3}>\s?/, ''));
+        index += 1;
+      }
+      blocks.push(`<blockquote class="${blockquoteClass}">${renderMarkdown(quoteLines.join('\n'))}</blockquote>`);
+      continue;
+    }
+
+    const list = readMarkdownList(lines, index);
+    if (list) {
+      blocks.push(renderMarkdownList(list));
+      index = list.nextIndex;
+      continue;
+    }
+
+    const paragraphLines: string[] = [];
+    while (index < lines.length && !isBlankLine(lines[index]) && !startsMarkdownBlock(lines, index)) {
+      paragraphLines.push(lines[index]);
+      index += 1;
+    }
+    if (paragraphLines.length > 0) {
+      blocks.push(`<p class="${paragraphClass}">${paragraphLines.map(renderInlineMarkdown).join('<br />')}</p>`);
+      continue;
+    }
+
+    blocks.push(`<p class="${paragraphClass}">${renderInlineMarkdown(lines[index])}</p>`);
+    index += 1;
+  }
+
+  return blocks.join('');
+}
+
 export function renderInlineMarkdown(text: string) {
-  return escapeBasic(text)
-    .replace(/!\[([^\]]*)\]\((blob:[^)]+|data:image\/[^)]+|https?:\/\/[^)]+)\)/g, '<img alt="$1" src="$2" class="mt-2 max-h-64 rounded-lg border border-border object-contain" />')
-    .replace(/`([^`]+)`/g, '<code class="px-1 py-0.5 rounded bg-muted font-mono text-[0.92em]">$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  const stashed: string[] = [];
+  const stash = (html: string) => {
+    const token = `\u0000MD${stashed.length}\u0000`;
+    stashed.push(html);
+    return token;
+  };
+
+  let html = escapeBasic(text);
+  html = html.replace(/`([^`\n]+)`/g, (_match, code) => (
+    stash(`<code class="rounded bg-muted px-1 py-0.5 font-mono text-[0.92em]">${code}</code>`)
+  ));
+  html = html.replace(/!\[([^\]]*)\]\((blob:[^) \t]+|https?:\/\/[^) \t]+|data:image\/(?:png|jpe?g|gif|webp|bmp);base64,[A-Za-z0-9+/=]+)\)/g, (_match, alt, src) => (
+    stash(`<img alt="${alt}" src="${src}" class="mt-2 max-h-64 rounded-lg border border-border object-contain" />`)
+  ));
+  html = html.replace(/\[([^\]\n]+)\]\((https?:\/\/[^) \t]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer" class="font-medium underline decoration-border underline-offset-2 hover:text-foreground">$1</a>');
+  html = html.replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '<strong>$2</strong>');
+  html = html.replace(/(~~)(?=\S)([\s\S]*?\S)\1/g, '<del>$2</del>');
+  html = html.replace(/(^|[^\w*])\*(?=\S)([^*\n]*?\S)\*(?!\w)/g, '$1<em>$2</em>');
+  html = html.replace(/(^|[^\w_])_(?=\S)([^_\n]*?\S)_(?!\w)/g, '$1<em>$2</em>');
+
+  return stashed.reduce((out, value, itemIndex) => out.replace(new RegExp(`\\u0000MD${itemIndex}\\u0000`, 'g'), value), html);
+}
+
+function headingClass(level: number) {
+  if (level <= 1) return 'my-3 text-base font-semibold leading-snug text-foreground';
+  if (level === 2) return 'my-3 text-[15px] font-semibold leading-snug text-foreground';
+  return 'my-2 text-sm font-semibold leading-snug text-foreground';
+}
+
+function isBlankLine(line: string) {
+  return /^\s*$/.test(line);
+}
+
+function isHorizontalRule(line: string) {
+  return /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line);
+}
+
+function startsMarkdownBlock(lines: string[], index: number) {
+  const line = lines[index];
+  return /^\s*```/.test(line)
+    || Boolean(readMarkdownTable(lines, index))
+    || /^\s{0,3}#{1,6}\s+/.test(line)
+    || isHorizontalRule(line)
+    || /^\s{0,3}>\s?/.test(line)
+    || /^\s{0,3}(?:[-+*])\s+/.test(line)
+    || /^\s{0,3}\d+[.)]\s+/.test(line);
+}
+
+type MarkdownTable = {
+  alignments: TableAlignment[];
+  headers: string[];
+  nextIndex: number;
+  rows: string[][];
+};
+
+function readMarkdownTable(lines: string[], index: number): MarkdownTable | null {
+  if (index + 1 >= lines.length || !hasUnescapedPipe(lines[index])) return null;
+  const delimiterCells = splitMarkdownTableRow(lines[index + 1]);
+  if (delimiterCells.length < 2 || !delimiterCells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()))) return null;
+
+  const headers = splitMarkdownTableRow(lines[index]);
+  if (headers.length < 2) return null;
+
+  const rows: string[][] = [];
+  let nextIndex = index + 2;
+  while (nextIndex < lines.length && hasUnescapedPipe(lines[nextIndex]) && !isBlankLine(lines[nextIndex])) {
+    if (splitMarkdownTableRow(lines[nextIndex]).every((cell) => /^:?-{3,}:?$/.test(cell.trim()))) break;
+    rows.push(splitMarkdownTableRow(lines[nextIndex]));
+    nextIndex += 1;
+  }
+
+  return {
+    alignments: delimiterCells.map(markdownTableAlignment),
+    headers,
+    rows,
+    nextIndex,
+  };
+}
+
+function renderMarkdownTable(table: MarkdownTable) {
+  const columnCount = Math.max(table.headers.length, table.alignments.length, ...table.rows.map((row) => row.length));
+  const alignments = Array.from({ length: columnCount }, (_value, index) => table.alignments[index] || 'left');
+  const headerCells = Array.from({ length: columnCount }, (_value, index) => renderTableCell('th', table.headers[index] || '', alignments[index], tableHeadCellClass));
+  const bodyRows = table.rows.map((row, rowIndex) => {
+    const cellClass = rowIndex === table.rows.length - 1 ? tableCellClass : `${tableCellClass} border-b`;
+    const cells = Array.from({ length: columnCount }, (_value, index) => renderTableCell('td', row[index] || '', alignments[index], cellClass));
+    return `<tr>${cells.join('')}</tr>`;
+  }).join('');
+
+  return `<div class="${tableWrapClass}"><table class="${tableClass}"><thead><tr>${headerCells.join('')}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
+}
+
+function renderTableCell(tag: 'td' | 'th', content: string, alignment: TableAlignment, baseClass: string) {
+  const alignmentClass = alignment === 'right' ? 'text-right' : alignment === 'center' ? 'text-center' : 'text-left';
+  return `<${tag} class="${baseClass} ${alignmentClass}">${renderInlineMarkdown(content.trim())}</${tag}>`;
+}
+
+function markdownTableAlignment(cell: string): TableAlignment {
+  const trimmed = cell.trim();
+  if (trimmed.startsWith(':') && trimmed.endsWith(':')) return 'center';
+  if (trimmed.endsWith(':')) return 'right';
+  return 'left';
+}
+
+function hasUnescapedPipe(line: string) {
+  let inCode = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    const previous = index > 0 ? line[index - 1] : '';
+    if (char === '`' && previous !== '\\') inCode = !inCode;
+    if (char === '|' && previous !== '\\' && !inCode) return true;
+  }
+  return false;
+}
+
+function splitMarkdownTableRow(line: string) {
+  const cells: string[] = [];
+  let current = '';
+  let inCode = false;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    const next = index + 1 < line.length ? line[index + 1] : '';
+
+    if (char === '\\' && next === '|') {
+      current += '|';
+      index += 1;
+      continue;
+    }
+    if (char === '`') {
+      inCode = !inCode;
+      current += char;
+      continue;
+    }
+    if (char === '|' && !inCode) {
+      cells.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  cells.push(current.trim());
+
+  if (line.trimStart().startsWith('|') && cells[0] === '') cells.shift();
+  if (line.trimEnd().endsWith('|') && cells[cells.length - 1] === '') cells.pop();
+  return cells;
+}
+
+type MarkdownList = {
+  items: string[];
+  nextIndex: number;
+  ordered: boolean;
+};
+
+function readMarkdownList(lines: string[], index: number): MarkdownList | null {
+  const firstOrdered = /^\s{0,3}\d+[.)]\s+/.test(lines[index]);
+  const firstUnordered = /^\s{0,3}[-+*]\s+/.test(lines[index]);
+  if (!firstOrdered && !firstUnordered) return null;
+
+  const items: string[] = [];
+  let nextIndex = index;
+  const itemPattern = firstOrdered ? /^\s{0,3}\d+[.)]\s+(.+)$/ : /^\s{0,3}[-+*]\s+(.+)$/;
+  while (nextIndex < lines.length) {
+    const item = lines[nextIndex].match(itemPattern);
+    if (!item) break;
+    items.push(item[1]);
+    nextIndex += 1;
+  }
+
+  return { items, nextIndex, ordered: firstOrdered };
+}
+
+function renderMarkdownList(list: MarkdownList) {
+  const tag = list.ordered ? 'ol' : 'ul';
+  const markerClass = list.ordered ? 'list-decimal' : 'list-disc';
+  const items = list.items.map((item) => `<li class="pl-1">${renderTaskListItem(item)}</li>`).join('');
+  return `<${tag} class="${listClass} ${markerClass}">${items}</${tag}>`;
+}
+
+function renderTaskListItem(item: string) {
+  const task = item.match(/^\[( |x|X)\]\s+(.+)$/);
+  if (!task) return renderInlineMarkdown(item);
+  const checked = task[1].toLowerCase() === 'x' ? ' checked' : '';
+  return `<span class="inline-flex items-start gap-2"><input type="checkbox" disabled${checked} class="mt-1 size-3 rounded border-border accent-primary" /> <span>${renderInlineMarkdown(task[2])}</span></span>`;
 }
 
 export function readImageAttachment(file: File): Promise<ImageAttachment> {

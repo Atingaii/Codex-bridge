@@ -28,6 +28,7 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P6.2 | Deep collaboration routing and orchestration browser approval | implemented |
 | P6.3 | Orchestration capability matrix and pass-through Claude/Codex relay | implemented |
 | P6.4 | CLI endpoint repair commands | implemented |
+| P6.5 | Formal-proof Proof Harness bootstrap | implemented |
 | P7 | Browser permission prompts over app-server | implemented for Codex chat and Codex orchestration |
 
 ## Engineering Workflow
@@ -51,7 +52,9 @@ Let a single user talk from any browser to Codex CLI running on a private machin
   user can `resume` them from the workspace. The Bridge only relays output and
   turn context; it does not inject verifier/remediation/assessment turns.
   Formal-proof is opt-in *prompt guidance* via
-  `internal/bridge/profiles/registry` + `internal/bridge/profiles/formalproof`.
+  `internal/bridge/profiles/registry` + `internal/bridge/profiles/formalproof`;
+  new formal-proof runs also get a persistent Chinese Proof Harness under the
+  run cwd before scheduled CLI turns begin.
 
 ## Maintenance Log
 

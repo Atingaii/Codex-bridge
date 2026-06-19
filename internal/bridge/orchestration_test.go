@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -2002,6 +2004,330 @@ func TestPrepareOrchestrationPromptFilesWritesArchiveUploads(t *testing.T) {
 	if !strings.Contains(prompt, wantPath) {
 		t.Fatalf("prompt missing archive path %q:\n%s", wantPath, prompt)
 	}
+}
+
+func TestFormalProofHarnessBootstrapCreatesTextOnlyRunFolder(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := config.Default()
+	cfg.Bridge.CWD = tmp
+	payload := protocol.OrchestrationStartPayload{
+		RunID:     "orc_text",
+		Mode:      "collaboration",
+		Prompt:    "从 0 开始创建 Lean4 项目，证明 reverse reverse。",
+		MaxTurns:  4,
+		Profile:   "formal-proof",
+		PromptSeq: 1,
+	}
+
+	result, err := prepareFormalProofHarness(&cfg, payload, tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRunDir := filepath.Join(tmp, ".codex-bridge", "proof-runs", "orc_text")
+	if result.RunDir != wantRunDir {
+		t.Fatalf("run dir = %q, want %q", result.RunDir, wantRunDir)
+	}
+	for _, rel := range []string{
+		"project",
+		"AGENTS.md",
+		"CLAUDE.md",
+		filepath.Join("proof-harness", "任务说明.md"),
+		filepath.Join("proof-harness", "证明义务.md"),
+		filepath.Join("proof-harness", "变更影响.md"),
+		filepath.Join("proof-harness", "状态.yaml"),
+		filepath.Join("proof-harness", "check.sh"),
+		filepath.Join("proof-harness", "证明决策", "000-初始任务.md"),
+	} {
+		if _, err := os.Stat(filepath.Join(result.RunDir, rel)); err != nil {
+			t.Fatalf("missing harness path %s: %v", rel, err)
+		}
+	}
+	task, err := os.ReadFile(filepath.Join(result.HarnessDir, "任务说明.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(task), "原始用户需求") || !strings.Contains(string(task), "从 0 开始创建 Lean4 项目") {
+		t.Fatalf("task doc missing Chinese task context:\n%s", task)
+	}
+	state, err := os.ReadFile(filepath.Join(result.HarnessDir, "状态.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(state), `assistant: "unknown"`) || !strings.Contains(string(state), "uploaded_files: []") {
+		t.Fatalf("state yaml missing expected text-only state:\n%s", state)
+	}
+	if !strings.Contains(result.Prompt, "Formal-proof harness workspace") || !strings.Contains(result.Prompt, "proof-harness/证明义务.md") {
+		t.Fatalf("prompt missing harness instructions:\n%s", result.Prompt)
+	}
+	info, err := os.Stat(filepath.Join(result.HarnessDir, "check.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Fatalf("check.sh should be executable, mode=%s", info.Mode())
+	}
+}
+
+func TestFormalProofHarnessBootstrapMaterializesUploadedProjectFiles(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := config.Default()
+	cfg.Bridge.CWD = tmp
+	payload := protocol.OrchestrationStartPayload{
+		RunID:   "orc_upload",
+		Prompt:  "补全 termination modify_lin。",
+		Profile: "formal-proof",
+		Files: []protocol.AttachmentPayload{
+			{Name: "Model.thy", MimeType: "application/octet-stream", Size: int64(len("theory Model\n")), Data: base64.StdEncoding.EncodeToString([]byte("theory Model\n"))},
+			{Name: "Termination.thy", MimeType: "application/octet-stream", Size: int64(len("theory Termination\n")), Data: base64.StdEncoding.EncodeToString([]byte("theory Termination\n"))},
+			{Name: "ROOT", MimeType: "application/octet-stream", Size: int64(len("session Demo\n")), Data: base64.StdEncoding.EncodeToString([]byte("session Demo\n"))},
+		},
+	}
+
+	result, err := prepareFormalProofHarness(&cfg, payload, tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"Model.thy", "Termination.thy", "ROOT"} {
+		if _, err := os.Stat(filepath.Join(result.ProjectDir, rel)); err != nil {
+			t.Fatalf("uploaded file %s not materialized under project: %v", rel, err)
+		}
+	}
+	if result.Assistant != "isabelle" {
+		t.Fatalf("assistant = %q, want isabelle", result.Assistant)
+	}
+	state, err := os.ReadFile(filepath.Join(result.HarnessDir, "状态.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`assistant: "isabelle"`, `"Model.thy"`, `"Termination.thy"`, `"ROOT"`} {
+		if !strings.Contains(string(state), want) {
+			t.Fatalf("state yaml missing %q:\n%s", want, state)
+		}
+	}
+}
+
+func TestFormalProofHarnessBootstrapExtractsZipAndRejectsTraversal(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := config.Default()
+	cfg.Bridge.CWD = tmp
+	raw := zipFixture(t, map[string]string{
+		"Proof.lean":     "theorem t : True := by trivial\n",
+		"lakefile.lean":  "import Lake\n",
+		"nested/Note.md": "notes\n",
+	})
+	payload := protocol.OrchestrationStartPayload{
+		RunID:   "orc_zip",
+		Prompt:  "检查 Lean4 项目。",
+		Profile: "formal-proof",
+		Files: []protocol.AttachmentPayload{{
+			Name:     "lean-project.zip",
+			MimeType: "application/zip",
+			Size:     int64(len(raw)),
+			Data:     base64.StdEncoding.EncodeToString(raw),
+		}},
+	}
+
+	result, err := prepareFormalProofHarness(&cfg, payload, tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"Proof.lean", "lakefile.lean", filepath.Join("nested", "Note.md")} {
+		if _, err := os.Stat(filepath.Join(result.ProjectDir, rel)); err != nil {
+			t.Fatalf("zip entry %s not extracted: %v", rel, err)
+		}
+	}
+	if result.Assistant != "lean4" {
+		t.Fatalf("assistant = %q, want lean4", result.Assistant)
+	}
+
+	badRaw := zipFixture(t, map[string]string{"../escape.v": "Axiom bad : True.\n"})
+	_, err = prepareFormalProofHarness(&cfg, protocol.OrchestrationStartPayload{
+		RunID:   "orc_bad_zip",
+		Prompt:  "bad",
+		Profile: "formal-proof",
+		Files: []protocol.AttachmentPayload{{
+			Name:     "bad.zip",
+			MimeType: "application/zip",
+			Size:     int64(len(badRaw)),
+			Data:     base64.StdEncoding.EncodeToString(badRaw),
+		}},
+	}, tmp)
+	if err == nil || !strings.Contains(err.Error(), "unsafe archive path") {
+		t.Fatalf("expected unsafe archive path error, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, ".codex-bridge", "proof-runs", "escape.v")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("archive traversal wrote outside project, stat err=%v", err)
+	}
+}
+
+func TestFormalProofHarnessResumeReusesRunCWDAndRecordsFollowup(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := config.Default()
+	cfg.Bridge.CWD = tmp
+	initial, err := prepareFormalProofHarness(&cfg, protocol.OrchestrationStartPayload{
+		RunID:     "orc_resume",
+		Prompt:    "初始 Coq 任务。",
+		Profile:   "formal-proof",
+		PromptSeq: 1,
+		Files: []protocol.AttachmentPayload{{
+			Name:     "Main.v",
+			MimeType: "application/octet-stream",
+			Size:     int64(len("Theorem t : True.\nProof. exact I. Qed.\n")),
+			Data:     base64.StdEncoding.EncodeToString([]byte("Theorem t : True.\nProof. exact I. Qed.\n")),
+		}},
+	}, tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := prepareFormalProofHarness(&cfg, protocol.OrchestrationStartPayload{
+		RunID:     "orc_resume",
+		Prompt:    "继续去掉剩余 Admitted。",
+		Profile:   "formal-proof",
+		Resume:    true,
+		RunCWD:    initial.RunDir,
+		PromptSeq: 2,
+	}, initial.RunDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.RunDir != initial.RunDir {
+		t.Fatalf("resumed run dir = %q, want existing %q", resumed.RunDir, initial.RunDir)
+	}
+	if strings.Contains(resumed.RunDir, filepath.Join("proof-runs", "orc_resume", ".codex-bridge", "proof-runs")) {
+		t.Fatalf("resumed run dir nested unexpectedly: %q", resumed.RunDir)
+	}
+	followup := filepath.Join(initial.HarnessDir, "followups", "002-后续需求.md")
+	content, err := os.ReadFile(followup)
+	if err != nil {
+		t.Fatalf("follow-up file not written: %v", err)
+	}
+	if !strings.Contains(string(content), "继续去掉剩余 Admitted") {
+		t.Fatalf("follow-up content missing prompt:\n%s", content)
+	}
+	if !strings.Contains(resumed.Prompt, "same Proof Run") {
+		t.Fatalf("resumed prompt missing same-run instruction:\n%s", resumed.Prompt)
+	}
+}
+
+func TestFormalProofRunUsesHarnessCWDWithoutConsumingTurns(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	claudePromptPath := filepath.Join(tmp, "claude_prompt.txt")
+	codexPromptPath := filepath.Join(tmp, "codex_prompt.txt")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeRelayScript(claudePromptPath, filepath.Join(tmp, "claude_argv.json"))), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexRelayScript(codexPromptPath, filepath.Join(tmp, "codex_argv.json"))), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_harness_run",
+		Mode:     "collaboration",
+		Prompt:   "补全 Coq theorem，不允许 Admitted。",
+		Profile:  "formal-proof",
+		MaxTurns: 2,
+		CWD:      tmp,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	var runStart protocol.OrchestrationEventPayload
+	var turnStarts int
+	var sawBootstrap bool
+	var sawSync bool
+	for _, event := range events {
+		switch event.Kind {
+		case "run.start":
+			runStart = event
+		case "turn.start":
+			turnStarts++
+		case "turn.delta":
+			if event.BridgeNoteData != nil && event.BridgeNoteData.Category == "formal-proof-harness-bootstrap" {
+				sawBootstrap = true
+			}
+			if event.BridgeNoteData != nil && event.BridgeNoteData.Category == "formal-proof-harness-sync" {
+				sawSync = true
+				if !strings.Contains(event.Content, "Proof Harness 同步检查通过") {
+					t.Fatalf("unexpected harness sync note: %#v", event)
+				}
+			}
+		}
+	}
+	wantRunDir := filepath.Join(tmp, ".codex-bridge", "proof-runs", "orc_harness_run")
+	if runStart.RunStartData == nil || runStart.RunStartData.CWD != wantRunDir {
+		t.Fatalf("run.start cwd = %#v, want %q", runStart.RunStartData, wantRunDir)
+	}
+	if turnStarts != 2 {
+		t.Fatalf("bootstrap should not consume scheduled turns, saw %d turn.start events", turnStarts)
+	}
+	if !sawBootstrap {
+		t.Fatalf("bootstrap note not emitted: %#v", events)
+	}
+	if !sawSync {
+		t.Fatalf("harness sync note not emitted: %#v", events)
+	}
+	claudePrompt, err := os.ReadFile(claudePromptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(claudePrompt), "Formal-proof harness workspace") || !strings.Contains(string(claudePrompt), "proof-harness/证明义务.md") {
+		t.Fatalf("first CLI prompt missing harness context:\n%s", claudePrompt)
+	}
+}
+
+func TestDefaultProfileStillUsesLegacyUploadMaterialization(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.CWD = filepath.Join(t.TempDir(), "configured")
+	runCWD := filepath.Join(t.TempDir(), "plain-run")
+	prompt, _, err := PrepareOrchestrationPromptFiles(&cfg, runCWD, "orc_plain", "read this", []protocol.AttachmentPayload{{
+		Name:     "Main.v",
+		MimeType: "application/octet-stream",
+		Size:     int64(len("Theorem t : True.")),
+		Data:     base64.StdEncoding.EncodeToString([]byte("Theorem t : True.")),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, filepath.Join(runCWD, ".codex-bridge", "orchestrations", "orc_plain", "01-Main.v")) {
+		t.Fatalf("default profile upload prompt changed unexpectedly:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "Formal-proof harness workspace") {
+		t.Fatalf("default profile prompt should not include harness:\n%s", prompt)
+	}
+}
+
+func zipFixture(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(files[name])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
 func TestRepeatedBlockedHandoffIsRelayedThroughScheduledTurns(t *testing.T) {

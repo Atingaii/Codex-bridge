@@ -505,16 +505,36 @@ func (m *OrchestrationManager) cancelApprovals(runID string) {
 
 func (m *OrchestrationManager) run(ctx context.Context, payload protocol.OrchestrationStartPayload) {
 	runCWD := m.cwd(payload)
-	preparedPrompt, _, err := PrepareOrchestrationPromptFiles(m.cfg, runCWD, payload.RunID, payload.Prompt, payload.Files)
-	if err != nil {
-		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-			Kind:   "run.error",
-			Status: store.OrchestrationFailed,
-			Error:  err.Error(),
-		})
-		return
+	profile := normalizeOrchestrationProfile(payload.Profile)
+	var bootstrapNote string
+	if profile == bridgeprofiles.Formal() {
+		harness, err := prepareFormalProofHarness(m.cfg, payload, runCWD)
+		if err != nil {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:   "run.error",
+				Status: store.OrchestrationFailed,
+				Error:  err.Error(),
+			})
+			return
+		}
+		runCWD = harness.RunDir
+		payload.CWD = runCWD
+		payload.RunCWD = runCWD
+		payload.Prompt = harness.Prompt
+		payload.Files = nil
+		bootstrapNote = harness.BootstrapNote
+	} else {
+		preparedPrompt, _, err := PrepareOrchestrationPromptFiles(m.cfg, runCWD, payload.RunID, payload.Prompt, payload.Files)
+		if err != nil {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:   "run.error",
+				Status: store.OrchestrationFailed,
+				Error:  err.Error(),
+			})
+			return
+		}
+		payload.Prompt = preparedPrompt
 	}
-	payload.Prompt = preparedPrompt
 	mode := payload.Mode
 	if mode != "collaboration" && mode != "debate" {
 		mode = "collaboration"
@@ -535,7 +555,6 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	if maxTurns > 12 {
 		maxTurns = 12
 	}
-	profile := normalizeOrchestrationProfile(payload.Profile)
 	nativeContextCompaction := protocol.NormalizeNativeContextCompaction(payload.NativeContextCompaction)
 	nativeSession := m.nativeSession(payload.RunID, runCWD)
 	nativeSession.mu.Lock()
@@ -587,8 +606,26 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			"nativeContextCompaction": nativeContextCompaction,
 		},
 	})
+	if bootstrapNote != "" {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:     "turn.delta",
+			Source:   "bridge",
+			Severity: "info",
+			Role:     "bootstrap",
+			CLI:      "bridge",
+			Content:  bootstrapNote,
+			BridgeNoteData: &protocol.BridgeNoteData{
+				Category: "formal-proof-harness-bootstrap",
+			},
+			Data: map[string]any{
+				"category": "formal-proof-harness-bootstrap",
+				"cwd":      runCWD,
+			},
+		})
+	}
 
 	var history []orchestrationTurn
+	formalHarnessSyncNote := ""
 	for turn := 1; turn <= maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -605,7 +642,8 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			turnID = fmt.Sprintf("%s-p%03d-%02d", payload.RunID, payload.PromptSeq, turn)
 		}
 		clearRelayResumeMode(cli, workerSlot, &sessionState)
-		prompt := composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, payload.Prompt, payload.Context, payload.Resume, role, cli, workerSlot, turn, maxTurns, history)
+		contextForTurn := appendFormalProofHarnessSyncContext(payload.Context, formalHarnessSyncNote)
+		prompt := composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, payload.Prompt, contextForTurn, payload.Resume, role, cli, workerSlot, turn, maxTurns, history)
 		resumeMode := plannedRelayResumeMode(cli, workerSlot, sessionState)
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:    "turn.start",
@@ -689,6 +727,9 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		})
 		if turn < maxTurns && turnStatus == "success" {
 			m.runPostTurnNativeMaintenance(ctx, payload.RunID, turnID, role, cli, workerSlot, &sessionState)
+		}
+		if profile == bridgeprofiles.Formal() {
+			formalHarnessSyncNote = m.emitFormalProofHarnessSync(payload.RunID, turnID, runCWD)
 		}
 	}
 	finalContent := relayTerminalContent(history)

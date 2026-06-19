@@ -82,7 +82,20 @@ hidden proof strategy gates,
 automatic verifier turns, or remediation turns. Formal-proof guidance is opt-in
 through the persisted `profile=formal-proof` run setting selected in the
 orchestration UI; the default profile does not activate proof guidance based on
-prompt keywords. The native-session design is documented in
+prompt keywords. For new formal-proof runs, Bridge first creates a persistent
+proof-run folder under the selected cwd, materializes uploaded projects or an
+empty `project/` directory there, and writes a Chinese proof harness
+(`AGENTS.md`, `CLAUDE.md`, `proof-harness/任务说明.md`,
+`proof-harness/证明义务.md`, `proof-harness/变更影响.md`,
+`proof-harness/状态.yaml`, and `proof-harness/check.sh`) before scheduled CLI
+turns begin. This bootstrap is not a hidden verifier turn and does not consume
+the user's turn budget; it only gives later CLI turns a stable, evolving task
+shell. After each formal-proof CLI turn, Bridge runs an internal structural
+sync check over required harness files, version markers, state fields, and
+decision records, emits the result as a Bridge note, and passes failures to the
+next relay prompt. Bridge does not execute the user-editable `check.sh` itself.
+Follow-up prompts reuse the locked proof-run cwd through the existing `RunCWD`
+continuity path. The native-session design is documented in
 [docs/features/native-interactive-orchestration.md](features/native-interactive-orchestration.md),
 and the relay contract is documented in
 [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).

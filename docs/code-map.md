@@ -21,7 +21,8 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Frontend source | `frontend/src/app/App.tsx`, `frontend/src/app/pages/`, `frontend/src/app/components/`, `frontend/src/app/lib/`, `frontend/src/styles/` |
 | Embedded frontend output | `internal/web/static/`, `internal/web/embed.go` |
 | Android wrapper | `android/`, `frontend/capacitor.config.ts` |
-| Deployment | `deploy/Caddyfile`, `deploy/systemd-*.service`, `Dockerfile`, `Makefile`, `docs/deployment.md` |
+| Deployment | `deploy/Caddyfile`, `deploy/systemd-*.service`, `deploy/portable/`, `scripts/build-portable-package.sh`, `Dockerfile`, `Makefile`, `docs/deployment.md` |
+| Formal-proof benchmarks | `benchmarks/formal-proof/`, `scripts/run-formal-proof-benchmarks.sh`, `docs/features/formal-proof-offline-benchmarks.md` |
 
 ## Common Tasks
 
@@ -176,6 +177,20 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
     `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
     render capability status, approval cards, and approve/deny responses in
     chat and orchestration views.
+
+### Change Chat Reliability Or Session Deletion
+
+1. `internal/bridge/appserver_runner.go:Prompt` owns safe
+   preparation retry, terminal text recovery, and app-server diagnostics.
+2. `internal/bridge/session.go:Prompt` and
+   `internal/hub/ws_bridge.go:handlePromptComplete` reject successful empty
+   completions; the Hub also validates the Bridge-to-session owner.
+3. `internal/hub/server.go:handleDeleteSession` deletes the Hub transcript,
+   invalidates buffered/owner state, and sends `close_session` to Bridge.
+4. `frontend/src/app/components/SidebarContent.tsx:SidebarContent` and
+   `frontend/src/app/pages/Workspace.tsx:Workspace` expose and handle deletion.
+5. See
+   [docs/features/chat-reliability-and-session-deletion.md](features/chat-reliability-and-session-deletion.md).
 
 ### Change Orchestration Continuity
 

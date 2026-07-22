@@ -287,28 +287,24 @@ func relayTurnPlan(workerPair, mode, firstCLI string, turn int) orchestrationTur
 }
 
 func roleForTurnWithFirstCLI(mode, firstCLI string, turn int) (string, string) {
-	if normalizeRelayFirstCLI(firstCLI) == "codex" {
-		if mode == "debate" {
-			if turn%2 == 1 {
-				return "critic", "codex"
-			}
-			return "proposer", "claude"
+	cli := normalizeRelayFirstCLI(firstCLI)
+	if turn%2 == 0 {
+		if cli == "codex" {
+			cli = "claude"
+		} else {
+			cli = "codex"
 		}
-		if turn%2 == 1 {
-			return "reviewer", "codex"
-		}
-		return "implementer", "claude"
 	}
 	if mode == "debate" {
 		if turn%2 == 1 {
-			return "proposer", "claude"
+			return "proposer", cli
 		}
-		return "critic", "codex"
+		return "critic", cli
 	}
 	if turn%2 == 1 {
-		return "implementer", "claude"
+		return "implementer", cli
 	}
-	return "reviewer", "codex"
+	return "reviewer", cli
 }
 
 func workerSlotForCLI(cli string) string {
@@ -436,6 +432,8 @@ func oneLine(value string) string {
 
 const orchestrationLanguageRule = "Language rule: write all user-visible prose, including the 交接总结 handoff summary, in Chinese by default unless the user explicitly asks for another language."
 
+const relayHistoryPromptBudget = 10 * 1024
+
 func composeRelayPromptWithFirstCLI(mode, firstCLI, profile, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {
 	return composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, contextSummary, resume, role, cli, workerSlotForCLI(cli), turn, maxTurns, history)
 }
@@ -447,10 +445,12 @@ func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, conte
 	b.WriteString("Codex Bridge is relaying this browser orchestration like a human handoff between local CLIs. Treat this as a real user instruction, use your normal capabilities, and do not wait for Bridge to validate strategy choices.\n\n")
 	b.WriteString(orchestrationLanguageRule)
 	b.WriteString("\n\n")
+	b.WriteString(relayModeRoleContract(mode, role, turn, maxTurns))
+	b.WriteString("\n")
 	if priorSameWorkerTurns(history, cli, workerSlot) > 0 {
 		b.WriteString("You are receiving this message in the same native " + cli + " conversation used for your earlier turn(s) in this orchestration run. Keep using your existing local context and remembered work from that native session. Do not assume shell process state persists unless your CLI explicitly preserves it between turns.\n\n")
 	}
-	if turn == 1 && profileActive && maxTurns >= 4 {
+	if turn == 1 && profileActive {
 		b.WriteString(registry.InitialStrategy(profile, mode, firstCLI, userPrompt))
 		b.WriteString("\n")
 	}
@@ -459,7 +459,11 @@ func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, conte
 	} else {
 		b.WriteString("You are continuing from the previous CLI's visible result. Treat the prior result as context from another person, decide independently what to do next, and continue the same user task.\n\n")
 	}
-	b.WriteString("Always end your visible reply with a short handoff summary titled \"交接总结：\" — 2-4 Chinese sentences covering what you did, what you verified and with which commands, what is still blocked, and the single most useful next step for the following CLI. Bridge forwards this summary to the next CLI as a reading guide and separately forwards your actually executed commands and their exit codes as objective evidence, so keep the summary honest and specific rather than a bare success claim. If you already write a \"最终结论/最终测试结果\" section (for example on formal-proof tasks), that section serves as the handoff summary and you need not repeat it.\n\n")
+	if turn == maxTurns {
+		b.WriteString("This is the last scheduled turn. End with a user-ready section titled \"最终结论：\" or \"最终测试结果：\" that synthesizes the whole run, compares claims with actual command evidence, distinguishes verified facts from unresolved assumptions, and names remaining risks. Do not hand work to another CLI that will not run. This final section serves as the handoff summary.\n\n")
+	} else {
+		b.WriteString("Always end your visible reply with a short handoff summary titled \"交接总结：\" — 2-4 Chinese sentences covering what you did, what you verified and with which commands, what is still blocked, and the single most useful next step for the following CLI. Bridge forwards this summary to the next CLI as a reading guide and separately forwards your actually executed commands and their exit codes as objective evidence, so keep the summary honest and specific rather than a bare success claim. If you already write a \"最终结论/最终测试结果\" section (for example on formal-proof tasks), that section serves as the handoff summary and you need not repeat it.\n\n")
+	}
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Use the compact context below when relevant, and treat the latest user task as authoritative.\n\n")
 	}
@@ -479,7 +483,7 @@ func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, conte
 	b.WriteString(fmt.Sprintf("Relay turn: %d of %d. Mode: %s. First CLI: %s. Current CLI: %s/%s.\n\n", turn, maxTurns, mode, normalizeRelayFirstCLI(firstCLI), role, cli))
 	if len(history) > 0 {
 		b.WriteString("Previous CLI handoff summary, result, and command evidence:\n")
-		for _, item := range history {
+		for _, item := range relayHistoryWithinBudget(history, relayHistoryPromptBudget) {
 			b.WriteString(formatRelayPriorTurn(item))
 		}
 		b.WriteByte('\n')
@@ -488,6 +492,61 @@ func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, conte
 	b.WriteString(strings.TrimSpace(userPrompt))
 	b.WriteString("\n")
 	return b.String()
+}
+
+func relayModeRoleContract(mode, role string, turn, maxTurns int) string {
+	cycle := (turn + 1) / 2
+	var duty string
+	switch mode {
+	case "debate":
+		switch role {
+		case "critic":
+			duty = "Critic duty: test the strongest version of the proposal, actively seek counterexamples and hidden assumptions, run disconfirming checks, and provide a stronger alternative or safe in-scope fix instead of abstract objections."
+			if turn == 1 {
+				duty += " No prior proposal exists in this run, so first establish a baseline, falsifiable acceptance criteria, and the main assumptions the next proposer must address."
+			}
+		default:
+			duty = "Proposer duty: state one falsifiable claim, its assumptions, concrete evidence, and an implementation or experiment when the task requests code; revise the claim when evidence contradicts it."
+		}
+		if cycle > 1 {
+			duty += " This is a later debate cycle: answer the strongest unresolved counterargument and update the working conclusion rather than restarting the thesis."
+		}
+		return fmt.Sprintf("Debate contract (cycle %d): %s", cycle, duty)
+	default:
+		switch role {
+		case "reviewer":
+			duty = "Reviewer duty: independently inspect the implementation, run relevant disconfirming checks, fix safe in-scope defects you find, and state what is accepted, rejected, or still unverified; do not merely agree with the implementer."
+			if turn == 1 {
+				duty += " No prior implementation exists in this run, so first establish the baseline and root cause, define the evidence required for review, and make safe in-scope fixes when appropriate."
+			}
+		default:
+			duty = "Implementer duty: find the root cause, make the smallest complete in-scope change, run focused validation, and leave an exact ledger of files, commands, blockers, and remaining risk."
+		}
+		if cycle > 1 {
+			duty += " This is a later collaboration cycle: resolve the prior review evidence and remaining blockers rather than restarting the task."
+		}
+		return fmt.Sprintf("Collaboration contract (cycle %d): %s", cycle, duty)
+	}
+}
+
+func relayHistoryWithinBudget(history []orchestrationTurn, budget int) []orchestrationTurn {
+	if len(history) == 0 || budget <= 0 {
+		return nil
+	}
+	start := len(history)
+	used := 0
+	for index := len(history) - 1; index >= 0; index-- {
+		size := len(formatRelayPriorTurn(history[index]))
+		if used > 0 && used+size > budget {
+			break
+		}
+		start = index
+		used += size
+		if used >= budget {
+			break
+		}
+	}
+	return history[start:]
 }
 
 func formatRelayPriorTurn(item orchestrationTurn) string {
@@ -536,6 +595,10 @@ func relayCommandSummaries(tools []RunnerToolEvent, max int) []string {
 	if max <= 0 || len(tools) == 0 {
 		return nil
 	}
+	tools = coalesceRelayToolEvents(tools)
+	if len(tools) > max {
+		tools = tools[len(tools)-max:]
+	}
 	var out []string
 	for _, tool := range tools {
 		if strings.TrimSpace(tool.Command) == "" {
@@ -555,6 +618,39 @@ func relayCommandSummaries(tools []RunnerToolEvent, max int) []string {
 		out = append(out, summary)
 		if len(out) >= max {
 			break
+		}
+	}
+	return out
+}
+
+func coalesceRelayToolEvents(tools []RunnerToolEvent) []RunnerToolEvent {
+	latest := make(map[string]RunnerToolEvent)
+	lastPosition := make(map[string]int)
+	keys := make([]string, len(tools))
+	for index, tool := range tools {
+		key := strings.TrimSpace(tool.ID)
+		if key == "" {
+			key = "command:" + strings.TrimSpace(tool.Command)
+		}
+		keys[index] = key
+		if previous, ok := latest[key]; ok {
+			if strings.TrimSpace(tool.Command) == "" {
+				tool.Command = previous.Command
+			}
+			if strings.TrimSpace(tool.Output) == "" {
+				tool.Output = previous.Output
+			}
+			if tool.ExitCode == nil {
+				tool.ExitCode = previous.ExitCode
+			}
+		}
+		latest[key] = tool
+		lastPosition[key] = index
+	}
+	out := make([]RunnerToolEvent, 0, len(latest))
+	for index, key := range keys {
+		if lastPosition[key] == index {
+			out = append(out, latest[key])
 		}
 	}
 	return out

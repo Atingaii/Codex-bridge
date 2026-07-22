@@ -1180,6 +1180,47 @@ const tableCellClass = 'border-border px-3 py-2 align-top text-foreground/90';
 const listClass = 'my-3 space-y-1 pl-5';
 const blockquoteClass = 'my-3 border-l-2 border-border pl-3 text-muted-foreground';
 const horizontalRuleClass = 'my-4 border-t border-border';
+const inlineFenceInfoPrefixes = [
+  'typescript',
+  'javascript',
+  'plaintext',
+  'markdown',
+  'isabelle',
+  'dockerfile',
+  'makefile',
+  'python',
+  'shell',
+  'bash',
+  'zsh',
+  'json',
+  'yaml',
+  'html',
+  'scss',
+  'diff',
+  'patch',
+  'text',
+  'lean4',
+  'lean',
+  'coq',
+  'rocq',
+  'tsx',
+  'jsx',
+  'txt',
+  'css',
+  'xml',
+  'toml',
+  'ini',
+  'sql',
+  'sh',
+  'md',
+  'py',
+  'go',
+  'rs',
+].sort((a, b) => b.length - a.length);
+
+type MarkdownFenceOpen = {
+  inlineContent: string;
+};
 
 export function renderMarkdown(text: string) {
   const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
@@ -1192,9 +1233,10 @@ export function renderMarkdown(text: string) {
       continue;
     }
 
-    const fence = lines[index].match(/^\s*```([A-Za-z0-9_.+#-]*)\s*$/);
+    const fence = readMarkdownFenceOpen(lines[index]);
     if (fence) {
       const codeLines: string[] = [];
+      if (fence.inlineContent) codeLines.push(fence.inlineContent);
       index += 1;
       while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) {
         codeLines.push(lines[index]);
@@ -1298,9 +1340,25 @@ function isHorizontalRule(line: string) {
   return /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line);
 }
 
+function readMarkdownFenceOpen(line: string): MarkdownFenceOpen | null {
+  const fence = line.match(/^\s{0,3}```(.*)$/);
+  if (!fence) return null;
+  const rest = fence[1].trim();
+  if (!rest || /^[A-Za-z0-9_.+#-]+$/.test(rest)) return { inlineContent: '' };
+  return { inlineContent: markdownFenceInlineContent(rest) };
+}
+
+function markdownFenceInlineContent(rest: string) {
+  const value = rest.trimStart();
+  const lower = value.toLowerCase();
+  const prefix = inlineFenceInfoPrefixes.find((info) => lower.startsWith(info));
+  if (!prefix) return value;
+  return value.slice(prefix.length).replace(/^[\s:,-]+/, '');
+}
+
 function startsMarkdownBlock(lines: string[], index: number) {
   const line = lines[index];
-  return /^\s*```/.test(line)
+  return Boolean(readMarkdownFenceOpen(line))
     || Boolean(readMarkdownTable(lines, index))
     || /^\s{0,3}#{1,6}\s+/.test(line)
     || isHorizontalRule(line)

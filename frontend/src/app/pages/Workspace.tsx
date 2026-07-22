@@ -104,6 +104,7 @@ export function Workspace({
   const [renaming, setRenaming] = useState(false);
   const [sharingSessionId, setSharingSessionId] = useState('');
   const [shareCopiedSessionId, setShareCopiedSessionId] = useState('');
+  const [deletingSessionId, setDeletingSessionId] = useState('');
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -574,18 +575,27 @@ export function Workspace({
   };
 
   const deleteSession = async (session: Session) => {
-    if (!window.confirm(t.deleteSessionConfirm)) return;
-    await api(`/api/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
-    const remaining = sessions.filter((item) => item.id !== session.id);
-    setSessions(remaining);
-    if (activeSessionId === session.id) {
-      const sameAgent = remaining.filter((item) => item.agentId === session.agentId);
+    if (deletingSessionId || !window.confirm(t.deleteSessionConfirm)) return;
+    const wasActive = activeSessionIdRef.current === session.id;
+    setDeletingSessionId(session.id);
+    try {
+      await api(`/api/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
+      const remaining = sessions.filter((item) => item.id !== session.id);
+      setSessions(remaining);
       forgetActiveSessionForAgent(session.agentId, session.id);
-      if (sameAgent[0]) {
-        await selectLoadedSession(sameAgent[0]);
-      } else {
-        clearActiveChat();
+      if (wasActive) {
+        closeWS();
+        const sameAgent = remaining.filter((item) => item.agentId === session.agentId);
+        if (sameAgent[0]) {
+          await selectLoadedSession(sameAgent[0]);
+        } else {
+          clearActiveChat();
+        }
       }
+    } catch (err) {
+      appendSystem(err instanceof Error ? `${t.failedDeleteSession}: ${err.message}` : t.failedDeleteSession);
+    } finally {
+      setDeletingSessionId('');
     }
   };
 
@@ -736,6 +746,7 @@ export function Workspace({
           openOrchestration={() => navigate('/orchestrate')}
           shareCopiedSessionId={shareCopiedSessionId}
           sharingSessionId={sharingSessionId}
+          deletingSessionId={deletingSessionId}
           t={t}
         />
       </aside>
@@ -765,6 +776,7 @@ export function Workspace({
               }}
               shareCopiedSessionId={shareCopiedSessionId}
               sharingSessionId={sharingSessionId}
+              deletingSessionId={deletingSessionId}
               t={t}
             />
           </div>

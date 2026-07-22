@@ -2,7 +2,7 @@ GO ?= go
 BINARY ?= bin/codex-bridge
 PREFIX ?= /usr/local
 
-.PHONY: help tidy frontend build build-all test doc-lint run-hub run-bridge install clean docker
+.PHONY: help tidy frontend build build-all portable-package test benchmark-formal-proof doc-lint run-hub run-bridge install clean docker
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -19,8 +19,14 @@ build: ## Build the Go binary (assumes frontend is already built)
 
 build-all: frontend build ## Build the frontend then the Go binary
 
+portable-package: ## Build a self-contained Linux amd64 tar.gz under dist/
+	./scripts/build-portable-package.sh
+
 test: ## Run the Go test suite
 	$(GO) test ./...
+
+benchmark-formal-proof: ## Run offline Coq and Isabelle proof benchmarks
+	./scripts/run-formal-proof-benchmarks.sh --all
 
 doc-lint: ## Validate docs, env references, and code anchors
 	./scripts/check-docs.sh
@@ -38,4 +44,4 @@ docker: ## Build the container image (tag: codex-bridge:local)
 	docker build -t codex-bridge:local .
 
 clean: ## Remove build artifacts
-	rm -rf bin
+	rm -rf bin dist

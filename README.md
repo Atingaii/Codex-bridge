@@ -110,11 +110,30 @@ make help                      # list all targets
 | --- | --- | --- |
 | From source | Local development, single host | [Quick Start](#quick-start-from-source) |
 | `make` binary | Reproducible local/staging build | [Build & Install](#build--install) |
-| Docker | Containerized Hub | [docs/deployment.md](docs/deployment.md#option-c--docker) |
-| systemd + Caddy | Production with TLS | [docs/deployment.md](docs/deployment.md#option-d--production-systemd--caddy) |
+| Portable package | Copy archive to a fresh Linux server and run one script | [docs/deployment.md](docs/deployment.md#option-c--portable-package) |
+| Docker | Containerized Hub | [docs/deployment.md](docs/deployment.md#option-d--docker) |
+| systemd + Caddy | Production with TLS | [docs/deployment.md](docs/deployment.md#option-e--production-systemd--caddy) |
 
 The full multi-method guide — prerequisites, production config, verification,
 and troubleshooting — is in **[docs/deployment.md](docs/deployment.md)**.
+
+### Portable package, at a glance
+
+```bash
+make portable-package
+scp dist/codex-bridge-*-linux-amd64.tar.gz user@server:/opt/
+
+ssh user@server
+cd /opt
+tar -xzf codex-bridge-*-linux-amd64.tar.gz
+cd codex-bridge-*-linux-amd64
+ADMIN_USERNAME=admin ADMIN_PASSWORD='change-me' APP_HOST=0.0.0.0 APP_PORT=8088 ./start.sh
+```
+
+The extracted package initializes package-local SQLite state, admin login,
+Bridge token, logs, and pid files. It defaults to `BRIDGE_RUNNER=echo` for a
+first smoke test; set `BRIDGE_RUNNER=codex` and `BRIDGE_CWD=/path/to/workspace`
+after the target server has Codex CLI installed and authenticated.
 
 ### Production (systemd + Caddy), at a glance
 

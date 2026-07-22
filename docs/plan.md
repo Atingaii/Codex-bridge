@@ -29,7 +29,9 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P6.3 | Orchestration capability matrix and pass-through Claude/Codex relay | implemented |
 | P6.4 | CLI endpoint repair commands | implemented |
 | P6.5 | Formal-proof Proof Harness bootstrap | implemented |
+| P6.6 | Persistent per-context task queue | designed |
 | P7 | Browser permission prompts over app-server | implemented for Codex chat and Codex orchestration |
+| P8 | Empty-reply hardening and accessible session deletion | implemented |
 
 ## Engineering Workflow
 
@@ -55,6 +57,11 @@ Let a single user talk from any browser to Codex CLI running on a private machin
   `internal/bridge/profiles/registry` + `internal/bridge/profiles/formalproof`;
   new formal-proof runs also get a persistent Chinese Proof Harness under the
   run cwd before scheduled CLI turns begin.
+- Persistent task queue design is captured in
+  [docs/features/persistent-task-queue.md](features/persistent-task-queue.md):
+  Hub should persist per-chat-session and per-orchestration-run serial queues so
+  users can submit follow-up work while a task is still running. This is not yet
+  implemented.
 
 ## Maintenance Log
 

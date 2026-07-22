@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -150,9 +151,9 @@ func (m *SessionManager) Prompt(parent context.Context, sid string, payload prot
 	}
 
 	var (
-		result       RunnerResult
-		nativeID     string
-		nativeCmd    string
+		result    RunnerResult
+		nativeID  string
+		nativeCmd string
 	)
 	if sr, ok := s.runner.(SessionRunner); ok {
 		// Interactive long-session path (ACP runner). Open or reuse the resident
@@ -216,6 +217,15 @@ func (m *SessionManager) Prompt(parent context.Context, sid string, payload prot
 			message = "canceled by user"
 		}
 		m.sendSessionEnvelope(sid, protocol.MustEnvelope(protocol.TypeError, sid, protocol.ErrorPayload{Code: code, Message: message, RunID: runID, PromptID: promptID}))
+		return
+	}
+	if strings.TrimSpace(result.Content) == "" {
+		m.sendSessionEnvelope(sid, protocol.MustEnvelope(protocol.TypeError, sid, protocol.ErrorPayload{
+			Code:     "EMPTY_RESPONSE",
+			Message:  "runner completed without an assistant response",
+			RunID:    runID,
+			PromptID: promptID,
+		}))
 		return
 	}
 	m.sendSessionEnvelope(sid, protocol.MustEnvelope(protocol.TypePromptComplete, sid, protocol.PromptCompletePayload{

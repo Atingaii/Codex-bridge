@@ -20,6 +20,7 @@ export function SidebarContent({
   openOrchestration,
   shareCopiedSessionId,
   sharingSessionId,
+  deletingSessionId,
   t,
 }: {
   groupedSessions: Record<string, Session[]>;
@@ -36,6 +37,7 @@ export function SidebarContent({
   openOrchestration: () => void;
   shareCopiedSessionId: string;
   sharingSessionId: string;
+  deletingSessionId: string;
   t: UIText;
 }) {
   return (
@@ -83,60 +85,73 @@ export function SidebarContent({
             </h4>
             <div className="space-y-0.5">
               {sessions.map((session) => (
-                <button
+                <div
                   key={session.id}
-                  onClick={() => setActiveSession(session.id)}
                   className={cn(
-                    "w-full text-left px-2 py-1.5 rounded-md text-sm flex items-center gap-2 transition-colors group",
+                    "w-full rounded-md text-sm flex items-center transition-colors group",
                     activeSession === session.id
                       ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
                       : "text-sidebar-foreground hover:bg-sidebar-accent/50"
                   )}
                 >
-                  <MessageSquare className="h-3.5 w-3.5 opacity-70 shrink-0" />
-                  <span className="truncate">{displaySessionTitle(session, t)}</span>
+                  <button
+                    type="button"
+                    onClick={() => setActiveSession(session.id)}
+                    className="min-w-0 flex-1 px-2 py-1.5 text-left flex items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-current={activeSession === session.id ? 'page' : undefined}
+                  >
+                    <MessageSquare className="h-3.5 w-3.5 opacity-70 shrink-0" />
+                    <span className="truncate">{displaySessionTitle(session, t)}</span>
+                  </button>
 
-                  <div className="ml-auto flex items-center gap-1">
-                    <span
+                  <div className={cn(
+                    "pr-1 flex shrink-0 items-center gap-0.5 transition-opacity",
+                    activeSession === session.id ? "opacity-100" : "opacity-100 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100"
+                  )}>
+                    <button
+                      type="button"
                       className={cn(
-                        "h-5 w-5 rounded flex items-center justify-center hover:bg-sidebar-border text-muted-foreground",
+                        "h-7 w-7 rounded flex items-center justify-center hover:bg-sidebar-border text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
                         shareCopiedSessionId === session.id && "text-emerald-600 dark:text-emerald-400"
                       )}
+                      disabled={sharingSessionId === session.id || deletingSessionId === session.id}
                       onClick={(event) => {
-                        event.preventDefault();
                         event.stopPropagation();
                         shareSession(session);
                       }}
+                      aria-label={shareCopiedSessionId === session.id ? t.copied : t.shareConversation}
                       title={shareCopiedSessionId === session.id ? t.copied : t.shareConversation}
                     >
                       {sharingSessionId === session.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : shareCopiedSessionId === session.id ? <Check className="h-3 w-3" /> : <Share2 className="h-3 w-3" />}
-                    </span>
-                    {activeSession === session.id && (
-                      <>
-                        <span
-                          className="h-5 w-5 rounded flex items-center justify-center hover:bg-sidebar-border text-muted-foreground"
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            renameSession(session);
-                          }}
-                        >
-                          <Edit2 className="h-3 w-3" />
-                        </span>
-                        <span
-                          className="h-5 w-5 rounded flex items-center justify-center hover:bg-destructive/10 hover:text-destructive text-muted-foreground"
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            deleteSession(session);
-                          }}
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </span>
-                      </>
-                    )}
+                    </button>
+                    <button
+                      type="button"
+                      className="h-7 w-7 rounded flex items-center justify-center hover:bg-sidebar-border text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                      disabled={deletingSessionId === session.id}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        renameSession(session);
+                      }}
+                      aria-label={t.renameSession}
+                      title={t.renameSession}
+                    >
+                      <Edit2 className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      className="h-7 w-7 rounded flex items-center justify-center hover:bg-destructive/10 hover:text-destructive text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                      disabled={deletingSessionId === session.id}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        deleteSession(session);
+                      }}
+                      aria-label={deletingSessionId === session.id ? t.deletingSession : t.deleteSession}
+                      title={deletingSessionId === session.id ? t.deletingSession : t.deleteSession}
+                    >
+                      {deletingSessionId === session.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                    </button>
                   </div>
-                </button>
+                </div>
               ))}
             </div>
           </div>

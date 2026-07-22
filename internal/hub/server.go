@@ -53,6 +53,8 @@ type Server struct {
 
 	buffersMu sync.Mutex
 	buffers   map[string]string
+	ownersMu  sync.RWMutex
+	owners    map[string]string
 
 	leasesMu sync.Mutex
 	leases   map[string]*browserSessionLease
@@ -73,6 +75,7 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 		signer:  auth.NewSigner(cfg.Auth.JWTSecret, cfg.Auth.AccessTokenTTL.Duration),
 		pool:    NewPool(),
 		buffers: make(map[string]string),
+		owners:  make(map[string]string),
 		leases:  make(map[string]*browserSessionLease),
 		rates:   make(map[string]rateBucket),
 	}
@@ -782,7 +785,9 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request, uid
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load session")
 		return
 	}
+	s.blockSessionOwner(sid)
 	if err := s.store.DeleteSession(r.Context(), sid, uid); err != nil {
+		s.forgetSessionOwner(sid)
 		if errors.Is(err, store.ErrNotFound) {
 			serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
 			return
@@ -790,6 +795,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request, uid
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to delete session")
 		return
 	}
+	s.forgetSessionOwner(sid)
 	s.clearAssistantBuffer(sid)
 	_ = s.pool.SendToAgent(session.AgentID, protocol.MustEnvelope(protocol.TypeCloseSession, sid, nil))
 	s.pool.BroadcastToBrowsers(sid, protocol.MustEnvelope(protocol.TypeError, sid, protocol.ErrorPayload{

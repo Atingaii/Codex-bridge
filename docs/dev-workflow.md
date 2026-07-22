@@ -171,6 +171,31 @@ Then run Go verification:
 CGO_ENABLED=0 /usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .
 ```
 
+## Portable Package Build
+
+For a copy-to-server bootstrap that does not require Go or Node on the target
+machine, build the Linux amd64 portable archive:
+
+```bash
+make portable-package
+```
+
+This calls `scripts/build-portable-package.sh`, writes
+`dist/codex-bridge-<version>-linux-amd64.tar.gz`, and includes
+`deploy/portable/start.sh`, `stop.sh`, `status.sh`, package-local config, and
+the static `codex-bridge` binary. On the target server:
+
+```bash
+tar -xzf codex-bridge-<version>-linux-amd64.tar.gz
+cd codex-bridge-<version>-linux-amd64
+ADMIN_USERNAME=admin ADMIN_PASSWORD='change-me' APP_HOST=0.0.0.0 APP_PORT=8088 ./start.sh
+```
+
+The script initializes `data/`, `state/`, `logs/`, and `run/` inside the
+extracted directory. It defaults to `BRIDGE_RUNNER=echo`; set
+`BRIDGE_RUNNER=codex` and `BRIDGE_CWD=/path/to/workspace` only after Codex CLI
+is installed and authenticated for that OS user.
+
 ## Documentation Check
 
 ```bash

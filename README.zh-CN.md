@@ -169,6 +169,28 @@ docker run --rm -p 8088:8088 \
   codex-bridge:local hub
 ```
 
+如果希望把新项目直接打成压缩包拷到另一台 Linux 服务器，只让新机器“解压并运行脚本”，
+可以构建 portable 包：
+
+```bash
+make portable-package
+scp dist/codex-bridge-*-linux-amd64.tar.gz user@server:/opt/
+
+ssh user@server
+cd /opt
+tar -xzf codex-bridge-*-linux-amd64.tar.gz
+cd codex-bridge-*-linux-amd64
+ADMIN_USERNAME=admin ADMIN_PASSWORD='change-me' APP_HOST=0.0.0.0 APP_PORT=8088 ./start.sh
+```
+
+`start.sh` 会在解压目录内初始化 SQLite、JWT secret、admin 登录用户、Bridge token、
+日志和 pid 文件，并同时启动 Hub 与本机 Bridge。默认 `BRIDGE_RUNNER=echo`，用于先确认
+登录和连接链路可用；目标服务器安装并登录 Codex CLI 后，可改用：
+
+```bash
+BRIDGE_RUNNER=codex BRIDGE_CWD=/srv/workspace ./start.sh
+```
+
 初始化生产配置：
 
 ```bash

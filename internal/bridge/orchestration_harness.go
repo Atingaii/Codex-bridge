@@ -70,7 +70,7 @@ func prepareFormalProofHarness(cfg *config.Config, payload protocol.Orchestratio
 			}
 		}
 		result.Created = !formalProofHarnessExists(runDir)
-		result.Assistant = detectProofAssistant(projectDir)
+		result.Assistant = detectProofAssistantForTask(projectDir, payload.Prompt)
 		if result.Assistant == "" {
 			result.Assistant = "unknown"
 		}
@@ -105,7 +105,7 @@ func prepareFormalProofHarness(cfg *config.Config, payload protocol.Orchestratio
 			return result, err
 		}
 	}
-	result.Assistant = detectProofAssistant(projectDir)
+	result.Assistant = detectProofAssistantForTask(projectDir, payload.Prompt)
 	if result.Assistant == "" {
 		result.Assistant = "unknown"
 	}
@@ -460,6 +460,10 @@ func writeFormalProofState(payload protocol.OrchestrationStartPayload, result fo
 }
 
 func detectProofAssistant(projectDir string) string {
+	return detectProofAssistantForTask(projectDir, "")
+}
+
+func detectProofAssistantForTask(projectDir, prompt string) string {
 	var hasThy, hasCoq, hasLean, hasLake bool
 	_ = filepath.WalkDir(projectDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -479,11 +483,21 @@ func detectProofAssistant(projectDir string) string {
 		}
 		return nil
 	})
-	switch {
-	case hasThy:
+	lowerPrompt := strings.ToLower(prompt)
+	if strings.Contains(lowerPrompt, "coq") || strings.Contains(lowerPrompt, "rocq") {
+		return "coq"
+	}
+	if strings.Contains(lowerPrompt, "lean") {
+		return "lean4"
+	}
+	if strings.Contains(lowerPrompt, "isabelle") {
 		return "isabelle"
+	}
+	switch {
 	case hasCoq:
 		return "coq"
+	case hasThy:
+		return "isabelle"
 	case hasLake || hasLean:
 		return "lean4"
 	default:
@@ -753,9 +767,16 @@ func formalProofCheckScript() string {
 set -euo pipefail
 
 mode="${1:---all}"
+proof_timeout="${PROOF_CHECK_TIMEOUT:-600}"
 run_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 harness_dir="$run_dir/proof-harness"
 project_dir="$run_dir/project"
+assistant="$(sed -n 's/^assistant:[[:space:]]*"\{0,1\}\([^"[:space:]]*\).*/\1/p' "$harness_dir/状态.yaml" | head -n1)"
+
+if [[ ! "$proof_timeout" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'ERROR: PROOF_CHECK_TIMEOUT must be a positive integer\n' >&2
+  exit 2
+fi
 
 err=0
 warn() { printf 'WARN: %s\n' "$*" >&2; }
@@ -796,47 +817,91 @@ run_harness() {
 }
 
 scan_forbidden() {
+  local target_dir=$1
+  local source_kind=$2
   printf '\n== shortcut scan ==\n'
+  local pattern='sorry|quick_and_dirty|oops|admit|Admitted|Axiom|Parameter|Conjecture|Abort|TODO|placeholder|unsafe'
+  local -a includes=()
+  case "$source_kind" in
+    coq) includes=(-g '*.v') ;;
+    isabelle) includes=(-g '*.thy') ;;
+    lean4) includes=(-g '*.lean') ;;
+  esac
   if command -v rg >/dev/null 2>&1; then
-    rg -n 'sorry|quick_and_dirty|oops|admit|Admitted|Axiom|Parameter|Conjecture|Abort|TODO|placeholder|unsafe' "$project_dir" || true
+    if rg -n "${includes[@]}" "$pattern" "$target_dir"; then
+      fail "proof shortcut found in $source_kind target sources"
+    fi
   else
-    grep -RInE 'sorry|quick_and_dirty|oops|admit|Admitted|Axiom|Parameter|Conjecture|Abort|TODO|placeholder|unsafe' "$project_dir" || true
+    local name_pattern='*'
+    case "$source_kind" in
+      coq) name_pattern='*.v' ;;
+      isabelle) name_pattern='*.thy' ;;
+      lean4) name_pattern='*.lean' ;;
+    esac
+    if find "$target_dir" -type f -name "$name_pattern" -print0 | xargs -0 -r grep -nE "$pattern"; then
+      fail "proof shortcut found in $source_kind target sources"
+    fi
   fi
 }
 
 run_proof() {
   printf '== proof checks ==\n'
-  if [[ -f "$project_dir/ROOT" ]] || find "$project_dir" -name '*.thy' | grep -q .; then
-    if command -v isabelle >/dev/null 2>&1; then
-      (cd "$run_dir" && isabelle build -D project)
-    else
-      warn "isabelle not found; build check skipped"
+  if [[ "$assistant" == "coq" ]] || { [[ "$assistant" != "isabelle" ]] && { [[ -f "$project_dir/_CoqProject" ]] || find "$project_dir" -name '*.v' | grep -q .; }; }; then
+    local coq_project_file
+    local coq_dir="$project_dir"
+    coq_project_file="$(find "$project_dir" -type f -name '_CoqProject' -print | LC_ALL=C sort | head -n1)"
+    if [[ -n "$coq_project_file" ]]; then
+      coq_dir="$(dirname "$coq_project_file")"
     fi
-    scan_forbidden
-    return 0
-  fi
-  if [[ -f "$project_dir/_CoqProject" ]] || find "$project_dir" -name '*.v' | grep -q .; then
-    if [[ -f "$project_dir/Makefile" ]] && command -v make >/dev/null 2>&1; then
-      (cd "$project_dir" && make)
+    if ! find "$coq_dir" -type f -name '*.v' -print -quit | grep -q .; then
+      fail "Coq target contains no .v source files"
+      return 1
+    fi
+    if [[ -f "$coq_dir/Makefile" ]] && command -v make >/dev/null 2>&1; then
+      (cd "$coq_dir" && timeout "${proof_timeout}s" make) || fail "Coq project build failed or timed out"
+    elif command -v coq_makefile >/dev/null 2>&1 && [[ -f "$coq_dir/_CoqProject" ]]; then
+      (cd "$coq_dir" && timeout "${proof_timeout}s" coq_makefile -f _CoqProject -o Makefile.proof-harness && timeout "${proof_timeout}s" make -f Makefile.proof-harness) || fail "Coq project build failed or timed out"
     elif command -v coqc >/dev/null 2>&1; then
-      find "$project_dir" -name '*.v' -print0 | xargs -0 -n1 coqc
+      while IFS= read -r file; do
+        (cd "$coq_dir" && timeout "${proof_timeout}s" coqc "${file#"$coq_dir/"}") || fail "Coq file failed or timed out: $file"
+      done < <(find "$coq_dir" -name '*.v' | LC_ALL=C sort)
     else
-      warn "make/coqc not found; Coq build check skipped"
+      fail "make/coq_makefile/coqc not found; Coq build was not verified"
     fi
-    scan_forbidden
-    return 0
+    scan_forbidden "$coq_dir" coq
+    return $((err > 0))
+  fi
+  if [[ "$assistant" == "isabelle" ]] || [[ -f "$project_dir/ROOT" ]] || find "$project_dir" -name '*.thy' | grep -q .; then
+    local isabelle_root
+    local isabelle_dir="$project_dir"
+    isabelle_root="$(find "$project_dir" -type f -name ROOT -print | LC_ALL=C sort | head -n1)"
+    if [[ -n "$isabelle_root" ]]; then
+      isabelle_dir="$(dirname "$isabelle_root")"
+    fi
+    if command -v isabelle >/dev/null 2>&1; then
+      timeout "${proof_timeout}s" isabelle build -D "$isabelle_dir" || fail "Isabelle project build failed or timed out"
+    else
+      fail "isabelle not found; Isabelle build was not verified"
+    fi
+    scan_forbidden "$isabelle_dir" isabelle
+    return $((err > 0))
   fi
   if [[ -f "$project_dir/lakefile.lean" || -f "$project_dir/lakefile.toml" ]] || find "$project_dir" -name '*.lean' | grep -q .; then
-    if command -v lake >/dev/null 2>&1; then
-      (cd "$project_dir" && lake build)
-    else
-      warn "lake not found; Lean4 build check skipped"
+    local lean_dir="$project_dir"
+    local lakefile
+    lakefile="$(find "$project_dir" -type f \( -name lakefile.lean -o -name lakefile.toml \) -print | LC_ALL=C sort | head -n1)"
+    if [[ -n "$lakefile" ]]; then
+      lean_dir="$(dirname "$lakefile")"
     fi
-    scan_forbidden
-    return 0
+    if command -v lake >/dev/null 2>&1; then
+      (cd "$lean_dir" && timeout "${proof_timeout}s" lake build) || fail "Lean4 project build failed or timed out"
+    else
+      fail "lake not found; Lean4 build was not verified"
+    fi
+    scan_forbidden "$lean_dir" lean4
+    return $((err > 0))
   fi
-  warn "unknown proof assistant; running generic shortcut scan only"
-  scan_forbidden
+  fail "unknown proof assistant; build was not verified"
 }
 
 case "$mode" in

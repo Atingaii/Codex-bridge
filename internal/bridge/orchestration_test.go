@@ -20,13 +20,24 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
+	"github.com/tencent/codex-bridge/internal/store"
 )
 
 func cleanOrchestrationTurnContent(content string) string {
 	return scrubOrchestrationTurnContent(content)
+}
+
+func containsTestString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestOrchestrationClaudeStreamInputArgsKeepSessionAndOmitPromptArg(t *testing.T) {
@@ -1924,6 +1935,146 @@ func TestComposeRelayPromptUsesCodexFirstProofStrategy(t *testing.T) {
 	}
 }
 
+func TestRelayModeRoleContractsAndFinalSynthesis(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     string
+		role     string
+		turn     int
+		maxTurns int
+		wants    []string
+	}{
+		{name: "collaboration implementer", mode: "collaboration", role: "implementer", turn: 1, maxTurns: 4, wants: []string{"Collaboration contract (cycle 1)", "Implementer duty", "root cause", "focused validation"}},
+		{name: "collaboration reviewer first", mode: "collaboration", role: "reviewer", turn: 1, maxTurns: 4, wants: []string{"Reviewer duty", "independently inspect", "No prior implementation exists", "baseline"}},
+		{name: "collaboration later cycle", mode: "collaboration", role: "implementer", turn: 3, maxTurns: 4, wants: []string{"cycle 2", "resolve the prior review evidence"}},
+		{name: "debate proposer", mode: "debate", role: "proposer", turn: 1, maxTurns: 4, wants: []string{"Debate contract (cycle 1)", "Proposer duty", "falsifiable claim", "assumptions"}},
+		{name: "debate critic first", mode: "debate", role: "critic", turn: 1, maxTurns: 4, wants: []string{"Critic duty", "counterexamples", "No prior proposal exists", "acceptance criteria"}},
+		{name: "debate later cycle", mode: "debate", role: "critic", turn: 4, maxTurns: 6, wants: []string{"cycle 2", "strongest unresolved counterargument"}},
+		{name: "unknown mode fallback", mode: "other", role: "implementer", turn: 1, maxTurns: 2, wants: []string{"Collaboration contract", "Implementer duty"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prompt := composeRelayPromptWithFirstCLI(test.mode, "claude", "default", "fix the task", "", false, test.role, "claude", test.turn, test.maxTurns, nil)
+			for _, want := range test.wants {
+				if !strings.Contains(prompt, want) {
+					t.Fatalf("prompt missing %q:\n%s", want, prompt)
+				}
+			}
+		})
+	}
+
+	finalPrompt := composeRelayPromptWithFirstCLI("debate", "claude", "default", "decide", "", false, "critic", "codex", 4, 4, nil)
+	for _, want := range []string{"last scheduled turn", "最终结论", "compares claims with actual command evidence", "Do not hand work to another CLI"} {
+		if !strings.Contains(finalPrompt, want) {
+			t.Fatalf("final prompt missing %q:\n%s", want, finalPrompt)
+		}
+	}
+	if strings.Contains(finalPrompt, "single most useful next step for the following CLI") {
+		t.Fatalf("final prompt still requests a nonexistent next-worker handoff:\n%s", finalPrompt)
+	}
+}
+
+func TestRelayTurnPlanKeepsRoleOrderIndependentOfFirstCLI(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       string
+		workerPair string
+		firstCLI   string
+		turn       int
+		wantRole   string
+		wantCLI    string
+		wantSlot   string
+	}{
+		{name: "collaboration claude first", mode: "collaboration", firstCLI: "claude", turn: 1, wantRole: "implementer", wantCLI: "claude", wantSlot: "claude"},
+		{name: "collaboration codex first", mode: "collaboration", firstCLI: "codex", turn: 1, wantRole: "implementer", wantCLI: "codex", wantSlot: orchestrationCodexDefaultSlot},
+		{name: "collaboration codex second", mode: "collaboration", firstCLI: "codex", turn: 2, wantRole: "reviewer", wantCLI: "claude", wantSlot: "claude"},
+		{name: "debate claude first", mode: "debate", firstCLI: "claude", turn: 1, wantRole: "proposer", wantCLI: "claude", wantSlot: "claude"},
+		{name: "debate codex first", mode: "debate", firstCLI: "codex", turn: 1, wantRole: "proposer", wantCLI: "codex", wantSlot: orchestrationCodexDefaultSlot},
+		{name: "debate codex second", mode: "debate", firstCLI: "codex", turn: 2, wantRole: "critic", wantCLI: "claude", wantSlot: "claude"},
+		{name: "codex pair collaboration first", mode: "collaboration", workerPair: protocol.WorkerPairCodexCodex, firstCLI: "claude", turn: 1, wantRole: "implementer", wantCLI: "codex", wantSlot: orchestrationCodexSlotA},
+		{name: "codex pair collaboration second", mode: "collaboration", workerPair: protocol.WorkerPairCodexCodex, firstCLI: "claude", turn: 2, wantRole: "reviewer", wantCLI: "codex", wantSlot: orchestrationCodexSlotB},
+		{name: "codex pair debate first", mode: "debate", workerPair: protocol.WorkerPairCodexCodex, firstCLI: "claude", turn: 1, wantRole: "proposer", wantCLI: "codex", wantSlot: orchestrationCodexSlotA},
+		{name: "codex pair debate second", mode: "debate", workerPair: protocol.WorkerPairCodexCodex, firstCLI: "claude", turn: 2, wantRole: "critic", wantCLI: "codex", wantSlot: orchestrationCodexSlotB},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := relayTurnPlan(test.workerPair, test.mode, test.firstCLI, test.turn)
+			if got.Role != test.wantRole || got.CLI != test.wantCLI || got.WorkerSlot != test.wantSlot {
+				t.Fatalf("turn plan = %#v, want role=%q cli=%q slot=%q", got, test.wantRole, test.wantCLI, test.wantSlot)
+			}
+		})
+	}
+}
+
+func TestFormalProofInitialStrategyDoesNotRequireFourTurns(t *testing.T) {
+	prompt := composeRelayPromptWithFirstCLI(
+		"collaboration",
+		"codex",
+		"formal-proof",
+		"用 Coq 证明列表反转定理。",
+		"",
+		false,
+		"implementer",
+		"codex",
+		1,
+		2,
+		nil,
+	)
+	if !strings.Contains(prompt, "Initial orchestration strategy for this formal-proof task") {
+		t.Fatalf("two-turn formal proof prompt omitted initial strategy:\n%s", prompt)
+	}
+}
+
+func TestRelayHistoryBudgetKeepsNewestUTF8Evidence(t *testing.T) {
+	history := make([]orchestrationTurn, 0, 12)
+	for index := 0; index < 12; index++ {
+		marker := fmt.Sprintf("证据-%02d", index)
+		history = append(history, orchestrationTurn{
+			Role:    "reviewer",
+			CLI:     "codex",
+			Content: marker + strings.Repeat("复杂证明上下文", 500),
+		})
+	}
+	prompt := composeRelayPromptWithFirstCLI("collaboration", "claude", "default", "继续", "", false, "reviewer", "codex", 12, 12, history)
+	if len(prompt) > relayHistoryPromptBudget+5000 {
+		t.Fatalf("bounded prompt grew to %d bytes", len(prompt))
+	}
+	if !strings.Contains(prompt, "证据-11") {
+		t.Fatalf("newest evidence was not retained:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "证据-00") {
+		t.Fatal("oldest oversized evidence should have been dropped")
+	}
+	if !utf8.ValidString(prompt) {
+		t.Fatal("history truncation produced invalid UTF-8")
+	}
+}
+
+func TestRelayCommandSummariesCoalesceLifecycleAndKeepRecentAudit(t *testing.T) {
+	exit := 0
+	tools := []RunnerToolEvent{
+		{ID: "build", Command: "coqc Main.v", Status: "running"},
+		{ID: "build", Command: "coqc Main.v", Status: "completed", ExitCode: &exit, Output: "ok"},
+	}
+	for index := 0; index < 7; index++ {
+		tools = append(tools, RunnerToolEvent{ID: fmt.Sprintf("probe-%d", index), Command: fmt.Sprintf("probe %d", index), Status: "completed", ExitCode: &exit})
+	}
+	tools = append(tools, RunnerToolEvent{ID: "audit", Command: "coqtop -quiet < Assumptions.v", Status: "completed", ExitCode: &exit, Output: "Closed under the global context"})
+	summaries := relayCommandSummaries(tools, 6)
+	joined := strings.Join(summaries, "\n")
+	if strings.Contains(joined, "running") {
+		t.Fatalf("stale lifecycle state leaked into summaries:\n%s", joined)
+	}
+	if strings.Count(joined, "coqc Main.v") > 1 {
+		t.Fatalf("command lifecycle was not coalesced:\n%s", joined)
+	}
+	for _, want := range []string{"coqtop -quiet", "Closed under the global context", "exit=0"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("recent audit evidence missing %q:\n%s", want, joined)
+		}
+	}
+}
+
 func TestPrepareOrchestrationPromptFilesProvidesLocalPathsOnly(t *testing.T) {
 	cfg := config.Default()
 	cfg.Bridge.CWD = t.TempDir()
@@ -2053,7 +2204,7 @@ func TestFormalProofHarnessBootstrapCreatesTextOnlyRunFolder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(state), `assistant: "unknown"`) || !strings.Contains(string(state), "uploaded_files: []") {
+	if !strings.Contains(string(state), `assistant: "lean4"`) || !strings.Contains(string(state), "uploaded_files: []") {
 		t.Fatalf("state yaml missing expected text-only state:\n%s", state)
 	}
 	if !strings.Contains(result.Prompt, "Formal-proof harness workspace") || !strings.Contains(result.Prompt, "proof-harness/证明义务.md") {
@@ -2103,6 +2254,58 @@ func TestFormalProofHarnessBootstrapMaterializesUploadedProjectFiles(t *testing.
 		if !strings.Contains(string(state), want) {
 			t.Fatalf("state yaml missing %q:\n%s", want, state)
 		}
+	}
+}
+
+func TestFormalProofHarnessCoqConversionTargetOverridesIsabelleInputs(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := config.Default()
+	cfg.Bridge.CWD = tmp
+	payload := protocol.OrchestrationStartPayload{
+		RunID:   "orc_isabelle_to_coq",
+		Prompt:  "把上传的 Isabelle 工程转换成新的 Coq 证明项目，并用 coqc 验证。",
+		Profile: "formal-proof",
+		Files: []protocol.AttachmentPayload{
+			{Name: "Model.thy", Size: int64(len("theory Model\n")), Data: base64.StdEncoding.EncodeToString([]byte("theory Model\n"))},
+			{Name: "ROOT", Size: int64(len("session Demo\n")), Data: base64.StdEncoding.EncodeToString([]byte("session Demo\n"))},
+		},
+	}
+	result, err := prepareFormalProofHarness(&cfg, payload, tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Assistant != "coq" {
+		t.Fatalf("assistant = %q, want target Coq despite Isabelle source files", result.Assistant)
+	}
+	state, err := os.ReadFile(filepath.Join(result.HarnessDir, "状态.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(state), `assistant: "coq"`) {
+		t.Fatalf("state did not persist target proof assistant:\n%s", state)
+	}
+}
+
+func TestFormalProofHarnessRejectsEmptyCoqTarget(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := config.Default()
+	cfg.Bridge.CWD = tmp
+	result, err := prepareFormalProofHarness(&cfg, protocol.OrchestrationStartPayload{
+		RunID:   "orc_empty_coq",
+		Prompt:  "创建一个新的 Coq 证明项目。",
+		Profile: "formal-proof",
+	}, tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("bash", filepath.Join(result.HarnessDir, "check.sh"), "--proof")
+	command.Dir = result.RunDir
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("empty Coq target unexpectedly passed proof validation:\n%s", output)
+	}
+	if !strings.Contains(string(output), "Coq target contains no .v source files") {
+		t.Fatalf("unexpected empty Coq validation output:\n%s", output)
 	}
 }
 
@@ -2575,6 +2778,52 @@ func TestExtractHandoffSummaryFindsTrailingSection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := extractHandoffSummary(tc.content); got != tc.want {
 				t.Fatalf("extractHandoffSummary = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunConclusionUsesExplicitFinalHandoffStatus(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		wantOutcome string
+		wantsUnmet  []string
+	}{
+		{
+			name:        "resolved",
+			content:     "最终结论：验证通过。\nHandoff: status=resolved; changed=main.go; verified=go test ./...; next=none; risks=none",
+			wantOutcome: "satisfied",
+		},
+		{
+			name:        "needs next",
+			content:     "最终结论：仍需继续。\nHandoff: status=needs_next; changed=none; verified=coqc Main.v; next=prove termination; risks=unjustified fuel bound",
+			wantOutcome: "blocked",
+			wantsUnmet:  []string{"prove termination", "unjustified fuel bound"},
+		},
+		{
+			name:        "blocked",
+			content:     "最终结论：环境阻塞。\nHandoff: status=blocked; changed=none; verified=none; next=install Isabelle; risks=compiler unavailable",
+			wantOutcome: "blocked",
+			wantsUnmet:  []string{"install Isabelle", "compiler unavailable"},
+		},
+		{
+			name:        "inline text is not parsed",
+			content:     "最终结论：正文提到 Handoff: status=blocked 但没有独立机器交接行。",
+			wantOutcome: "satisfied",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			history := []orchestrationTurn{{Content: test.content}}
+			conclusion := runConclusionForStatus(store.OrchestrationCompleted, test.content, history)
+			if conclusion.Outcome != test.wantOutcome {
+				t.Fatalf("outcome = %q, want %q", conclusion.Outcome, test.wantOutcome)
+			}
+			for _, want := range test.wantsUnmet {
+				if !containsTestString(conclusion.UnmetObligations, want) {
+					t.Fatalf("unmet obligations %#v missing %q", conclusion.UnmetObligations, want)
+				}
 			}
 		})
 	}

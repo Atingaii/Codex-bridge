@@ -146,6 +146,16 @@ the owning Bridge. The standalone `internal/bridge/appserver_runner.go:Prompt`
 path remains the Codex app-server runner for chat and non-orchestration runner
 uses.
 
+The standalone app-server path retries process initialization and thread
+preparation once, before `turn/start`; it never replays a submitted turn because
+tool and file side effects are not idempotent. It recovers terminal-only agent
+text, ignores empty unscoped protocol noise until an attributable terminal
+event arrives, and preserves a bounded diagnostic tail when the child process
+exits. `internal/bridge/session.go:Prompt` and
+`internal/hub/ws_bridge.go:handlePromptComplete` both reject a successful empty
+completion. See
+[docs/features/chat-reliability-and-session-deletion.md](features/chat-reliability-and-session-deletion.md).
+
 Orchestration is a native-session relay only. Each run drives one long-lived
 Codex app-server thread and one long-lived Claude Code stream-json session on the
 selected Bridge, and follow-up turns reuse those native conversations so the user

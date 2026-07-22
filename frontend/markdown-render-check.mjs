@@ -64,6 +64,23 @@ if (html.includes('<script>')) {
   throw new Error('raw script tag was rendered');
 }
 
+const compactFenceHTML = context.renderMarkdown('```textHWQ_U/,\n```');
+assertIncludes(compactFenceHTML, '<pre');
+assertIncludes(compactFenceHTML, 'HWQ_U/,');
+if (compactFenceHTML.includes('textHWQ_U/,')) {
+  throw new Error('compact text fence leaked the info prefix into rendered code');
+}
+
+const normalFenceHTML = context.renderMarkdown('```text\nHWQ_U/,\n```');
+assertIncludes(normalFenceHTML, 'HWQ_U/,');
+
+const openCompactFenceHTML = context.renderMarkdown('```textHWQ_U/,前端在渲染时还是会出现这样的小问题');
+assertIncludes(openCompactFenceHTML, '<pre');
+assertIncludes(openCompactFenceHTML, 'HWQ_U/,前端在渲染时还是会出现这样的小问题');
+if (openCompactFenceHTML.includes('textHWQ_U/,')) {
+  throw new Error('open compact text fence leaked the info prefix into rendered code');
+}
+
 function assertIncludes(value, expected) {
   if (!value.includes(expected)) {
     throw new Error(`expected rendered Markdown to include ${expected}`);

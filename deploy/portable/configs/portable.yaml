@@ -1,0 +1,71 @@
+app:
+  name: codex-bridge
+  env: portable
+  debug: false
+
+gateway:
+  host: 127.0.0.1
+  port: 8088
+  read_timeout: 10s
+  write_timeout: 0s
+
+hub:
+  db_path: data/codex-bridge.db
+  cookie_secure: false
+  heartbeat_interval: 15s
+  bridge_read_timeout: 45s
+  browser_close_session: false
+  browser_close_grace: 1500ms
+  browser_lease_ttl: 5m
+  allowed_origins: []
+  bridge_download_url: ""
+  max_bridge_send_queue: 128
+  max_browser_send_queue: 128
+  max_prompt_bytes: 262144
+  max_attachment_bytes: 8388608
+  max_assistant_message_bytes: 4194304
+
+bridge:
+  hub_url: http://127.0.0.1:8088
+  token: ""
+  token_file: state/bridge.token
+  name: portable-local
+  machine_id_file: state/bridge_machine_id
+  cwd: work
+  runner: echo
+  codex_path: codex
+  claude_path: claude
+  claude_model: ""
+  claude_effort: ""
+  model: ""
+  sandbox: workspace-write
+  approval_policy: never
+  reconnect_min: 5s
+  reconnect_max: 30s
+  heartbeat_interval: 15s
+  max_sessions: 8
+  long_command_observer:
+    enabled: false
+    after: 2m
+    command_patterns:
+      - "python -m slow_build"
+    applies_to:
+      - claude
+      - codex
+  acp:
+    cli: claude
+    claude_command: "npx"
+    claude_args: ["-y", "@zed-industries/claude-code-acp"]
+    codex_command: "codex-acp"
+    codex_args: []
+    prefer_native_resume: true
+
+auth:
+  jwt_secret: portable-placeholder-change-at-startup
+  access_token_ttl: 24h
+  bootstrap_username: admin
+  bootstrap_password: ""
+
+observability:
+  log_level: info
+  log_format: console

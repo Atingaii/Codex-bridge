@@ -77,7 +77,9 @@ Bridge prompt construction keeps mostly generic orchestration context:
 The run may choose `firstCli=claude` or `firstCli=codex`. The selected value is
 shown in the run start event, sent in the existing `orchestration_start`
 payload, and only offsets the first handoff; collaboration and debate still
-alternate CLIs turn by turn.
+alternate CLIs turn by turn. It does not reverse semantic roles: collaboration
+always starts with `implementer`, and debate always starts with `proposer`,
+regardless of which CLI executes that first role.
 
 Bridge no longer injects fixed Isabelle build templates or rejects foreground
 Isabelle build commands after the CLI has run. Formal proof reminders are prompt

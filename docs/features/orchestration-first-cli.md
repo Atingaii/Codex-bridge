@@ -4,8 +4,8 @@
 
 - Let a browser orchestration run choose whether Claude or Codex handles the
   first relay turn.
-- Preserve the existing collaboration/debate turn alternation after the chosen
-  first CLI.
+- Preserve the collaboration/debate role order while assigning the chosen CLI
+  to the first role.
 - Keep the selected first CLI visible and durable on the run record so refreshes
   and follow-up prompts reuse the same routing.
 - Support proof-smoke runs on endpoints where the user explicitly wants Codex to
@@ -33,8 +33,8 @@
 
 1. Add `first_cli` migration, store field, scanner, create, and update wiring.
 2. Add request normalization and protocol payload forwarding.
-3. Change relay turn routing to offset the existing role/CLI schedule by the
-   selected first CLI.
+3. Change relay turn routing so `first_cli` chooses the turn-one executor, while
+   collaboration still begins with `implementer` and debate with `proposer`.
 4. Add focused Hub, Store, and Bridge tests.
 5. Add a compact frontend control and include `firstCli` in create/continue
    requests.
@@ -45,6 +45,8 @@
   payload with `FirstCLI == "codex"`.
 - Bridge turn one emits Codex for `firstCli: "codex"`, then alternates to
   Claude on turn two.
+- Codex-first collaboration starts as `implementer`; Codex-first debate starts
+  as `proposer`. The selected executor never reverses semantic role order.
 - Existing requests without `firstCli` still start with Claude.
 - Full verification passes:
   `/usr/local/go/bin/go test ./...`,

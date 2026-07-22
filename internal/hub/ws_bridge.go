@@ -159,6 +159,9 @@ func (s *Server) scheduleAgentRunFailure(agentID, instance string, delay time.Du
 }
 
 func (s *Server) handleBridgeEnvelope(ctx context.Context, agentID string, env protocol.Envelope) {
+	if bridgeChatFrame(env) && !s.bridgeOwnsSession(ctx, agentID, env.Sid) {
+		return
+	}
 	switch env.Type {
 	case protocol.TypeHeartbeat:
 		payload, err := protocol.Decode[protocol.HeartbeatPayload](env)
@@ -198,6 +201,58 @@ func (s *Server) handleBridgeEnvelope(ctx context.Context, agentID string, env p
 	}
 }
 
+func bridgeChatFrame(env protocol.Envelope) bool {
+	if env.Sid == "" {
+		return false
+	}
+	switch env.Type {
+	case protocol.TypeSessionOpened,
+		protocol.TypeSessionUpdate,
+		protocol.TypePromptComplete,
+		protocol.TypeApprovalRequest,
+		protocol.TypeError:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) bridgeOwnsSession(ctx context.Context, agentID, sid string) bool {
+	s.ownersMu.RLock()
+	owner, cached := s.owners[sid]
+	s.ownersMu.RUnlock()
+	if cached {
+		return owner == agentID
+	}
+	session, err := s.store.SessionByIDAnyUser(ctx, sid)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Error("[hub] validate bridge session failed", "agent_id", agentID, "sid", sid, "error", err)
+		}
+		return false
+	}
+	if session.AgentID != agentID {
+		slog.Warn("[hub] rejected bridge frame for foreign session", "agent_id", agentID, "session_agent_id", session.AgentID, "sid", sid)
+		return false
+	}
+	s.ownersMu.Lock()
+	s.owners[sid] = session.AgentID
+	s.ownersMu.Unlock()
+	return true
+}
+
+func (s *Server) forgetSessionOwner(sid string) {
+	s.ownersMu.Lock()
+	delete(s.owners, sid)
+	s.ownersMu.Unlock()
+}
+
+func (s *Server) blockSessionOwner(sid string) {
+	s.ownersMu.Lock()
+	s.owners[sid] = ""
+	s.ownersMu.Unlock()
+}
+
 func (s *Server) handlePromptComplete(ctx context.Context, env protocol.Envelope) {
 	payload, err := protocol.Decode[protocol.PromptCompletePayload](env)
 	if err != nil {
@@ -212,6 +267,21 @@ func (s *Server) handlePromptComplete(ctx context.Context, env protocol.Envelope
 		content = s.consumeAssistantBuffer(env.Sid)
 	} else {
 		s.clearAssistantBuffer(env.Sid)
+	}
+	if strings.TrimSpace(content) == "" {
+		const message = "runner completed without an assistant response"
+		if payload.RunID != "" {
+			if err := s.store.UpdateRunStatus(ctx, payload.RunID, store.RunFailed, message, ""); err != nil {
+				slog.Error("[hub] update empty run failed", "run_id", payload.RunID, "error", err)
+			}
+		}
+		s.pool.BroadcastToBrowsers(env.Sid, protocol.MustEnvelope(protocol.TypeError, env.Sid, protocol.ErrorPayload{
+			Code:     "EMPTY_RESPONSE",
+			Message:  message,
+			RunID:    payload.RunID,
+			PromptID: payload.PromptID,
+		}))
+		return
 	}
 	if content != "" {
 		usage := ""

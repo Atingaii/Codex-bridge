@@ -64,11 +64,61 @@ Useful targets (`make help` lists them all):
 | `make frontend` | Build the web UI into `internal/web/static` |
 | `make build` | Build the Go binary (assumes the UI is already built) |
 | `make build-all` | `frontend` + `build` |
+| `make portable-package` | Build a copy-to-server tarball under `dist/` |
 | `make install` | Copy the binary to `$(PREFIX)/bin` (default `/usr/local/bin`) |
 | `make test` | Run the Go test suite |
 | `make doc-lint` | Validate docs |
 
-## Option C — Docker
+## Option C — Portable package
+
+Use this when a fresh Linux server should only need an archive upload, extract,
+and one start command. The package includes the static binary, package-local
+config, and scripts that initialize admin credentials, SQLite state, a same-host
+Bridge token, logs, and pid files under the extracted directory.
+
+Build the archive on the source machine:
+
+```bash
+make portable-package
+# -> dist/codex-bridge-<version>-linux-amd64.tar.gz
+```
+
+Copy the archive to the target server and run:
+
+```bash
+tar -xzf codex-bridge-<version>-linux-amd64.tar.gz
+cd codex-bridge-<version>-linux-amd64
+ADMIN_USERNAME=admin ADMIN_PASSWORD='change-me' APP_HOST=0.0.0.0 APP_PORT=8088 ./start.sh
+```
+
+Open `http://<server-ip>:8088` and log in with the admin credentials. If
+`ADMIN_PASSWORD` is omitted on first start, `start.sh` generates one and writes
+it to `state/admin_password`.
+
+The portable package defaults the same-host Bridge to `BRIDGE_RUNNER=echo` so a
+new server can be verified without Codex or Claude installed. For real CLI use,
+install and authenticate the target CLI as the same OS user, then start with
+overrides such as:
+
+```bash
+PUBLIC_URL='https://bridge.example.com' \
+BRIDGE_RUNNER=codex \
+BRIDGE_CWD=/srv/workspace \
+./start.sh
+```
+
+Operational commands:
+
+```bash
+./status.sh
+./stop.sh
+```
+
+Runtime files remain inside the extracted directory: `data/`, `state/`,
+`logs/`, `run/`, and `work/`. Use the systemd + Caddy path below when you need
+host-level service management and TLS automation.
+
+## Option D — Docker
 
 A multi-stage `Dockerfile` builds the UI, compiles the binary, and ships a
 minimal distroless image.
@@ -97,7 +147,7 @@ Notes:
 - The runtime image is non-root (`distroless ... :nonroot`); ensure mounted
   volumes are writable by that user.
 
-## Option D — Production (systemd + Caddy)
+## Option E — Production (systemd + Caddy)
 
 This mirrors the `sparkapi.tech` setup using the assets in `deploy/`.
 

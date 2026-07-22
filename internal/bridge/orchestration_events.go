@@ -19,6 +19,10 @@ func runConclusionForStatus(status, detail string, history []orchestrationTurn) 
 	case store.OrchestrationFailed:
 		outcome = "errored"
 	}
+	handoff := finalMachineHandoff(history)
+	if status == store.OrchestrationCompleted && (handoff.Status == "blocked" || handoff.Status == "needs_next") {
+		outcome = "blocked"
+	}
 	summary := strings.TrimSpace(detail)
 	if summary == "" {
 		summary = relayTerminalContent(history)
@@ -33,13 +37,68 @@ func runConclusionForStatus(status, detail string, history []orchestrationTurn) 
 		EvidenceRefs:         conclusionEvidenceRefs(history),
 	}
 	if outcome != "satisfied" {
-		if detail != "" {
+		if obligations := handoff.unmetObligations(); len(obligations) > 0 {
+			conclusion.UnmetObligations = obligations
+		} else if detail != "" {
 			conclusion.UnmetObligations = []string{detail}
 		} else {
 			conclusion.UnmetObligations = []string{"The orchestration did not complete successfully."}
 		}
 	}
 	return conclusion
+}
+
+type orchestrationMachineHandoff struct {
+	Status string
+	Next   string
+	Risks  string
+}
+
+func finalMachineHandoff(history []orchestrationTurn) orchestrationMachineHandoff {
+	if len(history) == 0 {
+		return orchestrationMachineHandoff{}
+	}
+	content := history[len(history)-1].Content
+	match, ok := lastAnchoredMarkerMatch(content, []string{"Handoff:"})
+	if !ok {
+		return orchestrationMachineHandoff{}
+	}
+	line := content[match.payloadStart:]
+	if newline := strings.IndexByte(line, '\n'); newline >= 0 {
+		line = line[:newline]
+	}
+	fields := parseMachineHandoffFields(line)
+	return orchestrationMachineHandoff{
+		Status: strings.ToLower(fields["status"]),
+		Next:   fields["next"],
+		Risks:  fields["risks"],
+	}
+}
+
+func parseMachineHandoffFields(line string) map[string]string {
+	fields := make(map[string]string)
+	for _, part := range strings.Split(line, ";") {
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "status" || key == "next" || key == "risks" {
+			fields[key] = strings.TrimSpace(value)
+		}
+	}
+	return fields
+}
+
+func (h orchestrationMachineHandoff) unmetObligations() []string {
+	var out []string
+	if value := strings.TrimSpace(h.Next); value != "" && !strings.EqualFold(value, "none") {
+		out = append(out, value)
+	}
+	if value := strings.TrimSpace(h.Risks); value != "" && !strings.EqualFold(value, "none") && value != h.Next {
+		out = append(out, value)
+	}
+	return out
 }
 
 func conclusionCommands(history []orchestrationTurn) []string {

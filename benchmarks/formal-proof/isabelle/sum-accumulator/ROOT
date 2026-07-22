@@ -1,0 +1,6 @@
+session CB_Bench_Sum_Accumulator = HOL +
+  options [timeout = 120]
+  theories
+    Reference
+    Contract
+    Audit

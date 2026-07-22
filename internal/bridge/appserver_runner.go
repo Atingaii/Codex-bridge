@@ -31,39 +31,34 @@ func (r *CodexAppServerRunner) Close() {}
 
 func (r *CodexAppServerRunner) Prompt(ctx context.Context, req RunnerRequest, onUpdate func(update RunnerUpdate)) (RunnerResult, error) {
 	req.Content = sanitizePromptText(req.Content)
-	client, err := r.start(ctx, req)
-	if err != nil {
-		return RunnerResult{}, err
+	var client *appServerClient
+	var threadID string
+	var err error
+	for attempt := 1; attempt <= appServerPrepareAttempts; attempt++ {
+		client, threadID, err = r.prepare(ctx, req)
+		if err == nil {
+			break
+		}
+		if client != nil {
+			client.unsubscribeThreadWithTimeout(threadID)
+			client.closeWithTimeout(appServerPrepareCloseTimeout)
+			err = client.withDiagnostics(err)
+		}
+		if attempt == appServerPrepareAttempts || ctx.Err() != nil {
+			return RunnerResult{}, fmt.Errorf("codex app-server preparation failed after %d attempt(s): %w", attempt, err)
+		}
+		timer := time.NewTimer(appServerPrepareRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return RunnerResult{}, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	threadID := ""
 	defer func() {
 		client.unsubscribeThreadWithTimeout(threadID)
 		client.close()
 	}()
-
-	if _, err := client.request(ctx, "initialize", map[string]any{
-		"clientInfo": map[string]string{"name": "codex-bridge", "title": "Codex Bridge", "version": "dev"},
-		"capabilities": map[string]any{
-			"experimentalApi":    true,
-			"requestAttestation": false,
-		},
-	}); err != nil {
-		return RunnerResult{}, err
-	}
-
-	threadID = req.RemoteThreadID
-	if threadID == "" {
-		res, err := client.request(ctx, "thread/start", r.threadStartParams(req))
-		if err != nil {
-			return RunnerResult{}, err
-		}
-		threadID = nestedString(appServerResultMap(res), "thread", "id")
-	} else if _, err := client.request(ctx, "thread/resume", r.threadResumeParams(threadID, req)); err != nil {
-		return RunnerResult{}, err
-	}
-	if threadID == "" {
-		return RunnerResult{}, errors.New("codex app-server did not return a thread id")
-	}
 
 	done := make(chan appServerTurnResult, 1)
 	scope := newAppServerTurnScope(threadID)
@@ -83,8 +78,44 @@ func (r *CodexAppServerRunner) Prompt(ctx context.Context, req RunnerRequest, on
 	}
 }
 
+func (r *CodexAppServerRunner) prepare(ctx context.Context, req RunnerRequest) (*appServerClient, string, error) {
+	client, err := r.start(ctx, req)
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := client.request(ctx, "initialize", map[string]any{
+		"clientInfo": map[string]string{"name": "codex-bridge", "title": "Codex Bridge", "version": "dev"},
+		"capabilities": map[string]any{
+			"experimentalApi":    true,
+			"requestAttestation": false,
+		},
+	}); err != nil {
+		return client, "", err
+	}
+
+	threadID := req.RemoteThreadID
+	if threadID == "" {
+		res, err := client.request(ctx, "thread/start", r.threadStartParams(req))
+		if err != nil {
+			return client, "", err
+		}
+		threadID = nestedString(appServerResultMap(res), "thread", "id")
+	} else if _, err := client.request(ctx, "thread/resume", r.threadResumeParams(threadID, req)); err != nil {
+		return client, threadID, err
+	}
+	if threadID == "" {
+		return client, "", errors.New("codex app-server did not return a thread id")
+	}
+	return client, threadID, nil
+}
+
 const appServerThreadUnsubscribeTimeout = 2 * time.Second
 const appServerProcessCloseTimeout = 30 * time.Second
+const appServerPrepareAttempts = 2
+const appServerPrepareRetryDelay = 150 * time.Millisecond
+const appServerPrepareCloseTimeout = 2 * time.Second
+const appServerDiagnosticTailBytes = 16 * 1024
+const appServerUnscopedErrorGracePeriod = 2 * time.Second
 
 func (r *CodexAppServerRunner) start(ctx context.Context, req RunnerRequest) (*appServerClient, error) {
 	cmd := exec.CommandContext(ctx, r.codexPath(), "app-server", "--listen", "stdio://")
@@ -108,14 +139,16 @@ func (r *CodexAppServerRunner) start(ctx context.Context, req RunnerRequest) (*a
 		return nil, err
 	}
 	client := &appServerClient{
-		cmd:      cmd,
-		stdin:    stdin,
-		pending:  make(map[int64]chan appServerResponse),
-		events:   make(chan appServerMessage, 128),
-		waitDone: make(chan struct{}),
+		cmd:         cmd,
+		stdin:       stdin,
+		pending:     make(map[int64]chan appServerResponse),
+		events:      make(chan appServerMessage, 128),
+		stop:        make(chan struct{}),
+		waitDone:    make(chan struct{}),
+		diagnostics: &appServerDiagnosticTail{limit: appServerDiagnosticTailBytes},
 	}
 	go client.read(stdout)
-	go io.Copy(io.Discard, stderr)
+	go io.Copy(client.diagnostics, stderr)
 	return client, nil
 }
 
@@ -224,6 +257,8 @@ type appServerTurnScope struct {
 	ready     chan struct{}
 	threadID  string
 	turnID    string
+	observed  string
+	resolved  bool
 }
 
 func newAppServerTurnScope(threadID string) *appServerTurnScope {
@@ -232,15 +267,42 @@ func newAppServerTurnScope(threadID string) *appServerTurnScope {
 
 func (s *appServerTurnScope) setTurnID(turnID string) {
 	turnID = strings.TrimSpace(turnID)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.resolved = true
+	if turnID != "" {
+		s.turnID = turnID
+	} else if s.turnID == "" {
+		s.turnID = s.observed
+	}
+	ready := s.turnID != ""
+	s.mu.Unlock()
+	if ready {
+		s.readyOnce.Do(func() {
+			close(s.ready)
+		})
+	}
+}
+
+func (s *appServerTurnScope) observeTurnID(turnID string) {
+	turnID = strings.TrimSpace(turnID)
 	if s == nil || turnID == "" {
 		return
 	}
 	s.mu.Lock()
-	s.turnID = turnID
+	s.observed = turnID
+	if s.resolved && s.turnID == "" {
+		s.turnID = turnID
+	}
+	ready := s.turnID != ""
 	s.mu.Unlock()
-	s.readyOnce.Do(func() {
-		close(s.ready)
-	})
+	if ready {
+		s.readyOnce.Do(func() {
+			close(s.ready)
+		})
+	}
 }
 
 func (s *appServerTurnScope) current() (threadID, turnID string) {
@@ -258,8 +320,20 @@ func (s *appServerTurnScope) waitForTurnID(ctx context.Context) {
 	}
 	select {
 	case <-s.ready:
+		return
+	default:
+	}
+	select {
 	case <-ctx.Done():
-	case <-time.After(250 * time.Millisecond):
+		return
+	default:
+	}
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-s.ready:
+	case <-ctx.Done():
+	case <-timer.C:
 	}
 }
 
@@ -298,14 +372,17 @@ func messageRequiresTurnID(method string) bool {
 	}
 }
 
-func (s *appServerTurnScope) matchesNonTerminal(msg appServerMessage) bool {
+func (s *appServerTurnScope) matchesNonTerminal(ctx context.Context, msg appServerMessage) bool {
+	if appServerMessageTurnID(msg) != "" {
+		s.waitForTurnID(ctx)
+	}
 	threadID, turnID := s.current()
 	if msgThreadID := appServerMessageThreadID(msg); msgThreadID != "" && threadID != "" && msgThreadID != threadID {
 		return false
 	}
 	msgTurnID := appServerMessageTurnID(msg)
-	if msgTurnID != "" && turnID != "" && msgTurnID != turnID {
-		return false
+	if msgTurnID != "" {
+		return turnID != "" && msgTurnID == turnID
 	}
 	return true
 }
@@ -314,10 +391,28 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 	var result RunnerResult
 	var text strings.Builder
 	var pendingFailedTool *RunnerToolEvent
+	var unscopedEmptyError error
+	var unscopedErrorTimer *time.Timer
+	var unscopedErrorTimeout <-chan time.Time
+	defer func() {
+		if unscopedErrorTimer != nil {
+			unscopedErrorTimer.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
 			done <- appServerTurnResult{result: result, err: ctx.Err()}
+			return
+		case <-unscopedErrorTimeout:
+			if text.Len() > 0 {
+				result.Content = text.String()
+			}
+			if strings.TrimSpace(result.Content) != "" && isAppServerEmptyErrorAfterVisibleOutput(unscopedEmptyError) {
+				done <- appServerTurnResult{result: result}
+			} else {
+				done <- appServerTurnResult{result: result, err: unscopedEmptyError}
+			}
 			return
 		case msg, ok := <-client.events:
 			if !ok {
@@ -332,22 +427,23 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 					done <- appServerTurnResult{result: result}
 					return
 				}
-				done <- appServerTurnResult{result: result, err: errors.New("codex app-server exited")}
+				done <- appServerTurnResult{result: result, err: client.exitError()}
 				return
 			}
 			if msg.Method == "" {
 				continue
 			}
 			if strings.HasSuffix(msg.Method, "/requestApproval") || msg.Method == "execCommandApproval" || msg.Method == "applyPatchApproval" {
-				if scope.matchesNonTerminal(msg) {
+				if scope.matchesNonTerminal(ctx, msg) {
 					threadID, _ := scope.current()
 					r.handleApproval(ctx, client, msg, req, threadID)
 				}
 				continue
 			}
 			if msg.Method == "turn/started" {
-				if turnID := appServerMessageTurnID(msg); turnID != "" {
-					scope.setTurnID(turnID)
+				threadID, _ := scope.current()
+				if msgThreadID := appServerMessageThreadID(msg); msgThreadID == "" || threadID == "" || msgThreadID == threadID {
+					scope.observeTurnID(appServerMessageTurnID(msg))
 				}
 				continue
 			}
@@ -399,11 +495,21 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 					done <- appServerTurnResult{result: result, err: err}
 					return
 				}
+				if content := appServerTurnContent(msg); content != "" {
+					if delta := appendAgentMessageContent(&text, content); delta != "" {
+						pendingFailedTool = nil
+						onUpdate(RunnerUpdate{Content: delta})
+					}
+				}
 				if text.Len() > 0 {
 					result.Content = text.String()
 				}
 				if pendingFailedTool != nil {
 					done <- appServerTurnResult{result: result, err: failedToolWithoutFollowupError("codex app-server", *pendingFailedTool)}
+					return
+				}
+				if strings.TrimSpace(result.Content) == "" {
+					done <- appServerTurnResult{result: result, err: errors.New("codex app-server completed the turn without an assistant response")}
 					return
 				}
 				done <- appServerTurnResult{result: result}
@@ -413,6 +519,14 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 					result.Content = text.String()
 				}
 				err := appServerEventError(msg, result.Content)
+				if isAppServerUnscopedEmptyError(msg, err) {
+					unscopedEmptyError = err
+					if unscopedErrorTimer == nil {
+						unscopedErrorTimer = time.NewTimer(appServerUnscopedErrorGracePeriod)
+						unscopedErrorTimeout = unscopedErrorTimer.C
+					}
+					continue
+				}
 				if isAppServerEmptyErrorAfterVisibleOutput(err) {
 					done <- appServerTurnResult{result: result}
 					return
@@ -454,7 +568,7 @@ func appServerTurnStatus(msg appServerMessage) string {
 }
 
 func appServerTurnError(msg appServerMessage) error {
-	if message := eventErrorMessage(map[string]any{"params": msg.Params}); message != "" {
+	if message := eventErrorMessage(msg.Params); message != "" {
 		return errors.New(message)
 	}
 	if message := firstString(msg.Params, "message", "error"); message != "" {
@@ -474,6 +588,25 @@ func appServerTurnError(msg appServerMessage) error {
 		return errors.New(strings.TrimSpace(msg.Error.Message))
 	}
 	return errors.New("codex app-server turn failed")
+}
+
+func appServerTurnContent(msg appServerMessage) string {
+	turn, _ := appServerNestedMap(msg.Params, "turn")
+	if turn == nil {
+		return ""
+	}
+	items, _ := turn["items"].([]any)
+	var content strings.Builder
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		if firstString(item, "type") != "agentMessage" {
+			continue
+		}
+		if text := agentMessageText(item); text != "" {
+			appendAgentMessageContent(&content, text)
+		}
+	}
+	return content.String()
 }
 
 func appServerTurnIDFromResponse(raw json.RawMessage) string {
@@ -528,7 +661,7 @@ func (e *appServerEmptyErrorAfterVisibleOutput) Error() string {
 }
 
 func appServerEventError(msg appServerMessage, visibleOutput string) error {
-	message := strings.TrimSpace(nestedString(map[string]any{"params": msg.Params}, "params", "message"))
+	message := strings.TrimSpace(eventErrorMessage(msg.Params))
 	if message == "" && msg.Error != nil {
 		message = strings.TrimSpace(msg.Error.Message)
 	}
@@ -539,6 +672,13 @@ func appServerEventError(msg appServerMessage, visibleOutput string) error {
 		return &appServerEmptyErrorAfterVisibleOutput{visibleOutput: output}
 	}
 	return errors.New("codex app-server returned an empty error")
+}
+
+func isAppServerUnscopedEmptyError(msg appServerMessage, err error) bool {
+	if err == nil || appServerMessageThreadID(msg) != "" || appServerMessageTurnID(msg) != "" {
+		return false
+	}
+	return err.Error() == "codex app-server returned an empty error" || isAppServerEmptyErrorAfterVisibleOutput(err)
 }
 
 func isAppServerEmptyErrorAfterVisibleOutput(err error) bool {
@@ -650,15 +790,59 @@ func approvalResponseFor(method, decision string) any {
 }
 
 type appServerClient struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	mu       sync.Mutex
-	nextID   int64
-	pending  map[int64]chan appServerResponse
-	events   chan appServerMessage
-	closed   bool
-	wait     sync.Once
-	waitDone chan struct{}
+	cmd         *exec.Cmd
+	stdin       io.WriteCloser
+	mu          sync.Mutex
+	writeMu     sync.Mutex
+	nextID      int64
+	pending     map[int64]chan appServerResponse
+	events      chan appServerMessage
+	stop        chan struct{}
+	stopOnce    sync.Once
+	closed      bool
+	wait        sync.Once
+	waitDone    chan struct{}
+	diagnostics *appServerDiagnosticTail
+}
+
+type appServerDiagnosticTail struct {
+	mu    sync.Mutex
+	limit int
+	data  []byte
+}
+
+func (t *appServerDiagnosticTail) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	written := len(p)
+	if t.limit <= 0 {
+		t.data = nil
+		return written, nil
+	}
+	if cap(t.data) < t.limit {
+		t.data = make([]byte, 0, t.limit)
+	}
+	if len(p) >= t.limit {
+		t.data = t.data[:t.limit]
+		copy(t.data, p[len(p)-t.limit:])
+		return written, nil
+	}
+	overflow := len(t.data) + len(p) - t.limit
+	if overflow > 0 {
+		copy(t.data, t.data[overflow:])
+		t.data = t.data[:len(t.data)-overflow]
+	}
+	t.data = append(t.data, p...)
+	return written, nil
+}
+
+func (t *appServerDiagnosticTail) String() string {
+	if t == nil {
+		return ""
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.TrimSpace(string(t.data))
 }
 
 type appServerMessage struct {
@@ -690,20 +874,27 @@ func (c *appServerClient) request(ctx context.Context, method string, params any
 	id := c.nextID
 	ch := make(chan appServerResponse, 1)
 	c.pending[id] = ch
+	stdin := c.stdin
+	c.mu.Unlock()
 	req := map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}
 	b, err := json.Marshal(req)
 	if err == nil {
-		_, err = c.stdin.Write(append(b, '\n'))
+		c.writeMu.Lock()
+		_, err = stdin.Write(append(b, '\n'))
+		c.writeMu.Unlock()
 	}
 	if err != nil {
+		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return nil, err
 	}
-	c.mu.Unlock()
 
 	select {
 	case res := <-ch:
+		if res.err != nil && strings.TrimSpace(res.err.Error()) == "" {
+			return res.result, fmt.Errorf("codex app-server %s failed without an error message", method)
+		}
 		return res.result, res.err
 	case <-ctx.Done():
 		c.mu.Lock()
@@ -720,11 +911,15 @@ func (c *appServerClient) respond(id any, result any) error {
 		return err
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return errors.New("codex app-server exited")
 	}
-	_, err = c.stdin.Write(append(b, '\n'))
+	stdin := c.stdin
+	c.mu.Unlock()
+	c.writeMu.Lock()
+	_, err = stdin.Write(append(b, '\n'))
+	c.writeMu.Unlock()
 	return err
 }
 
@@ -760,8 +955,9 @@ func (c *appServerClient) read(stdout io.Reader) {
 		c.pending = make(map[int64]chan appServerResponse)
 		c.closed = true
 		c.mu.Unlock()
+		c.signalStop()
 		for _, ch := range pending {
-			ch <- appServerResponse{err: errors.New("codex app-server exited")}
+			ch <- appServerResponse{err: c.exitError()}
 		}
 		close(c.events)
 	}()
@@ -770,6 +966,9 @@ func (c *appServerClient) read(stdout io.Reader) {
 	for scanner.Scan() {
 		var msg appServerMessage
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+			_, _ = c.diagnostics.Write([]byte("invalid stdout frame: "))
+			_, _ = c.diagnostics.Write(scanner.Bytes())
+			_, _ = c.diagnostics.Write([]byte{'\n'})
 			continue
 		}
 		if msg.ID != nil && msg.Method == "" {
@@ -781,15 +980,43 @@ func (c *appServerClient) read(stdout io.Reader) {
 				if ch != nil {
 					var err error
 					if msg.Error != nil {
-						err = errors.New(msg.Error.Message)
+						message := strings.TrimSpace(msg.Error.Message)
+						if message == "" {
+							message = fmt.Sprintf("codex app-server RPC error %d returned no message", msg.Error.Code)
+						}
+						err = errors.New(message)
 					}
 					ch <- appServerResponse{result: msg.Result, err: err}
 					continue
 				}
 			}
 		}
-		c.events <- msg
+		select {
+		case c.events <- msg:
+		case <-c.stopped():
+			return
+		}
 	}
+	if err := scanner.Err(); err != nil {
+		_, _ = c.diagnostics.Write([]byte("stdout read error: " + err.Error()))
+	}
+}
+
+func (c *appServerClient) exitError() error {
+	if detail := c.diagnostics.String(); detail != "" {
+		return fmt.Errorf("codex app-server exited: %s", trimForPrompt(detail, 2000))
+	}
+	return errors.New("codex app-server exited")
+}
+
+func (c *appServerClient) withDiagnostics(err error) error {
+	if err == nil {
+		return nil
+	}
+	if detail := c.diagnostics.String(); detail != "" && !strings.Contains(err.Error(), detail) {
+		return fmt.Errorf("%w; app-server diagnostics: %s", err, trimForPrompt(detail, 2000))
+	}
+	return err
 }
 
 func (c *appServerClient) close() {
@@ -801,9 +1028,13 @@ func (c *appServerClient) closeWithTimeout(timeout time.Duration) {
 	terminate := !c.closed
 	if terminate {
 		c.closed = true
-		_ = c.stdin.Close()
 	}
+	stdin := c.stdin
 	c.mu.Unlock()
+	c.signalStop()
+	if terminate && stdin != nil {
+		_ = stdin.Close()
+	}
 	if c.cmd == nil {
 		return
 	}
@@ -823,6 +1054,19 @@ func (c *appServerClient) closeWithTimeout(timeout time.Duration) {
 		}
 		<-done
 	}
+}
+
+func (c *appServerClient) stopped() <-chan struct{} {
+	return c.stop
+}
+
+func (c *appServerClient) signalStop() {
+	if c.stop == nil {
+		return
+	}
+	c.stopOnce.Do(func() {
+		close(c.stop)
+	})
 }
 
 func (c *appServerClient) waitProcess() <-chan struct{} {

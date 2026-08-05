@@ -1,0 +1,87 @@
+# Formal-Proof Lightweight Workspace
+
+## Goals
+
+- Keep a stable run-scoped `project/` directory for uploaded proof sources.
+- Replace the multi-file Proof Harness and generated checker with one concise,
+  persistent `proof-notes.md` evidence ledger.
+- Preserve formal-proof collaboration/debate prompts, proof-assistant command
+  evidence, native CLI continuity, and follow-up `runID` behavior.
+- Reduce setup work, filesystem churn, prompt instructions, and agent time spent
+  maintaining orchestration metadata instead of solving the proof task.
+
+## Non-Goals
+
+- No frontend, HTTP, WebSocket, SQLite, or protocol shape changes.
+- No change to collaboration/debate role scheduling or turn budgets.
+- No Bridge-owned semantic proof verdict and no generated proof checker.
+- No migration or deletion of files in existing proof-run directories.
+
+## Design
+
+For a new `profile=formal-proof` run,
+`internal/bridge/orchestration_harness.go:prepareFormalProofHarness` creates:
+
+```text
+<base>/.codex-bridge/proof-runs/<runID>/
+  project/
+  proof-notes.md
+```
+
+Uploaded regular files and safely extracted archives remain under `project/`.
+`proof-notes.md` records the original task, detected proof assistant, uploaded
+inputs, target/obligations, command evidence, blockers, and decisions. Workers
+update this document only when it helps preserve material state for a later
+turn; Bridge does not structurally validate it after every turn.
+
+A follow-up reuses the persisted `RunCWD` and appends the latest user request to
+the same document. Existing runs with the historical `proof-harness/` layout
+remain usable: Bridge creates `proof-notes.md` alongside those files when it is
+missing and does not remove or rewrite user work.
+
+The generated prompt identifies `project/`, `proof-notes.md`, and the detected
+assistant. It asks workers to run the project-appropriate proof assistant
+commands directly and record only important evidence. It does not require
+`AGENTS.md`, `CLAUDE.md`, YAML state, decision directories, structural sync, or
+`check.sh`.
+
+## Data And Protocol Impact
+
+- No stored fields or wire payloads change.
+- `RunStartData.CWD` continues to be the proof-run directory.
+- Existing bootstrap notes remain browser-visible but describe the lightweight
+  workspace rather than a Harness.
+- The `formal-proof-harness-sync` Bridge note is no longer emitted.
+
+## Implementation Steps
+
+1. Retain run directory resolution, upload decoding, archive extraction, and
+   proof-assistant detection.
+2. Generate and append one `proof-notes.md` file.
+3. Remove generated scripts, metadata files, and per-turn structural sync.
+4. Update focused tests and architecture/code-map documentation.
+
+## Exit Gates
+
+- New formal-proof runs create only `project/` and `proof-notes.md` as Bridge
+  bootstrap artifacts.
+- No generated `check.sh`, YAML state, agent entry files, or governance
+  subdirectories are created.
+- Upload extraction and traversal rejection remain covered by tests.
+- Follow-ups reuse the same run directory and append to `proof-notes.md`.
+- Formal-proof collaboration/debate contract tests continue to pass.
+- `/usr/local/go/bin/go test ./...` and `make doc-lint` pass.
+
+## Reviewer Q&A
+
+### Why keep a document at all?
+
+Native context compaction and cross-CLI handoffs can discard detail. One ledger
+retains the exact target, failed attempts, commands, and blockers without
+turning orchestration metadata maintenance into a second task.
+
+### Who verifies the proof now?
+
+As before, Codex or Claude runs the actual project-specific Coq/Rocq, Isabelle,
+or Lean commands. Their visible command output is the evidence; Bridge does not
+replace the proof assistant with a shell wrapper.

@@ -1,3 +1,8 @@
+> **DEPRECATED - replaced by the lightweight single-document workspace**
+>
+> Current design: [formal-proof-lightweight-workspace.md](formal-proof-lightweight-workspace.md).
+> Historical only; do not implement from this doc.
+
 # Formal Proof Harness Bootstrap
 
 ## Goal

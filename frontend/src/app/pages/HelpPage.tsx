@@ -262,7 +262,7 @@ export function HelpPage({ language, setLanguage, isDarkMode, setIsDarkMode }: H
           </GuideSection>
 
           <GuideSection id="formal-proof" eyebrow="07 · 专项配置" title="形式化验证：让证明义务和证据成为主线" icon={FileCheck2}>
-            <p>选择“形式化证明”配置后，Bridge 会围绕任务说明、证明义务、变更影响和审计状态组织 run。它适合 Coq/Rocq、Isabelle 等需要真实编译器验证的任务，不把语言模型的文字判断当作证明完成。</p>
+            <p>选择“形式化证明”配置后，Bridge 会保留实际项目和一份轻量证明记录，集中记录目标、未解决义务、关键命令证据与阻塞点。它适合 Coq/Rocq、Isabelle 等需要真实编译器验证的任务，不把语言模型的文字判断当作证明完成。</p>
             <Figure number={11} src="/help/formal-proof-setup.webp" alt="形式化证明编排配置，显示 proof profile、工作目录、文件和轮次" caption="证明配置：选择 formal-proof、准确工作目录和最少附件，再给出具体构建命令。" />
             <StepList items={[
               ['限定系统与目标', '写明 Coq/Rocq 或 Isabelle、目标 theorem/session，以及不可使用的 shortcut。'],

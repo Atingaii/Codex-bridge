@@ -162,9 +162,8 @@ time, not enqueue time, so the just-finished run output is included in the next
 prompt's compacted context.
 
 For `profile=formal-proof`, this is a product invariant: queued follow-ups keep
-the same `runID`, `RunCWD`, and `proof-harness/` directory. Bridge then records
-the follow-up under `proof-harness/followups/` through the existing
-formal-proof harness resume path.
+the same `runID`, `RunCWD`, and proof-run directory. Bridge then appends the
+follow-up to `proof-notes.md` through the existing formal-proof resume path.
 
 When Hub persists an orchestration terminal event in
 `internal/hub/orchestration.go:handleOrchestrationEvent`, it calls the queue
@@ -303,7 +302,7 @@ sanitized transcript flow.
   item instead of returning `RUN_ACTIVE`.
 - After orchestration run A completes successfully, Hub automatically dispatches
   B through the same run id and the same selected Bridge agent.
-- Formal-proof queued follow-ups reuse the existing proof-run cwd and harness.
+- Formal-proof queued follow-ups reuse the existing proof-run cwd and notes.
 - Canceling a pending queue item removes only that pending item and does not
   interrupt the active task.
 - Canceling or failing the active task pauses the lane and leaves later items
@@ -353,4 +352,4 @@ actually dispatched.
 A: It should reinforce it. Queued orchestration prompts must use
 `POST /api/orchestrations/{runID}/prompts` semantics at dispatch time, not
 `POST /api/orchestrations`, so the same run id, native resume metadata, locked
-cwd, and formal-proof harness are reused.
+cwd, and formal-proof workspace are reused.

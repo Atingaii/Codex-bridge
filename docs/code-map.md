@@ -278,8 +278,9 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    fingerprint decisions, and benchmark-specific detectors live under
    `internal/bridge/profiles/formalproof/`.
    `internal/bridge/orchestration_harness.go` creates the persistent
-   formal-proof run folder and Chinese proof harness before the first scheduled
-   CLI turn, then points the prompt and cwd at that folder.
+   formal-proof run folder, materializes `project/`, and maintains one
+   `proof-notes.md` evidence ledger before pointing the prompt and cwd at that
+   folder.
 8. `internal/bridge/orchestration_relay.go:formatRelayPriorTurn` controls how much
    prior visible output and command context is sent to the next CLI.
 9. `internal/bridge/orchestration_relay.go:runRelayCLI`,

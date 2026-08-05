@@ -26,11 +26,11 @@ dataset or calls a model/API.
 
 ## Current State
 
-Formal-proof runs already create a persistent proof harness through
+Formal-proof runs already create a persistent lightweight workspace through
 `internal/bridge/orchestration_harness.go:prepareFormalProofHarness` and inject
 proof-assistant-specific review guidance through
 `internal/bridge/profiles/formalproof/formalproof.go:RelayGuidance`. Focused Go
-tests verify prompt and harness behavior, but they do not compile a varied set
+tests verify prompt and workspace behavior, but they do not compile a varied set
 of proof projects with real Coq and Isabelle binaries.
 
 ## Design
@@ -79,11 +79,10 @@ result file automatically.
 ## Data And Protocol Impact
 
 - No HTTP, WebSocket, SQLite, config, or runner-interface changes.
-- The generated proof-harness checker chooses the detected target assistant,
-  limits builds with `PROOF_CHECK_TIMEOUT`, scans only that target assistant's
-  source subtree, and fails on trust shortcuts or missing toolchains. This lets
-  Isabelle-to-Coq conversion runs retain uploaded source material without
-  building or scanning it as the completed Coq target.
+- Runtime formal-proof workspaces do not generate a checker. Offline regression
+  remains the responsibility of `scripts/run-formal-proof-benchmarks.sh`, while
+  each CLI turn runs the project-appropriate assistant commands directly and
+  records material evidence in `proof-notes.md`.
 - New repository-only benchmark fixtures live in `benchmarks/formal-proof/`.
 - New developer command: `make benchmark-formal-proof`.
 - Execution creates only temporary build directories and proof-assistant output;

@@ -615,6 +615,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			CLI:      "bridge",
 			Content:  bootstrapNote,
 			BridgeNoteData: &protocol.BridgeNoteData{
+				// Keep the historical category stable for stored timelines and UI filters.
 				Category: "formal-proof-harness-bootstrap",
 			},
 			Data: map[string]any{
@@ -625,7 +626,6 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	}
 
 	var history []orchestrationTurn
-	formalHarnessSyncNote := ""
 	for turn := 1; turn <= maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -642,8 +642,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			turnID = fmt.Sprintf("%s-p%03d-%02d", payload.RunID, payload.PromptSeq, turn)
 		}
 		clearRelayResumeMode(cli, workerSlot, &sessionState)
-		contextForTurn := appendFormalProofHarnessSyncContext(payload.Context, formalHarnessSyncNote)
-		prompt := composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, payload.Prompt, contextForTurn, payload.Resume, role, cli, workerSlot, turn, maxTurns, history)
+		prompt := composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, payload.Prompt, payload.Context, payload.Resume, role, cli, workerSlot, turn, maxTurns, history)
 		resumeMode := plannedRelayResumeMode(cli, workerSlot, sessionState)
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:    "turn.start",
@@ -727,9 +726,6 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		})
 		if turn < maxTurns && turnStatus == "success" {
 			m.runPostTurnNativeMaintenance(ctx, payload.RunID, turnID, role, cli, workerSlot, &sessionState)
-		}
-		if profile == bridgeprofiles.Formal() {
-			formalHarnessSyncNote = m.emitFormalProofHarnessSync(payload.RunID, turnID, runCWD)
 		}
 	}
 	finalContent := relayTerminalContent(history)

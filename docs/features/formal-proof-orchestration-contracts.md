@@ -11,7 +11,8 @@
   refute it through counterexamples, statement comparison, dependency review,
   and executable checks.
 - Preserve native CLI continuity, turn count, worker-pair selection, browser
-  approvals, uploads, Proof Harness files, and follow-up `runID` behavior.
+  approvals, uploads, the lightweight proof notes, and follow-up `runID`
+  behavior.
 
 ## Non-Goals
 

@@ -16,6 +16,16 @@ import (
 	"github.com/tencent/codex-bridge/internal/store"
 )
 
+type stubTurnstileVerifier struct {
+	err      error
+	requests []turnstileVerifyRequest
+}
+
+func (v *stubTurnstileVerifier) Verify(_ context.Context, req turnstileVerifyRequest) error {
+	v.requests = append(v.requests, req)
+	return v.err
+}
+
 func TestRegisterDisabledAndExistingUserLoginNormalizesUsername(t *testing.T) {
 	t.Parallel()
 
@@ -41,6 +51,248 @@ func TestAuthRateLimit(t *testing.T) {
 		login(t, s, map[string]string{"username": "admin", "password": "wrong"}, http.StatusUnauthorized)
 	}
 	login(t, s, map[string]string{"username": "admin", "password": "wrong"}, http.StatusTooManyRequests)
+}
+
+func TestRegistrationRequiresTurnstileAndCreatesSignedInUser(t *testing.T) {
+	t.Parallel()
+
+	s, st := newAuthTestServer(t)
+	s.cfg.Auth.Registration.Enabled = true
+	s.cfg.Auth.Registration.TurnstileSiteKey = "site-public"
+	s.cfg.Auth.Registration.TurnstileSecret = "server-secret"
+	s.cfg.Auth.Registration.TurnstileHostname = "bridge.example"
+	verifier := &stubTurnstileVerifier{}
+	s.turnstile = verifier
+
+	configReq := httptest.NewRequest(http.MethodGet, "/api/auth/config", nil)
+	configRR := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(configRR, configReq)
+	if configRR.Code != http.StatusOK {
+		t.Fatalf("auth config status = %d: %s", configRR.Code, configRR.Body.String())
+	}
+	if strings.Contains(configRR.Body.String(), "server-secret") || !strings.Contains(configRR.Body.String(), "site-public") {
+		t.Fatalf("public auth config leaked secret or omitted sitekey: %s", configRR.Body.String())
+	}
+
+	register(t, s, map[string]string{"username": "member", "password": "long-password"}, http.StatusBadRequest)
+	bodyBytes, err := json.Marshal(map[string]string{
+		"username":       "member",
+		"password":       "long-password",
+		"turnstileToken": "browser-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("CF-Connecting-IP", "198.51.100.9")
+	rr := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("register status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if len(verifier.requests) != 1 {
+		t.Fatalf("verification requests = %#v", verifier.requests)
+	}
+	got := verifier.requests[0]
+	if got.Secret != "server-secret" || got.Token != "browser-token" || got.RemoteIP != "198.51.100.9" || got.ExpectedHostname != "bridge.example" || got.ExpectedAction != "register" {
+		t.Fatalf("verification request = %#v", got)
+	}
+	if _, err := st.AuthenticateUser(context.Background(), "member", "long-password"); err != nil {
+		t.Fatalf("registered user cannot authenticate: %v", err)
+	}
+	if len(rr.Result().Cookies()) == 0 {
+		t.Fatal("registration did not sign the user in")
+	}
+}
+
+func TestRegistrationFailsClosedAndRejectsPrivilegeAlias(t *testing.T) {
+	t.Parallel()
+
+	s, st := newAuthTestServer(t)
+	s.cfg.Auth.Registration.Enabled = true
+	s.cfg.Auth.Registration.TurnstileSiteKey = "site-public"
+	s.cfg.Auth.Registration.TurnstileSecret = "server-secret"
+	verifier := &stubTurnstileVerifier{err: errors.New("siteverify unavailable")}
+	s.turnstile = verifier
+
+	register(t, s, map[string]string{"username": "member", "password": "long-password", "turnstileToken": "bad"}, http.StatusBadRequest)
+	if _, err := st.UserByUsername(context.Background(), "member"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("failed verification created user: %v", err)
+	}
+	register(t, s, map[string]string{"username": "Admin", "password": "long-password", "turnstileToken": "token"}, http.StatusBadRequest)
+	if len(verifier.requests) != 1 {
+		t.Fatalf("invalid username should be rejected before verification: %#v", verifier.requests)
+	}
+}
+
+func TestCloudflareTurnstileVerifier(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		status    int
+		response  string
+		wantError string
+	}{
+		{name: "success", status: http.StatusOK, response: `{"success":true,"hostname":"bridge.example","action":"register"}`},
+		{name: "rejected", status: http.StatusOK, response: `{"success":false,"error-codes":["invalid-input-response"]}`, wantError: "rejected"},
+		{name: "action mismatch", status: http.StatusOK, response: `{"success":true,"hostname":"bridge.example","action":"login"}`, wantError: "action mismatch"},
+		{name: "hostname mismatch", status: http.StatusOK, response: `{"success":true,"hostname":"other.example","action":"register"}`, wantError: "hostname mismatch"},
+		{name: "upstream status", status: http.StatusBadGateway, response: `{}`, wantError: "status 502"},
+		{name: "malformed response", status: http.StatusOK, response: `{`, wantError: "unexpected EOF"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var gotSecret, gotResponse, gotIP string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := r.ParseForm(); err != nil {
+					t.Errorf("parse form: %v", err)
+				}
+				gotSecret = r.Form.Get("secret")
+				gotResponse = r.Form.Get("response")
+				gotIP = r.Form.Get("remoteip")
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.response))
+			}))
+			defer upstream.Close()
+
+			verifier := cloudflareTurnstileVerifier{client: upstream.Client(), url: upstream.URL}
+			err := verifier.Verify(context.Background(), turnstileVerifyRequest{
+				Secret:           "server-secret",
+				Token:            "browser-token",
+				RemoteIP:         "198.51.100.10",
+				ExpectedHostname: "bridge.example",
+				ExpectedAction:   "register",
+			})
+			if test.wantError == "" && err != nil {
+				t.Fatalf("Verify() error = %v", err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("Verify() error = %v, want substring %q", err, test.wantError)
+			}
+			if gotSecret != "server-secret" || gotResponse != "browser-token" || gotIP != "198.51.100.10" {
+				t.Fatalf("siteverify form = secret %q response %q remoteip %q", gotSecret, gotResponse, gotIP)
+			}
+		})
+	}
+}
+
+func TestRegistrationRateLimitIsIndependent(t *testing.T) {
+	t.Parallel()
+
+	s, _ := newAuthTestServer(t)
+	s.cfg.Auth.Registration.Enabled = true
+	s.cfg.Auth.Registration.TurnstileSiteKey = "site-public"
+	s.cfg.Auth.Registration.TurnstileSecret = "server-secret"
+	s.turnstile = &stubTurnstileVerifier{err: errors.New("rejected")}
+	payload := map[string]string{"username": "limited-user", "password": "long-password", "turnstileToken": "bad"}
+	for range registerRateLimitMax {
+		register(t, s, payload, http.StatusBadRequest)
+	}
+	register(t, s, payload, http.StatusTooManyRequests)
+
+	if _, err := s.store.UpsertUser(context.Background(), "limited-user", "long-password"); err != nil {
+		t.Fatal(err)
+	}
+	login(t, s, map[string]string{"username": "limited-user", "password": "long-password"}, http.StatusOK)
+}
+
+func TestAuthenticatedChatRoutesAreUserIsolated(t *testing.T) {
+	t.Parallel()
+
+	s, st := newAuthTestServer(t)
+	ctx := context.Background()
+	userA, err := st.CreateUser(ctx, "user-a", "long-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	userB, err := st.CreateUser(ctx, "user-b", "long-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentA, err := st.UpsertAgentForUser(ctx, userA.ID, "a-cli", "machine-a", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentB, err := st.UpsertAgentForUser(ctx, userB.ID, "b-cli", "machine-b", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionB, err := st.CreateSession(ctx, userB.ID, agentB.ID, "private-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookieA := loginCookie(t, s, map[string]string{"username": "user-a", "password": "long-password"})
+	created := authJSONRequestWithCookie(t, s, http.MethodPost, "/api/sessions", cookieA, map[string]string{"agentId": agentA.ID, "title": "private-a"}, http.StatusCreated)
+	if created["session"] == nil {
+		t.Fatalf("normal user could not create owned chat session: %#v", created)
+	}
+	authRequestWithCookie(t, s, http.MethodGet, "/api/sessions/"+sessionB.ID+"/messages", cookieA, http.StatusNotFound)
+	authJSONRequestWithCookie(t, s, http.MethodPost, "/api/sessions", cookieA, map[string]string{"agentId": agentB.ID, "title": "stolen"}, http.StatusBadRequest)
+	wsReq := httptest.NewRequest(http.MethodGet, "/ws/chat?sid="+sessionB.ID, nil)
+	wsReq.AddCookie(cookieA)
+	wsRR := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(wsRR, wsReq)
+	if wsRR.Code != http.StatusNotFound {
+		t.Fatalf("cross-user websocket preflight status = %d, body = %s", wsRR.Code, wsRR.Body.String())
+	}
+}
+
+func TestOrchestrationAndShareRoutesAreUserIsolated(t *testing.T) {
+	t.Parallel()
+
+	s, st := newAuthTestServer(t)
+	ctx := context.Background()
+	owner, err := st.CreateUser(ctx, "run-owner", "long-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intruder, err := st.CreateUser(ctx, "run-intruder", "long-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgentForUser(ctx, owner.ID, "owner-cli", "machine-owner", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := st.CreateOrchestrationRun(ctx, store.CreateOrchestrationRunParams{
+		UserID: owner.ID, AgentID: agent.ID, Title: "private proof", Mode: "debate", Prompt: "prove it", MaxTurns: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	share, err := st.CreateOrUpdateConversationShare(ctx, owner.ID, store.ShareKindOrchestration, run.ID, run.Title)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, s, map[string]string{"username": intruder.Username, "password": "long-password"})
+
+	list := authRequestWithCookie(t, s, http.MethodGet, "/api/orchestrations", cookie, http.StatusOK)
+	encoded, _ := json.Marshal(list)
+	if strings.Contains(string(encoded), run.ID) {
+		t.Fatalf("cross-user orchestration leaked in list: %s", encoded)
+	}
+	for _, request := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/orchestrations/" + run.ID},
+		{http.MethodGet, "/api/orchestrations/" + run.ID + "/events"},
+		{http.MethodPost, "/api/orchestrations/" + run.ID + "/prompts"},
+		{http.MethodPost, "/api/orchestrations/" + run.ID + "/cancel"},
+		{http.MethodPost, "/api/orchestrations/" + run.ID + "/share"},
+		{http.MethodDelete, "/api/shares/" + share.ID},
+	} {
+		authRequestWithCookie(t, s, request.method, request.path, cookie, http.StatusNotFound)
+	}
+	wsReq := httptest.NewRequest(http.MethodGet, "/ws/orchestrations?runId="+run.ID, nil)
+	wsReq.AddCookie(cookie)
+	wsRR := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(wsRR, wsReq)
+	if wsRR.Code != http.StatusNotFound {
+		t.Fatalf("cross-user orchestration websocket status = %d, body = %s", wsRR.Code, wsRR.Body.String())
+	}
 }
 
 func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
@@ -217,6 +469,27 @@ func authRequestWithCookie(t *testing.T, s *Server, method, path string, cookie 
 	}
 	if strings.TrimSpace(rr.Body.String()) == "" {
 		return nil
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode body: %v: %s", err, rr.Body.String())
+	}
+	return decoded
+}
+
+func authJSONRequestWithCookie(t *testing.T, s *Server, method, path string, cookie *http.Cookie, payload map[string]string, wantStatus int) map[string]any {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != wantStatus {
+		t.Fatalf("%s HTTP status = %d, want %d, body = %s", path, rr.Code, wantStatus, rr.Body.String())
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &decoded); err != nil {

@@ -9,7 +9,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | --- | --- |
 | CLI entry and subcommands | `main.go` |
 | Config structs/load | `internal/config/config.go`, `internal/config/load.go`, `internal/config/duration.go` |
-| Hub routes, auth, static serving | `internal/hub/server.go` |
+| Hub routes, auth, static serving | `internal/hub/server.go`, `internal/hub/registration.go` |
 | Public conversation shares | `internal/hub/share.go` |
 | Browser chat WebSocket | `internal/hub/ws_browser.go` |
 | Bridge reverse WebSocket | `internal/hub/ws_bridge.go`, `internal/bridge/client.go` |
@@ -34,6 +34,20 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 4. Add frontend caller in the relevant `frontend/src/app/pages/` or
    `frontend/src/app/components/` file when UI-visible.
 5. Add or update a feature doc and tests.
+
+### Change Registration Or User Isolation
+
+1. `internal/hub/registration.go:handleRegister` validates registration input,
+   rate limits attempts, verifies Turnstile, and issues the existing auth cookie.
+2. `internal/hub/server.go:NewServer` exposes public auth config and protects
+   chat/orchestration routes with authenticated middleware.
+3. Store lookups for agents, sessions, orchestration runs, and shares must carry
+   the JWT user id; child messages/events inherit access only after the owned
+   parent is loaded.
+4. `frontend/src/app/pages/LoginScreen.tsx:LoginScreen` owns the explicit
+   Turnstile widget lifecycle and login/register switch.
+5. Update
+   [docs/features/self-service-registration-and-user-isolation.md](features/self-service-registration-and-user-isolation.md).
 
 ### Change Conversation Share Links
 
@@ -245,8 +259,9 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    profile does not silently activate it from prompt keywords.
 7. `internal/bridge/profiles/registry` is the neutral boundary for
    profile-specific orchestration behavior. Formal-proof prompt fragments,
-   assessments, manual-build carry-over, command fingerprint decisions, and
-   benchmark-specific detectors live under
+   proof-author/auditor collaboration contracts, proposer/critic debate
+   contracts, final adjudication, assessments, manual-build carry-over, command
+   fingerprint decisions, and benchmark-specific detectors live under
    `internal/bridge/profiles/formalproof/`.
    `internal/bridge/orchestration_harness.go` creates the persistent
    formal-proof run folder and Chinese proof harness before the first scheduled

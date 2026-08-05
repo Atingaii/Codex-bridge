@@ -34,6 +34,20 @@ func InitialStrategy(profile, mode, firstCLI, userPrompt string) string {
 	return formalproof.InitialStrategy(mode, firstCLI, userPrompt)
 }
 
+func ModeRoleContract(profile, mode, role string, turn int) string {
+	if !profiles.IsFormal(profile) {
+		return ""
+	}
+	return formalproof.ModeRoleContract(mode, role, turn)
+}
+
+func FinalTurnGuidance(profile, mode string) string {
+	if !profiles.IsFormal(profile) {
+		return ""
+	}
+	return formalproof.FinalTurnGuidance(mode)
+}
+
 func RecordCommandFingerprints(memory map[string]profiles.CommandFingerprint, cwd string, commands []profiles.Command) {
 	formalproof.RecordCommandFingerprints(memory, cwd, commands)
 }

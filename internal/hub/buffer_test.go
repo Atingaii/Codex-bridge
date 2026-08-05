@@ -65,8 +65,11 @@ func TestSecurityHeaders(t *testing.T) {
 			t.Fatalf("missing security header %s", key)
 		}
 	}
-	if csp := rr.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "blob:") {
-		t.Fatalf("CSP should allow blob image previews, got %q", csp)
+	csp := rr.Header().Get("Content-Security-Policy")
+	for _, source := range []string{"blob:", "script-src 'self' https://challenges.cloudflare.com", "connect-src 'self' ws: wss: https://challenges.cloudflare.com", "frame-src https://challenges.cloudflare.com"} {
+		if !strings.Contains(csp, source) {
+			t.Fatalf("CSP should allow %q, got %q", source, csp)
+		}
 	}
 }
 

@@ -278,6 +278,18 @@ func TestStoreRejectsQuotedEmptyPasswords(t *testing.T) {
 	}
 }
 
+func TestCreateUserRejectsCaseInsensitiveDuplicate(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+	ctx := context.Background()
+	if _, err := st.CreateUser(ctx, "admin", "long-password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateUser(ctx, "Admin", "another-long-password"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("case-insensitive duplicate error = %v, want ErrConflict", err)
+	}
+}
+
 func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)

@@ -81,6 +81,18 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("HUB_PASSWORD"); v != "" {
 		cfg.Auth.BootstrapPassword = v
 	}
+	if v := os.Getenv("REGISTRATION_ENABLED"); v != "" {
+		cfg.Auth.Registration.Enabled = parseBool(v, cfg.Auth.Registration.Enabled)
+	}
+	if v := os.Getenv("TURNSTILE_SITE_KEY"); v != "" {
+		cfg.Auth.Registration.TurnstileSiteKey = v
+	}
+	if v := os.Getenv("TURNSTILE_SECRET"); v != "" {
+		cfg.Auth.Registration.TurnstileSecret = v
+	}
+	if v := os.Getenv("TURNSTILE_HOSTNAME"); v != "" {
+		cfg.Auth.Registration.TurnstileHostname = v
+	}
 	if v := os.Getenv("BRIDGE_HUB_URL"); v != "" {
 		cfg.Bridge.HubURL = v
 	}

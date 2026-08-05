@@ -1209,7 +1209,7 @@ func TestCoqTaskWebSmokeWithFakeBridge(t *testing.T) {
 	}
 }
 
-func TestNonAdminCanOnlyUseOrchestrationAPIs(t *testing.T) {
+func TestNonAdminCanUseOnlyOwnedChatAndOrchestrationAPIs(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1259,17 +1259,29 @@ func TestNonAdminCanOnlyUseOrchestrationAPIs(t *testing.T) {
 		t.Fatalf("admin login user = %#v", user)
 	}
 	waitAgents(t, adminClient, cfg.Bridge.HubURL)
-	postJSON(t, adminClient, cfg.Bridge.HubURL+"/api/sessions", map[string]string{"title": "admin-ok"}, http.StatusCreated)
+	adminSession := postJSON(t, adminClient, cfg.Bridge.HubURL+"/api/sessions", map[string]string{"title": "admin-ok"}, http.StatusCreated)["session"].(map[string]any)
 
 	workerClient := httpClient(t)
 	workerLogin := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "worker", "password": "secret"}, http.StatusOK)
 	if user := workerLogin["user"].(map[string]any); user["isAdmin"] == true {
 		t.Fatalf("worker login user = %#v", user)
 	}
-	getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/sessions", http.StatusForbidden)
+	workerSessions := getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/sessions", http.StatusOK)["sessions"]
+	if sessions, ok := workerSessions.([]any); ok && len(sessions) != 0 {
+		t.Fatalf("worker can see admin session %q: %#v", adminSession["id"], sessions)
+	}
 	workerAgents := getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/agents", http.StatusOK)["agents"].([]any)
 	if len(workerAgents) != 1 || workerAgents[0].(map[string]any)["userId"] != worker.ID {
 		t.Fatalf("worker agents = %#v", workerAgents)
+	}
+	workerSession := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/sessions", map[string]string{
+		"agentId": workerAgents[0].(map[string]any)["id"].(string),
+		"title":   "worker chat",
+	}, http.StatusCreated)["session"].(map[string]any)
+	workerSessions = getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/sessions", http.StatusOK)["sessions"]
+	sessions, ok := workerSessions.([]any)
+	if !ok || len(sessions) != 1 || sessions[0].(map[string]any)["id"] != workerSession["id"] {
+		t.Fatalf("worker sessions = %#v, want only %#v", workerSessions, workerSession)
 	}
 	getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/orchestrations", http.StatusOK)
 	orcBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/orchestrations", map[string]any{

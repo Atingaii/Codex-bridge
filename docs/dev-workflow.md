@@ -25,6 +25,10 @@ should list names and point here for detail.
 | `JWT_SECRET` | JWT signing secret, 32+ bytes | config `auth.jwt_secret` |
 | `HUB_USERNAME` | Bootstrap/default username | config `auth.bootstrap_username` |
 | `HUB_PASSWORD` | Bootstrap/default password | config `auth.bootstrap_password` |
+| `REGISTRATION_ENABLED` | Enable self-service registration only when Turnstile keys are complete | config `auth.registration.enabled` |
+| `TURNSTILE_SITE_KEY` | Public Cloudflare Turnstile Managed widget site key | config `auth.registration.turnstile_site_key` |
+| `TURNSTILE_SECRET` | Server-only Cloudflare Turnstile Siteverify secret | config `auth.registration.turnstile_secret` |
+| `TURNSTILE_HOSTNAME` | Expected production hostname returned by Siteverify | config `auth.registration.turnstile_hostname` |
 | `BRIDGE_HUB_URL` | Hub URL used by Bridge | config `bridge.hub_url` |
 | `BRIDGE_TOKEN` | Bridge enroll token | config `bridge.token` |
 | `BRIDGE_TOKEN_FILE` | File containing Bridge token | config `bridge.token_file` |
@@ -61,9 +65,13 @@ cp configs/dev.yaml.example configs/dev.yaml
 
 Open `http://127.0.0.1:8088`.
 
-Browser self-registration is disabled. Use
+Browser self-registration is disabled by default. Use
 `/usr/local/go/bin/go run . user --username <name> --password <password>` to
-create or update local test accounts.
+create or update local test accounts. To test registration, create a Cloudflare
+Turnstile Managed widget, configure all four registration values, and use a
+hostname allowed by that widget. The Hub validates each browser token with
+Siteverify and rejects unavailable, expired, replayed, wrong-action, and
+wrong-hostname results before creating a user. Never commit the secret.
 
 ## CLI Install Flow
 

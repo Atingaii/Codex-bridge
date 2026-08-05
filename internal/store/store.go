@@ -603,6 +603,13 @@ func (s *Store) CreateUser(ctx context.Context, username, password string) (User
 	if isQuotedEmptyPassword(password) {
 		return User{}, errors.New("password is invalid")
 	}
+	var existing int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE lower(username) = lower(?)`, username).Scan(&existing); err != nil {
+		return User{}, err
+	}
+	if existing > 0 {
+		return User{}, ErrConflict
+	}
 	now := time.Now().Unix()
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), passwordHashCost)
 	if err != nil {

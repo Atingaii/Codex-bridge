@@ -24,6 +24,9 @@ Browser ──WSS──> Hub (public) <──reverse WS── Bridge (your machi
   (resident Agent session + native local `/resume` takeover).
 - Multi-CLI orchestration relays turns between native Codex and Claude Code
   sessions, with browser-side command/file approvals in review-required mode.
+- Optional self-service registration uses Cloudflare Turnstile server-side
+  verification; every user's endpoints and private conversation data remain
+  isolated by account.
 - Closing the browser tab leases the live chat session by default; reopen the
   same `sid` before `hub.browser_lease_ttl` expires to reattach to the same
   Bridge-side CLI process.
@@ -169,8 +172,12 @@ codex-bridge bridge               # endpoint: run from configs/<env>.yaml (advan
 For a real endpoint, use the single command the Hub **Settings** page generates;
 it runs `codex-bridge link`. `connect` and `bridge` are lower-level entry points.
 
-Browser self-registration is disabled. Create or update approved users with
-`codex-bridge user --username <name> --password <password>`.
+Browser self-registration is disabled by default. Create or update approved
+users with `codex-bridge user --username <name> --password <password>`, or
+explicitly enable `auth.registration` with a Cloudflare Turnstile Managed
+widget. The Hub must receive the site key, server-only secret, and production
+hostname; it validates every registration token with Siteverify before creating
+the isolated account.
 
 After login, create a CLI token in Settings and copy the single install-and-connect
 command from the target workspace, as the same OS user that runs Codex CLI and
@@ -201,6 +208,10 @@ maintenance setting; formal-proof guidance and post-turn native compaction are
 explicit opt-ins and are persisted with the run. Codex uses its app-server
 compaction RPC when available; CLI surfaces without a verified control channel
 are skipped with Bridge notes instead of receiving model-visible slash commands.
+In the formal-proof profile, collaboration uses proof-author/auditor contracts
+and debate uses falsifiable proposer/adversarial-critic contracts; both require
+unchanged statement identity, proof-state evidence, exact checker commands, and
+a final trust/dependency audit without adding hidden turns or changing the UI.
 Run-end metadata includes
 direct native resume commands for Codex and Claude Code when their native ids
 are available. Orchestration timelines use typed events with `source`,
@@ -239,6 +250,7 @@ Common overrides:
 - `APP_HOST`, `APP_PORT`
 - `HUB_DB_PATH`, `HUB_COOKIE_SECURE`, `HUB_BROWSER_LEASE_TTL`
 - `JWT_SECRET`, `HUB_USERNAME`, `HUB_PASSWORD`
+- `REGISTRATION_ENABLED`, `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET`, `TURNSTILE_HOSTNAME`
 - `BRIDGE_HUB_URL`, `BRIDGE_TOKEN`, `BRIDGE_TOKEN_FILE`
 - `BRIDGE_NAME`, `BRIDGE_CWD`, `BRIDGE_RUNNER`, `BRIDGE_MODEL`
 - `BRIDGE_SANDBOX`, `BRIDGE_APPROVAL_POLICY`

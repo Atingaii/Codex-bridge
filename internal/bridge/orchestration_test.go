@@ -1974,6 +1974,40 @@ func TestRelayModeRoleContractsAndFinalSynthesis(t *testing.T) {
 	}
 }
 
+func TestFormalProofModeContractsUseProofStateAndReproducibleEvidence(t *testing.T) {
+	tests := []struct {
+		name  string
+		mode  string
+		role  string
+		turn  int
+		wants []string
+	}{
+		{name: "collaboration author", mode: "collaboration", role: "implementer", turn: 1, wants: []string{"Formal-proof collaboration contract (cycle 1)", "Proof author duty", "initial proof state", "unchanged", "dependency audit", "obligation ledger"}},
+		{name: "collaboration auditor", mode: "collaboration", role: "reviewer", turn: 2, wants: []string{"Proof auditor duty", "exact statement", "remaining goals", "sorry/admit/Admitted", "compile-only"}},
+		{name: "collaboration later", mode: "collaboration", role: "implementer", turn: 3, wants: []string{"cycle 2", "unresolved goal", "instead of restarting proof search"}},
+		{name: "debate proposer", mode: "debate", role: "proposer", turn: 1, wants: []string{"Formal-proof debate contract (cycle 1)", "Proof proposer duty", "falsifiable claim", "before/after proof state", "retract"}},
+		{name: "debate critic", mode: "debate", role: "critic", turn: 2, wants: []string{"Proof critic duty", "quantifiers", "counterexample", "hidden axioms/oracles", "failed checker"}},
+		{name: "debate later", mode: "debate", role: "critic", turn: 4, wants: []string{"cycle 2", "strongest surviving objection", "new proof-state or checker evidence"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prompt := composeRelayPromptWithFirstCLI(test.mode, "claude", "formal-proof", "prove theorem target in Lean", "", false, test.role, "claude", test.turn, 4, nil)
+			for _, want := range test.wants {
+				if !strings.Contains(prompt, want) {
+					t.Fatalf("formal-proof prompt missing %q:\n%s", want, prompt)
+				}
+			}
+		})
+	}
+
+	finalPrompt := composeRelayPromptWithFirstCLI("debate", "claude", "formal-proof", "prove theorem target in Lean", "", false, "critic", "codex", 4, 4, nil)
+	for _, want := range []string{"final formal-proof turn", "adversarial proof adjudication", "unchanged target statement", "dependency/trust audit", "remaining goals is not a completed proof", "Do not hand work"} {
+		if !strings.Contains(finalPrompt, want) {
+			t.Fatalf("formal-proof final prompt missing %q:\n%s", want, finalPrompt)
+		}
+	}
+}
+
 func TestRelayTurnPlanKeepsRoleOrderIndependentOfFirstCLI(t *testing.T) {
 	tests := []struct {
 		name       string

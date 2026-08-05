@@ -1,9 +1,51 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, ChevronDown, Globe, Lock, RefreshCw, Terminal, User } from 'lucide-react';
 import { api } from '../lib/api';
 import type { UserAccount } from '../lib/types';
 import type { Language, UIText } from '../lib/i18n';
 import { Button, Input } from '../components/ui';
+
+type AuthConfig = {
+  registrationEnabled: boolean;
+  turnstileSiteKey: string;
+};
+
+type TurnstileAPI = {
+  render: (container: HTMLElement, options: Record<string, unknown>) => string;
+  remove: (widgetId: string) => void;
+  reset: (widgetId: string) => void;
+};
+
+declare global {
+  interface Window {
+    turnstile?: TurnstileAPI;
+  }
+}
+
+let turnstileScriptPromise: Promise<TurnstileAPI> | null = null;
+
+function loadTurnstile(): Promise<TurnstileAPI> {
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+  if (turnstileScriptPromise) return turnstileScriptPromise;
+  turnstileScriptPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[data-codex-bridge-turnstile]');
+    const script = existing || document.createElement('script');
+    const handleLoad = () => window.turnstile ? resolve(window.turnstile) : reject(new Error('Turnstile unavailable'));
+    script.addEventListener('load', handleLoad, { once: true });
+    script.addEventListener('error', () => reject(new Error('Turnstile unavailable')), { once: true });
+    if (!existing) {
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      script.async = true;
+      script.defer = true;
+      script.dataset.codexBridgeTurnstile = 'true';
+      document.head.appendChild(script);
+    }
+  }).catch((error) => {
+    turnstileScriptPromise = null;
+    throw error;
+  });
+  return turnstileScriptPromise;
+}
 
 export function LoginScreen({
   onLogin,
@@ -18,23 +60,90 @@ export function LoginScreen({
 }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState('');
+  const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
+  const turnstileWidgetRef = useRef<string | null>(null);
 
-  const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
+  useEffect(() => {
+    let active = true;
+    api<AuthConfig>('/api/auth/config')
+      .then((config) => {
+        if (active) setAuthConfig(config);
+      })
+      .catch(() => {
+        if (active) setAuthConfig({ registrationEnabled: false, turnstileSiteKey: '' });
+      });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (mode !== 'register' || !authConfig?.registrationEnabled || !authConfig.turnstileSiteKey || !turnstileContainerRef.current) return;
+    let active = true;
+    loadTurnstile()
+      .then((turnstile) => {
+        if (!active || !turnstileContainerRef.current) return;
+        turnstileWidgetRef.current = turnstile.render(turnstileContainerRef.current, {
+          sitekey: authConfig.turnstileSiteKey,
+          action: 'register',
+          theme: 'auto',
+          callback: (token: string) => {
+            setTurnstileToken(token);
+            setError('');
+          },
+          'expired-callback': () => setTurnstileToken(''),
+          'error-callback': () => {
+            setTurnstileToken('');
+            setError(t.securityVerificationFailed);
+          },
+        });
+      })
+      .catch(() => {
+        if (active) setError(t.securityVerificationFailed);
+      });
+    return () => {
+      active = false;
+      if (turnstileWidgetRef.current && window.turnstile) {
+        window.turnstile.remove(turnstileWidgetRef.current);
+        turnstileWidgetRef.current = null;
+      }
+      setTurnstileToken('');
+    };
+  }, [authConfig, mode, t.securityVerificationFailed]);
+
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setLoading(true);
     setError('');
     const form = new FormData(e.currentTarget);
+    const password = String(form.get('password') || '');
+    if (mode === 'register' && password !== String(form.get('confirmPassword') || '')) {
+      setError(t.passwordsDoNotMatch);
+      setLoading(false);
+      return;
+    }
+    if (mode === 'register' && !turnstileToken) {
+      setError(t.completeSecurityVerification);
+      setLoading(false);
+      return;
+    }
     try {
-      const data = await api<{ user: UserAccount }>('/api/login', {
+      const data = await api<{ user: UserAccount }>(mode === 'register' ? '/api/register' : '/api/login', {
         method: 'POST',
         body: JSON.stringify({
           username: String(form.get('username') || ''),
-          password: String(form.get('password') || ''),
+          password,
+          ...(mode === 'register' ? { turnstileToken } : {}),
         }),
       });
       onLogin(data.user);
     } catch (err) {
       setError(err instanceof Error ? err.message : t.connectionFailed);
+      if (mode === 'register' && turnstileWidgetRef.current && window.turnstile) {
+        window.turnstile.reset(turnstileWidgetRef.current);
+        setTurnstileToken('');
+      }
     } finally {
       setLoading(false);
     }
@@ -51,7 +160,18 @@ export function LoginScreen({
           <p className="text-sm text-muted-foreground">{t.secureConnection}</p>
         </div>
 
-        <form onSubmit={handleLogin} className="flex flex-col gap-4">
+        {authConfig?.registrationEnabled && (
+          <div className="grid h-9 grid-cols-2 rounded-md bg-muted p-1" role="tablist" aria-label="Authentication mode">
+            <button type="button" role="tab" aria-selected={mode === 'login'} onClick={() => { setMode('login'); setError(''); }} className={`rounded-sm text-sm transition-colors ${mode === 'login' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}>
+              {t.signIn}
+            </button>
+            <button type="button" role="tab" aria-selected={mode === 'register'} onClick={() => { setMode('register'); setError(''); }} className={`rounded-sm text-sm transition-colors ${mode === 'register' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}>
+              {t.createAccount}
+            </button>
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div className="space-y-4">
             <div className="space-y-2">
               <label className="text-sm font-medium leading-none" htmlFor="username">
@@ -68,10 +188,23 @@ export function LoginScreen({
               </label>
               <div className="relative">
                 <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                <Input id="password" name="password" type="password" placeholder="••••••••" className="pl-9" autoComplete="current-password" required />
+                <Input id="password" name="password" type="password" placeholder="••••••••••" className="pl-9" autoComplete={mode === 'register' ? 'new-password' : 'current-password'} minLength={mode === 'register' ? 10 : undefined} required />
               </div>
             </div>
+            {mode === 'register' && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium leading-none" htmlFor="confirmPassword">
+                  {t.confirmPassword}
+                </label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <Input id="confirmPassword" name="confirmPassword" type="password" placeholder="••••••••••" className="pl-9" autoComplete="new-password" minLength={10} required />
+                </div>
+              </div>
+            )}
           </div>
+
+          {mode === 'register' && <div ref={turnstileContainerRef} className="min-h-[65px] w-full overflow-hidden flex justify-center" />}
 
           {error && (
             <div className="p-3 text-sm bg-destructive/10 text-destructive rounded-md border border-destructive/20 flex items-start gap-2">
@@ -81,7 +214,7 @@ export function LoginScreen({
           )}
 
           <Button type="submit" className="w-full" disabled={loading}>
-            {loading ? <RefreshCw className="h-4 w-4 animate-spin" /> : t.connectToWorkspace}
+            {loading ? <RefreshCw className="h-4 w-4 animate-spin" /> : mode === 'register' ? t.createAccount : t.connectToWorkspace}
           </Button>
         </form>
 

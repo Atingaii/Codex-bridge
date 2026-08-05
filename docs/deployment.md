@@ -178,6 +178,8 @@ Set these in `/opt/codex-bridge/configs/prod.yaml` for production:
 - `gateway.port: 8088`
 - `hub.cookie_secure: true`
 - `auth.jwt_secret`: a fresh 32+ byte secret
+- `auth.registration.enabled: false` unless a production Turnstile Managed
+  widget has been created and all registration fields are configured
 - `bridge.hub_url: https://<your-domain>`
 - `bridge.token` or `bridge.token_file`: the enroll token
 
@@ -205,6 +207,8 @@ another directory. Common overrides:
 - `APP_HOST`, `APP_PORT`, `APP_ENV`
 - `HUB_DB_PATH`, `HUB_COOKIE_SECURE`, `HUB_BROWSER_LEASE_TTL`
 - `JWT_SECRET`, `HUB_USERNAME`, `HUB_PASSWORD`
+- `REGISTRATION_ENABLED`, `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET`,
+  `TURNSTILE_HOSTNAME`
 - `BRIDGE_HUB_URL`, `BRIDGE_TOKEN`, `BRIDGE_TOKEN_FILE`
 - `BRIDGE_NAME`, `BRIDGE_CWD`, `BRIDGE_RUNNER`, `BRIDGE_MODEL`
 - `BRIDGE_SANDBOX`, `BRIDGE_APPROVAL_POLICY`
@@ -220,6 +224,9 @@ runner, and the long-command observer) lives in
 2. Bridge connection: the Bridge logs `[bridge] connected`; the Hub logs
    `bridge connected` and the endpoint appears online under Settings.
 3. Open a chat session and send a prompt; confirm streamed output.
+4. When registration is enabled, open the register tab, complete the Turnstile
+   challenge, and confirm the new account sees no other user's endpoints,
+   sessions, runs, or shares.
 
 ## Troubleshooting
 
@@ -229,3 +236,6 @@ runner, and the long-command observer) lives in
   `internal/web/static` is regenerated, then rebuild the binary.
 - **Cookies rejected over HTTPS** — set `hub.cookie_secure: true` only when
   serving over TLS; keep it `false` for plain-HTTP local dev.
+- **Registration tab is hidden** — registration fails closed unless enabled and
+  both Turnstile keys are non-empty. Check the widget hostname and set
+  `TURNSTILE_HOSTNAME` to the hostname Siteverify returns in production.

@@ -59,8 +59,9 @@ type Server struct {
 	leasesMu sync.Mutex
 	leases   map[string]*browserSessionLease
 
-	rateMu sync.Mutex
-	rates  map[string]rateBucket
+	rateMu    sync.Mutex
+	rates     map[string]rateBucket
+	turnstile turnstileVerifier
 }
 
 type rateBucket struct {
@@ -70,14 +71,15 @@ type rateBucket struct {
 
 func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	s := &Server{
-		cfg:     cfg,
-		store:   st,
-		signer:  auth.NewSigner(cfg.Auth.JWTSecret, cfg.Auth.AccessTokenTTL.Duration),
-		pool:    NewPool(),
-		buffers: make(map[string]string),
-		owners:  make(map[string]string),
-		leases:  make(map[string]*browserSessionLease),
-		rates:   make(map[string]rateBucket),
+		cfg:       cfg,
+		store:     st,
+		signer:    auth.NewSigner(cfg.Auth.JWTSecret, cfg.Auth.AccessTokenTTL.Duration),
+		pool:      NewPool(),
+		buffers:   make(map[string]string),
+		owners:    make(map[string]string),
+		leases:    make(map[string]*browserSessionLease),
+		rates:     make(map[string]rateBucket),
+		turnstile: cloudflareTurnstileVerifier{client: &http.Client{Timeout: 8 * time.Second}, url: turnstileVerifyURL},
 	}
 
 	mux := http.NewServeMux()
@@ -91,6 +93,7 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 		})
 	})
 	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.HandleFunc("GET /api/auth/config", s.handleAuthConfig)
 	mux.HandleFunc("POST /api/register", s.handleRegister)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/me", s.withAuth(s.handleMe))
@@ -100,13 +103,13 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("POST /api/bridge-tokens", s.withAuth(s.handleCreateBridgeToken))
 	mux.HandleFunc("GET /install.sh", s.handleInstallScript)
 	mux.HandleFunc("GET /downloads/codex-bridge-linux-amd64", s.handleBridgeBinaryDownload)
-	mux.HandleFunc("GET /api/sessions", s.withAdmin(s.handleListSessions))
-	mux.HandleFunc("POST /api/sessions", s.withAdmin(s.handleCreateSession))
-	mux.HandleFunc("PATCH /api/sessions/{sid}", s.withAdmin(s.handleUpdateSession))
-	mux.HandleFunc("DELETE /api/sessions/{sid}", s.withAdmin(s.handleDeleteSession))
-	mux.HandleFunc("GET /api/sessions/{sid}/messages", s.withAdmin(s.handleMessages))
-	mux.HandleFunc("GET /api/sessions/{sid}/runs", s.withAdmin(s.handleRuns))
-	mux.HandleFunc("POST /api/sessions/{sid}/share", s.withAdmin(s.handleShareSession))
+	mux.HandleFunc("GET /api/sessions", s.withAuth(s.handleListSessions))
+	mux.HandleFunc("POST /api/sessions", s.withAuth(s.handleCreateSession))
+	mux.HandleFunc("PATCH /api/sessions/{sid}", s.withAuth(s.handleUpdateSession))
+	mux.HandleFunc("DELETE /api/sessions/{sid}", s.withAuth(s.handleDeleteSession))
+	mux.HandleFunc("GET /api/sessions/{sid}/messages", s.withAuth(s.handleMessages))
+	mux.HandleFunc("GET /api/sessions/{sid}/runs", s.withAuth(s.handleRuns))
+	mux.HandleFunc("POST /api/sessions/{sid}/share", s.withAuth(s.handleShareSession))
 	mux.HandleFunc("GET /api/orchestrations", s.withAuth(s.handleListOrchestrations))
 	mux.HandleFunc("POST /api/orchestrations", s.withAuth(s.handleCreateOrchestration))
 	mux.HandleFunc("GET /api/orchestrations/{runID}", s.withAuth(s.handleGetOrchestration))
@@ -117,7 +120,7 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("DELETE /api/shares/{shareID}", s.withAuth(s.handleRevokeShare))
 	mux.HandleFunc("GET /api/public/shares/{shareID}", s.handlePublicShare)
 	mux.HandleFunc("GET /ws/orchestrations", s.withAuth(s.handleOrchestrationWS))
-	mux.HandleFunc("GET /ws/chat", s.withAdmin(s.handleBrowserWS))
+	mux.HandleFunc("GET /ws/chat", s.withAuth(s.handleBrowserWS))
 	mux.HandleFunc("GET /api/agents/connect", s.handleBridgeWS)
 	mux.Handle("GET /", s.staticHandler())
 
@@ -249,6 +252,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		serverutil.WriteError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid username or password")
 		return
 	}
+	s.writeAuthSession(w, r, user, http.StatusOK)
+}
+
+func (s *Server) writeAuthSession(w http.ResponseWriter, r *http.Request, user store.User, status int) {
 	token, expires, err := s.signer.Sign(user.ID)
 	if err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "TOKEN_ERROR", "failed to issue token")
@@ -264,11 +271,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		Secure:   s.secureCookie(r),
 	})
-	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"user": user, "expiresAt": expires.Unix()})
-}
-
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	serverutil.WriteError(w, http.StatusForbidden, "REGISTRATION_DISABLED", "registration is disabled")
+	serverutil.WriteJSON(w, status, map[string]any{"user": user, "expiresAt": expires.Unix()})
 }
 
 func normalizeUsername(username string) string {
@@ -939,7 +942,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' ws: wss:; img-src 'self' data: blob:; base-uri 'self'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' ws: wss: https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; img-src 'self' data: blob:; base-uri 'self'; frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
 }

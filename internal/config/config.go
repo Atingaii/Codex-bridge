@@ -87,10 +87,18 @@ type LongCommandObserverConfig struct {
 }
 
 type AuthConfig struct {
-	JWTSecret         string   `yaml:"jwt_secret"`
-	AccessTokenTTL    Duration `yaml:"access_token_ttl"`
-	BootstrapUsername string   `yaml:"bootstrap_username"`
-	BootstrapPassword string   `yaml:"bootstrap_password"`
+	JWTSecret         string             `yaml:"jwt_secret"`
+	AccessTokenTTL    Duration           `yaml:"access_token_ttl"`
+	BootstrapUsername string             `yaml:"bootstrap_username"`
+	BootstrapPassword string             `yaml:"bootstrap_password"`
+	Registration      RegistrationConfig `yaml:"registration"`
+}
+
+type RegistrationConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	TurnstileSiteKey  string `yaml:"turnstile_site_key"`
+	TurnstileSecret   string `yaml:"turnstile_secret"`
+	TurnstileHostname string `yaml:"turnstile_hostname"`
 }
 
 type ObservabilityConfig struct {
@@ -161,6 +169,7 @@ func Default() Config {
 			JWTSecret:         "dev-only-change-me-32-byte-minimum-secret",
 			AccessTokenTTL:    Duration{Duration: 24 * 60 * 60 * 1_000_000_000},
 			BootstrapUsername: "admin",
+			Registration:      RegistrationConfig{},
 		},
 		Observability: ObservabilityConfig{
 			LogLevel:  "info",

@@ -68,6 +68,45 @@ func InitialStrategy(mode, firstCLI, userPrompt string) string {
 	return b.String()
 }
 
+func ModeRoleContract(mode, role string, turn int) string {
+	cycle := (turn + 1) / 2
+	var duty string
+	if mode == "debate" {
+		if role == "critic" {
+			duty = "Proof critic duty: attack the strongest proof claim, not a weaker paraphrase. Compare the exact checked statement with the requested statement; inspect quantifiers, types, premises, remaining goals, circular dependencies, hidden axioms/oracles, and placeholder proofs; seek a concrete counterexample or failed checker command. When possible, leave a repaired falsifiable claim or proof path."
+			if turn == 1 {
+				duty += " No proposal exists yet, so first freeze the named target, baseline proof state, trust boundary, and executable acceptance check that the next proposer must satisfy."
+			}
+		} else {
+			duty = "Proof proposer duty: state one falsifiable claim with the exact named target, unchanged statement and premises, the before/after proof state, the tactic or lemma path, and the exact proof-assistant command expected to validate it. Implement or refine the proof, and retract or narrow the claim when checker evidence contradicts it."
+		}
+		if cycle > 1 {
+			duty += " This is a later proof-debate cycle: answer the strongest surviving objection with new proof-state or checker evidence instead of restating the thesis."
+		}
+		return fmt.Sprintf("Formal-proof debate contract (cycle %d): %s", cycle, duty)
+	}
+	if role == "reviewer" {
+		duty = "Proof auditor duty: independently reopen the named target, compare its exact statement with the user requirement, replay the narrow checker, inspect remaining goals and theorem dependencies, and scan deliverables for sorry/admit/Admitted/new axioms/oracle shortcuts. Fix safe in-scope defects, then state precisely what is checked, rejected, or still open; never certify prose confidence or compile-only evidence."
+		if turn == 1 {
+			duty += " No proof-author result exists yet, so establish the target statement, initial proof state, trust boundary, and reproducible baseline before making safe progress."
+		}
+	} else {
+		duty = "Proof author duty: freeze the original named statement and premises, keep that target unchanged, record the initial proof state and trust boundary, make the smallest faithful proof change, run the narrow proof-assistant checker, and leave an obligation ledger containing current goals, files, exact commands with results, dependency audit, blockers, and remaining risk."
+	}
+	if cycle > 1 {
+		duty += " This is a later proof-collaboration cycle: start from the newest unresolved goal or failed audit and close that evidence gap instead of restarting proof search."
+	}
+	return fmt.Sprintf("Formal-proof collaboration contract (cycle %d): %s", cycle, duty)
+}
+
+func FinalTurnGuidance(mode string) string {
+	method := "independent proof audit"
+	if mode == "debate" {
+		method = "adversarial proof adjudication"
+	}
+	return "This is the final formal-proof turn. Produce a user-ready section titled \"最终结论：\" or \"最终测试结果：\" based on " + method + ". Name the unchanged target statement, proof assistant and project, final proof state, exact checker commands and exit results, and dependency/trust audit. Separate checked facts from assumptions and list every unmet obligation. A build containing sorry, admit, Admitted, new axioms, oracle-tainted facts, a weakened statement, or remaining goals is not a completed proof. Do not hand work to another CLI that will not run."
+}
+
 func systemARelayGuidance(userPrompt string) string {
 	if !LooksLikeSystemATask(userPrompt) {
 		return ""

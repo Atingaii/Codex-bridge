@@ -46,17 +46,7 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePop);
   }, []);
 
-  useEffect(() => {
-    if (user && !user.isAdmin && !path.startsWith('/orchestrate') && !path.startsWith('/conversation-snapshot') && !path.startsWith('/share/')) {
-      window.history.replaceState({}, '', '/orchestrate');
-      setPath('/orchestrate');
-    }
-  }, [path, user]);
-
   const navigate = useCallback((nextPath: string, options: { replace?: boolean } = {}) => {
-    if (user && !user.isAdmin && !nextPath.startsWith('/orchestrate') && !nextPath.startsWith('/conversation-snapshot') && !nextPath.startsWith('/share/')) {
-      nextPath = '/orchestrate';
-    }
     if (window.location.pathname !== nextPath) {
       if (options.replace) {
         window.history.replaceState({}, '', nextPath);
@@ -65,7 +55,7 @@ export default function App() {
       }
       setPath(nextPath);
     }
-  }, [user]);
+  }, []);
 
   if (booting) {
     return (
@@ -87,7 +77,7 @@ export default function App() {
     return <ConversationSnapshotPage t={t} />;
   }
 
-  if (!user.isAdmin || path.startsWith('/orchestrate')) {
+  if (path.startsWith('/orchestrate')) {
     return (
       <OrchestrationWorkspace
         user={user}
@@ -97,7 +87,7 @@ export default function App() {
         language={language}
         setLanguage={setLanguage}
         t={t}
-        canOpenMain={Boolean(user.isAdmin)}
+        canOpenMain
         path={path}
         navigate={navigate}
       />

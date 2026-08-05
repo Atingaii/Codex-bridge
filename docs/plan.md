@@ -32,6 +32,7 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P6.6 | Persistent per-context task queue | designed |
 | P7 | Browser permission prompts over app-server | implemented for Codex chat and Codex orchestration |
 | P8 | Empty-reply hardening and accessible session deletion | implemented |
+| P9 | Turnstile-protected self-registration and per-user access | implemented |
 
 ## Engineering Workflow
 

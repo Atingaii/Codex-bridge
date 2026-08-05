@@ -82,7 +82,15 @@ hidden proof strategy gates,
 automatic verifier turns, or remediation turns. Formal-proof guidance is opt-in
 through the persisted `profile=formal-proof` run setting selected in the
 orchestration UI; the default profile does not activate proof guidance based on
-prompt keywords. For new formal-proof runs, Bridge first creates a persistent
+prompt keywords. Under that profile, collaboration alternates a proof author
+and independent proof auditor, while debate alternates a falsifiable proof
+claim and adversarial critic. Both contracts freeze the named statement, carry
+proof-state/checker evidence forward, audit trust dependencies, and require a
+final adjudication that cannot call placeholder, weakened, axiom-tainted, or
+unfinished output a completed proof. Existing UI modes, role identifiers,
+turn counts, and protocol payloads are unchanged. See
+[docs/features/formal-proof-orchestration-contracts.md](features/formal-proof-orchestration-contracts.md).
+For new formal-proof runs, Bridge first creates a persistent
 proof-run folder under the selected cwd, materializes uploaded projects or an
 empty `project/` directory there, and writes a Chinese proof harness
 (`AGENTS.md`, `CLAUDE.md`, `proof-harness/任务说明.md`,
@@ -281,6 +289,23 @@ Chat session isolation:
 3. Switching agents closes the active chat WebSocket and restores that agent's
    remembered session from `codexBridge.activeSessionByAgent`.
 4. Sending from an empty agent space creates a new session for that agent.
+
+## Authentication And User Isolation
+
+The bootstrap administrator is created by CLI/config. Operators may explicitly
+enable self-service registration with a Cloudflare Turnstile Managed widget.
+The browser receives only the public site key from `GET /api/auth/config`; the
+Hub validates the single-use token, `action=register`, optional production
+hostname, password policy, duplicate username, and a separate registration rate
+limit before creating a user and issuing the existing HttpOnly JWT cookie.
+Registration is fail-closed and remains disabled unless enabled with both keys.
+
+Agents, sessions, orchestration runs, and conversation shares carry a user id.
+Every authenticated HTTP and WebSocket entry loads its parent record using the
+JWT subject before child messages, chat runs, or orchestration events can be
+read or changed. Normal users can use both chat and orchestration but see and
+control only their own enrolled endpoints and records. Public shares remain an
+explicit, revocable exception containing sanitized read-only data.
 
 ## Storage
 

@@ -445,7 +445,7 @@ func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, conte
 	b.WriteString("Codex Bridge is relaying this browser orchestration like a human handoff between local CLIs. Treat this as a real user instruction, use your normal capabilities, and do not wait for Bridge to validate strategy choices.\n\n")
 	b.WriteString(orchestrationLanguageRule)
 	b.WriteString("\n\n")
-	b.WriteString(relayModeRoleContract(mode, role, turn, maxTurns))
+	b.WriteString(relayModeRoleContract(profile, mode, role, turn, maxTurns))
 	b.WriteString("\n")
 	if priorSameWorkerTurns(history, cli, workerSlot) > 0 {
 		b.WriteString("You are receiving this message in the same native " + cli + " conversation used for your earlier turn(s) in this orchestration run. Keep using your existing local context and remembered work from that native session. Do not assume shell process state persists unless your CLI explicitly preserves it between turns.\n\n")
@@ -460,7 +460,12 @@ func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, conte
 		b.WriteString("You are continuing from the previous CLI's visible result. Treat the prior result as context from another person, decide independently what to do next, and continue the same user task.\n\n")
 	}
 	if turn == maxTurns {
-		b.WriteString("This is the last scheduled turn. End with a user-ready section titled \"最终结论：\" or \"最终测试结果：\" that synthesizes the whole run, compares claims with actual command evidence, distinguishes verified facts from unresolved assumptions, and names remaining risks. Do not hand work to another CLI that will not run. This final section serves as the handoff summary.\n\n")
+		if guidance := registry.FinalTurnGuidance(profile, mode); guidance != "" {
+			b.WriteString(guidance)
+			b.WriteString(" This final section serves as the handoff summary.\n\n")
+		} else {
+			b.WriteString("This is the last scheduled turn. End with a user-ready section titled \"最终结论：\" or \"最终测试结果：\" that synthesizes the whole run, compares claims with actual command evidence, distinguishes verified facts from unresolved assumptions, and names remaining risks. Do not hand work to another CLI that will not run. This final section serves as the handoff summary.\n\n")
+		}
 	} else {
 		b.WriteString("Always end your visible reply with a short handoff summary titled \"交接总结：\" — 2-4 Chinese sentences covering what you did, what you verified and with which commands, what is still blocked, and the single most useful next step for the following CLI. Bridge forwards this summary to the next CLI as a reading guide and separately forwards your actually executed commands and their exit codes as objective evidence, so keep the summary honest and specific rather than a bare success claim. If you already write a \"最终结论/最终测试结果\" section (for example on formal-proof tasks), that section serves as the handoff summary and you need not repeat it.\n\n")
 	}
@@ -494,7 +499,10 @@ func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, conte
 	return b.String()
 }
 
-func relayModeRoleContract(mode, role string, turn, maxTurns int) string {
+func relayModeRoleContract(profile, mode, role string, turn, maxTurns int) string {
+	if contract := registry.ModeRoleContract(profile, mode, role, turn); contract != "" {
+		return contract
+	}
 	cycle := (turn + 1) / 2
 	var duty string
 	switch mode {

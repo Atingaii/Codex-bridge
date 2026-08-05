@@ -1,5 +1,9 @@
 # Registration Disabled
 
+> **DEPRECATED - registration can now be explicitly enabled with Turnstile**
+>
+> Current design: [Self-Service Registration And User Isolation](self-service-registration-and-user-isolation.md). Historical only; do not implement from this doc.
+
 ## Goals
 
 - Disable public browser/API self-registration for new users.

@@ -8,9 +8,9 @@
   events, and terminal status in the browser-visible timeline.
 - Avoid Bridge-owned proof acceptance gates, automatic proof remediation turns,
   or runtime command bans that constrain what the CLI may do.
-- For formal-proof-looking tasks, provide lightweight workflow and audit
-  reminders in the initial CLI prompt so the browser-visible result records
-  the original obligation, build/scan/audit evidence, and unresolved blockers.
+- For `profile=formal-proof`, provide proof-state and audit contracts so the
+  browser-visible result records the unchanged obligation, build/scan/audit
+  evidence, adversarial review, and unresolved blockers.
 - Keep one narrow safety boundary for explicit Isabelle work: when Claude Code
   appears to be running a long Isabelle build, Bridge may append a user-style
   note to the same Claude stdin stream telling it to stop waiting, inspect the
@@ -73,6 +73,13 @@ Bridge prompt construction keeps mostly generic orchestration context:
   `最终测试结果` / `最终结论` section in the visible final answer so the browser
   timeline carries the test result directly instead of requiring the user to
   infer it from command logs.
+- profile-scoped mode contracts: collaboration alternates proof author and
+  independent proof auditor; debate alternates a falsifiable proof proposer and
+  adversarial critic. Later cycles must answer the latest failed check or
+  strongest objection with new evidence, and the scheduled final turn reports
+  the exact proof state and trust/dependency audit. These are visible prompt
+  contracts, not hidden verification turns. See
+  [formal-proof-orchestration-contracts.md](formal-proof-orchestration-contracts.md).
 
 The run may choose `firstCli=claude` or `firstCli=codex`. The selected value is
 shown in the run start event, sent in the existing `orchestration_start`

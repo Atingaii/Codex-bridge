@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertCircle, ChevronDown, Globe, Lock, RefreshCw, Terminal, User } from 'lucide-react';
+import { AlertCircle, ChevronDown, Eye, EyeOff, Globe, Lock, RefreshCw, Terminal, User } from 'lucide-react';
 import { api } from '../lib/api';
 import type { UserAccount } from '../lib/types';
 import type { Language, UIText } from '../lib/i18n';
@@ -61,10 +61,19 @@ export function LoginScreen({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const [confirmPasswordVisible, setConfirmPasswordVisible] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
   const [turnstileToken, setTurnstileToken] = useState('');
   const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
   const turnstileWidgetRef = useRef<string | null>(null);
+
+  const selectMode = (nextMode: 'login' | 'register') => {
+    setMode(nextMode);
+    setError('');
+    setPasswordVisible(false);
+    setConfirmPasswordVisible(false);
+  };
 
   useEffect(() => {
     let active = true;
@@ -162,10 +171,10 @@ export function LoginScreen({
 
         {authConfig?.registrationEnabled && (
           <div className="grid h-9 grid-cols-2 rounded-md bg-muted p-1" role="tablist" aria-label="Authentication mode">
-            <button type="button" role="tab" aria-selected={mode === 'login'} onClick={() => { setMode('login'); setError(''); }} className={`rounded-sm text-sm transition-colors ${mode === 'login' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}>
+            <button type="button" role="tab" aria-selected={mode === 'login'} onClick={() => selectMode('login')} className={`rounded-sm text-sm transition-colors ${mode === 'login' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}>
               {t.signIn}
             </button>
-            <button type="button" role="tab" aria-selected={mode === 'register'} onClick={() => { setMode('register'); setError(''); }} className={`rounded-sm text-sm transition-colors ${mode === 'register' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}>
+            <button type="button" role="tab" aria-selected={mode === 'register'} onClick={() => selectMode('register')} className={`rounded-sm text-sm transition-colors ${mode === 'register' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}>
               {t.createAccount}
             </button>
           </div>
@@ -188,7 +197,16 @@ export function LoginScreen({
               </label>
               <div className="relative">
                 <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                <Input id="password" name="password" type="password" placeholder="••••••••••" className="pl-9" autoComplete={mode === 'register' ? 'new-password' : 'current-password'} minLength={mode === 'register' ? 10 : undefined} required />
+                <Input id="password" name="password" type={passwordVisible ? 'text' : 'password'} placeholder="••••••••••" className="pl-9 pr-10" autoComplete={mode === 'register' ? 'new-password' : 'current-password'} minLength={mode === 'register' ? 10 : undefined} required />
+                <button
+                  type="button"
+                  className="absolute right-0 top-0 flex h-full w-10 items-center justify-center rounded-r-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                  aria-label={passwordVisible ? t.hidePassword : t.showPassword}
+                  aria-pressed={passwordVisible}
+                  onClick={() => setPasswordVisible((visible) => !visible)}
+                >
+                  {passwordVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
               </div>
             </div>
             {mode === 'register' && (
@@ -198,7 +216,16 @@ export function LoginScreen({
                 </label>
                 <div className="relative">
                   <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                  <Input id="confirmPassword" name="confirmPassword" type="password" placeholder="••••••••••" className="pl-9" autoComplete="new-password" minLength={10} required />
+                  <Input id="confirmPassword" name="confirmPassword" type={confirmPasswordVisible ? 'text' : 'password'} placeholder="••••••••••" className="pl-9 pr-10" autoComplete="new-password" minLength={10} required />
+                  <button
+                    type="button"
+                    className="absolute right-0 top-0 flex h-full w-10 items-center justify-center rounded-r-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                    aria-label={confirmPasswordVisible ? t.hidePassword : t.showPassword}
+                    aria-pressed={confirmPasswordVisible}
+                    onClick={() => setConfirmPasswordVisible((visible) => !visible)}
+                  >
+                    {confirmPasswordVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
                 </div>
               </div>
             )}

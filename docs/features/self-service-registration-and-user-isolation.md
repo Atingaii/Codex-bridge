@@ -6,6 +6,8 @@
 - Require Cloudflare Turnstile for every enabled registration and validate its
   single-use token on the Hub before creating a user.
 - Sign a newly registered user in with the existing HttpOnly JWT cookie.
+- Let users reveal or hide login, registration, and confirmation passwords
+  independently without changing the submitted values.
 - Let non-admin users use chat while keeping agents, sessions, messages, runs,
   orchestrations, and share-management operations scoped to their `users.id`.
 - Keep registration disabled and fail closed when Turnstile is incomplete or
@@ -72,8 +74,9 @@ no credential or placeholder secret is committed.
    duplicate-user handling, cookie issuance, and secret-safe errors.
 3. Change chat routes to authenticated access and audit every data load for
    ownership checks.
-4. Add the login/register switch, confirmation password, explicit Turnstile
-   widget lifecycle, bilingual text, loading, expiry, and error states.
+4. Add the login/register switch, independent password-visibility controls,
+   confirmation password, explicit Turnstile widget lifecycle, bilingual text,
+   loading, expiry, and error states.
 5. Rebuild `internal/web/static/` and update architecture, code map, workflow,
    roadmap, deployment guidance, and change-impact records where applicable.
 6. Add backend tests for disabled/misconfigured registration, validation,
@@ -91,6 +94,8 @@ no credential or placeholder secret is committed.
   checked-in examples.
 - Frontend production build refreshes embedded output and passes responsive
   browser checks for login and registration.
+- Login and registration password controls remain keyboard accessible, expose
+  localized show/hide labels, and do not overlap typed values on narrow screens.
 - `/usr/local/go/bin/go test ./...`, the production Go build, and
   `make doc-lint` pass.
 

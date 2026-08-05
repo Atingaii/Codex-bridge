@@ -33,6 +33,7 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P7 | Browser permission prompts over app-server | implemented for Codex chat and Codex orchestration |
 | P8 | Empty-reply hardening and accessible session deletion | implemented |
 | P9 | Turnstile-protected self-registration and per-user access | implemented |
+| P10 | Public screenshot guide for chat, orchestration, and formal proof | implemented |
 
 ## Engineering Workflow
 
@@ -66,6 +67,9 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 
 ## Maintenance Log
 
+- 2026-08-05: Added the public `/help` guide and `/hlep` alias with 17
+  deterministic application screenshots, detailed collaboration/debate and
+  formal-proof workflows, copyable demos, and low-context orchestration advice.
 - 2026-05-30: Removed the abandoned external CCB orchestration backend and the
   superseded per-turn orchestration design (verifier / remediation / acceptance
   assessment), the deprecated `orchestration_runner` config, and dead CCB install

@@ -4,6 +4,7 @@ import { api } from './lib/api';
 import type { UserAccount } from './lib/types';
 import { initialLanguage, uiText, type Language } from './lib/i18n';
 import { ConversationSnapshotPage } from './pages/ConversationSnapshotPage';
+import { HelpPage } from './pages/HelpPage';
 import { LoginScreen } from './pages/LoginScreen';
 import { OrchestrationWorkspace } from './pages/OrchestrationWorkspace';
 import { PublicSharePage } from './pages/PublicSharePage';
@@ -18,6 +19,7 @@ export default function App() {
   const t = uiText[language];
   const isSnapshotRoute = path.startsWith('/conversation-snapshot');
   const isShareRoute = path.startsWith('/share/');
+  const isHelpRoute = path === '/help' || path === '/help/' || path === '/hlep' || path === '/hlep/';
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDarkMode);
@@ -30,7 +32,7 @@ export default function App() {
   }, [language]);
 
   useEffect(() => {
-    if (isShareRoute) {
+    if (isShareRoute || isHelpRoute) {
       setBooting(false);
       return;
     }
@@ -38,7 +40,7 @@ export default function App() {
       .then((data) => setUser(data.user))
       .catch(() => setUser(null))
       .finally(() => setBooting(false));
-  }, [isShareRoute]);
+  }, [isHelpRoute, isShareRoute]);
 
   useEffect(() => {
     const handlePop = () => setPath(window.location.pathname);
@@ -67,6 +69,10 @@ export default function App() {
 
   if (isShareRoute) {
     return <PublicSharePage shareID={decodeURIComponent(path.replace(/^\/share\/?/, '').split('/')[0] || '')} t={t} />;
+  }
+
+  if (isHelpRoute) {
+    return <HelpPage language={language} setLanguage={setLanguage} isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} />;
   }
 
   if (!user) {

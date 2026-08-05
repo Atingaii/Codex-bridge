@@ -4,6 +4,7 @@ import {
   AlertCircle,
   ArrowDownToLine,
   ArrowLeft,
+  BookOpen,
   Check,
   Command,
   FileUp,
@@ -873,6 +874,10 @@ export function OrchestrationWorkspace({
           ))}
         </div>
         <div className="p-3 border-t border-sidebar-border shrink-0">
+          <a href="/help" className="mb-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground">
+            <BookOpen className="h-3.5 w-3.5" />
+            <span>{t.help}</span>
+          </a>
           <button onClick={() => openSettings()} className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm hover:bg-sidebar-accent transition-colors">
             <Settings className="h-3.5 w-3.5" />
             <span className="flex-1 text-left">{t.settings}</span>

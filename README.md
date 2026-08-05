@@ -8,7 +8,7 @@ Remote browser access to the **Codex** and **Claude Code** CLIs running on your
 own machine — 1:1 chat with a single CLI, plus multi-CLI orchestration that
 relays turns between a native Codex session and a native Claude Code session.
 
-[简体中文](README.zh-CN.md) · [Deployment Guide](docs/deployment.md) · [Architecture](docs/architecture.md)
+[简体中文](README.zh-CN.md) · [Live Help Guide](https://sparkon.cn/help) · [Deployment Guide](docs/deployment.md) · [Architecture](docs/architecture.md)
 
 ```text
 Browser ──WSS──> Hub (public) <──reverse WS── Bridge (your machine) ──> Codex / Claude
@@ -284,6 +284,10 @@ variables such as `OPENAI_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` in its private
 0600 env file.
 
 ## Documentation
+
+The public [screenshot help guide](https://sparkon.cn/help) covers account
+registration, Turnstile, endpoint enrollment, chat, collaboration/debate
+orchestration, formal-proof runs, context reduction, sharing, and troubleshooting.
 
 - [Deployment Guide](docs/deployment.md) — all deployment methods, production setup, troubleshooting
 - [Architecture](docs/architecture.md) — components, data flow, protocol

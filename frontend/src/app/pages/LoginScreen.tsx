@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertCircle, ChevronDown, Eye, EyeOff, Globe, Lock, RefreshCw, Terminal, User } from 'lucide-react';
+import { AlertCircle, BookOpen, ChevronDown, Eye, EyeOff, Globe, Lock, RefreshCw, Terminal, User } from 'lucide-react';
 import { api } from '../lib/api';
 import type { UserAccount } from '../lib/types';
 import type { Language, UIText } from '../lib/i18n';
@@ -246,11 +246,16 @@ export function LoginScreen({
         </form>
 
         <div className="flex justify-center mt-4">
-          <Button variant="ghost" size="sm" className="text-muted-foreground gap-2" onClick={() => setLanguage(language === 'zh' ? 'en' : 'zh')}>
-            <Globe className="h-4 w-4" />
-            {language === 'zh' ? t.chinese : t.english}
-            <ChevronDown className="h-3 w-3 opacity-50" />
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="sm" className="text-muted-foreground gap-2" onClick={() => setLanguage(language === 'zh' ? 'en' : 'zh')}>
+              <Globe className="h-4 w-4" />
+              {language === 'zh' ? t.chinese : t.english}
+              <ChevronDown className="h-3 w-3 opacity-50" />
+            </Button>
+            <a href="/help" className="inline-flex h-8 items-center justify-center gap-2 rounded-md px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground">
+              <BookOpen className="h-4 w-4" />{language === 'zh' ? '使用帮助' : 'Help'}
+            </a>
+          </div>
         </div>
       </div>
     </div>

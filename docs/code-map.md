@@ -19,6 +19,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | SQLite schema and CRUD | `internal/store/store.go`, `internal/store/id.go` |
 | Wire protocol | `internal/protocol/envelope.go` |
 | Frontend source | `frontend/src/app/App.tsx`, `frontend/src/app/pages/`, `frontend/src/app/components/`, `frontend/src/app/lib/`, `frontend/src/styles/` |
+| Public help guide | `frontend/src/app/pages/HelpPage.tsx`, `frontend/public/help/`, `frontend/scripts/generate-help-screenshots.cjs`, `docs/features/public-help-guide.md` |
 | Embedded frontend output | `internal/web/static/`, `internal/web/embed.go` |
 | Android wrapper | `android/`, `frontend/capacitor.config.ts` |
 | Deployment | `deploy/Caddyfile`, `deploy/systemd-*.service`, `deploy/portable/`, `scripts/build-portable-package.sh`, `Dockerfile`, `Makefile`, `docs/deployment.md` |
@@ -34,6 +35,19 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 4. Add frontend caller in the relevant `frontend/src/app/pages/` or
    `frontend/src/app/components/` file when UI-visible.
 5. Add or update a feature doc and tests.
+
+### Change The Public Help Guide
+
+1. `frontend/src/app/pages/HelpPage.tsx:HelpPage` owns `/help` and `/hlep`
+   content, navigation, examples, and screenshot captions.
+2. `frontend/scripts/generate-help-screenshots.cjs:main` drives the real UI with
+   deterministic demo data and regenerates `frontend/public/help/`.
+3. `frontend/help-page-check.mjs` protects the public routes, workflow coverage,
+   screenshot count, and navigation links.
+4. Run `npm run help:screenshots`, `npm test`, and `npm run build`; commit the
+   resulting `internal/web/static/help/` assets with the frontend bundle.
+5. Update [docs/features/public-help-guide.md](features/public-help-guide.md)
+   when the guide's scope or capture contract changes.
 
 ### Change Registration Or User Isolation
 

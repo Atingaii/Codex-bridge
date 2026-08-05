@@ -4,7 +4,7 @@
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![Platform](https://img.shields.io/badge/platform-Linux-555)](docs/deployment.md)
 
-[English](README.md) · [部署指南](docs/deployment.md) · [架构](docs/architecture.md)
+[English](README.md) · [在线图文教程](https://sparkon.cn/help) · [部署指南](docs/deployment.md) · [架构](docs/architecture.md)
 
 Codex Bridge 让浏览器远程访问私有机器上的 Codex 和 Claude Code CLI：既可与单个 CLI 一对一聊天，也可通过编排在一个长驻的原生 Codex 会话与一个长驻的原生 Claude Code 会话之间逐轮中转（Bridge 只回传输出与轮次上下文，不注入额外的校验/补救轮次，因此你可以在工作目录里 `resume` 这些原生会话）。Hub 是公网入口和 Web UI，Bridge 从私有机器反向连接 Hub，所以 Hub 不需要保存 `OPENAI_API_KEY`，也不需要直连你的工作目录。
 
@@ -127,6 +127,9 @@ codex resume --include-non-interactive
 ```
 
 ## 界面使用
+
+完整的注册、Turnstile 验证、端点接入、单 CLI 对话、协作/辩论编排、形式化证明、
+上下文节省、分享和排错流程见 [在线图文教程](https://sparkon.cn/help)。
 
 - 登录后在设置里可以看到自己已接入的 CLI 端。
 - 在线/离线状态会显示在 CLI 端列表里。

@@ -126,6 +126,13 @@ Bridge binary, and reconnects with the endpoint's existing machine id, name, and
 first known working directory so older endpoints do not accidentally register as
 new agents.
 
+An enroll token's expiry is the deadline for its first successful machine
+binding. After binding, the same machine id may use that credential for normal
+Bridge reconnects even after the deadline; another machine remains rejected,
+and deleting the endpoint revokes the binding. The endpoint selector reports
+the version and connection time of the active in-memory Bridge socket so an
+online Hub is not mistaken for an online CLI endpoint.
+
 For deterministic tests use `bridge.runner=echo`. For real Codex:
 
 ```yaml

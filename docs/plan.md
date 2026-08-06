@@ -23,6 +23,7 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P3.1 | Agent-scoped chat session spaces | implemented |
 | P4 | Cookie JWT login and Caddy/systemd deployment files | implemented |
 | P5 | Heartbeat, reconnect, cancel, close-session cleanup | partial |
+| P5.1 | Machine-bound reconnect after enrollment expiry and online Bridge metadata | implemented |
 | P6 | Orchestration create/continue event stream | implemented |
 | P6.1 | Low-token orchestration handoff strategies | implemented |
 | P6.2 | Deep collaboration routing and orchestration browser approval | implemented |
@@ -67,6 +68,9 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 
 ## Maintenance Log
 
+- 2026-08-06: Fixed expired machine-bound Bridge reconnects, exposed active
+  Bridge version/connection time, reduced returning-worker relay history, and
+  bounded the Bridge-owned formal-proof follow-up ledger.
 - 2026-08-05: Added the public `/help` guide and `/hlep` alias with 17
   deterministic application screenshots, detailed collaboration/debate and
   formal-proof workflows, copyable demos, and low-context orchestration advice.

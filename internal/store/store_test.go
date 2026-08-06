@@ -644,18 +644,35 @@ func TestStoreConversationShareFlow(t *testing.T) {
 func TestConsumeEnrollToken(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	expires := time.Now().Add(time.Hour)
+	expires := time.Now().Add(time.Second)
 	if err := st.CreateEnrollToken(ctx, "token-1", &expires); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.ConsumeEnrollToken(ctx, "token-1", "machine-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ConsumeEnrollToken(ctx, "token-1", "machine-1"); err != nil {
+	if _, err := st.db.ExecContext(ctx, `UPDATE enroll_tokens SET expires_at = ? WHERE token = ?`, time.Now().Add(-time.Hour).Unix(), "token-1"); err != nil {
 		t.Fatal(err)
+	}
+	if err := st.ConsumeEnrollToken(ctx, "token-1", "machine-1"); err != nil {
+		t.Fatalf("bound machine reconnect after expiry: %v", err)
 	}
 	if err := st.ConsumeEnrollToken(ctx, "token-1", "machine-2"); !errors.Is(err, ErrTokenConsumed) {
 		t.Fatalf("expected consumed, got %v", err)
+	}
+	if err := st.RevokeEnrollTokensForMachine(ctx, "machine-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ConsumeEnrollToken(ctx, "token-1", "machine-1"); !errors.Is(err, ErrTokenConsumed) {
+		t.Fatalf("expected revoked token to be consumed, got %v", err)
+	}
+
+	expired := time.Now().Add(-time.Hour)
+	if err := st.CreateEnrollToken(ctx, "token-expired", &expired); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ConsumeEnrollToken(ctx, "token-expired", "machine-new"); !errors.Is(err, ErrTokenExpired) {
+		t.Fatalf("expected unused expired token to expire, got %v", err)
 	}
 }
 

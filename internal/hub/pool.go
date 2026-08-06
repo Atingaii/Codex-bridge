@@ -234,21 +234,47 @@ func (s *wsSender) Close() {
 type BridgeConn struct {
 	agentID      string
 	capabilities *protocol.BridgeCapabilities
+	version      string
+	connectedAt  int64
 	wsSender
 }
 
-func NewBridgeConn(agentID string, ws *websocket.Conn, queue int, capabilities *protocol.BridgeCapabilities) *BridgeConn {
-	return &BridgeConn{agentID: agentID, capabilities: capabilities, wsSender: newWSSender(ws, queue)}
+func NewBridgeConn(agentID string, ws *websocket.Conn, queue int, capabilities *protocol.BridgeCapabilities, version string) *BridgeConn {
+	return &BridgeConn{
+		agentID:      agentID,
+		capabilities: capabilities,
+		version:      version,
+		connectedAt:  time.Now().Unix(),
+		wsSender:     newWSSender(ws, queue),
+	}
 }
 
-func (p *Pool) AgentCapabilities(agentID string) (*protocol.BridgeCapabilities, bool) {
+type AgentConnectionInfo struct {
+	Capabilities *protocol.BridgeCapabilities
+	Version      string
+	ConnectedAt  int64
+}
+
+func (p *Pool) AgentConnectionInfo(agentID string) (AgentConnectionInfo, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	conn := p.agents[agentID]
-	if conn == nil || conn.capabilities == nil {
+	if conn == nil {
+		return AgentConnectionInfo{}, false
+	}
+	return AgentConnectionInfo{
+		Capabilities: conn.capabilities,
+		Version:      conn.version,
+		ConnectedAt:  conn.connectedAt,
+	}, true
+}
+
+func (p *Pool) AgentCapabilities(agentID string) (*protocol.BridgeCapabilities, bool) {
+	connection, ok := p.AgentConnectionInfo(agentID)
+	if !ok || connection.Capabilities == nil {
 		return nil, false
 	}
-	return conn.capabilities, true
+	return connection.Capabilities, true
 }
 
 type BrowserConn struct {

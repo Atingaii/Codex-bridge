@@ -2084,6 +2084,43 @@ func TestRelayHistoryBudgetKeepsNewestUTF8Evidence(t *testing.T) {
 	}
 }
 
+func TestReturningWorkerReceivesOnlyLatestCrossWorkerHandoff(t *testing.T) {
+	exit := 0
+	history := []orchestrationTurn{
+		{Role: "implementer", CLI: "codex", WorkerSlot: orchestrationCodexDefaultSlot, Content: "codex-old-private-result"},
+		{
+			Role: "reviewer", CLI: "claude", WorkerSlot: "claude",
+			Content: "claude-current-review", Handoff: "请修复边界条件并复测。",
+			Tools: []RunnerToolEvent{{Command: "go test ./internal/bridge", Status: "completed", ExitCode: &exit, Output: "ok"}},
+		},
+		{Role: "implementer", CLI: "codex", WorkerSlot: orchestrationCodexDefaultSlot, Content: "codex-newer-private-result"},
+	}
+	prompt := composeRelayPromptWithWorkerSlot("collaboration", "codex", "default", "继续修复", "", false, "implementer", "codex", orchestrationCodexDefaultSlot, 4, 4, history)
+	for _, want := range []string{"请修复边界条件并复测", "go test ./internal/bridge", "exit=0"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("returning worker prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, redundant := range []string{"codex-old-private-result", "codex-newer-private-result"} {
+		if strings.Contains(prompt, redundant) {
+			t.Fatalf("returning worker received redundant own result %q:\n%s", redundant, prompt)
+		}
+	}
+}
+
+func TestFirstWorkerEntryRetainsNecessaryRelayHistory(t *testing.T) {
+	history := []orchestrationTurn{
+		{Role: "implementer", CLI: "claude", WorkerSlot: "claude", Content: "baseline-evidence"},
+		{Role: "reviewer", CLI: "codex", WorkerSlot: orchestrationCodexSlotA, Content: "latest-review-evidence"},
+	}
+	prompt := composeRelayPromptWithWorkerSlot("collaboration", "claude", "default", "继续", "", false, "reviewer", "codex", orchestrationCodexSlotB, 3, 4, history)
+	for _, want := range []string{"baseline-evidence", "latest-review-evidence"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("first worker entry omitted %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestRelayCommandSummariesCoalesceLifecycleAndKeepRecentAudit(t *testing.T) {
 	exit := 0
 	tools := []RunnerToolEvent{
@@ -2385,6 +2422,80 @@ func TestFormalProofWorkspaceResumeReusesRunCWDAndAppendsNotes(t *testing.T) {
 	}
 	if !strings.Contains(resumed.Prompt, "same proof run") {
 		t.Fatalf("resumed prompt missing same-run instruction:\n%s", resumed.Prompt)
+	}
+}
+
+func TestFormalProofFollowupsStayBoundedAndPreserveWorkerEvidence(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := config.Default()
+	initial, err := prepareFormalProofHarness(&cfg, protocol.OrchestrationStartPayload{
+		RunID: "orc_bounded_notes", Prompt: "初始 Lean 任务。", Profile: "formal-proof", PromptSeq: 1,
+	}, tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(initial.NotesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerEvidence := "- worker 保留的验证证据：lake build exit=0。"
+	updated := strings.Replace(string(raw), "## 验证证据\n", "## 验证证据\n\n"+workerEvidence+"\n", 1)
+	if err := os.WriteFile(initial.NotesPath, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 20; index++ {
+		_, err := prepareFormalProofHarness(&cfg, protocol.OrchestrationStartPayload{
+			RunID: "orc_bounded_notes", Prompt: fmt.Sprintf("followup-%02d %s", index, strings.Repeat("证明上下文", 800)),
+			Profile: "formal-proof", Resume: true, RunCWD: initial.RunDir, PromptSeq: int64(index + 2),
+		}, initial.RunDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	finalNotes, err := os.ReadFile(initial.NotesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(finalNotes)
+	for _, want := range []string{workerEvidence, "- 后续请求总数：20", "- 已压缩较早请求：12", "请求 21", "followup-19"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("bounded notes missing %q:\n%s", want, content)
+		}
+	}
+	for _, dropped := range []string{"followup-00", "followup-11"} {
+		if strings.Contains(content, dropped) {
+			t.Fatalf("old follow-up %q was not compacted", dropped)
+		}
+	}
+	if strings.Count(content, formalProofFollowupStart) != 1 || strings.Count(content, formalProofFollowupEnd) != 1 {
+		t.Fatalf("follow-up marker block count is invalid:\n%s", content)
+	}
+	if len(finalNotes) > 24*1024 {
+		t.Fatalf("proof notes grew beyond bounded follow-up window: %d bytes", len(finalNotes))
+	}
+}
+
+func TestFormalProofFollowupAdoptsLegacyUnmarkedEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), formalProofNotesFileName)
+	legacy := "# Formal Proof Notes\n\n## 验证证据\n\n- legacy worker evidence\n\n## 后续请求\n\n- 暂无。\n\n### 请求 2\n\n```text\n旧请求\n```\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendFormalProofFollowup(protocol.OrchestrationStartPayload{Prompt: "新请求", PromptSeq: 3}, formalProofHarnessResult{NotesPath: path}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(raw)
+	for _, want := range []string{"legacy worker evidence", "- 后续请求总数：2", "请求 2", "旧请求", "请求 3", "新请求"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("migrated legacy notes missing %q:\n%s", want, content)
+		}
+	}
+	if strings.Count(content, formalProofFollowupStart) != 1 || strings.Count(content, "### 请求 2") != 1 {
+		t.Fatalf("legacy follow-up was duplicated:\n%s", content)
 	}
 }
 

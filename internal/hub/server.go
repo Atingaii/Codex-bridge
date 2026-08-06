@@ -362,10 +362,12 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request, uid string
 	}
 	out := make([]agentResponse, 0, len(agents))
 	for i := range agents {
-		agents[i].Online = s.pool.AgentOnline(agents[i].ID)
 		item := agentResponse{Agent: agents[i]}
-		if caps, ok := s.pool.AgentCapabilities(agents[i].ID); ok {
-			item.Capabilities = caps
+		if connection, ok := s.pool.AgentConnectionInfo(agents[i].ID); ok {
+			item.Online = true
+			item.Capabilities = connection.Capabilities
+			item.Version = connection.Version
+			item.ConnectedAt = connection.ConnectedAt
 		}
 		out = append(out, item)
 	}
@@ -375,6 +377,8 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request, uid string
 type agentResponse struct {
 	store.Agent
 	Capabilities *protocol.BridgeCapabilities `json:"capabilities,omitempty"`
+	Version      string                       `json:"version,omitempty"`
+	ConnectedAt  int64                        `json:"connectedAt,omitempty"`
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request, uid string) {

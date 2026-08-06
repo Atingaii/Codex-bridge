@@ -64,7 +64,7 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 		s.scheduleAgentRunFailure(agent.ID, reg.Instance, 0)
 	}
 
-	conn := NewBridgeConn(agent.ID, ws, s.cfg.Hub.MaxBridgeSendQueue, reg.Capabilities)
+	conn := NewBridgeConn(agent.ID, ws, s.cfg.Hub.MaxBridgeSendQueue, reg.Capabilities, strings.TrimSpace(reg.Version))
 	s.pool.RegisterAgent(conn)
 	defer func() {
 		s.pool.UnregisterAgent(agent.ID, conn)

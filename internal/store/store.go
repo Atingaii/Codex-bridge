@@ -2133,9 +2133,6 @@ func (s *Store) ConsumeEnrollTokenInfo(ctx context.Context, token, machineID str
 		}
 		return EnrollToken{}, err
 	}
-	if expires.Valid && expires.Int64 < time.Now().Unix() {
-		return EnrollToken{}, ErrTokenExpired
-	}
 	if expires.Valid {
 		info.ExpiresAt = expires.Int64
 	}
@@ -2146,6 +2143,9 @@ func (s *Store) ConsumeEnrollTokenInfo(ctx context.Context, token, machineID str
 		return EnrollToken{}, ErrTokenConsumed
 	}
 	if !used.Valid || used.String == "" {
+		if expires.Valid && expires.Int64 < time.Now().Unix() {
+			return EnrollToken{}, ErrTokenExpired
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE enroll_tokens SET used_by_machine = ? WHERE token = ?`, machineID, token); err != nil {
 			return EnrollToken{}, err
 		}

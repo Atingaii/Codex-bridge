@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,7 +20,20 @@ import (
 	"github.com/tencent/codex-bridge/internal/protocol"
 )
 
-const formalProofNotesFileName = "proof-notes.md"
+const (
+	formalProofNotesFileName       = "proof-notes.md"
+	formalProofFollowupStart       = "<!-- bridge-followups:start -->"
+	formalProofFollowupEnd         = "<!-- bridge-followups:end -->"
+	formalProofFollowupWindow      = 8
+	formalProofFollowupPromptLimit = 2 * 1024
+)
+
+var formalProofFollowupPattern = regexp.MustCompile(`(?ms)\n?### 请求 ([0-9]+)\n\n` + "```text\\n" + `(.*?)\n` + "```\\n?")
+
+type formalProofFollowup struct {
+	Sequence string
+	Prompt   string
+}
 
 type formalProofHarnessResult struct {
 	RunDir        string
@@ -363,7 +377,9 @@ func writeFormalProofNotes(payload protocol.OrchestrationStartPayload, result fo
 	b.WriteString("## 验证证据\n\n- 记录实际运行的 proof assistant 构建、目标检查和依赖/可信性审计命令及结果。\n")
 	b.WriteString("- 构建通过不等于完整证明；含 `sorry`、`admit`、新增公理、oracle、弱化陈述或剩余 goal 时必须明确标记。\n\n")
 	b.WriteString("## 关键决策\n\n- 仅在目标、语义、证明策略或验收标准发生重要变化时追加说明。\n\n")
-	b.WriteString("## 后续请求\n\n- 暂无。\n")
+	b.WriteString("## 后续请求\n\n")
+	b.WriteString(formatFormalProofFollowupBlock(0, nil))
+	b.WriteByte('\n')
 	if err := os.WriteFile(result.NotesPath, []byte(b.String()), 0o600); err != nil {
 		return fmt.Errorf("write formal-proof notes %q: %w", result.NotesPath, err)
 	}
@@ -371,20 +387,138 @@ func writeFormalProofNotes(payload protocol.OrchestrationStartPayload, result fo
 }
 
 func appendFormalProofFollowup(payload protocol.OrchestrationStartPayload, result formalProofHarnessResult) error {
-	file, err := os.OpenFile(result.NotesPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	raw, err := os.ReadFile(result.NotesPath)
 	if err != nil {
-		return fmt.Errorf("open formal-proof notes for follow-up: %w", err)
+		return fmt.Errorf("read formal-proof notes for follow-up: %w", err)
 	}
-	defer file.Close()
+	notes, total, followups := parseFormalProofFollowups(string(raw))
 	seq := payload.PromptSeq
 	if seq <= 0 {
-		seq = 1
+		seq = int64(total + 1)
 	}
-	content := "\n### 请求 " + strconv.FormatInt(seq, 10) + "\n\n```text\n" + strings.TrimSpace(payload.Prompt) + "\n```\n"
-	if _, err := io.WriteString(file, content); err != nil {
-		return fmt.Errorf("append formal-proof follow-up: %w", err)
+	followups = append(followups, formalProofFollowup{
+		Sequence: strconv.FormatInt(seq, 10),
+		Prompt:   trimForPrompt(strings.TrimSpace(payload.Prompt), formalProofFollowupPromptLimit),
+	})
+	total++
+	if len(followups) > formalProofFollowupWindow {
+		followups = followups[len(followups)-formalProofFollowupWindow:]
+	}
+	updated := replaceFormalProofFollowupBlock(notes, formatFormalProofFollowupBlock(total, followups))
+	if err := writeFormalProofNotesAtomic(result.NotesPath, []byte(updated)); err != nil {
+		return fmt.Errorf("rewrite formal-proof follow-ups: %w", err)
 	}
 	return nil
+}
+
+func parseFormalProofFollowups(notes string) (string, int, []formalProofFollowup) {
+	start := strings.Index(notes, formalProofFollowupStart)
+	end := strings.Index(notes, formalProofFollowupEnd)
+	if start >= 0 && end > start {
+		block := notes[start : end+len(formalProofFollowupEnd)]
+		total := parseFormalProofFollowupTotal(block)
+		return notes, total, parseFormalProofFollowupEntries(block)
+	}
+
+	heading := strings.Index(notes, "## 后续请求")
+	if heading < 0 {
+		return notes, 0, nil
+	}
+	prefix := notes[:heading]
+	section := notes[heading:]
+	followups := parseFormalProofFollowupEntries(section)
+	section = formalProofFollowupPattern.ReplaceAllString(section, "")
+	section = strings.Replace(section, "\n\n- 暂无。", "", 1)
+	return prefix + section, len(followups), followups
+}
+
+func parseFormalProofFollowupTotal(block string) int {
+	const prefix = "- 后续请求总数："
+	for _, line := range strings.Split(block, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			value, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, prefix)))
+			if err == nil && value >= 0 {
+				return value
+			}
+		}
+	}
+	return len(parseFormalProofFollowupEntries(block))
+}
+
+func parseFormalProofFollowupEntries(block string) []formalProofFollowup {
+	matches := formalProofFollowupPattern.FindAllStringSubmatch(block, -1)
+	out := make([]formalProofFollowup, 0, len(matches))
+	for _, match := range matches {
+		out = append(out, formalProofFollowup{Sequence: match[1], Prompt: match[2]})
+	}
+	return out
+}
+
+func replaceFormalProofFollowupBlock(notes, block string) string {
+	start := strings.Index(notes, formalProofFollowupStart)
+	end := strings.Index(notes, formalProofFollowupEnd)
+	if start >= 0 && end > start {
+		end += len(formalProofFollowupEnd)
+		return notes[:start] + block + notes[end:]
+	}
+	heading := strings.Index(notes, "## 后续请求")
+	if heading < 0 {
+		return strings.TrimRight(notes, "\n") + "\n\n## 后续请求\n\n" + block + "\n"
+	}
+	headingEnd := strings.IndexByte(notes[heading:], '\n')
+	if headingEnd < 0 {
+		return notes + "\n\n" + block + "\n"
+	}
+	headingEnd += heading + 1
+	return notes[:headingEnd] + "\n" + block + notes[headingEnd:]
+}
+
+func formatFormalProofFollowupBlock(total int, followups []formalProofFollowup) string {
+	var b strings.Builder
+	b.WriteString(formalProofFollowupStart)
+	b.WriteString("\n- 后续请求总数：")
+	b.WriteString(strconv.Itoa(total))
+	b.WriteString("\n- 已压缩较早请求：")
+	b.WriteString(strconv.Itoa(max(0, total-len(followups))))
+	b.WriteByte('\n')
+	if len(followups) == 0 {
+		b.WriteString("- 暂无。\n")
+	}
+	for _, followup := range followups {
+		prompt := strings.ReplaceAll(followup.Prompt, "```", "``\u200b`")
+		b.WriteString("\n### 请求 ")
+		b.WriteString(followup.Sequence)
+		b.WriteString("\n\n```text\n")
+		b.WriteString(prompt)
+		b.WriteString("\n```\n")
+	}
+	b.WriteString(formalProofFollowupEnd)
+	return b.String()
+}
+
+func writeFormalProofNotesAtomic(path string, content []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".proof-notes-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := file.Name()
+	defer os.Remove(tmpPath)
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return err
+	}
+	if _, err := file.Write(content); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func detectProofAssistant(projectDir string) string {

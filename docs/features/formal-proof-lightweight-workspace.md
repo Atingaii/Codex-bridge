@@ -34,10 +34,16 @@ inputs, target/obligations, command evidence, blockers, and decisions. Workers
 update this document only when it helps preserve material state for a later
 turn; Bridge does not structurally validate it after every turn.
 
-A follow-up reuses the persisted `RunCWD` and appends the latest user request to
-the same document. Existing runs with the historical `proof-harness/` layout
-remain usable: Bridge creates `proof-notes.md` alongside those files when it is
-missing and does not remove or rewrite user work.
+A follow-up reuses the persisted `RunCWD` and records the latest user request in
+the same document. `internal/bridge/orchestration_harness.go:appendFormalProofFollowup`
+maintains only a delimited Bridge-owned block: each request is bounded, the
+newest eight remain verbatim, and a counter records compacted predecessors.
+Worker-maintained goals, obligations, validation evidence, blockers, and
+decisions outside that block are not rewritten. Existing runs with the
+historical `proof-harness/` layout remain usable: Bridge creates
+`proof-notes.md` alongside those files when it is missing and does not remove
+user work. Legacy unmarked follow-up entries are adopted into the bounded block
+on the next continuation.
 
 The generated prompt identifies `project/`, `proof-notes.md`, and the detected
 assistant. It asks workers to run the project-appropriate proof assistant
@@ -57,7 +63,8 @@ commands directly and record only important evidence. It does not require
 
 1. Retain run directory resolution, upload decoding, archive extraction, and
    proof-assistant detection.
-2. Generate and append one `proof-notes.md` file.
+2. Generate one `proof-notes.md` file and compact only its Bridge-owned
+   follow-up block.
 3. Remove generated scripts, metadata files, and per-turn structural sync.
 4. Update focused tests and architecture/code-map documentation.
 
@@ -68,7 +75,8 @@ commands directly and record only important evidence. It does not require
 - No generated `check.sh`, YAML state, agent entry files, or governance
   subdirectories are created.
 - Upload extraction and traversal rejection remain covered by tests.
-- Follow-ups reuse the same run directory and append to `proof-notes.md`.
+- Follow-ups reuse the same run directory, preserve worker evidence, and keep a
+  bounded recent-request window in `proof-notes.md`.
 - Formal-proof collaboration/debate contract tests continue to pass.
 - `/usr/local/go/bin/go test ./...` and `make doc-lint` pass.
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -356,6 +357,71 @@ func TestDeleteAgentHidesVisibleAgent(t *testing.T) {
 	agents := body["agents"].([]any)
 	if len(agents) != 0 {
 		t.Fatalf("deleted agent still visible: %#v", agents)
+	}
+}
+
+func TestAgentListIncludesOnlyVisibleOnlineConnectionMetadata(t *testing.T) {
+	t.Parallel()
+
+	s, st := newAuthTestServer(t)
+	ctx := context.Background()
+	user, err := st.UpsertUser(ctx, "metadata-user", "abc1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgentForUser(ctx, user.ID, "metadata-cli", "machine-metadata", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherUser, err := st.UpsertUser(ctx, "metadata-other", "abc1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := st.UpsertAgentForUser(ctx, otherUser.ID, "other-cli", "machine-other-metadata", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectedAt := time.Now().Add(-time.Minute).Unix()
+	connection := &BridgeConn{
+		agentID:      agent.ID,
+		version:      "v0.2.4-test",
+		connectedAt:  connectedAt,
+		capabilities: &protocol.BridgeCapabilities{Runner: "codex"},
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 1),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(connection)
+	s.pool.RegisterAgent(&BridgeConn{
+		agentID:     other.ID,
+		version:     "private-version",
+		connectedAt: connectedAt,
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 1),
+			done: make(chan struct{}),
+		},
+	})
+
+	cookie := loginCookie(t, s, map[string]string{"username": "metadata-user", "password": "abc1234567"})
+	body := authRequestWithCookie(t, s, http.MethodGet, "/api/agents", cookie, http.StatusOK)
+	agents := body["agents"].([]any)
+	if len(agents) != 1 {
+		t.Fatalf("visible agents = %#v", agents)
+	}
+	got := agents[0].(map[string]any)
+	if got["id"] != agent.ID || got["online"] != true || got["version"] != "v0.2.4-test" || got["connectedAt"] != float64(connectedAt) {
+		t.Fatalf("online metadata = %#v", got)
+	}
+	if strings.Contains(fmt.Sprint(got), "private-version") {
+		t.Fatalf("other user's metadata leaked: %#v", got)
+	}
+
+	s.pool.UnregisterAgent(agent.ID, connection)
+	body = authRequestWithCookie(t, s, http.MethodGet, "/api/agents", cookie, http.StatusOK)
+	got = body["agents"].([]any)[0].(map[string]any)
+	if got["online"] != false || got["version"] != nil || got["connectedAt"] != nil || got["capabilities"] != nil {
+		t.Fatalf("offline agent retained live connection metadata: %#v", got)
 	}
 }
 

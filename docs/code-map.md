@@ -83,19 +83,25 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 ### Change CLI Endpoint Management
 
 1. `internal/hub/server.go:handleAgents` lists visible endpoints.
-2. `internal/hub/server.go:handleDeleteAgent` soft-deletes an endpoint and
+2. `internal/hub/pool.go:AgentConnectionInfo` supplies online capabilities,
+   Bridge version, and connection time without persisting stale metadata.
+3. `internal/store/store.go:ConsumeEnrollTokenInfo` treats expiry as a first-use
+   enrollment deadline while enforcing the permanent machine binding on reconnect.
+4. `internal/hub/server.go:handleDeleteAgent` soft-deletes an endpoint and
    sends `agent_shutdown` before disconnecting its active Bridge connection.
-3. `internal/hub/server.go:handleCreateAgentRepairToken` generates repair
+5. `internal/hub/server.go:handleCreateAgentRepairToken` generates repair
    commands for existing endpoints.
-4. `internal/bridge/client.go:connectOnce` sends live `workingDirs` in Bridge
+6. `internal/bridge/client.go:connectOnce` sends live `workingDirs` in Bridge
    heartbeat payloads, and `internal/hub/ws_bridge.go:handleBridgeEnvelope`
    stores them through `internal/store/store.go:TouchAgentWorkingDirs`.
-5. `internal/bridge/client.go:requestShutdown` handles remote endpoint
+7. `internal/bridge/client.go:requestShutdown` handles remote endpoint
    shutdown and local user-service cleanup.
-6. `internal/store/store.go:DeleteAgent` owns agent soft deletion.
-7. `frontend/src/app/components/Settings.tsx:SettingsModal` renders
+8. `internal/store/store.go:DeleteAgent` owns agent soft deletion.
+9. `frontend/src/app/components/Settings.tsx:SettingsModal` renders
    add/delete/detail/repair controls.
-8. Update the relevant feature doc and tests.
+10. `frontend/src/app/components/AgentSelector.tsx:AgentSelector` renders online
+    state and active Bridge version without changing endpoint selection behavior.
+11. Update the relevant feature doc and tests.
 
 ### Add A WebSocket Frame
 

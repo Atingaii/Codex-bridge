@@ -432,7 +432,7 @@ func oneLine(value string) string {
 
 const orchestrationLanguageRule = "Language rule: write all user-visible prose, including the 交接总结 handoff summary, in Chinese by default unless the user explicitly asks for another language."
 
-const relayHistoryPromptBudget = 10 * 1024
+const relayHistoryPromptBudget = 6 * 1024
 
 func composeRelayPromptWithFirstCLI(mode, firstCLI, profile, userPrompt, contextSummary string, resume bool, role, cli string, turn, maxTurns int, history []orchestrationTurn) string {
 	return composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, contextSummary, resume, role, cli, workerSlotForCLI(cli), turn, maxTurns, history)
@@ -447,7 +447,8 @@ func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, conte
 	b.WriteString("\n\n")
 	b.WriteString(relayModeRoleContract(profile, mode, role, turn, maxTurns))
 	b.WriteString("\n")
-	if priorSameWorkerTurns(history, cli, workerSlot) > 0 {
+	returningWorker := priorSameWorkerTurns(history, cli, workerSlot) > 0
+	if returningWorker {
 		b.WriteString("You are receiving this message in the same native " + cli + " conversation used for your earlier turn(s) in this orchestration run. Keep using your existing local context and remembered work from that native session. Do not assume shell process state persists unless your CLI explicitly preserves it between turns.\n\n")
 	}
 	if turn == 1 && profileActive {
@@ -486,9 +487,10 @@ func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, conte
 		b.WriteString("\n")
 	}
 	b.WriteString(fmt.Sprintf("Relay turn: %d of %d. Mode: %s. First CLI: %s. Current CLI: %s/%s.\n\n", turn, maxTurns, mode, normalizeRelayFirstCLI(firstCLI), role, cli))
-	if len(history) > 0 {
+	relayHistory := relayHistoryForWorker(history, relayHistoryPromptBudget, cli, workerSlot, returningWorker)
+	if len(relayHistory) > 0 {
 		b.WriteString("Previous CLI handoff summary, result, and command evidence:\n")
-		for _, item := range relayHistoryWithinBudget(history, relayHistoryPromptBudget) {
+		for _, item := range relayHistory {
 			b.WriteString(formatRelayPriorTurn(item))
 		}
 		b.WriteByte('\n')
@@ -497,6 +499,34 @@ func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, conte
 	b.WriteString(strings.TrimSpace(userPrompt))
 	b.WriteString("\n")
 	return b.String()
+}
+
+func relayHistoryForWorker(history []orchestrationTurn, budget int, cli, workerSlot string, returningWorker bool) []orchestrationTurn {
+	if !returningWorker {
+		return relayHistoryWithinBudget(history, budget)
+	}
+	for index := len(history) - 1; index >= 0; index-- {
+		if !sameRelayWorker(history[index], cli, workerSlot) {
+			return relayHistoryWithinBudget(history[index:index+1], budget)
+		}
+	}
+	if len(history) == 0 {
+		return nil
+	}
+	return relayHistoryWithinBudget(history[len(history)-1:], budget)
+}
+
+func sameRelayWorker(item orchestrationTurn, cli, workerSlot string) bool {
+	if !strings.EqualFold(item.CLI, cli) {
+		return false
+	}
+	if strings.EqualFold(cli, "codex") {
+		return strings.EqualFold(normalizeCodexWorkerSlot(item.WorkerSlot), normalizeCodexWorkerSlot(workerSlot))
+	}
+	if strings.TrimSpace(workerSlot) == "" {
+		return true
+	}
+	return strings.EqualFold(item.WorkerSlot, workerSlot)
 }
 
 func relayModeRoleContract(profile, mode, role string, turn, maxTurns int) string {

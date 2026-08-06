@@ -90,6 +90,10 @@ final adjudication that cannot call placeholder, weakened, axiom-tainted, or
 unfinished output a completed proof. Existing UI modes, role identifiers,
 turn counts, and protocol payloads are unchanged. See
 [docs/features/formal-proof-orchestration-contracts.md](features/formal-proof-orchestration-contracts.md).
+Relay prompts reuse each worker's native session as the primary memory: a
+returning worker receives only the newest cross-worker handoff plus bounded
+command evidence instead of copies of its own earlier output. A worker entering
+the run for the first time still receives the bounded prior history it needs.
 For new formal-proof runs, Bridge first creates a persistent proof-run folder
 under the selected cwd, materializes uploaded projects or an empty `project/`
 directory there, and writes one `proof-notes.md` evidence ledger before
@@ -97,7 +101,10 @@ scheduled CLI turns begin. This bootstrap is not a hidden verifier turn and
 does not consume the user's turn budget. Workers run project-appropriate proof
 assistant commands directly and update the ledger only with material targets,
 obligations, command evidence, blockers, or decisions; Bridge does not generate
-a checker or run per-turn metadata synchronization. See
+a checker or run per-turn metadata synchronization. Bridge maintains follow-up
+requests inside one delimited block, retaining the newest eight bounded requests
+and a count of compacted predecessors without rewriting worker-owned evidence.
+See
 [docs/features/formal-proof-lightweight-workspace.md](features/formal-proof-lightweight-workspace.md).
 Follow-up prompts reuse the locked proof-run cwd through the existing `RunCWD`
 continuity path. The native-session design is documented in
@@ -226,6 +233,13 @@ Implemented frame types:
 Bridge-originated `heartbeat` payloads may include `workingDirs`. Hub treats
 that as live endpoint metadata, updates `agents.working_dirs_json`, and still
 accepts older heartbeat payloads that only carry a timestamp.
+
+Enrollment-token expiry limits first use. After a token is bound through
+`internal/store/store.go:ConsumeEnrollTokenInfo`, only that machine id may reuse
+it for reconnects, including after the bootstrap expiry; endpoint deletion
+revokes the binding. Hub retains `RegisterPayload.Version` and connection time
+only in `internal/hub/pool.go:BridgeConn`, and exposes them for online endpoints
+through the authenticated, ownership-filtered agent list.
 
 ## Continuity
 

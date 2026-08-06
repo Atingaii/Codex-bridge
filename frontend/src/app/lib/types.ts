@@ -15,6 +15,8 @@ export type Agent = {
   workingDirs?: string[];
   lastSeenAt: number;
   online: boolean;
+  version?: string;
+  connectedAt?: number;
   capabilities?: BridgeCapabilities;
 };
 

@@ -54,7 +54,9 @@ the same one-request acceptance from its approval socket.
 ## Implementation Steps
 
 1. Serialize WebSocket JSON and ping writes through the existing Hub sender.
-2. Add Bridge ping/pong deadlines to its single reader/single writer loops.
+2. Add Bridge ping/pong deadlines to its single reader/single writer loops;
+   transient application-queue saturation skips a heartbeat instead of
+   terminating the transport, and stable connections reset reconnect backoff.
 3. Add bounded chat reconnect, state rehydration, and online/visibility wakeup.
 4. Retry a pending chat approval on an attached Bridge connection without
    repeatedly buffering it while disconnected.

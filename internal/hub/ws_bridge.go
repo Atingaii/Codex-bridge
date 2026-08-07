@@ -68,7 +68,7 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 	s.pool.RegisterAgent(conn)
 	defer func() {
 		s.pool.UnregisterAgent(agent.ID, conn)
-		s.scheduleAgentRunFailure(agent.ID, reg.Instance, s.cfg.Bridge.ReconnectMax.Duration+time.Second)
+		s.scheduleAgentRunFailure(agent.ID, reg.Instance, s.bridgeReconnectGrace())
 	}()
 	go conn.WriteLoop(s.websocketPingInterval())
 	defer conn.Close()
@@ -78,7 +78,7 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("[hub] bridge connected", "agent_id", agent.ID, "machine_id", agent.MachineID, "name", agent.Name)
 
-	ticker := time.NewTicker(s.cfg.Hub.HeartbeatInterval.Duration)
+	ticker := time.NewTicker(s.websocketPingInterval())
 	defer ticker.Stop()
 	done := make(chan struct{})
 	go func() {
@@ -117,6 +117,18 @@ func (s *Server) websocketPingInterval() time.Duration {
 		interval = 15 * time.Second
 	}
 	return interval
+}
+
+func (s *Server) bridgeReconnectGrace() time.Duration {
+	minDelay := s.cfg.Bridge.ReconnectMin.Duration
+	if minDelay <= 0 {
+		minDelay = 5 * time.Second
+	}
+	maxDelay := s.cfg.Bridge.ReconnectMax.Duration
+	if maxDelay < minDelay {
+		maxDelay = minDelay
+	}
+	return maxDelay + time.Second
 }
 
 func resilientWebSocketReadTimeout(configured, heartbeat time.Duration) time.Duration {

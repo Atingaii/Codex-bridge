@@ -73,6 +73,9 @@ Let a single user talk from any browser to Codex CLI running on a private machin
   reconnect with state/output recovery, wider Bridge liveness tolerance, and
   request-scoped strict approval for workspace `cat`, `coqc`, and batch
   `coqtop` commands.
+- 2026-08-07: Prevented transient Bridge outbound-queue saturation from
+  forcing a reconnect, added heartbeat interval defaults, and reset backoff
+  after stable connections.
 - 2026-08-07: Added bounded ordinary-chat response evidence, direct recovery
   from streamed text, and one same-native-thread continuation for empty or
   interrupted CLI terminal responses without replaying the original prompt.

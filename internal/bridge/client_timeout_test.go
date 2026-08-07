@@ -19,3 +19,12 @@ func TestBridgeWebSocketReadTimeout(t *testing.T) {
 		}
 	}
 }
+
+func TestBridgeHeartbeatIntervalDefaultsWhenUnset(t *testing.T) {
+	if got := bridgeHeartbeatInterval(0); got != 15*time.Second {
+		t.Fatalf("bridgeHeartbeatInterval(0) = %s, want 15s", got)
+	}
+	if got := bridgeHeartbeatInterval(2 * time.Second); got != 2*time.Second {
+		t.Fatalf("bridgeHeartbeatInterval(2s) = %s, want 2s", got)
+	}
+}

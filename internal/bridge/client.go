@@ -2,7 +2,6 @@ package bridge
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -30,6 +29,7 @@ type Client struct {
 	orchestrations *OrchestrationManager
 	shutdown       chan struct{}
 	shutdownOnce   chan struct{}
+	connectedAt    time.Time
 }
 
 func NewClient(cfg *config.Config, version string) *Client {
@@ -73,6 +73,12 @@ func (c *Client) Run(ctx context.Context) error {
 		if c.shutdownRequested() {
 			return nil
 		}
+		// A connection that stayed alive has recovered from the transient
+		// failure. Do not carry a previous outage's maximum backoff into the
+		// next unrelated outage.
+		if !c.connectedAt.IsZero() && time.Since(c.connectedAt) >= 30*time.Second {
+			delay = minDelay
+		}
 		slog.Warn("[bridge] disconnected", "error", err, "retry_in", delay.String())
 		timer := time.NewTimer(delay + time.Duration(rand.Int63n(int64(delay/2+1))))
 		select {
@@ -92,6 +98,7 @@ func (c *Client) Run(ctx context.Context) error {
 }
 
 func (c *Client) connectOnce(ctx context.Context, token string) error {
+	c.connectedAt = time.Time{}
 	wsURL, err := c.bridgeURL(token)
 	if err != nil {
 		return err
@@ -135,6 +142,7 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 		return err
 	}
 	slog.Info("[bridge] connected", "agent_id", registered.AgentID, "hub", c.cfg.Bridge.HubURL, "runner", c.cfg.Bridge.Runner)
+	c.connectedAt = time.Now()
 	readTimeout := bridgeWebSocketReadTimeout(c.cfg.Bridge.HeartbeatInterval.Duration)
 	_ = ws.SetReadDeadline(time.Now().Add(readTimeout))
 	ws.SetPongHandler(func(string) error {
@@ -147,10 +155,7 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 	writeDone := make(chan struct{})
 	done := make(chan error, 2)
 	go func() {
-		pingInterval := c.cfg.Bridge.HeartbeatInterval.Duration
-		if pingInterval <= 0 {
-			pingInterval = 15 * time.Second
-		}
+		pingInterval := bridgeHeartbeatInterval(c.cfg.Bridge.HeartbeatInterval.Duration)
 		pingTicker := time.NewTicker(pingInterval)
 		defer pingTicker.Stop()
 		for {
@@ -183,7 +188,8 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 		}
 	}()
 
-	ticker := time.NewTicker(c.cfg.Bridge.HeartbeatInterval.Duration)
+	heartbeatInterval := bridgeHeartbeatInterval(c.cfg.Bridge.HeartbeatInterval.Duration)
+	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 	defer func() {
 		c.sessions.DetachOut(writec)
@@ -220,10 +226,20 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 			select {
 			case writec <- protocol.MustEnvelope(protocol.TypeHeartbeat, "", payload):
 			default:
-				return errors.New("bridge write queue full")
+				// Transport Ping/Pong continues to prove liveness. A full
+				// application queue is temporary backpressure, not a reason to
+				// tear down the whole Bridge connection.
+				slog.Warn("[bridge] heartbeat skipped: outbound queue full")
 			}
 		}
 	}
+}
+
+func bridgeHeartbeatInterval(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return 15 * time.Second
+	}
+	return configured
 }
 
 func bridgeWebSocketReadTimeout(heartbeat time.Duration) time.Duration {

@@ -126,70 +126,93 @@ func (m *SessionManager) Prompt(parent context.Context, sid string, payload prot
 	m.mu.Lock()
 	cwd := s.cwd
 	m.mu.Unlock()
-	onUpdate := func(update RunnerUpdate) {
-		if update.Delta == "" && update.Content == "" && update.Tool == nil {
-			return
-		}
-		var tool *protocol.ToolEvent
-		if update.Tool != nil {
-			tool = &protocol.ToolEvent{
-				ID:       update.Tool.ID,
-				Status:   update.Tool.Status,
-				Command:  update.Tool.Command,
-				Output:   update.Tool.Output,
-				ExitCode: update.Tool.ExitCode,
-			}
-		}
-		m.sendSessionEnvelope(sid, protocol.MustEnvelope(protocol.TypeSessionUpdate, sid, protocol.SessionUpdatePayload{
-			Delta:    update.Delta,
-			Content:  update.Content,
-			RunID:    runID,
-			PromptID: promptID,
-			Event:    updateEvent(update),
-			Tool:     tool,
-		}))
-	}
 
 	var (
-		result    RunnerResult
-		nativeID  string
-		nativeCmd string
+		result        RunnerResult
+		nativeID      string
+		nativeCmd     string
+		handle        SessionHandle
+		sessionRunner SessionRunner
 	)
 	if sr, ok := s.runner.(SessionRunner); ok {
 		// Interactive long-session path (ACP runner). Open or reuse the resident
 		// session, then prompt into it. Both ids round-trip back to the browser.
-		handle, openErr := sr.OpenSession(ctx, OpenSessionRequest{
+		sessionRunner = sr
+		handle, err = sr.OpenSession(ctx, OpenSessionRequest{
 			SID:            sid,
 			CWD:            cwd,
 			RemoteThreadID: remoteThreadID,
 			Approvals:      approvals,
 		})
-		if openErr != nil {
-			err = openErr
-		} else {
-			nativeID = handle.NativeResumeID
-			nativeCmd = handle.NativeResumeCommand
-			result, err = sr.PromptSession(ctx, PromptSessionRequest{
-				SID:       sid,
-				Content:   preparedContent,
-				RunID:     runID,
-				PromptID:  promptID,
-				Approvals: approvals,
-			}, onUpdate)
-			if result.RemoteThreadID == "" {
-				result.RemoteThreadID = handle.ACPSessionID
+		if shouldRetryChatSessionOpen(ctx, err) {
+			if waitErr := waitForChatRecovery(ctx); waitErr == nil {
+				handle, err = sr.OpenSession(ctx, OpenSessionRequest{
+					SID:            sid,
+					CWD:            cwd,
+					RemoteThreadID: remoteThreadID,
+					Approvals:      approvals,
+				})
+			} else {
+				err = waitErr
 			}
 		}
-	} else {
-		result, err = s.runner.Prompt(ctx, RunnerRequest{
-			SID:            sid,
-			Content:        preparedContent,
-			RemoteThreadID: remoteThreadID,
-			RunID:          runID,
-			PromptID:       promptID,
-			CWD:            cwd,
-			Approvals:      approvals,
-		}, onUpdate)
+		if err == nil {
+			nativeID = handle.NativeResumeID
+			nativeCmd = handle.NativeResumeCommand
+		}
+	}
+
+	accumulated := newChatPromptEvidence(m.chatTranscriptLimit())
+	currentThreadID := remoteThreadID
+	if handle.ACPSessionID != "" {
+		currentThreadID = handle.ACPSessionID
+	}
+	if err == nil {
+		result, err = m.runChatPromptAttempt(ctx, s.runner, sessionRunner, chatPromptAttemptRequest{
+			sid:            sid,
+			content:        preparedContent,
+			remoteThreadID: currentThreadID,
+			runID:          runID,
+			promptID:       promptID,
+			cwd:            cwd,
+			approvals:      approvals,
+		}, accumulated)
+		if result.RemoteThreadID != "" {
+			currentThreadID = result.RemoteThreadID
+		} else {
+			result.RemoteThreadID = currentThreadID
+		}
+
+		if shouldContinueChatPrompt(ctx, result, err, accumulated) {
+			if waitErr := waitForChatRecovery(ctx); waitErr == nil {
+				continuation := composeChatRecoveryPrompt(accumulated, err)
+				result, err = m.runChatPromptAttempt(ctx, s.runner, sessionRunner, chatPromptAttemptRequest{
+					sid:            sid,
+					content:        continuation,
+					remoteThreadID: currentThreadID,
+					runID:          runID,
+					promptID:       promptID,
+					cwd:            cwd,
+					approvals:      approvals,
+				}, accumulated)
+				if result.RemoteThreadID != "" {
+					currentThreadID = result.RemoteThreadID
+				} else {
+					result.RemoteThreadID = currentThreadID
+				}
+			} else {
+				err = waitErr
+			}
+		}
+	}
+	if err == nil && strings.TrimSpace(result.Content) == "" {
+		result.Content = accumulated.contentText()
+	} else if strings.TrimSpace(result.Content) != "" {
+		accumulated.addContent(result.Content)
+		result.Content = accumulated.contentText()
+	}
+	if result.RemoteThreadID == "" {
+		result.RemoteThreadID = currentThreadID
 	}
 	cancel()
 

@@ -216,15 +216,18 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 
 1. `internal/bridge/appserver_runner.go:Prompt` owns safe
    preparation retry, terminal text recovery, and app-server diagnostics.
-2. `internal/bridge/session.go:Prompt` and
+2. `internal/bridge/session_recovery.go:runChatPromptAttempt` bounds streamed
+   assistant/tool evidence and performs at most one same-thread continuation
+   without replaying the original prompt.
+3. `internal/bridge/session.go:Prompt` and
    `internal/hub/ws_bridge.go:handlePromptComplete` reject successful empty
    completions; the Hub also validates the Bridge-to-session owner.
-3. `internal/hub/server.go:handleDeleteSession` deletes the Hub transcript,
+4. `internal/hub/server.go:handleDeleteSession` deletes the Hub transcript,
    invalidates buffered/owner state, and sends `close_session` to Bridge.
-4. `frontend/src/app/components/SidebarContent.tsx:SidebarContent` and
+5. `frontend/src/app/components/SidebarContent.tsx:SidebarContent` and
    `frontend/src/app/pages/Workspace.tsx:Workspace` expose and handle deletion.
-5. See
-   [docs/features/chat-reliability-and-session-deletion.md](features/chat-reliability-and-session-deletion.md).
+6. See
+   [docs/features/cli-thread-recovery-and-empty-response-retry.md](features/cli-thread-recovery-and-empty-response-retry.md).
 
 ### Change Orchestration Continuity
 

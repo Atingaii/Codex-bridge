@@ -33,6 +33,7 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P6.6 | Persistent per-context task queue | designed |
 | P7 | Browser permission prompts over app-server | implemented for Codex chat and Codex orchestration |
 | P8 | Empty-reply hardening and accessible session deletion | implemented |
+| P8.1 | Same-thread chat recovery and bounded retry evidence | implemented |
 | P9 | Turnstile-protected self-registration and per-user access | implemented |
 | P10 | Public screenshot guide for chat, orchestration, and formal proof | implemented |
 
@@ -68,6 +69,9 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 
 ## Maintenance Log
 
+- 2026-08-07: Added bounded ordinary-chat response evidence, direct recovery
+  from streamed text, and one same-native-thread continuation for empty or
+  interrupted CLI terminal responses without replaying the original prompt.
 - 2026-08-06: Fixed expired machine-bound Bridge reconnects, exposed active
   Bridge version/connection time, reduced returning-worker relay history, and
   bounded the Bridge-owned formal-proof follow-up ledger.

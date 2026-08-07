@@ -163,10 +163,13 @@ preparation once, before `turn/start`; it never replays a submitted turn because
 tool and file side effects are not idempotent. It recovers terminal-only agent
 text, ignores empty unscoped protocol noise until an attributable terminal
 event arrives, and preserves a bounded diagnostic tail when the child process
-exits. `internal/bridge/session.go:Prompt` and
-`internal/hub/ws_bridge.go:handlePromptComplete` both reject a successful empty
-completion. See
-[docs/features/chat-reliability-and-session-deletion.md](features/chat-reliability-and-session-deletion.md).
+exits. `internal/bridge/session_recovery.go:runChatPromptAttempt` also retains a
+bounded assistant/tool summary for ordinary chat: streamed text can complete a
+missing terminal payload, while an empty or interrupted turn can issue one
+short continuation in the same native thread without replaying the original
+prompt. `internal/hub/ws_bridge.go:handlePromptComplete` remains the final empty
+completion guard. See
+[docs/features/cli-thread-recovery-and-empty-response-retry.md](features/cli-thread-recovery-and-empty-response-retry.md).
 
 Orchestration is a native-session relay only. Each run drives one long-lived
 Codex app-server thread and one long-lived Claude Code stream-json session on the

@@ -70,7 +70,7 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 		s.pool.UnregisterAgent(agent.ID, conn)
 		s.scheduleAgentRunFailure(agent.ID, reg.Instance, s.cfg.Bridge.ReconnectMax.Duration+time.Second)
 	}()
-	go conn.WriteLoop()
+	go conn.WriteLoop(s.websocketPingInterval())
 	defer conn.Close()
 
 	if err := conn.Send(protocol.MustEnvelope(protocol.TypeRegistered, "", protocol.RegisteredPayload{AgentID: agent.ID})); err != nil {
@@ -108,9 +108,27 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) bridgeReadTimeout() time.Duration {
-	timeout := s.cfg.Hub.BridgeReadTimeout.Duration
-	if timeout <= 0 {
-		timeout = 45 * time.Second
+	return resilientWebSocketReadTimeout(s.cfg.Hub.BridgeReadTimeout.Duration, s.cfg.Hub.HeartbeatInterval.Duration)
+}
+
+func (s *Server) websocketPingInterval() time.Duration {
+	interval := s.cfg.Hub.HeartbeatInterval.Duration
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	return interval
+}
+
+func resilientWebSocketReadTimeout(configured, heartbeat time.Duration) time.Duration {
+	if heartbeat <= 0 {
+		heartbeat = 15 * time.Second
+	}
+	timeout := configured
+	if heartbeatWindow := 6 * heartbeat; timeout < heartbeatWindow {
+		timeout = heartbeatWindow
+	}
+	if timeout < 90*time.Second {
+		timeout = 90 * time.Second
 	}
 	return timeout
 }
@@ -186,7 +204,9 @@ func (s *Server) handleBridgeEnvelope(ctx context.Context, agentID string, env p
 		s.handlePromptComplete(ctx, env)
 	case protocol.TypeApprovalRequest:
 		payload, err := protocol.Decode[protocol.ApprovalRequestPayload](env)
-		if err == nil && payload.RunID != "" {
+		// Chat approvals also carry a run id. The envelope sid is the unambiguous
+		// routing boundary: only sid-less requests belong to orchestration.
+		if err == nil && env.Sid == "" && payload.RunID != "" {
 			s.pool.BroadcastToOrchestrationBrowsers(payload.RunID, protocol.MustEnvelope(protocol.TypeApprovalRequest, "", payload))
 			return
 		}
@@ -356,6 +376,12 @@ func (s *Server) consumeAssistantBuffer(sid string) string {
 	content := s.buffers[sid]
 	delete(s.buffers, sid)
 	return content
+}
+
+func (s *Server) currentAssistantBuffer(sid string) string {
+	s.buffersMu.Lock()
+	defer s.buffersMu.Unlock()
+	return s.buffers[sid]
 }
 
 func (s *Server) clearAssistantBuffer(sid string) {

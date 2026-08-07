@@ -575,7 +575,7 @@ func TestBrowserApprovalResponseRoutesToBridge(t *testing.T) {
 	defer ws.Close()
 	waitBridgeEnvelope(t, fakeBridge, protocol.TypeOpenSession, sid)
 
-	req := protocol.ApprovalRequestPayload{RequestID: "apr_1", Kind: "item/commandExecution/requestApproval", Command: "rm -rf build", CWD: "/repo"}
+	req := protocol.ApprovalRequestPayload{RequestID: "apr_1", Kind: "item/commandExecution/requestApproval", Command: "rm -rf build", CWD: "/repo", RunID: "run_chat_1", PromptID: "prompt_chat_1"}
 	if err := fakeBridge.WriteJSON(protocol.MustEnvelope(protocol.TypeApprovalRequest, sid, req)); err != nil {
 		t.Fatal(err)
 	}

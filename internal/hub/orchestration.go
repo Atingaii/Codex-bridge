@@ -882,7 +882,7 @@ func (s *Server) handleOrchestrationWS(w http.ResponseWriter, r *http.Request, u
 	ws.SetReadLimit(64 * 1024)
 	conn := NewBrowserConn(runID, ws, s.cfg.Hub.MaxBrowserSendQueue)
 	s.pool.AddOrchestrationBrowser(runID, conn)
-	go conn.WriteLoop()
+	go conn.WriteLoop(s.websocketPingInterval())
 	defer func() {
 		s.pool.RemoveOrchestrationBrowser(runID, conn)
 		conn.Close()

@@ -117,6 +117,8 @@ export function Workspace({
   const assistantItemIdRef = useRef<string | null>(null);
   const assistantTextRef = useRef('');
   const refreshAllInFlightRef = useRef<Promise<void> | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) || null;
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
@@ -165,9 +167,16 @@ export function Workspace({
   }, []);
 
   const closeWS = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    reconnectAttemptRef.current = 0;
+    const ws = wsRef.current;
+    wsRef.current = null;
+    if (ws) {
+      ws.onclose = null;
+      ws.close();
     }
   }, []);
 
@@ -316,7 +325,9 @@ export function Workspace({
             const existing = current.findIndex((item) => item.type === 'approval' && item.approval.requestId === approval.requestId);
             const next: ChatItem = { id: approval.requestId, type: 'approval', approval, status: 'pending' };
             if (existing === -1) return [...current, next];
-            return current.map((item, index) => index === existing ? next : item);
+            // A Bridge retry uses the same request id. Keep an already-clicked
+            // decision visible instead of turning the card back into pending.
+            return current.map((item, index) => index === existing ? { ...item, approval } : item);
           });
         }
         break;
@@ -349,8 +360,21 @@ export function Workspace({
     }
   }, [appendSystem, captureNativeResume, clearActiveChat, t.connected, t.error, t.ready, thread, touchSession]);
 
-  const connectWS = useCallback((sessionId: string) => {
-    closeWS();
+  const connectWS = useCallback((sessionId: string, reconnect = false) => {
+    if (!reconnect) {
+      closeWS();
+    } else {
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      const previous = wsRef.current;
+      wsRef.current = null;
+      if (previous) {
+        previous.onclose = null;
+        previous.close();
+      }
+    }
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${scheme}://${location.host}/ws/chat?sid=${encodeURIComponent(sessionId)}`);
     wsRef.current = ws;
@@ -360,6 +384,7 @@ export function Workspace({
       if (activeSessionIdRef.current !== sessionId || wsRef.current !== ws) return;
       setConnectionStatus(t.connected);
       stopHeartbeat = startWSHeartbeat(ws, sessionId);
+      reconnectAttemptRef.current = 0;
     };
     ws.onmessage = (event) => {
       if (activeSessionIdRef.current !== sessionId || wsRef.current !== ws) return;
@@ -374,10 +399,23 @@ export function Workspace({
     };
     ws.onclose = () => {
       stopHeartbeat?.();
-      if (activeSessionIdRef.current === sessionId) setConnectionStatus(t.disconnected);
+      if (activeSessionIdRef.current !== sessionId || wsRef.current !== ws) return;
+      wsRef.current = null;
+      setConnectionStatus(t.disconnected);
+      const attempt = reconnectAttemptRef.current++;
+      const delay = Math.min(15_000, 750 * (2 ** Math.min(attempt, 5)));
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        if (activeSessionIdRef.current !== sessionId || !navigator.onLine) return;
+        Promise.all([loadMessages(sessionId), loadRuns(sessionId)])
+          .catch(() => undefined)
+          .finally(() => {
+            if (activeSessionIdRef.current === sessionId && !wsRef.current) connectWS(sessionId, true);
+          });
+      }, delay);
     };
     return ws;
-  }, [closeWS, handleEnvelope, startWSHeartbeat, t.connected, t.connecting, t.connectionError, t.disconnected]);
+  }, [closeWS, handleEnvelope, loadMessages, loadRuns, startWSHeartbeat, t.connected, t.connecting, t.connectionError, t.disconnected]);
 
   const selectSession = useCallback(async (sessionId: string) => {
     const session = sessions.find((item) => item.id === sessionId);
@@ -491,6 +529,28 @@ export function Workspace({
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    const recover = () => {
+      const sessionId = activeSessionIdRef.current;
+      if (!sessionId || !navigator.onLine || document.visibilityState !== 'visible') return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState === WebSocket.CLOSED) {
+        reconnectAttemptRef.current = Math.max(1, reconnectAttemptRef.current);
+        Promise.all([loadMessages(sessionId), loadRuns(sessionId)])
+          .catch(() => undefined)
+          .finally(() => {
+            if (activeSessionIdRef.current === sessionId && !wsRef.current) connectWS(sessionId, true);
+          });
+      }
+    };
+    window.addEventListener('online', recover);
+    document.addEventListener('visibilitychange', recover);
+    return () => {
+      window.removeEventListener('online', recover);
+      document.removeEventListener('visibilitychange', recover);
+    };
+  }, [connectWS]);
 
   useEffect(() => {
     selectedAgentIdRef.current = selectedAgentId;

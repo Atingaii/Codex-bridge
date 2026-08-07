@@ -704,12 +704,30 @@ func (r *CodexAppServerRunner) handleApproval(ctx context.Context, client *appSe
 		PromptID:  req.PromptID,
 		Params:    raw,
 	}
+	if payload.CWD == "" {
+		payload.CWD = r.cwd(req)
+	}
+	if isCodexCommandApproval(msg.Method) && isProofCommandAutoApprovable(payload.Command, payload.CWD) {
+		_ = client.respond(msg.ID, automaticApprovalResponseFor(msg.Method))
+		return
+	}
 	res, err := req.Approvals.RequestApproval(ctx, payload)
 	if err != nil {
 		res.Decision = "cancel"
 	}
 	response := approvalResponseFor(msg.Method, res.Decision)
 	_ = client.respond(msg.ID, response)
+}
+
+func isCodexCommandApproval(method string) bool {
+	return method == "item/commandExecution/requestApproval" || method == "execCommandApproval"
+}
+
+func automaticApprovalResponseFor(method string) any {
+	if method == "execCommandApproval" {
+		return map[string]any{"decision": "approved"}
+	}
+	return map[string]any{"decision": "accept"}
 }
 
 func appServerToolEvent(item map[string]any) *RunnerToolEvent {

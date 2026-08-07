@@ -22,7 +22,7 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P3 | SQLite users, agents, sessions, messages | implemented |
 | P3.1 | Agent-scoped chat session spaces | implemented |
 | P4 | Cookie JWT login and Caddy/systemd deployment files | implemented |
-| P5 | Heartbeat, reconnect, cancel, close-session cleanup | partial |
+| P5 | Heartbeat, reconnect, cancel, close-session cleanup | implemented |
 | P5.1 | Machine-bound reconnect after enrollment expiry and online Bridge metadata | implemented |
 | P6 | Orchestration create/continue event stream | implemented |
 | P6.1 | Low-token orchestration handoff strategies | implemented |
@@ -69,6 +69,10 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 
 ## Maintenance Log
 
+- 2026-08-07: Added WebSocket ping/pong resilience, bounded same-session chat
+  reconnect with state/output recovery, wider Bridge liveness tolerance, and
+  request-scoped strict approval for workspace `cat`, `coqc`, and batch
+  `coqtop` commands.
 - 2026-08-07: Added bounded ordinary-chat response evidence, direct recovery
   from streamed text, and one same-native-thread continuation for empty or
   interrupted CLI terminal responses without replaying the original prompt.

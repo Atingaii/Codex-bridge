@@ -134,7 +134,7 @@ codex resume --include-non-interactive
 - 登录后在设置里可以看到自己已接入的 CLI 端。
 - 在线/离线状态会显示在 CLI 端列表里。
 - 主对话和编排页顶部都有 CLI 端选择器，可以在多个 WSL2/服务器终端之间切换。
-- “需要确认”权限策略会把 Codex 聊天、Codex 编排和 Claude Code 编排审批都展示到浏览器；“自动执行”权限策略会把 Claude Code 映射到原生 bypass 权限模式，并把 root 场景需要的 `IS_SANDBOX` 只注入 Bridge 管理的 Claude 子进程，不要求用户修改全局 Claude 配置。编排页会显示当前 CLI 端的能力矩阵。Hub 编排会在同一个选中的 Bridge 连接上轮流调用 Claude Code 和 Codex CLI，并把每轮摘要带给下一轮。
+- “需要确认”权限策略会把 Codex 聊天、Codex 编排和 Claude Code 编排审批都展示到浏览器；其中单条 `cat`、`coqc` 和批处理 `coqtop` 仅在可执行文件、参数和文件路径通过严格工作区白名单时自动放行，命令拼接、重定向、展开和目录越界仍需人工审批。“自动执行”权限策略会把 Claude Code 映射到原生 bypass 权限模式，并把 root 场景需要的 `IS_SANDBOX` 只注入 Bridge 管理的 Claude 子进程，不要求用户修改全局 Claude 配置。编排页会显示当前 CLI 端的能力矩阵。Hub 编排会在同一个选中的 Bridge 连接上轮流调用 Claude Code 和 Codex CLI，并把每轮摘要带给下一轮。
 - 编排页有 `默认` / `形式化证明` 配置选择，也有“原生上下文”设置。形式化证明提示和每轮结束后的原生压缩维护都是显式选择后才启用，并随 run 持久化；Codex 会走 app-server 原生压缩 RPC，没有可验证控制通道的 CLI 会记录 Bridge note 并跳过，避免把 slash 命令写进真实会话。形式化证明下，协作模式采用证明作者/独立审计者契约，辩论模式采用可证伪提案者/对抗性批评者契约，要求目标陈述不变、记录证明状态和精确检查命令，并在最后审计依赖与信任边界；界面、轮数和现有会话用法不变。默认配置不会因为关键词自动注入证明提示。编排事件使用结构化字段区分 CLI、Bridge、用户来源，并用单独的最终结论事件展示收尾结果。
 - 每个 CLI 端可以展开“详情”并生成“修复连接”命令；旧版启动命令接入的端点可用该命令更新 Bridge、保留原 machine id 并重连同一个端点。
 - 删除 CLI 端会让 Hub 通知在线 Bridge 停止对应本地服务并退出，同时让已消费 token

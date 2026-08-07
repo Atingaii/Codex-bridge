@@ -623,6 +623,10 @@ func handleClaudeApprovalSocketConn(ctx context.Context, conn net.Conn, server *
 	if payload.Reason == "" {
 		payload.Reason = claudeApprovalReason(raw)
 	}
+	if isProofCommandAutoApprovable(payload.Command, payload.CWD) {
+		_ = json.NewEncoder(conn).Encode(claudeApprovalSocketResponse{RequestID: payload.RequestID, Decision: "accept"})
+		return
+	}
 	requester := server.requesterForPayload()
 	res, err := requester.RequestApproval(ctx, payload)
 	if err != nil {

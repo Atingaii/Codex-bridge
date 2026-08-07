@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
@@ -232,6 +233,88 @@ func TestSessionPromptDoesNotRetryCancellation(t *testing.T) {
 	errPayload := findSessionError(t, envelopes)
 	if errPayload.Code != "CANCELED" {
 		t.Fatalf("error = %#v", errPayload)
+	}
+}
+
+func TestSessionApprovalRequesterRetriesAfterReconnect(t *testing.T) {
+	cfg := config.Default()
+	manager := NewSessionManager(&cfg)
+	firstOut := make(chan protocol.Envelope, 4)
+	manager.sessions["session-1"] = &Session{
+		sid:       "session-1",
+		out:       firstOut,
+		approvals: make(map[string]chan protocol.ApprovalResponsePayload),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type approvalResult struct {
+		res protocol.ApprovalResponsePayload
+		err error
+	}
+	done := make(chan approvalResult, 1)
+	go func() {
+		res, err := (sessionApprovalRequester{
+			manager:  manager,
+			sid:      "session-1",
+			runID:    "run-1",
+			promptID: "prompt-1",
+		}).RequestApproval(ctx, protocol.ApprovalRequestPayload{
+			RequestID: "approval-1",
+			Kind:      "item/commandExecution/requestApproval",
+			Command:   "rm -rf build",
+		})
+		done <- approvalResult{res: res, err: err}
+	}()
+
+	first := waitSessionApprovalEnvelope(t, firstOut)
+	if first.RequestID != "approval-1" || first.RunID != "run-1" || first.PromptID != "prompt-1" {
+		t.Fatalf("first approval = %#v", first)
+	}
+
+	manager.DetachOut(firstOut)
+	secondOut := make(chan protocol.Envelope, 4)
+	manager.AttachOut(secondOut)
+	second := waitSessionApprovalEnvelope(t, secondOut)
+	if second.RequestID != first.RequestID {
+		t.Fatalf("retried request id = %q, want %q", second.RequestID, first.RequestID)
+	}
+
+	if !manager.ApprovalResponse("session-1", protocol.ApprovalResponsePayload{RequestID: "approval-1", Decision: "accept"}) {
+		t.Fatal("approval response was not routed")
+	}
+	select {
+	case result := <-done:
+		if result.err != nil || result.res.Decision != "accept" || result.res.RequestID != "approval-1" {
+			t.Fatalf("approval result = %#v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("approval request did not return after response")
+	}
+
+	manager.mu.Lock()
+	_, stillPending := manager.sessions["session-1"].approvals["approval-1"]
+	manager.mu.Unlock()
+	if stillPending {
+		t.Fatal("approval mapping was not cleaned up")
+	}
+}
+
+func waitSessionApprovalEnvelope(t *testing.T, out <-chan protocol.Envelope) protocol.ApprovalRequestPayload {
+	t.Helper()
+	select {
+	case env := <-out:
+		if env.Type != protocol.TypeApprovalRequest {
+			t.Fatalf("envelope type = %q, want %q", env.Type, protocol.TypeApprovalRequest)
+		}
+		payload, err := protocol.Decode[protocol.ApprovalRequestPayload](env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for approval request")
+		return protocol.ApprovalRequestPayload{}
 	}
 }
 

@@ -109,8 +109,12 @@ The settings UI exposes two permission profiles:
   orchestration approval requests are shown in the browser and answered through
   run-scoped approval frames. Claude Code orchestration uses a temporary MCP
   permission tool so browser approval cards appear on the orchestration
-  timeline. Hub-managed orchestration requires the selected Bridge connection
-  to expose both direct Claude Code and Codex CLI capabilities.
+  timeline. Single `cat`, `coqc`, and batch `coqtop` commands are automatically
+  accepted only when their executable, options, and file paths pass the strict
+  workspace allowlist; shell composition, redirection, expansion, and path
+  escape still require browser review. Hub-managed orchestration requires the
+  selected Bridge connection to expose both direct Claude Code and Codex CLI
+  capabilities.
 - `auto-execute`: starts Bridge with `--runner codex --sandbox
   danger-full-access --approval-policy never`, preserving the previous
   browser-first trusted-machine behavior. Claude Code orchestration maps this

@@ -135,6 +135,11 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 		return err
 	}
 	slog.Info("[bridge] connected", "agent_id", registered.AgentID, "hub", c.cfg.Bridge.HubURL, "runner", c.cfg.Bridge.Runner)
+	readTimeout := bridgeWebSocketReadTimeout(c.cfg.Bridge.HeartbeatInterval.Duration)
+	_ = ws.SetReadDeadline(time.Now().Add(readTimeout))
+	ws.SetPongHandler(func(string) error {
+		return ws.SetReadDeadline(time.Now().Add(readTimeout))
+	})
 
 	writec := make(chan protocol.Envelope, 128)
 	c.sessions.AttachOut(writec)
@@ -142,13 +147,25 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 	writeDone := make(chan struct{})
 	done := make(chan error, 2)
 	go func() {
+		pingInterval := c.cfg.Bridge.HeartbeatInterval.Duration
+		if pingInterval <= 0 {
+			pingInterval = 15 * time.Second
+		}
+		pingTicker := time.NewTicker(pingInterval)
+		defer pingTicker.Stop()
 		for {
 			select {
 			case <-writeDone:
 				return
+			case <-pingTicker.C:
+				if err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second)); err != nil {
+					done <- fmt.Errorf("bridge websocket ping failed: %w", err)
+					return
+				}
 			case env := <-writec:
+				_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if err := ws.WriteJSON(env); err != nil {
-					done <- err
+					done <- fmt.Errorf("bridge websocket write failed: %w", err)
 					return
 				}
 			}
@@ -158,9 +175,10 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 		for {
 			var env protocol.Envelope
 			if err := ws.ReadJSON(&env); err != nil {
-				done <- err
+				done <- fmt.Errorf("bridge websocket read failed: %w", err)
 				return
 			}
+			_ = ws.SetReadDeadline(time.Now().Add(readTimeout))
 			c.handleEnvelope(ctx, env, writec)
 		}
 	}()
@@ -206,6 +224,17 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 			}
 		}
 	}
+}
+
+func bridgeWebSocketReadTimeout(heartbeat time.Duration) time.Duration {
+	if heartbeat <= 0 {
+		heartbeat = 15 * time.Second
+	}
+	timeout := 6 * heartbeat
+	if timeout < 90*time.Second {
+		timeout = 90 * time.Second
+	}
+	return timeout
 }
 
 func BridgeCapabilities(cfg *config.Config) *protocol.BridgeCapabilities {

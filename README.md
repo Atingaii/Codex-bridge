@@ -199,7 +199,10 @@ trusted-machine mode with `danger-full-access` and no prompts; Bridge maps that
 profile to Claude Code's bypass permission mode and scopes any root-only
 `IS_SANDBOX` handling to the managed Claude child process. Claude Code
 orchestration also uses browser-side approval in review-required mode through
-Claude Code's permission prompt MCP hook. Hub-managed orchestration uses the
+Claude Code's permission prompt MCP hook. A single workspace-contained `cat`,
+`coqc`, or batch `coqtop` command can be approved automatically after strict
+validation; shell composition, redirection, expansion, unknown options, and
+path escape continue to require browser review. Hub-managed orchestration uses the
 selected Bridge connection for the whole run, alternates direct Claude Code and
 Codex CLI turns, carries compact turn summaries forward, and shows each
 endpoint's approval capabilities before a run starts. The orchestration page

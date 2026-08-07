@@ -123,7 +123,7 @@ func Default() Config {
 			DBPath:                   "data/codex-bridge.db",
 			CookieSecure:             false,
 			HeartbeatInterval:        Duration{Duration: 15_000_000_000},
-			BridgeReadTimeout:        Duration{Duration: 45_000_000_000},
+			BridgeReadTimeout:        Duration{Duration: 90_000_000_000},
 			BrowserCloseSession:      false,
 			BrowserCloseGrace:        Duration{Duration: 1500_000_000},
 			BrowserLeaseTTL:          Duration{Duration: 5 * 60 * 1_000_000_000},

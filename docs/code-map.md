@@ -191,21 +191,24 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 4. `internal/bridge/orchestration_claude.go:runClaude` maps Claude Code permission
    prompts through `codex-bridge claude-approval-mcp` and run-scoped approval
    frames.
-5. `internal/bridge/session.go:ApprovalResponse` routes browser decisions back
+5. `internal/bridge/approval_allowlist.go:isProofCommandAutoApprovable`
+   request-scopes automatic `cat`/`coqc`/batch-`coqtop` approval after strict
+   command, executable, option, and workspace-path validation.
+6. `internal/bridge/session.go:ApprovalResponse` routes browser decisions back
    to the waiting runner.
-6. `internal/bridge/orchestration.go:ApprovalResponse` routes run-scoped
+7. `internal/bridge/orchestration.go:ApprovalResponse` routes run-scoped
    browser decisions back to the waiting Claude MCP or Codex app-server turn.
-7. `internal/hub/ws_bridge.go:handleBridgeEnvelope` forwards Bridge approval
+8. `internal/hub/ws_bridge.go:handleBridgeEnvelope` forwards Bridge approval
    requests to chat browsers by `sid` or orchestration browsers by
    `payload.runId`.
-8. `internal/hub/orchestration.go:validateOrchestrationCapabilities` blocks
+9. `internal/hub/orchestration.go:validateOrchestrationCapabilities` blocks
    orchestration if the selected online Bridge cannot execute both CLIs, and
    additionally blocks review-required orchestration if browser approval support
    is missing.
-9. `internal/hub/ws_browser.go:handleBrowserEnvelope` and
+10. `internal/hub/ws_browser.go:handleBrowserEnvelope` and
    `internal/hub/orchestration.go:handleOrchestrationWS` forward browser
    approval decisions back to the Bridge.
-10. `frontend/src/app/components/OrchestrationComponents.tsx:CapabilityMatrix`,
+11. `frontend/src/app/components/OrchestrationComponents.tsx:CapabilityMatrix`,
     `frontend/src/app/components/chat/ApprovalCard.tsx:ApprovalCard`,
     `frontend/src/app/pages/Workspace.tsx:Workspace`, and
     `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
@@ -214,19 +217,23 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 
 ### Change Chat Reliability Or Session Deletion
 
-1. `internal/bridge/appserver_runner.go:Prompt` owns safe
+1. `internal/hub/pool.go:WriteLoop` and
+   `internal/bridge/client.go:connectOnce` own serialized WebSocket ping/JSON
+   writes and transport liveness; `frontend/src/app/pages/Workspace.tsx:connectWS`
+   owns same-`sid` reconnect and state rehydration.
+2. `internal/bridge/appserver_runner.go:Prompt` owns safe
    preparation retry, terminal text recovery, and app-server diagnostics.
-2. `internal/bridge/session_recovery.go:runChatPromptAttempt` bounds streamed
+3. `internal/bridge/session_recovery.go:runChatPromptAttempt` bounds streamed
    assistant/tool evidence and performs at most one same-thread continuation
    without replaying the original prompt.
-3. `internal/bridge/session.go:Prompt` and
+4. `internal/bridge/session.go:Prompt` and
    `internal/hub/ws_bridge.go:handlePromptComplete` reject successful empty
    completions; the Hub also validates the Bridge-to-session owner.
-4. `internal/hub/server.go:handleDeleteSession` deletes the Hub transcript,
+5. `internal/hub/server.go:handleDeleteSession` deletes the Hub transcript,
    invalidates buffered/owner state, and sends `close_session` to Bridge.
-5. `frontend/src/app/components/SidebarContent.tsx:SidebarContent` and
+6. `frontend/src/app/components/SidebarContent.tsx:SidebarContent` and
    `frontend/src/app/pages/Workspace.tsx:Workspace` expose and handle deletion.
-6. See
+7. See
    [docs/features/cli-thread-recovery-and-empty-response-retry.md](features/cli-thread-recovery-and-empty-response-retry.md).
 
 ### Change Orchestration Continuity

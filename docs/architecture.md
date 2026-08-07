@@ -13,6 +13,15 @@ Bridge (Go)
 codex exec --json
 ```
 
+All three WebSocket paths use standard ping/pong control frames in addition to
+the existing JSON heartbeat envelopes. Hub serializes JSON and ping writes in
+`internal/hub/pool.go:WriteLoop`; Bridge does the same in
+`internal/bridge/client.go:connectOnce`. Read deadlines retain at least six
+heartbeat windows (and at least 90 seconds). Chat reconnect in
+`frontend/src/app/pages/Workspace.tsx:connectWS` keeps the same `sid`, reloads
+persisted messages/runs, and receives any in-flight assistant buffer from
+`internal/hub/ws_browser.go:handleBrowserWS`.
+
 CLI endpoints created with the review-required profile use
 `internal/bridge/appserver_runner.go` instead of `codex exec --json` for Codex
 chat. That runner keeps a `codex app-server --listen stdio://` JSON-RPC session
@@ -157,6 +166,14 @@ callbacks are mapped to run-scoped `approval_request` frames with
 the owning Bridge. The standalone `internal/bridge/appserver_runner.go:Prompt`
 path remains the Codex app-server runner for chat and non-orchestration runner
 uses.
+
+In review-required mode, command execution callbacks pass through
+`internal/bridge/approval_allowlist.go:isProofCommandAutoApprovable` before
+browser relay. A single workspace-contained `cat`, `coqc`, or batch `coqtop`
+request can receive a request-scoped approval; file changes, permission grants,
+compound shell syntax, unknown options, and paths escaping the workspace keep
+the normal browser approval path. The same validator is applied at the Claude
+permission socket boundary.
 
 The standalone app-server path retries process initialization and thread
 preparation once, before `turn/start`; it never replays a submitted turn because

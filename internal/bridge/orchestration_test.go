@@ -3063,6 +3063,33 @@ func TestOrchestrationApprovalRequesterRoundTrip(t *testing.T) {
 	}
 }
 
+func TestClaudeApprovalSocketAutoApprovesProofCommand(t *testing.T) {
+	root := t.TempDir()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "coqc"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(root, "Main.v"), []byte("Check nat.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client, server := net.Pipe()
+	defer client.Close()
+	go handleClaudeApprovalSocketConn(context.Background(), server, nil)
+	if err := json.NewEncoder(client).Encode(claudeApprovalSocketRequest{
+		RequestID: "apr_auto", Command: "coqc Main.v", CWD: root,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var res claudeApprovalSocketResponse
+	if err := json.NewDecoder(client).Decode(&res); err != nil {
+		t.Fatal(err)
+	}
+	if res.RequestID != "apr_auto" || res.Decision != "accept" || res.Error != "" {
+		t.Fatalf("auto approval = %#v", res)
+	}
+}
+
 func TestClaudeApprovalMCPToolCallUsesSocketDecision(t *testing.T) {
 	socketPath := t.TempDir() + "/approval.sock"
 	listener, err := net.Listen("unix", socketPath)

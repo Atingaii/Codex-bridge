@@ -13,7 +13,7 @@ hub:
   db_path: data/codex-bridge.db
   cookie_secure: false
   heartbeat_interval: 15s
-  bridge_read_timeout: 45s
+  bridge_read_timeout: 90s
   browser_close_session: false
   browser_close_grace: 1500ms
   browser_lease_ttl: 5m

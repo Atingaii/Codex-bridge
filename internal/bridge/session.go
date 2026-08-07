@@ -290,6 +290,8 @@ type sessionApprovalRequester struct {
 	promptID string
 }
 
+const sessionApprovalRetryInterval = time.Second
+
 func updateEvent(update RunnerUpdate) string {
 	if update.Tool != nil {
 		return "tool"
@@ -353,13 +355,39 @@ func (r sessionApprovalRequester) RequestApproval(ctx context.Context, req proto
 	s.approvals[req.RequestID] = ch
 	m.mu.Unlock()
 
-	m.sendSessionEnvelope(r.sid, protocol.MustEnvelope(protocol.TypeApprovalRequest, r.sid, req))
-	select {
-	case res := <-ch:
-		return res, nil
-	case <-ctx.Done():
-		m.removeApproval(r.sid, req.RequestID)
-		return protocol.ApprovalResponsePayload{}, ctx.Err()
+	env := protocol.MustEnvelope(protocol.TypeApprovalRequest, r.sid, req)
+	// Preserve one request for the next Bridge connection, then retry only while
+	// an output is currently attached. A browser can reconnect after the initial
+	// request was delivered, so the stable request ID lets the UI upsert it.
+	m.sendSessionEnvelope(r.sid, env)
+	ticker := time.NewTicker(sessionApprovalRetryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case res := <-ch:
+			return res, nil
+		case <-ticker.C:
+			m.retrySessionApproval(r.sid, req.RequestID, ch, env)
+		case <-ctx.Done():
+			m.removeApproval(r.sid, req.RequestID)
+			return protocol.ApprovalResponsePayload{}, ctx.Err()
+		}
+	}
+}
+
+func (m *SessionManager) retrySessionApproval(sid, requestID string, ch chan protocol.ApprovalResponsePayload, env protocol.Envelope) {
+	m.mu.Lock()
+	s := m.sessions[sid]
+	var out chan<- protocol.Envelope
+	if s != nil && s.approvals[requestID] == ch {
+		out = s.out
+	}
+	m.mu.Unlock()
+	if out != nil {
+		// Do not buffer a recurring retransmission while disconnected. The first
+		// request above is retained once in pending and the next tick will use the
+		// newly attached output channel.
+		send(out, env)
 	}
 }
 

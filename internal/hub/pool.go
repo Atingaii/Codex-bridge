@@ -207,11 +207,24 @@ func (s *wsSender) Send(env protocol.Envelope) error {
 	}
 }
 
-func (s *wsSender) WriteLoop() {
+func (s *wsSender) WriteLoop(pingInterval time.Duration) {
+	var ping <-chan time.Time
+	var ticker *time.Ticker
+	if pingInterval > 0 {
+		ticker = time.NewTicker(pingInterval)
+		ping = ticker.C
+		defer ticker.Stop()
+	}
 	for {
 		select {
 		case <-s.done:
 			return
+		case <-ping:
+			_ = s.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := s.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second)); err != nil {
+				s.Close()
+				return
+			}
 		case env := <-s.send:
 			_ = s.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := s.ws.WriteJSON(env); err != nil {

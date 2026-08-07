@@ -71,6 +71,21 @@ func TestApprovalResponseForUsesSessionScopedAcceptance(t *testing.T) {
 	}
 }
 
+func TestAutomaticApprovalResponseIsRequestScoped(t *testing.T) {
+	tests := []struct {
+		method string
+		want   any
+	}{
+		{"item/commandExecution/requestApproval", map[string]any{"decision": "accept"}},
+		{"execCommandApproval", map[string]any{"decision": "approved"}},
+	}
+	for _, tc := range tests {
+		if got := automaticApprovalResponseFor(tc.method); !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("automaticApprovalResponseFor(%q) = %#v, want %#v", tc.method, got, tc.want)
+		}
+	}
+}
+
 func TestCodexAppServerRunnerSanitizesPromptText(t *testing.T) {
 	tmp := t.TempDir()
 	codexPath := filepath.Join(tmp, "codex")

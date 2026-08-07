@@ -44,7 +44,7 @@ func (s *Server) handleBrowserWS(w http.ResponseWriter, r *http.Request, uid str
 	conn := NewBrowserConn(sid, ws, s.cfg.Hub.MaxBrowserSendQueue)
 	reattached := s.tryReattach(sid)
 	s.pool.AddBrowser(sid, conn)
-	go conn.WriteLoop()
+	go conn.WriteLoop(s.websocketPingInterval())
 	defer func() {
 		last := s.pool.RemoveBrowser(sid, conn)
 		conn.Close()
@@ -65,6 +65,14 @@ func (s *Server) handleBrowserWS(w http.ResponseWriter, r *http.Request, uid str
 			status = "reattached"
 		}
 		_ = conn.Send(protocol.MustEnvelope(protocol.TypeStatus, sid, map[string]any{"status": status}))
+		if content := s.currentAssistantBuffer(sid); content != "" {
+			active, _ := s.store.ActiveRunBySession(r.Context(), sid)
+			_ = conn.Send(protocol.MustEnvelope(protocol.TypeSessionUpdate, sid, protocol.SessionUpdatePayload{
+				Content:  content,
+				RunID:    active.ID,
+				PromptID: active.PromptID,
+			}))
+		}
 	}
 
 	for {
@@ -94,11 +102,7 @@ func (s *Server) browserReadLimit() int64 {
 }
 
 func (s *Server) browserReadTimeout() time.Duration {
-	timeout := 3 * s.cfg.Hub.HeartbeatInterval.Duration
-	if timeout <= 0 {
-		timeout = 45 * time.Second
-	}
-	return timeout
+	return resilientWebSocketReadTimeout(0, s.cfg.Hub.HeartbeatInterval.Duration)
 }
 
 func (s *Server) handleBrowserEnvelope(r *http.Request, uid string, session store.Session, conn *BrowserConn, env protocol.Envelope) {

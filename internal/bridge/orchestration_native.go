@@ -68,11 +68,11 @@ func (m *OrchestrationManager) runPostTurnNativeMaintenance(ctx context.Context,
 	}
 }
 
-func (m *OrchestrationManager) runFinalNativeMaintenance(ctx context.Context, workerPair, mode, firstCLI string, maxTurns int, state *orchestrationSessionState) {
-	if state == nil || state.NativeSession == nil || maxTurns <= 0 {
+func (m *OrchestrationManager) runFinalNativeMaintenance(ctx context.Context, workerPair, mode, firstCLI string, completedTurns int, state *orchestrationSessionState) {
+	if state == nil || state.NativeSession == nil || completedTurns <= 0 {
 		return
 	}
-	turnPlan := roleForTurnWithWorkerPair(mode, workerPair, firstCLI, maxTurns)
+	turnPlan := roleForTurnWithWorkerPair(mode, workerPair, firstCLI, completedTurns)
 	if turnPlan.CLI != "codex" {
 		return
 	}

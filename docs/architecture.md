@@ -74,8 +74,14 @@ stream-json session. For Codex + Codex runs, Bridge keeps independent
 native context. Direct orchestration is a pass-through relay: the run's
 persisted `worker_pair` and `first_cli` settings decide which worker receives
 the browser task first, Bridge streams CLI deltas, typed command events, and
-terminal status to the browser, and the next worker receives the previous
-worker's visible result plus useful command context. Bridge persists the legacy
+terminal status to the browser, and the next worker receives a parsed
+Agent-to-Agent packet containing the newest request, changed files,
+verification, next action, risks, and useful command context. Full prose is a
+bounded fallback only when the structured packet is absent or malformed.
+Reviewer/critic turns may end the schedule below its configured ceiling only
+after an explicit resolved handoff with independent evidence; formal-proof
+runs additionally require a successful reviewing-turn checker/audit command.
+Bridge persists the legacy
 Codex thread id, the `codex_thread_ids_json` slot map, and the stable Claude
 session id so follow-up prompts can resume native history after a Bridge
 restart where the CLI supports it. Run-end data also carries direct native
@@ -120,6 +126,8 @@ continuity path. The native-session design is documented in
 [docs/features/native-interactive-orchestration.md](features/native-interactive-orchestration.md),
 and the relay contract is documented in
 [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
+The structured handoff and convergence rules are documented in
+[docs/features/structured-agent-dialogue-relay.md](features/structured-agent-dialogue-relay.md).
 Runs may opt in to `native_context_compaction=after-turn`; Bridge then sends
 native compaction maintenance after each successful business turn where the CLI
 surface exposes a verified control channel. Codex uses app-server

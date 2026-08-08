@@ -17,8 +17,21 @@ type orchestrationTurn struct {
 	WorkerSlot string
 	Content    string
 	Handoff    string
+	Relay      orchestrationRelayPacket
 	Err        string
 	Tools      []RunnerToolEvent
+}
+
+type orchestrationRelayPacket struct {
+	To         string
+	Intent     string
+	Need       string
+	Status     string
+	Changed    string
+	Verified   string
+	Next       string
+	Risks      string
+	Structured bool
 }
 
 type orchestrationTurnAssignment struct {
@@ -351,8 +364,67 @@ func newOrchestrationTurnRecordWithSlot(turnID, role, cli, workerSlot, content s
 		WorkerSlot: workerSlot,
 		Content:    content,
 		Handoff:    extractHandoffSummary(content),
+		Relay:      parseOrchestrationRelayPacket(content),
 		Tools:      tools,
 	}
+}
+
+func parseOrchestrationRelayPacket(content string) orchestrationRelayPacket {
+	msg, msgOK := anchoredMachineFields(content, "Msg:")
+	handoff, handoffOK := anchoredMachineFields(content, "Handoff:")
+	packet := orchestrationRelayPacket{
+		To:       strings.ToLower(msg["to"]),
+		Intent:   strings.ToLower(msg["intent"]),
+		Need:     msg["need"],
+		Status:   strings.ToLower(handoff["status"]),
+		Changed:  handoff["changed"],
+		Verified: handoff["verified"],
+		Next:     handoff["next"],
+		Risks:    handoff["risks"],
+	}
+	packet.Structured = msgOK && handoffOK &&
+		machineFieldsPresent(msg, "to", "intent", "need") &&
+		machineFieldsPresent(handoff, "status", "changed", "verified", "next", "risks") &&
+		packet.To != "" && packet.Intent != "" && packet.Status != ""
+	return packet
+}
+
+func machineFieldsPresent(fields map[string]string, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := fields[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func anchoredMachineFields(content, marker string) (map[string]string, bool) {
+	match, ok := lastAnchoredMarkerMatch(content, []string{marker})
+	if !ok {
+		return nil, false
+	}
+	line := content[match.payloadStart:]
+	if newline := strings.IndexByte(line, '\n'); newline >= 0 {
+		line = line[:newline]
+	}
+	fields := parseMachineFields(line)
+	return fields, len(fields) > 0
+}
+
+func parseMachineFields(line string) map[string]string {
+	fields := make(map[string]string)
+	for _, part := range strings.Split(line, ";") {
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		switch key {
+		case "to", "intent", "need", "status", "changed", "verified", "next", "risks":
+			fields[key] = strings.TrimSpace(value)
+		}
+	}
+	return fields
 }
 
 func orchestrationTurnHasFinalConclusion(record orchestrationTurn) bool {
@@ -470,6 +542,8 @@ func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, conte
 	} else {
 		b.WriteString("Always end your visible reply with a short handoff summary titled \"交接总结：\" — 2-4 Chinese sentences covering what you did, what you verified and with which commands, what is still blocked, and the single most useful next step for the following CLI. Bridge forwards this summary to the next CLI as a reading guide and separately forwards your actually executed commands and their exit codes as objective evidence, so keep the summary honest and specific rather than a bare success claim. If you already write a \"最终结论/最终测试结果\" section (for example on formal-proof tasks), that section serves as the handoff summary and you need not repeat it.\n\n")
 	}
+	b.WriteString(relayMachineHandoffContract(mode, role))
+	b.WriteString("\n")
 	if resume {
 		b.WriteString("This is a continuation of the same user-visible orchestration conversation. Use the compact context below when relevant, and treat the latest user task as authoritative.\n\n")
 	}
@@ -493,12 +567,40 @@ func composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, userPrompt, conte
 		for _, item := range relayHistory {
 			b.WriteString(formatRelayPriorTurn(item))
 		}
+		if note := relayRoutingNote(role, relayHistory[len(relayHistory)-1].Relay); note != "" {
+			b.WriteString(note)
+			b.WriteByte('\n')
+		}
 		b.WriteByte('\n')
 	}
 	b.WriteString("User task:\n")
 	b.WriteString(strings.TrimSpace(userPrompt))
 	b.WriteString("\n")
 	return b.String()
+}
+
+func relayRoutingNote(scheduledRole string, packet orchestrationRelayPacket) string {
+	if !packet.Structured || packet.To == "user" || packet.To == "peer" || strings.EqualFold(packet.To, scheduledRole) {
+		return ""
+	}
+	return fmt.Sprintf("Bridge routing note: the sender addressed %q, but the configured deterministic schedule selected %q. Keep the scheduled role and use the requested need as advisory context.", packet.To, scheduledRole)
+}
+
+func relayMachineHandoffContract(mode, role string) string {
+	nextRole := "reviewer"
+	if mode == "debate" {
+		nextRole = "critic"
+	}
+	if role == "reviewer" || role == "critic" {
+		nextRole = "implementer"
+		if mode == "debate" {
+			nextRole = "proposer"
+		}
+	}
+	return "After the visible summary, append exactly two compact machine-readable lines:\n" +
+		"Msg: to=<" + nextRole + " or user>; intent=<review, continue, revise, or final>; need=<single requested result or none>\n" +
+		"Handoff: status=<needs_next, blocked, or resolved>; changed=<files or none>; verified=<checks or none>; next=<single action or none>; risks=<remaining risk or none>\n" +
+		"Use resolved/to=user/intent=final only when the task is actually complete. Bridge may end early only from an independently evidenced reviewer/critic handoff; implementer/proposer completion claims still require peer review."
 }
 
 func relayHistoryForWorker(history []orchestrationTurn, budget int, cli, workerSlot string, returningWorker bool) []orchestrationTurn {
@@ -594,14 +696,35 @@ func formatRelayPriorTurn(item orchestrationTurn) string {
 		b.WriteString(" error=")
 		b.WriteString(trimForPrompt(oneLine(item.Err), 220))
 	}
+	if item.Relay.Structured {
+		b.WriteString("\n  message: to=")
+		b.WriteString(trimForPrompt(oneLine(item.Relay.To), 80))
+		b.WriteString("; intent=")
+		b.WriteString(trimForPrompt(oneLine(item.Relay.Intent), 80))
+		b.WriteString("; need=")
+		b.WriteString(trimForPrompt(oneLine(item.Relay.Need), 360))
+		b.WriteString("\n  state: status=")
+		b.WriteString(trimForPrompt(oneLine(item.Relay.Status), 80))
+		b.WriteString("; changed=")
+		b.WriteString(trimForPrompt(oneLine(item.Relay.Changed), 500))
+		b.WriteString("; verified=")
+		b.WriteString(trimForPrompt(oneLine(item.Relay.Verified), 500))
+		b.WriteString("; next=")
+		b.WriteString(trimForPrompt(oneLine(item.Relay.Next), 500))
+		b.WriteString("; risks=")
+		b.WriteString(trimForPrompt(oneLine(item.Relay.Risks), 500))
+	}
 	summary := strings.TrimSpace(item.Handoff)
+	if item.Relay.Structured {
+		summary = ""
+	}
 	if summary != "" {
 		b.WriteString("\n  handoff: ")
 		b.WriteString(strings.ReplaceAll(trimForPrompt(summary, 600), "\n", "\n  "))
 	}
 	summaries := relayCommandSummaries(item.Tools, 6)
 	hasCommands := len(summaries) > 0
-	if summary == "" || hasCommands {
+	if !item.Relay.Structured && (summary == "" || hasCommands) {
 		body := strings.TrimSpace(item.Content)
 		if summary != "" {
 			body = strings.TrimSpace(contentWithoutHandoffSummary(item.Content))
@@ -627,6 +750,70 @@ func formatRelayPriorTurn(item orchestrationTurn) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+func relayCanConverge(mode, profile string, history []orchestrationTurn) bool {
+	if len(history) < 2 {
+		return false
+	}
+	record := history[len(history)-1]
+	if (mode == "collaboration" && record.Role != "reviewer") || (mode == "debate" && record.Role != "critic") {
+		return false
+	}
+	packet := record.Relay
+	if !packet.Structured || packet.Status != "resolved" || packet.To != "user" || packet.Intent != "final" || !machineExplicitNone(packet.Next) || !machineExplicitNone(packet.Risks) {
+		return false
+	}
+	if relayParticipantCount(history) < 2 || (machineNone(packet.Verified) && !relayHasSuccessfulCommand(record.Tools)) {
+		return false
+	}
+	if normalizeOrchestrationProfile(profile) == "formal-proof" {
+		return relayHasSuccessfulFormalCheck(record.Tools)
+	}
+	return true
+}
+
+func machineNone(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "" || strings.EqualFold(value, "none")
+}
+
+func machineExplicitNone(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "none")
+}
+
+func relayParticipantCount(history []orchestrationTurn) int {
+	seen := make(map[string]bool)
+	for _, item := range history {
+		worker := strings.ToLower(strings.TrimSpace(item.CLI)) + "/" + strings.ToLower(strings.TrimSpace(item.WorkerSlot))
+		seen[worker] = true
+	}
+	return len(seen)
+}
+
+func relayHasSuccessfulCommand(tools []RunnerToolEvent) bool {
+	for _, tool := range coalesceRelayToolEvents(tools) {
+		status := strings.ToLower(strings.TrimSpace(tool.Status))
+		if tool.ExitCode != nil && *tool.ExitCode == 0 && (status == "" || status == "completed" || status == "success" || status == "succeeded") {
+			return true
+		}
+	}
+	return false
+}
+
+func relayHasSuccessfulFormalCheck(tools []RunnerToolEvent) bool {
+	for _, tool := range coalesceRelayToolEvents(tools) {
+		if !relayHasSuccessfulCommand([]RunnerToolEvent{tool}) {
+			continue
+		}
+		command := strings.ToLower(tool.Command)
+		for _, marker := range []string{"coqc", "coqtop", "rocq", "lake build", "lean ", "isabelle build", "isabelle process", "print assumptions", "thm_oracles"} {
+			if strings.Contains(command, marker) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func relayCommandSummaries(tools []RunnerToolEvent, max int) []string {

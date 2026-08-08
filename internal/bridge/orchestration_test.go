@@ -349,8 +349,13 @@ func TestOrchestrationRelayRunEmitsFrontendVisiblePromptsCommandsAndSessionState
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(codexPrompt), "Claude result: wrote Model.v") || !strings.Contains(string(codexPrompt), "mkdir -p coq-relay") {
-		t.Fatalf("Codex stdin missing Claude handoff context:\n%s", codexPrompt)
+	if !strings.Contains(string(codexPrompt), "state: status=needs_next") ||
+		!strings.Contains(string(codexPrompt), "changed=coq-relay/Model.v, coq-relay/Termination.v") ||
+		!strings.Contains(string(codexPrompt), "mkdir -p coq-relay") {
+		t.Fatalf("Codex stdin missing compact Claude handoff context:\n%s", codexPrompt)
+	}
+	if strings.Contains(string(codexPrompt), "Claude result: wrote Model.v") {
+		t.Fatalf("Codex stdin repeated structured Claude prose instead of compact state:\n%s", codexPrompt)
 	}
 	claudeArgv, err := os.ReadFile(claudeArgvPath)
 	if err != nil {
@@ -2908,6 +2913,148 @@ func TestRunConclusionUsesExplicitFinalHandoffStatus(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestParseOrchestrationRelayPacketRequiresAnchoredMessageAndHandoff(t *testing.T) {
+	content := "已完成修复。\n\nMsg: to=reviewer; intent=review; need=verify parser\nHandoff: status=needs_next; changed=parser.go; verified=go test ./...; next=review edge; risks=none"
+	packet := parseOrchestrationRelayPacket(content)
+	if !packet.Structured || packet.To != "reviewer" || packet.Intent != "review" || packet.Need != "verify parser" {
+		t.Fatalf("message packet = %#v", packet)
+	}
+	if packet.Status != "needs_next" || packet.Changed != "parser.go" || packet.Verified != "go test ./..." || packet.Next != "review edge" || packet.Risks != "none" {
+		t.Fatalf("handoff packet = %#v", packet)
+	}
+
+	for _, malformed := range []string{
+		"正文提到 Msg: to=reviewer，但不是独立行。\nHandoff: status=needs_next; next=review",
+		"Msg: to=reviewer; intent=review; need=verify",
+		"Msg: to=reviewer; intent=review\nHandoff: changed=parser.go; next=review",
+	} {
+		if got := parseOrchestrationRelayPacket(malformed); got.Structured {
+			t.Fatalf("malformed packet was accepted: %#v", got)
+		}
+	}
+}
+
+func TestFormatRelayPriorTurnUsesCompactStructuredPacket(t *testing.T) {
+	exit := 0
+	record := newOrchestrationTurnRecord(
+		"turn-1",
+		"implementer",
+		"claude",
+		"large implementation explanation that is already in the native Claude session\n\nMsg: to=reviewer; intent=review; need=check edge case\nHandoff: status=needs_next; changed=parser.go; verified=go test ./...; next=review parser; risks=none",
+		[]RunnerToolEvent{{Command: "go test ./...", Status: "completed", ExitCode: &exit}},
+	)
+	out := formatRelayPriorTurn(record)
+	for _, want := range []string{"message: to=reviewer", "intent=review", "need=check edge case", "state: status=needs_next", "changed=parser.go", "commands:", "go test ./..."} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("compact relay missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "large implementation explanation") || strings.Contains(out, "result:") {
+		t.Fatalf("structured relay repeated prior prose:\n%s", out)
+	}
+}
+
+func TestRelayConvergenceRequiresReviewingRoleAndEvidence(t *testing.T) {
+	exit := 0
+	failed := 1
+	needsReview := newOrchestrationTurnRecordWithSlot(
+		"turn-1", "implementer", "claude", "claude",
+		"交接总结：实现已完成。\nMsg: to=reviewer; intent=review; need=verify\nHandoff: status=resolved; changed=main.go; verified=go test ./...; next=none; risks=none", nil,
+	)
+	accepted := newOrchestrationTurnRecordWithSlot(
+		"turn-2", "reviewer", "codex", orchestrationCodexDefaultSlot,
+		"最终结论：复查通过。\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=main.go; verified=go test ./...; next=none; risks=none",
+		[]RunnerToolEvent{{Command: "go test ./...", Status: "completed", ExitCode: &exit}},
+	)
+	if relayCanConverge("collaboration", "default", []orchestrationTurn{needsReview}) {
+		t.Fatal("implementer self-certification converged")
+	}
+	if !relayCanConverge("collaboration", "default", []orchestrationTurn{needsReview, accepted}) {
+		t.Fatal("evidenced reviewer acceptance did not converge")
+	}
+
+	rejected := accepted
+	rejected.Relay.Risks = "edge case untested"
+	if relayCanConverge("collaboration", "default", []orchestrationTurn{needsReview, rejected}) {
+		t.Fatal("review with remaining risk converged")
+	}
+	rejected = accepted
+	rejected.Tools = []RunnerToolEvent{{Command: "go test ./...", Status: "failed", ExitCode: &failed}}
+	rejected.Relay.Verified = "none"
+	if relayCanConverge("collaboration", "default", []orchestrationTurn{needsReview, rejected}) {
+		t.Fatal("review without successful evidence converged")
+	}
+
+	critic := accepted
+	critic.Role = "critic"
+	if !relayCanConverge("debate", "default", []orchestrationTurn{needsReview, critic}) {
+		t.Fatal("evidenced critic acceptance did not converge")
+	}
+}
+
+func TestRelayRunStopsAfterReviewerConvergence(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	codexPath := filepath.Join(tmp, "codex")
+	implementer := "交接总结：实现已完成，请复查。\nMsg: to=reviewer; intent=review; need=verify fix\nHandoff: status=needs_next; changed=main.go; verified=none; next=review fix; risks=none"
+	reviewer := "最终结论：独立复查通过。\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=main.go; verified=reviewed regression; next=none; risks=none"
+	if err := os.WriteFile(claudePath, []byte(fakeClaudePrintScript(implementer)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte(fakeCodexExecScript(reviewer)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+	defer manager.CloseAll()
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID: "orc_converge", Mode: "collaboration", Prompt: "fix regression", MaxTurns: 4, CWD: tmp,
+	})
+	events := drainOrchestrationEvents(t, out)
+	turnStarts := 0
+	var runEnd protocol.OrchestrationEventPayload
+	for _, event := range events {
+		if event.Kind == "turn.start" {
+			turnStarts++
+		}
+		if event.Kind == "run.end" {
+			runEnd = event
+		}
+	}
+	if turnStarts != 2 {
+		t.Fatalf("turn starts = %d, want 2 after reviewer convergence; events=%#v", turnStarts, events)
+	}
+	if runEnd.RunConclusion == nil || runEnd.RunConclusion.Outcome != "satisfied" || !strings.Contains(runEnd.Content, "独立复查通过") {
+		t.Fatalf("run.end = %#v", runEnd)
+	}
+}
+
+func TestFormalProofConvergenceRequiresReviewingCheckerCommand(t *testing.T) {
+	exit := 0
+	first := newOrchestrationTurnRecordWithSlot(
+		"turn-1", "implementer", "claude", "claude",
+		"交接总结：证明已提交。\nMsg: to=reviewer; intent=review; need=audit proof\nHandoff: status=needs_next; changed=Main.v; verified=coqc Main.v; next=audit; risks=none", nil,
+	)
+	reviewer := newOrchestrationTurnRecordWithSlot(
+		"turn-2", "reviewer", "codex", orchestrationCodexDefaultSlot,
+		"最终结论：证明通过。\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=Main.v; verified=coqc Main.v; next=none; risks=none",
+		[]RunnerToolEvent{{Command: "go test ./...", Status: "completed", ExitCode: &exit}},
+	)
+	if relayCanConverge("collaboration", "formal-proof", []orchestrationTurn{first, reviewer}) {
+		t.Fatal("formal proof converged from non-checker command")
+	}
+	reviewer.Tools = []RunnerToolEvent{{Command: "coqc Main.v", Status: "completed", ExitCode: &exit}}
+	if !relayCanConverge("collaboration", "formal-proof", []orchestrationTurn{first, reviewer}) {
+		t.Fatal("formal proof did not converge from successful reviewing checker command")
 	}
 }
 

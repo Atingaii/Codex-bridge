@@ -76,18 +76,7 @@ func finalMachineHandoff(history []orchestrationTurn) orchestrationMachineHandof
 }
 
 func parseMachineHandoffFields(line string) map[string]string {
-	fields := make(map[string]string)
-	for _, part := range strings.Split(line, ";") {
-		key, value, ok := strings.Cut(part, "=")
-		if !ok {
-			continue
-		}
-		key = strings.ToLower(strings.TrimSpace(key))
-		if key == "status" || key == "next" || key == "risks" {
-			fields[key] = strings.TrimSpace(value)
-		}
-	}
-	return fields
+	return parseMachineFields(line)
 }
 
 func (h orchestrationMachineHandoff) unmetObligations() []string {

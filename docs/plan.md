@@ -31,6 +31,7 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P6.4 | CLI endpoint repair commands | implemented |
 | P6.5 | Formal-proof lightweight workspace bootstrap | implemented |
 | P6.6 | Persistent per-context task queue | designed |
+| P6.7 | Structured Agent dialogue relay and evidence-based convergence | implemented |
 | P7 | Browser permission prompts over app-server | implemented for Codex chat and Codex orchestration |
 | P8 | Empty-reply hardening and accessible session deletion | implemented |
 | P8.1 | Same-thread chat recovery and bounded retry evidence | implemented |
@@ -69,6 +70,9 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 
 ## Maintenance Log
 
+- 2026-08-08: Added structured Agent-to-Agent relay packets, compact incremental
+  cross-worker context, and conservative reviewer/critic-confirmed early
+  convergence without changing orchestration APIs, UI, or native sessions.
 - 2026-08-07: Added WebSocket ping/pong resilience, bounded same-session chat
   reconnect with state/output recovery, wider Bridge liveness tolerance, and
   request-scoped strict approval for workspace `cat`, `coqc`, and batch

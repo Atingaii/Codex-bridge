@@ -297,8 +297,13 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    formal-proof run folder, materializes `project/`, and maintains one
    `proof-notes.md` evidence ledger before pointing the prompt and cwd at that
    folder.
-8. `internal/bridge/orchestration_relay.go:formatRelayPriorTurn` controls how much
-   prior visible output and command context is sent to the next CLI.
+8. `internal/bridge/orchestration_relay.go:parseOrchestrationRelayPacket` parses
+   anchored Agent message/handoff fields;
+   `internal/bridge/orchestration_relay.go:formatRelayPriorTurn` sends their
+   compact state and command evidence to the next CLI, with bounded prose as a
+   compatibility fallback; and
+   `internal/bridge/orchestration_relay.go:relayCanConverge` permits only an
+   evidenced reviewer/critic turn to finish below the configured turn ceiling.
 9. `internal/bridge/orchestration_relay.go:runRelayCLI`,
    `internal/bridge/orchestration_codex.go:runCodexInteractive`, and
    `internal/bridge/orchestration_claude.go:runClaudeInteractive` preserve the
@@ -322,7 +327,9 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    `frontend/src/app/lib/utils.ts:visibleOrchestrationEvents`, including
    terminal run summary rendering for `run.end` / `run.error`.
 15. Update
-   [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md).
+   [docs/features/orchestration-pass-through-cli.md](features/orchestration-pass-through-cli.md)
+   and
+   [docs/features/structured-agent-dialogue-relay.md](features/structured-agent-dialogue-relay.md).
 
 ### Change Orchestration Event Protocol
 

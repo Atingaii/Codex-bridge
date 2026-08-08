@@ -100,6 +100,31 @@ export type OrchestrationRun = {
   finishedAt?: number;
 };
 
+export type OrchestrationUsageStats = {
+  cli: string;
+  model?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  estimatedCostUsd: number;
+  estimated: boolean;
+};
+
+export type OrchestrationRunStats = {
+  runId: string;
+  startedAt?: number;
+  finishedAt?: number;
+  runtimeSeconds: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  estimatedCostUsd: number;
+  estimated: boolean;
+  byCli: OrchestrationUsageStats[];
+};
+
 export type OrchestrationEvent = {
   id?: string;
   runId: string;

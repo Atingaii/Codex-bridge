@@ -18,6 +18,7 @@ import {
   Share2,
   ShieldQuestion,
   Square,
+  BarChart3,
   Swords,
   UsersRound,
 } from 'lucide-react';
@@ -40,6 +41,7 @@ import { AgentSelector } from '../components/AgentSelector';
 import { OrchestrationFileRow } from '../components/OrchestrationFiles';
 import {
   CapabilityMatrix,
+  RunConclusionCard,
   OrchestrationTimelineGroupItem,
   defaultCollapsedTimelineGroups,
   reconcileCollapsedTimelineGroups,
@@ -162,7 +164,8 @@ export function OrchestrationWorkspace({
   const activeRunFiles = useMemo(() => {
     return activeRun ? mergeOrchestrationFiles(activeRun.files, orchestrationRunFilesFromEvents(events, activeRun.id)) : [];
   }, [activeRun, events]);
-  const visibleEvents = useMemo(() => activeRun ? visibleOrchestrationEvents(events, activeRunId, activeRun, t) : [], [activeRun, events, activeRunId, t]);
+  const visibleEvents = useMemo(() => activeRun ? visibleOrchestrationEvents(events, activeRunId, activeRun, t).filter((event) => event.kind !== 'run.conclusion') : [], [activeRun, events, activeRunId, t]);
+  const finalConclusion = useMemo(() => events.slice().reverse().find((event) => event.runId === activeRunId && Boolean(event.runConclusion) && (event.kind === 'run.conclusion' || event.kind === 'run.end' || event.kind === 'run.error' || event.kind === 'run.cancelled'))?.runConclusion || null, [events, activeRunId]);
   const isRunning = activeOrchestrationStatus(activeRun?.status);
   const currentTurnInfo = useMemo(() => activeRun ? orchestrationTurnInfoFromEvents(events, activeRun.id, activeRun.maxTurns, isRunning) : {}, [activeRun, events, isRunning]);
   const currentTurnLabel = useMemo(() => orchestrationTurnLabel(currentTurnInfo, t), [currentTurnInfo, t]);
@@ -925,6 +928,9 @@ export function OrchestrationWorkspace({
               {sharingRunId === activeRun?.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : shareCopiedRunId === activeRun?.id ? <Check className="h-3.5 w-3.5" /> : <Share2 className="h-3.5 w-3.5" />}
               <span>{shareCopiedRunId === activeRun?.id ? t.copied : t.shareRun}</span>
             </Button>
+            <Button variant="secondary" size="icon" className="h-8 w-8 rounded-lg" onClick={() => navigate(activeRun ? `/orchestrate/stats?run=${encodeURIComponent(activeRun.id)}` : '/orchestrate/stats')} aria-label={t.runStatistics} title={t.runStatistics}>
+              <BarChart3 className="h-3.5 w-3.5" />
+            </Button>
             <Button
               variant="ghost"
               size="icon"
@@ -1010,6 +1016,7 @@ export function OrchestrationWorkspace({
                       </Button>
                     </div>
                   )}
+                  {finalConclusion && !isRunning && <RunConclusionCard conclusion={finalConclusion} status={activeRun?.status} t={t} />}
                   {timelineGroups.map((group) => (
                     <OrchestrationTimelineGroupItem
                       key={group.key}
@@ -1139,7 +1146,7 @@ export function OrchestrationWorkspace({
                 <div className="grid gap-3 sm:grid-cols-[minmax(7rem,0.45fr)_minmax(10rem,0.55fr)]">
                   <label className="block space-y-2">
                     <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.turns}</span>
-                    <Input type="number" min={2} max={12} value={maxTurns} onChange={(event) => setMaxTurns(Number(event.target.value) || 4)} disabled={creating || isRunning} />
+                    <Input type="number" min={1} max={12} value={maxTurns} onChange={(event) => setMaxTurns(Math.max(1, Number(event.target.value) || 4))} disabled={creating || isRunning} />
                   </label>
                   <div className="space-y-2">
                     <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.nativeContextCompaction}</span>

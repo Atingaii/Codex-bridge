@@ -20,6 +20,27 @@ type orchestrationTurn struct {
 	Relay      orchestrationRelayPacket
 	Err        string
 	Tools      []RunnerToolEvent
+	Usage      orchestrationUsage
+}
+
+func (m *OrchestrationManager) emitTurnUsage(runID string, record orchestrationTurn) {
+	usage := record.Usage
+	m.emit(runID, protocol.OrchestrationEventPayload{
+		Kind:   "turn.usage",
+		TurnID: record.TurnID,
+		Role:   record.Role,
+		CLI:    record.CLI,
+		Data: map[string]any{
+			"cli":              record.CLI,
+			"model":            usage.Model,
+			"inputTokens":      usage.InputTokens,
+			"outputTokens":     usage.OutputTokens,
+			"cacheReadTokens":  usage.CacheReadTokens,
+			"cacheWriteTokens": usage.CacheWriteTokens,
+			"estimatedCostUsd": usage.EstimatedCostUSD,
+			"estimated":        usage.Estimated,
+		},
+	})
 }
 
 type orchestrationRelayPacket struct {

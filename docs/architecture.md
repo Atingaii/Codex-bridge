@@ -157,6 +157,12 @@ diagnostics and is stripped from public shares. Every terminal run emits one
 structured `run.conclusion` event before `run.end`, `run.error`, or
 `run.cancelled`.
 
+Each completed relay turn also emits a persisted `turn.usage` event containing
+per-CLI/model input, output, cache, and estimated-cost fields. The Hub exposes
+owner-scoped aggregation at `/api/orchestrations/{runID}/stats`; runtime uses
+the run timestamps, and missing native provider accounting remains visibly
+labelled as an estimate.
+
 Bridge long-command observation is controlled by
 `bridge.long_command_observer`. Matching Claude commands can receive a tagged
 stream-input note, and matching Codex commands emit a visible Bridge-note row

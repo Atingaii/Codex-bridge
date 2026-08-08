@@ -38,6 +38,7 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P8.1 | Same-thread chat recovery and bounded retry evidence | implemented |
 | P9 | Turnstile-protected self-registration and per-user access | implemented |
 | P10 | Public screenshot guide for chat, orchestration, and formal proof | implemented |
+| P10.1 | Orchestration runtime, token usage, cost estimates, one-turn mode, and prominent final conclusion | implemented |
 
 ## Engineering Workflow
 

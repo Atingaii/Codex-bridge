@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, AlertTriangle, Check, ChevronDown, Command, GitBranch, RefreshCw, Terminal, User, X } from 'lucide-react';
+import { Activity, AlertTriangle, Check, ChevronDown, Command, GitBranch, RefreshCw, Terminal, User, X, Sparkles } from 'lucide-react';
 import type { Agent, BridgeCLICapability, OrchestrationEvent, OrchestrationTimelineGroup, OrchestrationTimelineItem, OrchestrationVisibleEvent } from '../lib/types';
 import type { UIText } from '../lib/i18n';
 import { Button } from './ui';
@@ -17,6 +17,14 @@ import {
   orchestrationTurnLabel,
   stripMachineContractLines,
 } from '../lib/utils';
+
+export function RunConclusionCard({ conclusion, status, t }: { conclusion: NonNullable<OrchestrationEvent['runConclusion']>; status?: string; t: UIText }) {
+  const outcome = conclusion.outcome || status || t.ready;
+  const positive = outcome === 'satisfied' || outcome === 'completed';
+  return <section className={cn('mx-auto w-full max-w-4xl rounded-xl border-2 p-4 shadow-sm', positive ? 'border-emerald-500/40 bg-emerald-500/10' : 'border-primary/35 bg-primary/5')}>
+    <div className="flex items-start gap-3"><div className={cn('mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg', positive ? 'bg-emerald-500/15 text-emerald-600' : 'bg-primary/15 text-primary')}><Sparkles className="h-4 w-4" /></div><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 className="text-sm font-bold">{t.runConclusion}</h2><span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">{outcome}</span></div><div className="mt-2 text-sm leading-6"><MessageContent content={conclusion.summary || t.noVisibleAnswer} /></div>{conclusion.buildOrAuditCommands?.length ? <div className="mt-3 space-y-1 text-xs text-muted-foreground"><div className="font-semibold">{t.commands}</div>{conclusion.buildOrAuditCommands.map((command) => <code key={command} className="block rounded bg-background/60 px-2 py-1">{command}</code>)}</div> : null}</div></div>
+  </section>;
+}
 
 export function CapabilityMatrix({ agent, t }: { agent: Agent | null; t: UIText }) {
   const rows: Array<{ cli: 'claude' | 'codex'; label: string; cap?: BridgeCLICapability }> = [

@@ -287,6 +287,123 @@ func (s *Server) normalizeOrchestrationStart(w http.ResponseWriter, req orchestr
 	return req, true
 }
 
+type orchestrationUsageStats struct {
+	CLI              string  `json:"cli"`
+	Model            string  `json:"model"`
+	InputTokens      int64   `json:"inputTokens"`
+	OutputTokens     int64   `json:"outputTokens"`
+	CacheReadTokens  int64   `json:"cacheReadTokens"`
+	CacheWriteTokens int64   `json:"cacheWriteTokens"`
+	EstimatedCostUSD float64 `json:"estimatedCostUsd"`
+	Estimated        bool    `json:"estimated"`
+}
+
+type orchestrationRunStats struct {
+	RunID            string                    `json:"runId"`
+	StartedAt        int64                     `json:"startedAt,omitempty"`
+	FinishedAt       int64                     `json:"finishedAt,omitempty"`
+	RuntimeSeconds   int64                     `json:"runtimeSeconds"`
+	InputTokens      int64                     `json:"inputTokens"`
+	OutputTokens     int64                     `json:"outputTokens"`
+	CacheReadTokens  int64                     `json:"cacheReadTokens"`
+	CacheWriteTokens int64                     `json:"cacheWriteTokens"`
+	EstimatedCostUSD float64                   `json:"estimatedCostUsd"`
+	Estimated        bool                      `json:"estimated"`
+	ByCLI            []orchestrationUsageStats `json:"byCli"`
+}
+
+func (s *Server) handleOrchestrationStats(w http.ResponseWriter, r *http.Request, uid string) {
+	run, err := s.store.OrchestrationRunByID(r.Context(), r.PathValue("runID"), uid)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "orchestration run not found")
+			return
+		}
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration run")
+		return
+	}
+	events, err := s.store.ListOrchestrationEvents(r.Context(), run.ID, 10000)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration statistics")
+		return
+	}
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"stats": buildOrchestrationRunStats(run, events)})
+}
+
+func buildOrchestrationRunStats(run store.OrchestrationRun, events []store.OrchestrationEvent) orchestrationRunStats {
+	stats := orchestrationRunStats{RunID: run.ID, FinishedAt: run.FinishedAt}
+	byCLI := map[string]*orchestrationUsageStats{}
+	for _, event := range events {
+		if event.Kind == "run.start" && (stats.StartedAt == 0 || event.CreatedAt < stats.StartedAt) {
+			stats.StartedAt = event.CreatedAt
+		}
+		if event.Kind != "turn.usage" || event.Data == nil {
+			continue
+		}
+		usage := orchestrationUsageFromData(event.Data)
+		if usage.CLI == "" {
+			usage.CLI = event.CLI
+		}
+		if usage.CLI == "" {
+			usage.CLI = "unknown"
+		}
+		stats.InputTokens += usage.InputTokens
+		stats.OutputTokens += usage.OutputTokens
+		stats.CacheReadTokens += usage.CacheReadTokens
+		stats.CacheWriteTokens += usage.CacheWriteTokens
+		stats.EstimatedCostUSD += usage.EstimatedCostUSD
+		stats.Estimated = stats.Estimated || usage.Estimated
+		item := byCLI[usage.CLI]
+		if item == nil {
+			item = &orchestrationUsageStats{CLI: usage.CLI, Model: usage.Model, Estimated: usage.Estimated}
+			byCLI[usage.CLI] = item
+		}
+		item.InputTokens += usage.InputTokens
+		item.OutputTokens += usage.OutputTokens
+		item.CacheReadTokens += usage.CacheReadTokens
+		item.CacheWriteTokens += usage.CacheWriteTokens
+		item.EstimatedCostUSD += usage.EstimatedCostUSD
+		item.Estimated = item.Estimated || usage.Estimated
+	}
+	if stats.StartedAt == 0 {
+		stats.StartedAt = run.CreatedAt
+	}
+	end := run.FinishedAt
+	if end == 0 && run.Status == store.OrchestrationRunning {
+		end = time.Now().Unix()
+	}
+	if end >= stats.StartedAt {
+		stats.RuntimeSeconds = end - stats.StartedAt
+	}
+	for _, usage := range byCLI {
+		stats.ByCLI = append(stats.ByCLI, *usage)
+	}
+	return stats
+}
+
+func orchestrationUsageFromData(data map[string]any) orchestrationUsageStats {
+	value := func(key string) int64 {
+		switch v := data[key].(type) {
+		case float64:
+			return int64(v)
+		case int64:
+			return v
+		case int:
+			return int64(v)
+		}
+		return 0
+	}
+	decimal := func(key string) float64 {
+		if v, ok := data[key].(float64); ok {
+			return v
+		}
+		return 0
+	}
+	text := func(key string) string { v, _ := data[key].(string); return v }
+	estimated, _ := data["estimated"].(bool)
+	return orchestrationUsageStats{CLI: text("cli"), Model: text("model"), InputTokens: value("inputTokens"), OutputTokens: value("outputTokens"), CacheReadTokens: value("cacheReadTokens"), CacheWriteTokens: value("cacheWriteTokens"), EstimatedCostUSD: decimal("estimatedCostUsd"), Estimated: estimated}
+}
+
 func (s *Server) startOrchestration(ctx context.Context, run store.OrchestrationRun, req orchestrationStartRequest, contextParts []string, resume bool) error {
 	event, err := s.store.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
 		RunID:   run.ID,

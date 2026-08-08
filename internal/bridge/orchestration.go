@@ -747,6 +747,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		if err != nil {
 			record.Err = visibleCLIError(err)
 			history = append(history, record)
+			m.emitTurnUsage(payload.RunID, record)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 				Kind:       "turn.end",
 				TurnID:     turnID,
@@ -782,6 +783,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			return
 		}
 		history = append(history, record)
+		m.emitTurnUsage(payload.RunID, record)
 		content := record.Content
 		if strings.TrimSpace(content) == "" {
 			content = relayTerminalContent([]orchestrationTurn{record})
@@ -1008,6 +1010,7 @@ func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context
 		content, tools, err := m.runRelayCLI(ctx, payload, turnID, role, cli, workerSlot, nextPrompt, state)
 		recordCommandFingerprints(state, runCWD, tools)
 		record := newOrchestrationTurnRecordWithSlot(turnID, role, cli, workerSlot, content, tools)
+		record.Usage = m.orchestrationUsageForTurn(cli, nextPrompt, content)
 		if err != nil {
 			record.Err = visibleCLIError(err)
 		}
@@ -1092,6 +1095,15 @@ func mergeOrchestrationTurnAttempts(current, next orchestrationTurn) orchestrati
 		current.Err = next.Err
 	}
 	current.Tools = append(current.Tools, next.Tools...)
+	current.Usage.InputTokens += next.Usage.InputTokens
+	current.Usage.OutputTokens += next.Usage.OutputTokens
+	current.Usage.CacheReadTokens += next.Usage.CacheReadTokens
+	current.Usage.CacheWriteTokens += next.Usage.CacheWriteTokens
+	current.Usage.EstimatedCostUSD += next.Usage.EstimatedCostUSD
+	current.Usage.Estimated = current.Usage.Estimated || next.Usage.Estimated
+	if current.Usage.Model == "" {
+		current.Usage.Model = next.Usage.Model
+	}
 	return current
 }
 

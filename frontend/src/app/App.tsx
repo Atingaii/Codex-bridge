@@ -7,6 +7,7 @@ import { ConversationSnapshotPage } from './pages/ConversationSnapshotPage';
 import { HelpPage } from './pages/HelpPage';
 import { LoginScreen } from './pages/LoginScreen';
 import { OrchestrationWorkspace } from './pages/OrchestrationWorkspace';
+import { OrchestrationStatsPage } from './pages/OrchestrationStatsPage';
 import { PublicSharePage } from './pages/PublicSharePage';
 import { Workspace } from './pages/Workspace';
 
@@ -84,6 +85,10 @@ export default function App() {
   }
 
   if (path.startsWith('/orchestrate')) {
+    if (path.startsWith('/orchestrate/stats')) {
+      const runId = new URLSearchParams(window.location.search).get('run') || localStorage.getItem('codexBridge.activeOrchestrationRunId') || '';
+      return <OrchestrationStatsPage t={t} navigate={navigate} runId={runId} />;
+    }
     return (
       <OrchestrationWorkspace
         user={user}

@@ -15,6 +15,18 @@ import (
 	"github.com/tencent/codex-bridge/internal/store"
 )
 
+func TestBuildOrchestrationRunStatsAggregatesUsage(t *testing.T) {
+	run := store.OrchestrationRun{ID: "orc_stats", CreatedAt: 100, FinishedAt: 130, Status: store.OrchestrationCompleted}
+	stats := buildOrchestrationRunStats(run, []store.OrchestrationEvent{
+		{Kind: "run.start", CreatedAt: 101},
+		{Kind: "turn.usage", CLI: "codex", Data: map[string]any{"cli": "codex", "model": "gpt-5-codex", "inputTokens": float64(10), "outputTokens": float64(4), "cacheReadTokens": float64(2), "estimatedCostUsd": .01, "estimated": true}},
+		{Kind: "turn.usage", CLI: "claude", Data: map[string]any{"cli": "claude", "model": "claude-sonnet-4", "inputTokens": float64(8), "outputTokens": float64(3), "estimatedCostUsd": .02, "estimated": true}},
+	})
+	if stats.RuntimeSeconds != 29 || stats.InputTokens != 18 || stats.OutputTokens != 7 || stats.CacheReadTokens != 2 || len(stats.ByCLI) != 2 || !stats.Estimated {
+		t.Fatalf("stats = %#v", stats)
+	}
+}
+
 func TestCancelOrchestrationStatusTransitions(t *testing.T) {
 	t.Parallel()
 

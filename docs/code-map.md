@@ -14,6 +14,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Browser chat WebSocket | `internal/hub/ws_browser.go` |
 | Bridge reverse WebSocket | `internal/hub/ws_bridge.go`, `internal/bridge/client.go` |
 | Orchestration transport recovery | `internal/bridge/client.go:connectOnce`, `internal/bridge/orchestration_events.go:send`, `internal/hub/ws_bridge.go:bridgeReconnectGrace` |
+| Orchestration model-capacity retry | `internal/bridge/orchestration_relay.go:runRelayCLIWithCapacityRetries`, `internal/bridge/orchestration.go:runRelayTurnWithContinuations`, `docs/features/orchestration-model-capacity-retries.md` |
 | Browser/Bridge connection pools | `internal/hub/pool.go` |
 | Orchestration HTTP/WS and event history | `internal/hub/orchestration.go:handleOrchestrationEvents`, `internal/hub/ws_bridge.go:handleBridgeWS`, `frontend/src/app/pages/OrchestrationWorkspace.tsx`, `internal/bridge/orchestration*.go` |
 | Orchestration runtime/usage statistics | `internal/hub/orchestration.go:handleOrchestrationStats`, `internal/bridge/orchestration_usage.go`, `frontend/src/app/pages/OrchestrationStatsPage.tsx` |

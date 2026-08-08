@@ -2,10 +2,12 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/tencent/codex-bridge/internal/bridge/profiles/registry"
 	"github.com/tencent/codex-bridge/internal/protocol"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -85,6 +87,120 @@ func (m *OrchestrationManager) runRelayCLI(ctx context.Context, payload protocol
 		}
 		return content, tools, err
 	}
+}
+
+// runRelayCLIWithCapacityRetries keeps a transient provider-capacity failure
+// inside the same visible turn. The retry has the same prompt, turn ID, and
+// run-scoped workspace; it is not a continuation or a new orchestration run.
+func (m *OrchestrationManager) runRelayCLIWithCapacityRetries(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, workerSlot, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, error) {
+	waits := m.modelCapacityRetryWaits
+	if len(waits) == 0 {
+		waits = defaultModelCapacityRetryWaits
+	}
+	for retry := 0; ; retry++ {
+		content, tools, err := m.runRelayCLI(ctx, payload, turnID, role, cli, workerSlot, prompt, state)
+		if err == nil || !isModelCapacityError(err) {
+			return content, tools, err
+		}
+		if ctx.Err() != nil {
+			return content, tools, ctx.Err()
+		}
+		if retry >= len(waits) {
+			message := visibleCLIError(err)
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:     "turn.delta",
+				Source:   "bridge",
+				Severity: "error",
+				TurnID:   turnID,
+				Role:     role,
+				CLI:      cli,
+				Content:  fmt.Sprintf("%s 模型容量持续不足，已完成 %d 次退避重试，无法继续此回合。", cliDisplay(cli), len(waits)),
+				Error:    message,
+				Data: map[string]any{
+					"relayOnly": true,
+					"category":  "model-capacity-retry-exhausted",
+					"attempts":  len(waits),
+					"error":     message,
+				},
+			})
+			return content, tools, err
+		}
+
+		wait := waits[retry]
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:     "turn.delta",
+			Source:   "bridge",
+			Severity: "warning",
+			TurnID:   turnID,
+			Role:     role,
+			CLI:      cli,
+			Content:  fmt.Sprintf("%s 模型当前容量已满，将在 %s 后重试（第 %d/%d 次重试）。", cliDisplay(cli), humanRetryWait(wait), retry+1, len(waits)),
+			Error:    visibleCLIError(err),
+			Data: map[string]any{
+				"relayOnly":         true,
+				"category":          "model-capacity-retry-wait",
+				"retry":             retry + 1,
+				"maxRetries":        len(waits),
+				"retryAfterSeconds": int(wait.Seconds()),
+			},
+		})
+		// A capacity response can leave a native interactive process in an
+		// unusable state. Recreate only that CLI session before retrying.
+		m.resetNativeInteractiveSessionForContinuation(cli, workerSlot, state)
+		if err := waitModelCapacityRetry(ctx, wait); err != nil {
+			return content, tools, err
+		}
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:     "turn.delta",
+			Source:   "bridge",
+			Severity: "info",
+			TurnID:   turnID,
+			Role:     role,
+			CLI:      cli,
+			Content:  fmt.Sprintf("正在重试 %s（第 %d/%d 次重试）。", cliDisplay(cli), retry+1, len(waits)),
+			Data: map[string]any{
+				"relayOnly":  true,
+				"category":   "model-capacity-retry-start",
+				"retry":      retry + 1,
+				"maxRetries": len(waits),
+			},
+		})
+	}
+}
+
+func isModelCapacityError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	message := strings.ToLower(stripANSI(err.Error()))
+	return strings.Contains(message, "selected model is at capacity") ||
+		(strings.Contains(message, "model") && strings.Contains(message, "at capacity"))
+}
+
+func waitModelCapacityRetry(ctx context.Context, wait time.Duration) error {
+	if wait <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func humanRetryWait(wait time.Duration) string {
+	if wait > 0 && wait%time.Minute == 0 {
+		return fmt.Sprintf("%d 分钟", int(wait/time.Minute))
+	}
+	return fmt.Sprintf("%d 秒", int(wait.Round(time.Second)/time.Second))
 }
 
 func clearRelayResumeMode(cli, workerSlot string, state *orchestrationSessionState) {

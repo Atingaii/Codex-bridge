@@ -31,6 +31,10 @@ type OrchestrationManager struct {
 	approvals   map[string]orchestrationApproval
 	conclusions map[string]bool
 	executions  map[string]orchestrationExecution
+	// modelCapacityRetryWaits is intentionally kept on the manager rather than
+	// as global mutable test state. Production uses the default schedule; focused
+	// tests can shorten it without changing other concurrently running managers.
+	modelCapacityRetryWaits []time.Duration
 }
 
 type orchestrationExecution struct {
@@ -105,14 +109,17 @@ const (
 	orchestrationCodexSlotB                  = "codex-b"
 )
 
+var defaultModelCapacityRetryWaits = []time.Duration{10 * time.Second, 30 * time.Second, time.Minute}
+
 func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
 	return &OrchestrationManager{
-		cfg:         cfg,
-		runs:        make(map[string]*orchestrationRunHandle),
-		sessions:    make(map[string]*orchestrationNativeSession),
-		approvals:   make(map[string]orchestrationApproval),
-		conclusions: make(map[string]bool),
-		executions:  make(map[string]orchestrationExecution),
+		cfg:                     cfg,
+		runs:                    make(map[string]*orchestrationRunHandle),
+		sessions:                make(map[string]*orchestrationNativeSession),
+		approvals:               make(map[string]orchestrationApproval),
+		conclusions:             make(map[string]bool),
+		executions:              make(map[string]orchestrationExecution),
+		modelCapacityRetryWaits: append([]time.Duration(nil), defaultModelCapacityRetryWaits...),
 	}
 }
 
@@ -1007,7 +1014,7 @@ func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context
 				},
 			})
 		}
-		content, tools, err := m.runRelayCLI(ctx, payload, turnID, role, cli, workerSlot, nextPrompt, state)
+		content, tools, err := m.runRelayCLIWithCapacityRetries(ctx, payload, turnID, role, cli, workerSlot, nextPrompt, state)
 		recordCommandFingerprints(state, runCWD, tools)
 		record := newOrchestrationTurnRecordWithSlot(turnID, role, cli, workerSlot, content, tools)
 		record.Usage = m.orchestrationUsageForTurn(cli, nextPrompt, content)
@@ -1134,6 +1141,12 @@ func orchestrationTurnNeedsContinuation(record orchestrationTurn, err error) boo
 
 func shouldContinueInterruptedRelayTurn(record orchestrationTurn, err error) bool {
 	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return false
+	}
+	// Capacity retries have their own bounded policy. Once that policy returns
+	// an error, do not reinterpret partial output as an unrelated missing-final
+	// continuation and issue another provider request.
+	if isModelCapacityError(err) {
 		return false
 	}
 	if err == nil {

@@ -1363,6 +1363,149 @@ func TestRelayCLIErrorIsFrontendVisibleAndRedacted(t *testing.T) {
 	}
 }
 
+func TestModelCapacityErrorRecognitionIsConservative(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "selected model capacity", err: errors.New("Selected model is at capacity. Please try a different model."), want: true},
+		{name: "generic model capacity", err: errors.New("model is at capacity"), want: true},
+		{name: "invalid model", err: errors.New("selected model does not exist"), want: false},
+		{name: "canceled", err: context.Canceled, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isModelCapacityError(test.err); got != test.want {
+				t.Fatalf("isModelCapacityError(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
+
+func TestRelayCLIModelCapacityRetriesSameTurn(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeCapacityThenFinalScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	manager.modelCapacityRetryWaits = []time.Duration{0}
+	out := make(chan protocol.Envelope, 32)
+	manager.AttachOut(out)
+
+	content, _, err := manager.runRelayCLIWithCapacityRetries(context.Background(), protocol.OrchestrationStartPayload{
+		RunID: "orc_capacity_retry", CWD: tmp,
+	}, "orc_capacity_retry-01", "implementer", "claude", "claude", "finish the task", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "capacity retry completed") {
+		t.Fatalf("retry content = %q", content)
+	}
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "claude", "模型当前容量已满") ||
+		!orchestrationEventsContain(events, "turn.delta", "claude", "正在重试 Claude") {
+		t.Fatalf("capacity retry state was not visible: %#v", events)
+	}
+}
+
+func TestRelayCLIModelCapacityRetryExhaustionPreservesProviderError(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeErrorScript("Selected model is at capacity. Please try a different model.")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	manager.modelCapacityRetryWaits = []time.Duration{0, 0}
+	out := make(chan protocol.Envelope, 32)
+	manager.AttachOut(out)
+
+	_, _, err := manager.runRelayCLIWithCapacityRetries(context.Background(), protocol.OrchestrationStartPayload{
+		RunID: "orc_capacity_exhausted", CWD: tmp,
+	}, "orc_capacity_exhausted-01", "implementer", "claude", "claude", "finish the task", nil)
+	if err == nil || !strings.Contains(err.Error(), "at capacity") {
+		t.Fatalf("retry exhaustion error = %v", err)
+	}
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "claude", "已完成 2 次退避重试") ||
+		!orchestrationEventsContain(events, "turn.delta", "claude", "Selected model is at capacity") {
+		t.Fatalf("retry exhaustion was not visible with provider error: %#v", events)
+	}
+}
+
+func TestRelayCLIModelCapacityRetryWaitHonorsCancellation(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeErrorScript("Selected model is at capacity. Please try a different model.")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	manager.modelCapacityRetryWaits = []time.Duration{time.Hour}
+	out := make(chan protocol.Envelope, 32)
+	manager.AttachOut(out)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := manager.runRelayCLIWithCapacityRetries(ctx, protocol.OrchestrationStartPayload{
+			RunID: "orc_capacity_cancel", CWD: tmp,
+		}, "orc_capacity_cancel-01", "implementer", "claude", "claude", "finish the task", nil)
+		done <- err
+	}()
+	if !waitForOrchestrationEvent(t, out, "turn.delta", "claude", "模型当前容量已满") {
+		t.Fatal("capacity retry wait was not emitted")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled wait error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("capacity retry wait did not stop after cancellation")
+	}
+	events := drainOrchestrationEvents(t, out)
+	if orchestrationEventsContain(events, "turn.delta", "claude", "正在重试 Claude") {
+		t.Fatalf("retry started after cancellation: %#v", events)
+	}
+}
+
+func TestOrchestrationModelCapacityExhaustionEndsWithProviderReason(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeErrorScript("Selected model is at capacity. Please try a different model.")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	manager.modelCapacityRetryWaits = []time.Duration{0}
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID: "orc_capacity_terminal", Mode: "collaboration", Prompt: "finish", MaxTurns: 1, CWD: tmp,
+	})
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "claude", "已完成 1 次退避重试") ||
+		!orchestrationEventsContain(events, "run.error", "claude", "Selected model is at capacity") {
+		t.Fatalf("capacity exhaustion did not remain a visible terminal error: %#v", events)
+	}
+	if orchestrationEventsContain(events, "turn.delta", "claude", "continuing this same turn") {
+		t.Fatalf("capacity exhaustion incorrectly started missing-final continuation: %#v", events)
+	}
+}
+
 func TestOrchestrationCodexTailDisconnectAfterFinalContentCompletes(t *testing.T) {
 	tmp := t.TempDir()
 	codexPath := filepath.Join(tmp, "codex")
@@ -3693,6 +3836,30 @@ import sys
 text = ` + string(raw) + `
 print(text, file=sys.stderr, flush=True)
 sys.exit(1)
+`
+}
+
+func fakeClaudeCapacityThenFinalScript() string {
+	return `#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+state = pathlib.Path(sys.argv[0]).with_suffix(".state")
+count = int(state.read_text(encoding="utf-8")) if state.exists() else 0
+state.write_text(str(count + 1), encoding="utf-8")
+if count == 0:
+    print("Selected model is at capacity. Please try a different model.", file=sys.stderr, flush=True)
+    raise SystemExit(1)
+text = "最终结论：capacity retry completed\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=retry; next=none; risks=none"
+if "--input-format=stream-json" in sys.argv:
+    for line in sys.stdin:
+        json.loads(line)
+        print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
+        print(json.dumps({"type":"result","result":text}), flush=True)
+        raise SystemExit(0)
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
+print(json.dumps({"type":"result","result":text}), flush=True)
 `
 }
 

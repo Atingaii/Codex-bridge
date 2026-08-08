@@ -182,6 +182,12 @@ when no stdin side-channel exists. Both paths use
 `BridgeNoteData.InjectedText` so the browser timeline records exactly what
 Bridge said.
 
+When a CLI explicitly reports that its selected model is at capacity, Bridge
+keeps the same relay turn and performs bounded 10/30/60-second backoff retries.
+Waiting, retry start, and retry exhaustion are persisted as Bridge-originated
+`turn.delta` notices, and cancellation interrupts the wait. Other CLI errors
+remain terminal; this behavior neither starts a new run nor switches models.
+
 Review-required Claude orchestration uses Claude Code's
 `--permission-prompt-tool` support.
 `internal/bridge/orchestration_claude.go:runClaude` and

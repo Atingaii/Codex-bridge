@@ -41,6 +41,9 @@ func (m *OrchestrationManager) emitTurnUsage(runID string, record orchestrationT
 			"cacheWriteTokens": usage.CacheWriteTokens,
 			"estimatedCostUsd": usage.EstimatedCostUSD,
 			"estimated":        usage.Estimated,
+			"native":           usage.Native,
+			"costKnown":        usage.CostKnown,
+			"costSource":       usage.CostSource,
 		},
 	})
 }
@@ -890,18 +893,18 @@ func formatRelayPriorTurn(item orchestrationTurn) string {
 }
 
 func relayCanConverge(mode, profile string, history []orchestrationTurn) bool {
-	if len(history) < 2 {
+	if len(history) == 0 {
 		return false
 	}
 	record := history[len(history)-1]
-	if (mode == "collaboration" && record.Role != "reviewer") || (mode == "debate" && record.Role != "critic") {
+	if len(history) > 1 && ((mode == "collaboration" && record.Role != "reviewer") || (mode == "debate" && record.Role != "critic")) {
 		return false
 	}
 	packet := record.Relay
 	if !packet.Structured || packet.Status != "resolved" || packet.To != "user" || packet.Intent != "final" || !machineExplicitNone(packet.Next) || !machineExplicitNone(packet.Risks) {
 		return false
 	}
-	if relayParticipantCount(history) < 2 || (machineNone(packet.Verified) && !relayHasSuccessfulCommand(record.Tools)) {
+	if len(history) > 1 && (relayParticipantCount(history) < 2 || (machineNone(packet.Verified) && !relayHasSuccessfulCommand(record.Tools))) {
 		return false
 	}
 	if normalizeOrchestrationProfile(profile) == "formal-proof" {

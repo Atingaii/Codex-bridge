@@ -82,6 +82,13 @@ func TestDurableTaskDispatchRetainsSelectedCWD(t *testing.T) {
 	}
 }
 
+func TestOrchestrationTaskSpecsOneTurnIsSolo(t *testing.T) {
+	specs := orchestrationTaskSpecs("digest", protocol.WorkerPairCodexCodex, "collaboration", 1)
+	if len(specs) != 1 || specs[0].Name != "solo" || specs[0].Role != store.TaskRoleReviewer {
+		t.Fatalf("one-turn specs = %#v", specs)
+	}
+}
+
 func sendTaskLifecycle(s *Server, runID string, ref protocol.TaskAttemptRef, conclusion *protocol.RunConclusion) {
 	ctx := context.Background()
 	s.handleOrchestrationEvent(ctx, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{

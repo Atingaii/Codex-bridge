@@ -274,7 +274,7 @@ func (s *Server) normalizeOrchestrationStart(w http.ResponseWriter, req orchestr
 	req.Profile = normalizeOrchestrationProfile(req.Profile)
 	req.NativeContextCompaction = protocol.NormalizeNativeContextCompaction(req.NativeContextCompaction)
 	if req.MaxTurns <= 0 {
-		req.MaxTurns = 4
+		req.MaxTurns = 2
 	}
 	req.MaxTurnsRequested = req.MaxTurns
 	if req.MaxTurns > 12 {
@@ -296,6 +296,9 @@ type orchestrationUsageStats struct {
 	CacheWriteTokens int64   `json:"cacheWriteTokens"`
 	EstimatedCostUSD float64 `json:"estimatedCostUsd"`
 	Estimated        bool    `json:"estimated"`
+	Native           bool    `json:"native"`
+	CostKnown        bool    `json:"costKnown"`
+	CostSource       string  `json:"costSource"`
 }
 
 type orchestrationRunStats struct {
@@ -309,6 +312,9 @@ type orchestrationRunStats struct {
 	CacheWriteTokens int64                     `json:"cacheWriteTokens"`
 	EstimatedCostUSD float64                   `json:"estimatedCostUsd"`
 	Estimated        bool                      `json:"estimated"`
+	Native           bool                      `json:"native"`
+	CostKnown        bool                      `json:"costKnown"`
+	CostSource       string                    `json:"costSource"`
 	ByCLI            []orchestrationUsageStats `json:"byCli"`
 }
 
@@ -353,6 +359,15 @@ func buildOrchestrationRunStats(run store.OrchestrationRun, events []store.Orche
 		stats.CacheWriteTokens += usage.CacheWriteTokens
 		stats.EstimatedCostUSD += usage.EstimatedCostUSD
 		stats.Estimated = stats.Estimated || usage.Estimated
+		stats.Native = stats.Native || usage.Native
+		stats.CostKnown = stats.CostKnown || usage.CostKnown
+		if usage.CostSource != "" {
+			if stats.CostSource == "" {
+				stats.CostSource = usage.CostSource
+			} else if stats.CostSource != usage.CostSource {
+				stats.CostSource = "mixed"
+			}
+		}
 		item := byCLI[usage.CLI]
 		if item == nil {
 			item = &orchestrationUsageStats{CLI: usage.CLI, Model: usage.Model, Estimated: usage.Estimated}
@@ -364,6 +379,15 @@ func buildOrchestrationRunStats(run store.OrchestrationRun, events []store.Orche
 		item.CacheWriteTokens += usage.CacheWriteTokens
 		item.EstimatedCostUSD += usage.EstimatedCostUSD
 		item.Estimated = item.Estimated || usage.Estimated
+		item.Native = item.Native || usage.Native
+		item.CostKnown = item.CostKnown || usage.CostKnown
+		if usage.CostSource != "" {
+			if item.CostSource == "" {
+				item.CostSource = usage.CostSource
+			} else if item.CostSource != usage.CostSource {
+				item.CostSource = "mixed"
+			}
+		}
 	}
 	if stats.StartedAt == 0 {
 		stats.StartedAt = run.CreatedAt
@@ -401,7 +425,9 @@ func orchestrationUsageFromData(data map[string]any) orchestrationUsageStats {
 	}
 	text := func(key string) string { v, _ := data[key].(string); return v }
 	estimated, _ := data["estimated"].(bool)
-	return orchestrationUsageStats{CLI: text("cli"), Model: text("model"), InputTokens: value("inputTokens"), OutputTokens: value("outputTokens"), CacheReadTokens: value("cacheReadTokens"), CacheWriteTokens: value("cacheWriteTokens"), EstimatedCostUSD: decimal("estimatedCostUsd"), Estimated: estimated}
+	native, _ := data["native"].(bool)
+	costKnown, _ := data["costKnown"].(bool)
+	return orchestrationUsageStats{CLI: text("cli"), Model: text("model"), InputTokens: value("inputTokens"), OutputTokens: value("outputTokens"), CacheReadTokens: value("cacheReadTokens"), CacheWriteTokens: value("cacheWriteTokens"), EstimatedCostUSD: decimal("estimatedCostUsd"), Estimated: estimated, Native: native, CostKnown: costKnown, CostSource: text("costSource")}
 }
 
 func (s *Server) startOrchestration(ctx context.Context, run store.OrchestrationRun, req orchestrationStartRequest, contextParts []string, resume bool) error {

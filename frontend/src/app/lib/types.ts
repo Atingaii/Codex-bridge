@@ -109,6 +109,9 @@ export type OrchestrationUsageStats = {
   cacheWriteTokens: number;
   estimatedCostUsd: number;
   estimated: boolean;
+  native: boolean;
+  costKnown: boolean;
+  costSource?: string;
 };
 
 export type OrchestrationRunStats = {
@@ -122,6 +125,9 @@ export type OrchestrationRunStats = {
   cacheWriteTokens: number;
   estimatedCostUsd: number;
   estimated: boolean;
+  native: boolean;
+  costKnown: boolean;
+  costSource?: string;
   byCli: OrchestrationUsageStats[];
 };
 

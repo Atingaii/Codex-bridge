@@ -33,6 +33,7 @@ type codexScanResult struct {
 	Tools         []RunnerToolEvent
 	ThreadID      string
 	ThreadStarted bool
+	Usage         json.RawMessage
 }
 
 func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, []RunnerToolEvent, error) {
@@ -107,6 +108,9 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 	scope.setTurnID(appServerTurnIDFromResponse(res))
 	select {
 	case result := <-done:
+		if len(result.result.Usage) > 0 {
+			m.recordNativeUsage(turnID, "codex", m.cfg.Bridge.Model, result.result.Usage)
+		}
 		return strings.TrimSpace(result.result.Content), snapshotTools(), codex.threadID, resumeMode, result.err
 	case <-ctx.Done():
 		return "", snapshotTools(), codex.threadID, resumeMode, ctx.Err()
@@ -258,6 +262,9 @@ func (m *OrchestrationManager) runCodexWithThread(ctx context.Context, payload p
 		return m.runCodexAppServerWithThread(ctx, payload, turnID, role, prompt, threadID)
 	}
 	attempt := m.runCodexExecAttempt(ctx, payload, turnID, role, prompt, threadID)
+	if len(attempt.usage) > 0 {
+		m.recordNativeUsage(turnID, "codex", m.cfg.Bridge.Model, attempt.usage)
+	}
 	if threadID != "" {
 		if attempt.threadID != "" && attempt.threadID != threadID {
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -292,6 +299,9 @@ func (m *OrchestrationManager) runCodexWithThread(ctx context.Context, payload p
 				},
 			})
 			fresh := m.runCodexExecAttempt(ctx, payload, turnID, role, prompt, "")
+			if len(fresh.usage) > 0 {
+				m.recordNativeUsage(turnID, "codex", m.cfg.Bridge.Model, fresh.usage)
+			}
 			return fresh.content, fresh.tools, firstNonEmpty(fresh.threadID, attempt.threadID, threadID), "codex-fresh-after-resume-miss", fresh.err
 		}
 		if attempt.threadID == threadID {
@@ -311,6 +321,7 @@ type codexExecAttempt struct {
 	threadID      string
 	threadStarted bool
 	err           error
+	usage         json.RawMessage
 }
 
 func (m *OrchestrationManager) runCodexExecAttempt(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt, threadID string) codexExecAttempt {
@@ -347,22 +358,22 @@ func (m *OrchestrationManager) runCodexExecAttempt(ctx context.Context, payload 
 	}
 	waitErr := cmd.Wait()
 	if err := ctx.Err(); err != nil {
-		return codexExecAttempt{content: scanResult.Content, tools: scanResult.Tools, threadID: firstNonEmpty(scanResult.ThreadID, threadID), threadStarted: scanResult.ThreadStarted, err: err}
+		return codexExecAttempt{content: scanResult.Content, tools: scanResult.Tools, threadID: firstNonEmpty(scanResult.ThreadID, threadID), threadStarted: scanResult.ThreadStarted, usage: scanResult.Usage, err: err}
 	}
 	if scanErr != nil {
-		return codexExecAttempt{content: scanResult.Content, tools: scanResult.Tools, threadID: firstNonEmpty(scanResult.ThreadID, threadID), threadStarted: scanResult.ThreadStarted, err: scanErr}
+		return codexExecAttempt{content: scanResult.Content, tools: scanResult.Tools, threadID: firstNonEmpty(scanResult.ThreadID, threadID), threadStarted: scanResult.ThreadStarted, usage: scanResult.Usage, err: scanErr}
 	}
 	if waitErr != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = waitErr.Error()
 		}
-		return codexExecAttempt{content: scanResult.Content, tools: scanResult.Tools, threadID: firstNonEmpty(scanResult.ThreadID, threadID), threadStarted: scanResult.ThreadStarted, err: errors.New(msg)}
+		return codexExecAttempt{content: scanResult.Content, tools: scanResult.Tools, threadID: firstNonEmpty(scanResult.ThreadID, threadID), threadStarted: scanResult.ThreadStarted, usage: scanResult.Usage, err: errors.New(msg)}
 	}
 	if scanResult.Content == "" {
 		scanResult.Content = strings.TrimSpace(stderr.String())
 	}
-	return codexExecAttempt{content: scanResult.Content, tools: scanResult.Tools, threadID: firstNonEmpty(scanResult.ThreadID, threadID), threadStarted: scanResult.ThreadStarted}
+	return codexExecAttempt{content: scanResult.Content, tools: scanResult.Tools, threadID: firstNonEmpty(scanResult.ThreadID, threadID), threadStarted: scanResult.ThreadStarted, usage: scanResult.Usage}
 }
 
 func shouldRetryCodexFreshAfterResume(expectedThreadID string, attempt codexExecAttempt) bool {
@@ -473,6 +484,9 @@ func (m *OrchestrationManager) runCodexAppServerWithThread(ctx context.Context, 
 	if threadID != "" {
 		mode = "codex-thread-resume"
 	}
+	if len(result.Usage) > 0 {
+		m.recordNativeUsage(turnID, "codex", m.cfg.Bridge.Model, result.Usage)
+	}
 	return strings.TrimSpace(result.Content), tools, firstNonEmpty(result.RemoteThreadID, threadID), mode, err
 }
 
@@ -487,6 +501,7 @@ func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, tur
 	var tools []RunnerToolEvent
 	var threadID string
 	var threadStarted bool
+	var usage json.RawMessage
 	var pendingFailedTool *RunnerToolEvent
 	toolStarts := make(map[string]time.Time)
 	observer := m.longCommandObserverConfig()
@@ -529,7 +544,7 @@ func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, tur
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return codexScanResult{Content: content.String(), Tools: tools, ThreadID: threadID, ThreadStarted: threadStarted}, err
+			return codexScanResult{Content: content.String(), Tools: tools, ThreadID: threadID, ThreadStarted: threadStarted, Usage: usage}, err
 		}
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
@@ -583,13 +598,19 @@ func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, tur
 			if itemType == "command_execution" || itemType == "commandExecution" {
 				emitCodexTool(commandExecutionEvent(item))
 			}
+		case "turn.completed":
+			if rawUsage, ok := msg["usage"]; ok {
+				if encoded, marshalErr := json.Marshal(rawUsage); marshalErr == nil {
+					usage = encoded
+				}
+			}
 		}
 	}
 	if eventErr != "" && !codexTailErrorAfterContent(eventErr, content.String()) {
-		return codexScanResult{Content: content.String(), Tools: tools, ThreadID: threadID, ThreadStarted: threadStarted}, errors.New(eventErr)
+		return codexScanResult{Content: content.String(), Tools: tools, ThreadID: threadID, ThreadStarted: threadStarted, Usage: usage}, errors.New(eventErr)
 	}
 	if pendingFailedTool != nil {
-		return codexScanResult{Content: strings.TrimSpace(content.String()), Tools: tools, ThreadID: threadID, ThreadStarted: threadStarted}, failedToolWithoutFollowupError("codex", *pendingFailedTool)
+		return codexScanResult{Content: strings.TrimSpace(content.String()), Tools: tools, ThreadID: threadID, ThreadStarted: threadStarted, Usage: usage}, failedToolWithoutFollowupError("codex", *pendingFailedTool)
 	}
-	return codexScanResult{Content: strings.TrimSpace(content.String()), Tools: tools, ThreadID: threadID, ThreadStarted: threadStarted}, nil
+	return codexScanResult{Content: strings.TrimSpace(content.String()), Tools: tools, ThreadID: threadID, ThreadStarted: threadStarted, Usage: usage}, nil
 }

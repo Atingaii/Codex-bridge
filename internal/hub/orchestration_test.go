@@ -27,6 +27,16 @@ func TestBuildOrchestrationRunStatsAggregatesUsage(t *testing.T) {
 	}
 }
 
+func TestBuildOrchestrationRunStatsPreservesUsageProvenance(t *testing.T) {
+	run := store.OrchestrationRun{ID: "orc_provenance", CreatedAt: 100, FinishedAt: 110, Status: store.OrchestrationCompleted}
+	stats := buildOrchestrationRunStats(run, []store.OrchestrationEvent{{Kind: "turn.usage", CLI: "codex", Data: map[string]any{
+		"cli": "codex", "model": "gpt-5-codex", "inputTokens": float64(10), "native": true, "costKnown": true, "costSource": "catalog", "estimatedCostUsd": .01,
+	}}})
+	if !stats.Native || !stats.CostKnown || stats.CostSource != "catalog" || len(stats.ByCLI) != 1 || !stats.ByCLI[0].Native {
+		t.Fatalf("stats = %#v", stats)
+	}
+}
+
 func TestCancelOrchestrationStatusTransitions(t *testing.T) {
 	t.Parallel()
 

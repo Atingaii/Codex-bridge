@@ -911,6 +911,15 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 			}
 		case "result":
 			receivedResult = true
+			usagePayload := map[string]any{}
+			for _, key := range []string{"usage", "modelUsage", "costUSD"} {
+				if value, ok := msg[key]; ok {
+					usagePayload[key] = value
+				}
+			}
+			if raw, marshalErr := json.Marshal(usagePayload); marshalErr == nil {
+				m.recordNativeUsage(turnID, "claude", m.cfg.Bridge.ClaudeModel, raw)
+			}
 			if isErr, _ := msg["is_error"].(bool); isErr {
 				if text := firstString(msg, "result", "error"); text != "" {
 					return content.String(), tools, errors.New(text)

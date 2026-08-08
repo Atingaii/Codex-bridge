@@ -34,6 +34,7 @@ type OrchestrationManager struct {
 	// as global mutable test state. Production uses the default schedule; focused
 	// tests can shorten it without changing other concurrently running managers.
 	modelCapacityRetryWaits []time.Duration
+	nativeUsage             map[string][]orchestrationUsage
 }
 
 type orchestrationExecution struct {
@@ -119,6 +120,7 @@ func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
 		conclusions:             make(map[string]bool),
 		executions:              make(map[string]orchestrationExecution),
 		modelCapacityRetryWaits: append([]time.Duration(nil), defaultModelCapacityRetryWaits...),
+		nativeUsage:             make(map[string][]orchestrationUsage),
 	}
 }
 
@@ -862,7 +864,7 @@ func durableReviewerCanComplete(profile string, history []orchestrationTurn) boo
 	if record.Role != store.TaskRoleReviewer || !packet.Structured || packet.Status != "resolved" || packet.To != "user" || packet.Intent != "final" || !machineExplicitNone(packet.Next) || !machineExplicitNone(packet.Risks) {
 		return false
 	}
-	if machineNone(packet.Verified) && !relayHasSuccessfulCommand(record.Tools) {
+	if len(history) > 1 && machineNone(packet.Verified) && !relayHasSuccessfulCommand(record.Tools) {
 		return false
 	}
 	return normalizeOrchestrationProfile(profile) != bridgeprofiles.Formal() || durableTaskHasFormalCheck(history)
@@ -897,7 +899,7 @@ func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context
 		content, tools, err := m.runRelayCLIWithCapacityRetries(ctx, payload, turnID, role, cli, workerSlot, nextPrompt, state)
 		recordCommandFingerprints(state, runCWD, tools)
 		record := newOrchestrationTurnRecordWithSlot(turnID, role, cli, workerSlot, content, tools)
-		record.Usage = m.orchestrationUsageForTurn(cli, nextPrompt, content)
+		record.Usage = m.orchestrationUsageForTurn(turnID, cli, nextPrompt, content)
 		if err != nil {
 			record.Err = visibleCLIError(err)
 		}
@@ -988,6 +990,11 @@ func mergeOrchestrationTurnAttempts(current, next orchestrationTurn) orchestrati
 	current.Usage.CacheWriteTokens += next.Usage.CacheWriteTokens
 	current.Usage.EstimatedCostUSD += next.Usage.EstimatedCostUSD
 	current.Usage.Estimated = current.Usage.Estimated || next.Usage.Estimated
+	current.Usage.Native = current.Usage.Native || next.Usage.Native
+	current.Usage.CostKnown = current.Usage.CostKnown || next.Usage.CostKnown
+	if next.Usage.CostSource != "" {
+		current.Usage.CostSource = next.Usage.CostSource
+	}
 	if current.Usage.Model == "" {
 		current.Usage.Model = next.Usage.Model
 	}

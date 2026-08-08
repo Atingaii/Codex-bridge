@@ -27,10 +27,21 @@ func taskPayloadDigest(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func orchestrationTaskSpecs(baseDigest, workerPair, mode string) []store.CreateTaskSpec {
+func orchestrationTaskSpecs(baseDigest, workerPair, mode string, maxTurns ...int) []store.CreateTaskSpec {
 	workerA, workerB := "claude", "codex"
 	if protocol.NormalizeOrchestrationWorkerPair(workerPair) == protocol.WorkerPairCodexCodex {
 		workerA, workerB = "codex-a", "codex-b"
+	}
+	if len(maxTurns) > 0 && maxTurns[0] == 1 {
+		instruction := orchestrationTaskInstruction{Instruction: "Act as the sole autonomous executor and reviewer in the user's selected project directory. Fully investigate and complete the request, make all safe in-scope changes, run relevant checks, and use your own judgment rather than waiting for another agent. Finish with a user-ready resolved structured handoff only when the evidence supports completion; otherwise state the exact blocker and remaining work. Formal-proof work must include a successful proof-assistant checker or audit command."}
+		raw, _ := json.Marshal(instruction)
+		return []store.CreateTaskSpec{{
+			Name:          "solo",
+			Role:          store.TaskRoleReviewer,
+			WorkerSlot:    workerA,
+			PayloadJSON:   string(raw),
+			PayloadDigest: taskPayloadDigest(baseDigest, string(raw)),
+		}}
 	}
 	workerDuty := "Build one independent candidate in the user's selected project directory. Inspect the actual project, make bounded changes, run focused checks, and finish with a structured handoff naming changed files, exact commands, and remaining risks."
 	if mode == "debate" {
@@ -73,7 +84,7 @@ func (s *Server) createAndDispatchTaskGraph(ctx context.Context, run store.Orche
 		return err
 	}
 	baseDigest := taskPayloadDigest(string(baseJSON))
-	graph, err := s.store.CreateOrchestrationTaskGraph(ctx, run.ID, string(baseJSON), baseDigest, orchestrationTaskSpecs(baseDigest, payload.WorkerPair, payload.Mode))
+	graph, err := s.store.CreateOrchestrationTaskGraph(ctx, run.ID, string(baseJSON), baseDigest, orchestrationTaskSpecs(baseDigest, payload.WorkerPair, payload.Mode, payload.MaxTurns))
 	if err != nil {
 		return err
 	}

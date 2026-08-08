@@ -127,7 +127,7 @@ export function OrchestrationWorkspace({
   const [nativeContextCompaction, setNativeContextCompaction] = useState<NativeContextCompaction>('off');
   const [prompt, setPrompt] = useState('');
   const [cwd, setCwd] = useState('');
-  const [maxTurns, setMaxTurns] = useState(4);
+  const [maxTurns, setMaxTurns] = useState(2);
   const [files, setFiles] = useState<UploadAttachment[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsFocus, setSettingsFocus] = useState<'cli' | ''>('');
@@ -1166,7 +1166,9 @@ export function OrchestrationWorkspace({
                 <div className="grid gap-3 sm:grid-cols-[minmax(7rem,0.45fr)_minmax(10rem,0.55fr)]">
                   <label className="block space-y-2">
                     <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.turns}</span>
-                    <Input type="number" min={1} max={12} value={maxTurns} onChange={(event) => setMaxTurns(Math.max(1, Number(event.target.value) || 4))} disabled={creating || isRunning} />
+                    <select value={maxTurns} onChange={(event) => setMaxTurns(Number(event.target.value))} disabled={creating || isRunning} className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm">
+                      {[1, 2, 3, 4, 6, 8, 12].map((turns) => <option key={turns} value={turns}>{turns} {turns === 1 ? 'round' : 'rounds'}</option>)}
+                    </select>
                   </label>
                   <div className="space-y-2">
                     <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.nativeContextCompaction}</span>

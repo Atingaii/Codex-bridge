@@ -1,5 +1,9 @@
 # Orchestration Runtime And Usage Statistics
 
+> **DEPRECATED - character-count token fallback removed**
+>
+> Current design: [Gateway Native Usage Accounting](gateway-native-usage-accounting.md). Historical details below are retained for context only.
+
 ## Goals
 
 - Allow users to explicitly select a one-turn orchestration for simple tasks.
@@ -19,8 +23,9 @@
 ## Data And Protocol Impact
 
 CLI workers emit a persisted `turn.usage` orchestration event. Its `data` object
-contains the CLI, model, input/output/cache token counts, whether counts were
-estimated, and estimated USD cost. Existing event consumers ignore the new kind.
+contains the CLI, model, input/output/cache token counts, native/provenance
+flags, and cost availability. Missing provider counts are explicitly marked
+unavailable; the gateway no longer fabricates token counts from characters.
 The run record's existing `created_at` and `finished_at` fields are used for
 wall-clock runtime; running runs use the current time for a live duration.
 

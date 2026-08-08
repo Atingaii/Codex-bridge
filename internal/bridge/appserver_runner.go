@@ -362,6 +362,8 @@ func (s *appServerTurnScope) matches(ctx context.Context, msg appServerMessage) 
 func messageRequiresTurnID(method string) bool {
 	switch method {
 	case "turn/completed",
+		"thread/tokenUsage/updated",
+		"raw/responseCompleted",
 		"item/agentMessage/delta",
 		"item/completed",
 		"item/started",
@@ -444,6 +446,23 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 				threadID, _ := scope.current()
 				if msgThreadID := appServerMessageThreadID(msg); msgThreadID == "" || threadID == "" || msgThreadID == threadID {
 					scope.observeTurnID(appServerMessageTurnID(msg))
+				}
+				continue
+			}
+			if msg.Method == "thread/tokenUsage/updated" || msg.Method == "raw/responseCompleted" {
+				if !scope.matchesNonTerminal(ctx, msg) {
+					continue
+				}
+				var payload any
+				if msg.Method == "thread/tokenUsage/updated" {
+					payload = msg.Params["tokenUsage"]
+				} else {
+					payload = msg.Params
+				}
+				if payload != nil {
+					if raw, marshalErr := json.Marshal(payload); marshalErr == nil && len(raw) > 0 {
+						result.Usage = raw
+					}
 				}
 				continue
 			}

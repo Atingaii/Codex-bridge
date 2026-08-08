@@ -32,8 +32,29 @@ func TestBuildOrchestrationRunStatsPreservesUsageProvenance(t *testing.T) {
 	stats := buildOrchestrationRunStats(run, []store.OrchestrationEvent{{Kind: "turn.usage", CLI: "codex", Data: map[string]any{
 		"cli": "codex", "model": "gpt-5-codex", "inputTokens": float64(10), "native": true, "costKnown": true, "costSource": "catalog", "estimatedCostUsd": .01,
 	}}})
-	if !stats.Native || !stats.CostKnown || stats.CostSource != "catalog" || len(stats.ByCLI) != 1 || !stats.ByCLI[0].Native {
+	if !stats.Native || !stats.CostKnown || stats.CostSource != "catalog" || len(stats.ByCLI) != 1 || !stats.ByCLI[0].Native || len(stats.PricingModels) != 0 {
 		t.Fatalf("stats = %#v", stats)
+	}
+}
+
+func TestBuildOrchestrationRunStatsPricesLegacyCodexDefault(t *testing.T) {
+	run := store.OrchestrationRun{ID: "orc_legacy_usage", CreatedAt: 100, FinishedAt: 110, Status: store.OrchestrationCompleted}
+	stats := buildOrchestrationRunStats(run, []store.OrchestrationEvent{{Kind: "turn.usage", CLI: "codex", Data: map[string]any{
+		"cli": "codex", "model": "default", "inputTokens": float64(23858), "outputTokens": float64(1605), "estimated": true, "costKnown": false, "costSource": "unavailable",
+	}}})
+	if !stats.CostKnown || stats.CostSource != "official-catalog" || len(stats.PricingModels) != 1 || stats.PricingModels[0] != "gpt-5.6-sol" || len(stats.ByCLI) != 1 || stats.ByCLI[0].PricingModel != "gpt-5.6-sol" || stats.EstimatedCostUSD < 0.167439 || stats.EstimatedCostUSD > 0.167441 {
+		t.Fatalf("stats = %#v", stats)
+	}
+}
+
+func TestBuildOrchestrationRunStatsDoesNotPresentPartialCostAsComplete(t *testing.T) {
+	run := store.OrchestrationRun{ID: "orc_partial_cost", CreatedAt: 100, FinishedAt: 110, Status: store.OrchestrationCompleted}
+	stats := buildOrchestrationRunStats(run, []store.OrchestrationEvent{
+		{Kind: "turn.usage", CLI: "codex", Data: map[string]any{"cli": "codex", "model": "gpt-5.6-sol", "inputTokens": float64(100), "costKnown": true, "costSource": "official-catalog", "estimatedCostUsd": .0005}},
+		{Kind: "turn.usage", CLI: "other", Data: map[string]any{"cli": "other", "model": "unknown", "inputTokens": float64(100), "costKnown": false, "costSource": "unavailable"}},
+	})
+	if stats.CostKnown {
+		t.Fatalf("partial aggregate marked complete: %#v", stats)
 	}
 }
 

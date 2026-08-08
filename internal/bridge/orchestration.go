@@ -974,6 +974,8 @@ func mergeOrchestrationTurnAttempts(current, next orchestrationTurn) orchestrati
 	if current.TurnID == "" {
 		return next
 	}
+	currentHasUsage := orchestrationUsageHasCounts(current.Usage)
+	nextHasUsage := orchestrationUsageHasCounts(next.Usage)
 	if strings.TrimSpace(next.Content) != "" {
 		current.Content = mergeOrchestrationTurnContent(current.Content, next.Content)
 	}
@@ -991,14 +993,29 @@ func mergeOrchestrationTurnAttempts(current, next orchestrationTurn) orchestrati
 	current.Usage.EstimatedCostUSD += next.Usage.EstimatedCostUSD
 	current.Usage.Estimated = current.Usage.Estimated || next.Usage.Estimated
 	current.Usage.Native = current.Usage.Native || next.Usage.Native
-	current.Usage.CostKnown = current.Usage.CostKnown || next.Usage.CostKnown
-	if next.Usage.CostSource != "" {
+	if currentHasUsage && nextHasUsage {
+		current.Usage.CostKnown = current.Usage.CostKnown && next.Usage.CostKnown
+	} else if nextHasUsage {
+		current.Usage.CostKnown = next.Usage.CostKnown
+	}
+	if current.Usage.CostSource == "" {
 		current.Usage.CostSource = next.Usage.CostSource
+	} else if next.Usage.CostSource != "" && current.Usage.CostSource != next.Usage.CostSource {
+		current.Usage.CostSource = "mixed"
+	}
+	if current.Usage.PricingModel == "" {
+		current.Usage.PricingModel = next.Usage.PricingModel
+	} else if next.Usage.PricingModel != "" && current.Usage.PricingModel != next.Usage.PricingModel {
+		current.Usage.PricingModel = "mixed"
 	}
 	if current.Usage.Model == "" {
 		current.Usage.Model = next.Usage.Model
 	}
 	return current
+}
+
+func orchestrationUsageHasCounts(usage orchestrationUsage) bool {
+	return usage.InputTokens+usage.OutputTokens+usage.CacheReadTokens+usage.CacheWriteTokens > 0
 }
 
 func mergeOrchestrationTurnContent(current, next string) string {

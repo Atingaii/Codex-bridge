@@ -15,6 +15,7 @@ import (
 	"github.com/tencent/codex-bridge/internal/protocol"
 	"github.com/tencent/codex-bridge/internal/serverutil"
 	"github.com/tencent/codex-bridge/internal/store"
+	"github.com/tencent/codex-bridge/internal/usagepricing"
 )
 
 type orchestrationCreateRequest struct {
@@ -299,6 +300,7 @@ type orchestrationUsageStats struct {
 	Native           bool    `json:"native"`
 	CostKnown        bool    `json:"costKnown"`
 	CostSource       string  `json:"costSource"`
+	PricingModel     string  `json:"pricingModel,omitempty"`
 }
 
 type orchestrationRunStats struct {
@@ -315,6 +317,7 @@ type orchestrationRunStats struct {
 	Native           bool                      `json:"native"`
 	CostKnown        bool                      `json:"costKnown"`
 	CostSource       string                    `json:"costSource"`
+	PricingModels    []string                  `json:"pricingModels,omitempty"`
 	ByCLI            []orchestrationUsageStats `json:"byCli"`
 }
 
@@ -339,6 +342,7 @@ func (s *Server) handleOrchestrationStats(w http.ResponseWriter, r *http.Request
 func buildOrchestrationRunStats(run store.OrchestrationRun, events []store.OrchestrationEvent) orchestrationRunStats {
 	stats := orchestrationRunStats{RunID: run.ID, FinishedAt: run.FinishedAt}
 	byCLI := map[string]*orchestrationUsageStats{}
+	usageCount := 0
 	for _, event := range events {
 		if event.Kind == "run.start" && (stats.StartedAt == 0 || event.CreatedAt < stats.StartedAt) {
 			stats.StartedAt = event.CreatedAt
@@ -353,6 +357,8 @@ func buildOrchestrationRunStats(run store.OrchestrationRun, events []store.Orche
 		if usage.CLI == "" {
 			usage.CLI = "unknown"
 		}
+		usage.applyOfficialCatalogFallback()
+		usageCount++
 		stats.InputTokens += usage.InputTokens
 		stats.OutputTokens += usage.OutputTokens
 		stats.CacheReadTokens += usage.CacheReadTokens
@@ -360,7 +366,11 @@ func buildOrchestrationRunStats(run store.OrchestrationRun, events []store.Orche
 		stats.EstimatedCostUSD += usage.EstimatedCostUSD
 		stats.Estimated = stats.Estimated || usage.Estimated
 		stats.Native = stats.Native || usage.Native
-		stats.CostKnown = stats.CostKnown || usage.CostKnown
+		if usageCount == 1 {
+			stats.CostKnown = usage.CostKnown
+		} else {
+			stats.CostKnown = stats.CostKnown && usage.CostKnown
+		}
 		if usage.CostSource != "" {
 			if stats.CostSource == "" {
 				stats.CostSource = usage.CostSource
@@ -368,9 +378,11 @@ func buildOrchestrationRunStats(run store.OrchestrationRun, events []store.Orche
 				stats.CostSource = "mixed"
 			}
 		}
+		stats.PricingModels = appendUnique(stats.PricingModels, usage.PricingModel)
 		item := byCLI[usage.CLI]
+		newItem := item == nil
 		if item == nil {
-			item = &orchestrationUsageStats{CLI: usage.CLI, Model: usage.Model, Estimated: usage.Estimated}
+			item = &orchestrationUsageStats{CLI: usage.CLI, Model: usage.Model, Estimated: usage.Estimated, CostKnown: usage.CostKnown}
 			byCLI[usage.CLI] = item
 		}
 		item.InputTokens += usage.InputTokens
@@ -380,7 +392,14 @@ func buildOrchestrationRunStats(run store.OrchestrationRun, events []store.Orche
 		item.EstimatedCostUSD += usage.EstimatedCostUSD
 		item.Estimated = item.Estimated || usage.Estimated
 		item.Native = item.Native || usage.Native
-		item.CostKnown = item.CostKnown || usage.CostKnown
+		if !newItem {
+			item.CostKnown = item.CostKnown && usage.CostKnown
+		}
+		if item.PricingModel == "" {
+			item.PricingModel = usage.PricingModel
+		} else if usage.PricingModel != "" && item.PricingModel != usage.PricingModel {
+			item.PricingModel = "mixed"
+		}
 		if usage.CostSource != "" {
 			if item.CostSource == "" {
 				item.CostSource = usage.CostSource
@@ -427,7 +446,33 @@ func orchestrationUsageFromData(data map[string]any) orchestrationUsageStats {
 	estimated, _ := data["estimated"].(bool)
 	native, _ := data["native"].(bool)
 	costKnown, _ := data["costKnown"].(bool)
-	return orchestrationUsageStats{CLI: text("cli"), Model: text("model"), InputTokens: value("inputTokens"), OutputTokens: value("outputTokens"), CacheReadTokens: value("cacheReadTokens"), CacheWriteTokens: value("cacheWriteTokens"), EstimatedCostUSD: decimal("estimatedCostUsd"), Estimated: estimated, Native: native, CostKnown: costKnown, CostSource: text("costSource")}
+	return orchestrationUsageStats{CLI: text("cli"), Model: text("model"), InputTokens: value("inputTokens"), OutputTokens: value("outputTokens"), CacheReadTokens: value("cacheReadTokens"), CacheWriteTokens: value("cacheWriteTokens"), EstimatedCostUSD: decimal("estimatedCostUsd"), Estimated: estimated, Native: native, CostKnown: costKnown, CostSource: text("costSource"), PricingModel: text("pricingModel")}
+}
+
+func (usage *orchestrationUsageStats) applyOfficialCatalogFallback() {
+	if usage.CostKnown {
+		return
+	}
+	quote, ok := usagepricing.Estimate(usage.CLI, usage.Model, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens)
+	if !ok {
+		return
+	}
+	usage.EstimatedCostUSD = quote.CostUSD
+	usage.CostKnown = true
+	usage.CostSource = quote.Source
+	usage.PricingModel = quote.PricingModel
+}
+
+func appendUnique(values []string, value string) []string {
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 func (s *Server) startOrchestration(ctx context.Context, run store.OrchestrationRun, req orchestrationStartRequest, contextParts []string, resume bool) error {

@@ -27,6 +27,19 @@ the counts. Cost uses provider-reported cost when present; otherwise it uses a
 known model price catalog and is labeled catalog-calculated. If neither is
 available, cost is null/zero and the UI reports that pricing is unavailable.
 
+The catalog is anchored to the providers' public standard API token prices.
+Codex events whose model is empty or `default` use `gpt-5.6-sol` as an explicit
+pricing anchor, matching the supported Bridge host default as of 2026-08-08.
+The event and statistics API preserve the actual model separately and expose
+the anchor as `pricingModel`; the UI labels this an official API catalog
+estimate, never a provider invoice. The OpenAI catalog treats cached input as a
+subset of total input and subtracts it before applying the uncached input rate.
+
+The Hub applies the same catalog at read time to legacy native-token events
+that did not persist cost provenance, so completed runs become priceable after
+deployment without rewriting stored orchestration history. The source catalog
+is [OpenAI API Pricing](https://platform.openai.com/docs/pricing), standard tier.
+
 Retries and continuations are separate provider calls and are each recorded;
 the aggregate is their sum, with no character-based fallback.
 
@@ -42,6 +55,8 @@ the aggregate is their sum, with no character-based fallback.
 - Native Codex and Claude usage is persisted per provider call.
 - Missing usage never creates fabricated token counts or cost.
 - Aggregate stats preserve retry/continuation calls without double counting.
+- Legacy Codex `default` events use the visible `gpt-5.6-sol` pricing anchor.
+- Provider-reported cost remains authoritative over the public catalog.
 - Focused and full Go/frontend checks pass.
 
 ## Reviewer Q&A

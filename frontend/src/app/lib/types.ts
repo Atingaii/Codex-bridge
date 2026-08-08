@@ -112,6 +112,7 @@ export type OrchestrationUsageStats = {
   native: boolean;
   costKnown: boolean;
   costSource?: string;
+	pricingModel?: string;
 };
 
 export type OrchestrationRunStats = {
@@ -128,6 +129,7 @@ export type OrchestrationRunStats = {
   native: boolean;
   costKnown: boolean;
   costSource?: string;
+	pricingModels?: string[];
   byCli: OrchestrationUsageStats[];
 };
 

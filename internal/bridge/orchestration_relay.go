@@ -44,6 +44,7 @@ func (m *OrchestrationManager) emitTurnUsage(runID string, record orchestrationT
 			"native":           usage.Native,
 			"costKnown":        usage.CostKnown,
 			"costSource":       usage.CostSource,
+			"pricingModel":     usage.PricingModel,
 		},
 	})
 }

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"math"
 	"strings"
+
+	"github.com/tencent/codex-bridge/internal/usagepricing"
 )
 
 // orchestrationUsage is deliberately compact because it is persisted as an
@@ -21,6 +23,7 @@ type orchestrationUsage struct {
 	Native           bool
 	CostKnown        bool
 	CostSource       string
+	PricingModel     string
 }
 
 func estimateOrchestrationUsage(model, prompt, content string) orchestrationUsage {
@@ -30,26 +33,6 @@ func estimateOrchestrationUsage(model, prompt, content string) orchestrationUsag
 		CostSource: "unavailable",
 	}
 	return usage
-}
-
-// Rates are USD per million tokens. They are only used when the provider
-// returned native counts but did not include its own cost.
-func orchestrationModelRates(model string) (input, output, cacheRead, cacheWrite float64) {
-	model = strings.ToLower(strings.TrimSpace(model))
-	switch {
-	case strings.Contains(model, "claude-opus"):
-		return 15, 75, 1.5, 18.75
-	case strings.Contains(model, "claude-sonnet"):
-		return 3, 15, 0.3, 3.75
-	case strings.Contains(model, "claude-haiku"):
-		return 0.8, 4, 0.08, 1
-	case strings.Contains(model, "gpt-5") || strings.Contains(model, "codex"):
-		return 1.25, 10, 0.125, 0
-	case strings.Contains(model, "gpt-4o"):
-		return 2.5, 10, 1.25, 0
-	default:
-		return 0, 0, 0, 0
-	}
 }
 
 func (m *OrchestrationManager) recordNativeUsage(turnID, cli, model string, raw json.RawMessage) {
@@ -73,7 +56,7 @@ func (m *OrchestrationManager) orchestrationUsageForTurn(turnID, cli, prompt, co
 	m.mu.Unlock()
 	if ok {
 		usage := orchestrationUsage{Model: strings.TrimSpace(model), Native: true, CostSource: "unavailable"}
-		for _, item := range native {
+		for index, item := range native {
 			if usage.Model == "" {
 				usage.Model = item.Model
 			}
@@ -82,9 +65,20 @@ func (m *OrchestrationManager) orchestrationUsageForTurn(turnID, cli, prompt, co
 			usage.CacheReadTokens += item.CacheReadTokens
 			usage.CacheWriteTokens += item.CacheWriteTokens
 			usage.EstimatedCostUSD += item.EstimatedCostUSD
-			usage.CostKnown = usage.CostKnown || item.CostKnown
-			if item.CostSource != "" {
+			if index == 0 {
+				usage.CostKnown = item.CostKnown
+			} else {
+				usage.CostKnown = usage.CostKnown && item.CostKnown
+			}
+			if usage.CostSource == "unavailable" {
 				usage.CostSource = item.CostSource
+			} else if item.CostSource != "" && usage.CostSource != item.CostSource {
+				usage.CostSource = "mixed"
+			}
+			if usage.PricingModel == "" {
+				usage.PricingModel = item.PricingModel
+			} else if item.PricingModel != "" && usage.PricingModel != item.PricingModel {
+				usage.PricingModel = "mixed"
 			}
 		}
 		return usage
@@ -152,11 +146,12 @@ func normalizeNativeUsage(cli, model string, raw json.RawMessage) (orchestration
 		usage.CostSource = "provider"
 	}
 	if !usage.CostKnown {
-		input, output, read, write := orchestrationModelRates(usage.Model)
-		if input > 0 || output > 0 {
-			usage.EstimatedCostUSD = float64(usage.InputTokens)*input/1e6 + float64(usage.OutputTokens)*output/1e6 + float64(usage.CacheReadTokens)*read/1e6 + float64(usage.CacheWriteTokens)*write/1e6
+		quote, ok := usagepricing.Estimate(cli, usage.Model, usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens)
+		if ok {
+			usage.EstimatedCostUSD = quote.CostUSD
 			usage.CostKnown = true
-			usage.CostSource = "catalog"
+			usage.CostSource = quote.Source
+			usage.PricingModel = quote.PricingModel
 		} else {
 			usage.CostSource = "unavailable"
 		}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
@@ -44,7 +43,7 @@ func TestBridgeUserServiceNameUsesMachineIDFileHash(t *testing.T) {
 	}
 }
 
-func TestConnectOnceClosesActiveOrchestrationsOnWebSocketDisconnect(t *testing.T) {
+func TestConnectOnceKeepsActiveOrchestrationsOnWebSocketDisconnect(t *testing.T) {
 	registered := make(chan struct{})
 	disconnect := make(chan struct{})
 	serverErr := make(chan error, 1)
@@ -90,13 +89,7 @@ func TestConnectOnceClosesActiveOrchestrationsOnWebSocketDisconnect(t *testing.T
 	client.sessions = NewSessionManager(&cfg)
 	client.orchestrations = NewOrchestrationManager(&cfg)
 
-	cancelled := make(chan struct{})
-	var cancelOnce sync.Once
-	client.orchestrations.runs["orc_disconnect"] = &orchestrationRunHandle{cancel: func() {
-		cancelOnce.Do(func() {
-			close(cancelled)
-		})
-	}}
+	client.orchestrations.runs["orc_disconnect"] = &orchestrationRunHandle{cancel: func() {}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -115,14 +108,6 @@ func TestConnectOnceClosesActiveOrchestrationsOnWebSocketDisconnect(t *testing.T
 	close(disconnect)
 
 	select {
-	case <-cancelled:
-	case err := <-serverErr:
-		t.Fatalf("fake hub failed before disconnect cleanup: %v", err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("active orchestration was not cancelled after websocket disconnect")
-	}
-
-	select {
 	case err := <-result:
 		if err == nil {
 			t.Fatal("connectOnce returned nil after websocket disconnect")
@@ -130,7 +115,7 @@ func TestConnectOnceClosesActiveOrchestrationsOnWebSocketDisconnect(t *testing.T
 	case <-time.After(2 * time.Second):
 		t.Fatal("connectOnce did not return after websocket disconnect")
 	}
-	if len(client.orchestrations.runs) != 0 {
-		t.Fatalf("active orchestration handles were not cleared: %#v", client.orchestrations.runs)
+	if len(client.orchestrations.runs) != 1 {
+		t.Fatalf("active orchestration handles should remain for reconnect, got %#v", client.orchestrations.runs)
 	}
 }

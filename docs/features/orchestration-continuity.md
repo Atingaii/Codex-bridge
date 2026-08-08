@@ -61,6 +61,11 @@ context in the same `runID`.
 - The orchestration WebSocket is the live path. If it disconnects while the
   selected run is active, the frontend reconnects and reloads persisted events
   so progress that arrived during the gap is rendered.
+- A transient reverse Bridge WebSocket disconnect does not cancel the native
+  orchestration. Bridge buffers emitted orchestration events until reconnect,
+  while Hub keeps active runs alive for the configured reconnect backoff,
+  jitter, and heartbeat window. See
+  [orchestration transport recovery](orchestration-transport-recovery.md).
 - The final turn should leave a user-readable conclusion, and successful
   `turn.end` / `run.end` events carry the CLI's visible content. A relay turn is
   complete only when the visible reply contains a final conclusion or handoff

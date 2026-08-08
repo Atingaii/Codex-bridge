@@ -22,6 +22,15 @@ heartbeat windows (and at least 90 seconds). Chat reconnect in
 persisted messages/runs, and receives any in-flight assistant buffer from
 `internal/hub/ws_browser.go:handleBrowserWS`.
 
+For orchestration, a transient reverse Bridge WebSocket loss is transport state,
+not task cancellation. `internal/bridge/client.go:connectOnce` detaches the
+dead output channel while `internal/bridge/orchestration_events.go:send` buffers
+events until reconnect. `internal/hub/ws_bridge.go:bridgeReconnectGrace` holds
+the Hub-side active run through the Bridge's maximum retry delay, jitter, and a
+heartbeat window before declaring an offline machine failed. Process restart
+and explicit cancellation remain terminal. See
+[orchestration transport recovery](features/orchestration-transport-recovery.md).
+
 CLI endpoints created with the review-required profile use
 `internal/bridge/appserver_runner.go` instead of `codex exec --json` for Codex
 chat. That runner keeps a `codex app-server --listen stdio://` JSON-RPC session

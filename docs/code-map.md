@@ -13,6 +13,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Public conversation shares | `internal/hub/share.go` |
 | Browser chat WebSocket | `internal/hub/ws_browser.go` |
 | Bridge reverse WebSocket | `internal/hub/ws_bridge.go`, `internal/bridge/client.go` |
+| Orchestration transport recovery | `internal/bridge/client.go:connectOnce`, `internal/bridge/orchestration_events.go:send`, `internal/hub/ws_bridge.go:bridgeReconnectGrace` |
 | Browser/Bridge connection pools | `internal/hub/pool.go` |
 | Orchestration HTTP/WS | `internal/hub/orchestration.go`, `internal/bridge/orchestration*.go` |
 | Orchestration runtime/usage statistics | `internal/hub/orchestration.go:handleOrchestrationStats`, `internal/bridge/orchestration_usage.go`, `frontend/src/app/pages/OrchestrationStatsPage.tsx` |

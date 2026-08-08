@@ -31,9 +31,9 @@ func TestBridgeReconnectGraceUsesEffectiveBridgeBackoff(t *testing.T) {
 		max  time.Duration
 		want time.Duration
 	}{
-		{0, 0, 6 * time.Second},
-		{5 * time.Second, 30 * time.Second, 31 * time.Second},
-		{10 * time.Second, 5 * time.Second, 11 * time.Second},
+		{0, 0, 23*time.Second + 500*time.Millisecond},
+		{5 * time.Second, 30 * time.Second, 61 * time.Second},
+		{10 * time.Second, 5 * time.Second, 31 * time.Second},
 	}
 	for _, tc := range tests {
 		cfg := config.Default()

@@ -132,7 +132,16 @@ func (s *Server) bridgeReconnectGrace() time.Duration {
 	if maxDelay < minDelay {
 		maxDelay = minDelay
 	}
-	return maxDelay + time.Second
+	// Client reconnects use exponential backoff with up to 50% jitter. Keep
+	// active runs alive long enough for one full max-delay attempt plus the
+	// websocket heartbeat/read-deadline detection window. A short transport
+	// flap must not be persisted as a failed orchestration before the Bridge
+	// has a chance to reconnect and flush its buffered events.
+	heartbeat := s.cfg.Hub.HeartbeatInterval.Duration
+	if heartbeat <= 0 {
+		heartbeat = 15 * time.Second
+	}
+	return maxDelay + maxDelay/2 + heartbeat + time.Second
 }
 
 func resilientWebSocketReadTimeout(configured, heartbeat time.Duration) time.Duration {

@@ -116,6 +116,7 @@ const appServerPrepareRetryDelay = 150 * time.Millisecond
 const appServerPrepareCloseTimeout = 2 * time.Second
 const appServerDiagnosticTailBytes = 16 * 1024
 const appServerUnscopedErrorGracePeriod = 2 * time.Second
+const appServerNativeReconnectGracePeriod = 45 * time.Second
 
 func (r *CodexAppServerRunner) start(ctx context.Context, req RunnerRequest) (*appServerClient, error) {
 	cmd := exec.CommandContext(ctx, r.codexPath(), "app-server", "--listen", "stdio://")
@@ -396,15 +397,50 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 	var unscopedEmptyError error
 	var unscopedErrorTimer *time.Timer
 	var unscopedErrorTimeout <-chan time.Time
+	var nativeReconnectErr error
+	var nativeReconnectTimer *time.Timer
+	var nativeReconnectTimeout <-chan time.Time
+	clearNativeReconnect := func() {
+		if nativeReconnectTimer != nil {
+			nativeReconnectTimer.Stop()
+		}
+		nativeReconnectTimer = nil
+		nativeReconnectTimeout = nil
+		nativeReconnectErr = nil
+	}
+	armNativeReconnect := func(err error) {
+		if nativeReconnectTimer == nil {
+			nativeReconnectTimer = time.NewTimer(appServerNativeReconnectGracePeriod)
+		} else {
+			if !nativeReconnectTimer.Stop() {
+				select {
+				case <-nativeReconnectTimer.C:
+				default:
+				}
+			}
+			nativeReconnectTimer.Reset(appServerNativeReconnectGracePeriod)
+		}
+		nativeReconnectTimeout = nativeReconnectTimer.C
+		nativeReconnectErr = err
+	}
 	defer func() {
 		if unscopedErrorTimer != nil {
 			unscopedErrorTimer.Stop()
+		}
+		if nativeReconnectTimer != nil {
+			nativeReconnectTimer.Stop()
 		}
 	}()
 	for {
 		select {
 		case <-ctx.Done():
 			done <- appServerTurnResult{result: result, err: ctx.Err()}
+			return
+		case <-nativeReconnectTimeout:
+			if text.Len() > 0 {
+				result.Content = text.String()
+			}
+			done <- appServerTurnResult{result: result, err: fmt.Errorf("%w (Codex native reconnect did not recover within %s)", nativeReconnectErr, appServerNativeReconnectGracePeriod)}
 			return
 		case <-unscopedErrorTimeout:
 			if text.Len() > 0 {
@@ -420,6 +456,10 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 			if !ok {
 				if text.Len() > 0 {
 					result.Content = text.String()
+				}
+				if nativeReconnectErr != nil {
+					done <- appServerTurnResult{result: result, err: client.withDiagnostics(nativeReconnectErr)}
+					return
 				}
 				if pendingFailedTool != nil {
 					done <- appServerTurnResult{result: result, err: failedToolWithoutFollowupError("codex app-server", *pendingFailedTool)}
@@ -468,6 +508,9 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 			}
 			if !scope.matches(ctx, msg) {
 				continue
+			}
+			if msg.Method != "error" && nativeReconnectErr != nil {
+				clearNativeReconnect()
 			}
 			switch msg.Method {
 			case "item/agentMessage/delta":
@@ -538,6 +581,21 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 					result.Content = text.String()
 				}
 				err := appServerEventError(msg, result.Content)
+				if isCodexNativeReconnectError(err) {
+					attempt, max := codexNativeReconnectProgress(err)
+					armNativeReconnect(err)
+					onUpdate(RunnerUpdate{Notice: &RunnerNotice{
+						Category: "codex-native-reconnect-progress",
+						Severity: "warning",
+						Content:  nativeReconnectNoticeContent(attempt, max),
+						Error:    visibleCLIError(err),
+						Data: map[string]any{
+							"attempt": attempt,
+							"max":     max,
+						},
+					}})
+					continue
+				}
 				if isAppServerUnscopedEmptyError(msg, err) {
 					unscopedEmptyError = err
 					if unscopedErrorTimer == nil {
@@ -555,6 +613,37 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 			}
 		}
 	}
+}
+
+func isCodexNativeReconnectError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(stripANSI(err.Error())), "reconnecting")
+}
+
+func codexNativeReconnectProgress(err error) (int, int) {
+	if err == nil {
+		return 0, 0
+	}
+	message := strings.ToLower(stripANSI(err.Error()))
+	index := strings.Index(message, "reconnecting")
+	if index < 0 {
+		return 0, 0
+	}
+	tail := strings.TrimLeft(message[index+len("reconnecting"):], ".: ")
+	var attempt, max int
+	if _, scanErr := fmt.Sscanf(tail, "%d/%d", &attempt, &max); scanErr != nil || attempt < 1 || max < attempt {
+		return 0, 0
+	}
+	return attempt, max
+}
+
+func nativeReconnectNoticeContent(attempt, max int) string {
+	if attempt > 0 && max >= attempt {
+		return fmt.Sprintf("Codex 原生连接正在恢复（%d/%d）；Bridge 将保持当前回合并等待结果。", attempt, max)
+	}
+	return "Codex 原生连接正在恢复；Bridge 将保持当前回合并等待结果。"
 }
 
 func appServerCompletedTurnState(msg appServerMessage) (bool, error) {

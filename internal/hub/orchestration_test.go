@@ -603,6 +603,63 @@ func TestCreateOrchestrationAllowsAutoExecuteWithoutBrowserApprovalCapability(t 
 	}
 }
 
+func TestCreateOrchestrationRejectsBridgeWithoutTransportRecovery(t *testing.T) {
+	t.Parallel()
+
+	s, _, userID, agentID := newOrchestrationTestServer(t)
+	conn := &BridgeConn{
+		agentID: agentID,
+		version: "v0.3.0",
+		capabilities: &protocol.BridgeCapabilities{
+			Sandbox:        "danger-full-access",
+			ApprovalPolicy: "never",
+			Orchestration: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: true},
+				"codex":  {Available: true},
+			},
+		},
+		wsSender: wsSender{
+			send: make(chan protocol.Envelope, 2),
+			done: make(chan struct{}),
+		},
+	}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	body := createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId":  agentID,
+		"prompt":   "trusted run",
+		"maxTurns": 1,
+	}, http.StatusConflict)
+	if body["code"] != "ORCHESTRATION_CAPABILITY_UNAVAILABLE" ||
+		!strings.Contains(body["message"].(string), "v0.3.0") ||
+		!strings.Contains(body["message"].(string), "v0.3.1") {
+		t.Fatalf("outdated Bridge body = %#v", body)
+	}
+}
+
+func TestBridgeVersionBeforeTransportRecovery(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		version string
+		want    bool
+	}{
+		{version: "v0.3.0", want: true},
+		{version: "0.2.9", want: true},
+		{version: "v0.3.1", want: false},
+		{version: "v0.3.8", want: false},
+		{version: "v1.0.0", want: false},
+		{version: "dev", want: false},
+		{version: "test", want: false},
+		{version: "", want: false},
+	} {
+		if got := bridgeVersionBefore(test.version, 0, 3, 1); got != test.want {
+			t.Fatalf("bridgeVersionBefore(%q) = %v, want %v", test.version, got, test.want)
+		}
+	}
+}
+
 func TestCreateOrchestrationRejectsEndpointMissingDirectCLIs(t *testing.T) {
 	t.Parallel()
 

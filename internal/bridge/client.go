@@ -150,8 +150,6 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 	})
 
 	writec := make(chan protocol.Envelope, 128)
-	c.sessions.AttachOut(writec)
-	c.orchestrations.AttachOut(writec)
 	writeDone := make(chan struct{})
 	done := make(chan error, 2)
 	go func() {
@@ -176,6 +174,11 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 			}
 		}
 	}()
+	// Start the writer before attaching managers. AttachOut may flush more
+	// buffered events than fit in writec after a long disconnect, so the queue
+	// must already have an active consumer.
+	c.sessions.AttachOut(writec)
+	c.orchestrations.AttachOut(writec)
 	go func() {
 		for {
 			var env protocol.Envelope
@@ -424,7 +427,7 @@ func (c *Client) handleEnvelope(ctx context.Context, env protocol.Envelope, out 
 			}))
 			return
 		}
-		c.orchestrations.Start(ctx, payload)
+		c.orchestrations.Start(payload)
 	case protocol.TypeOrchestrationCancel:
 		payload, _ := protocol.Decode[protocol.OrchestrationCancelPayload](env)
 		c.orchestrations.Cancel(payload.RunID)

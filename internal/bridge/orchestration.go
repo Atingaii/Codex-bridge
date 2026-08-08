@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,6 +23,9 @@ import (
 
 type OrchestrationManager struct {
 	cfg         *config.Config
+	lifetime    context.Context
+	stop        context.CancelFunc
+	sendMu      sync.Mutex
 	mu          sync.Mutex
 	runs        map[string]*orchestrationRunHandle
 	sessions    map[string]*orchestrationNativeSession
@@ -34,7 +38,14 @@ type OrchestrationManager struct {
 	// as global mutable test state. Production uses the default schedule; focused
 	// tests can shorten it without changing other concurrently running managers.
 	modelCapacityRetryWaits []time.Duration
-	nativeUsage             map[string][]orchestrationUsage
+	// cliTransportRetryWaits is independent from missing-final continuations:
+	// a stream failure while requesting a conclusion must not consume the
+	// conclusion budget itself.
+	cliTransportRetryWaits []time.Duration
+	// codexThreadBusyRetryWaits handles a resumed native thread whose previous
+	// turn still owns Codex's writer lease. The rejected prompt is unchanged.
+	codexThreadBusyRetryWaits []time.Duration
+	nativeUsage               map[string][]orchestrationUsage
 }
 
 type orchestrationExecution struct {
@@ -110,29 +121,56 @@ const (
 )
 
 var defaultModelCapacityRetryWaits = []time.Duration{10 * time.Second, 30 * time.Second, time.Minute}
+var defaultCLITransportRetryWaits = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
+var defaultCodexThreadBusyRetryWaits = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second, time.Minute}
 
 func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
+	lifetime, stop := context.WithCancel(context.Background())
 	return &OrchestrationManager{
-		cfg:                     cfg,
-		runs:                    make(map[string]*orchestrationRunHandle),
-		sessions:                make(map[string]*orchestrationNativeSession),
-		approvals:               make(map[string]orchestrationApproval),
-		conclusions:             make(map[string]bool),
-		executions:              make(map[string]orchestrationExecution),
-		modelCapacityRetryWaits: append([]time.Duration(nil), defaultModelCapacityRetryWaits...),
-		nativeUsage:             make(map[string][]orchestrationUsage),
+		cfg:                       cfg,
+		lifetime:                  lifetime,
+		stop:                      stop,
+		runs:                      make(map[string]*orchestrationRunHandle),
+		sessions:                  make(map[string]*orchestrationNativeSession),
+		approvals:                 make(map[string]orchestrationApproval),
+		conclusions:               make(map[string]bool),
+		executions:                make(map[string]orchestrationExecution),
+		modelCapacityRetryWaits:   append([]time.Duration(nil), defaultModelCapacityRetryWaits...),
+		cliTransportRetryWaits:    append([]time.Duration(nil), defaultCLITransportRetryWaits...),
+		codexThreadBusyRetryWaits: append([]time.Duration(nil), defaultCodexThreadBusyRetryWaits...),
+		nativeUsage:               make(map[string][]orchestrationUsage),
 	}
 }
 
 func (m *OrchestrationManager) AttachOut(out chan<- protocol.Envelope) {
+	m.sendMu.Lock()
+	defer m.sendMu.Unlock()
 	m.mu.Lock()
 	pending := append([]protocol.Envelope(nil), m.pending...)
 	m.pending = nil
-	for _, env := range pending {
-		send(out, env)
-	}
 	m.output = out
 	m.mu.Unlock()
+
+	for index, env := range pending {
+		timer := time.NewTimer(orchestrationSendTimeout)
+		select {
+		case out <- env:
+			timer.Stop()
+		case <-timer.C:
+			m.mu.Lock()
+			remaining := append([]protocol.Envelope(nil), pending[index:]...)
+			m.pending = append(remaining, m.pending...)
+			if len(m.pending) > 1000 {
+				m.pending = m.pending[len(m.pending)-1000:]
+			}
+			if m.output == out {
+				m.output = nil
+			}
+			m.mu.Unlock()
+			slog.Warn("[bridge] orchestration reconnect flush paused: outbound queue saturated", "remaining", len(remaining))
+			return
+		}
+	}
 }
 
 func (m *OrchestrationManager) DetachOut(out chan<- protocol.Envelope) {
@@ -143,7 +181,7 @@ func (m *OrchestrationManager) DetachOut(out chan<- protocol.Envelope) {
 	}
 }
 
-func (m *OrchestrationManager) Start(parent context.Context, payload protocol.OrchestrationStartPayload) {
+func (m *OrchestrationManager) Start(payload protocol.OrchestrationStartPayload) {
 	if payload.RunID == "" {
 		m.send(protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
 			Kind:  "run.error",
@@ -153,7 +191,10 @@ func (m *OrchestrationManager) Start(parent context.Context, payload protocol.Or
 	}
 	executionKey := orchestrationExecutionKey(payload)
 	publicRunID := payload.RunID
-	ctx, cancel := context.WithCancel(parent)
+	// A run belongs to the Bridge process, not to the reverse WebSocket that
+	// delivered this frame. Transport loss only detaches output and must never
+	// cancel the native CLI process.
+	ctx, cancel := context.WithCancel(m.lifetime)
 	// Cancel and join any goroutine still owning this run id before starting
 	// the replacement: otherwise its stale terminal events interleave after
 	// the new run.start and the hub records the wrong final status.
@@ -245,6 +286,9 @@ func (m *OrchestrationManager) executionFor(key string) orchestrationExecution {
 }
 
 func (m *OrchestrationManager) CloseAll() {
+	if m.stop != nil {
+		m.stop()
+	}
 	m.mu.Lock()
 	var cancels []context.CancelFunc
 	runIDs := make([]string, 0, len(m.runs))
@@ -896,18 +940,96 @@ func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context
 				},
 			})
 		}
-		content, tools, err := m.runRelayCLIWithCapacityRetries(ctx, payload, turnID, role, cli, workerSlot, nextPrompt, state)
-		recordCommandFingerprints(state, runCWD, tools)
-		record := newOrchestrationTurnRecordWithSlot(turnID, role, cli, workerSlot, content, tools)
-		record.Usage = m.orchestrationUsageForTurn(turnID, cli, nextPrompt, content)
-		if err != nil {
-			record.Err = visibleCLIError(err)
+		callPrompt := nextPrompt
+		var err error
+		for transportRetry := 0; ; transportRetry++ {
+			content, tools, callErr := m.runRelayCLIWithSubmissionRetries(ctx, payload, turnID, role, cli, workerSlot, callPrompt, state)
+			recordCommandFingerprints(state, runCWD, tools)
+			record := newOrchestrationTurnRecordWithSlot(turnID, role, cli, workerSlot, content, tools)
+			record.Usage = m.orchestrationUsageForTurn(turnID, cli, callPrompt, content)
+			if callErr != nil {
+				record.Err = visibleCLIError(callErr)
+			}
+			combined = mergeOrchestrationTurnAttempts(combined, record)
+			err = callErr
+			if callErr == nil {
+				combined.Err = ""
+			}
+			if !isRecoverableCLITransportError(cli, err) {
+				break
+			}
+			waits := m.cliTransportRetryWaits
+			if len(waits) == 0 {
+				waits = defaultCLITransportRetryWaits
+			}
+			if ctx.Err() != nil {
+				return combined, status, ctx.Err()
+			}
+			if transportRetry >= len(waits) {
+				message := visibleCLIError(err)
+				combined.Err = message
+				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+					Kind:     "turn.delta",
+					Source:   "bridge",
+					Severity: "error",
+					TurnID:   turnID,
+					Role:     role,
+					CLI:      cli,
+					Content:  fmt.Sprintf("%s 连接恢复失败，已完成 %d 次退避重试，无法继续此回合。", cliDisplay(cli), len(waits)),
+					Error:    message,
+					Data: map[string]any{
+						"relayOnly": true,
+						"category":  "cli-transport-retry-exhausted",
+						"attempts":  len(waits),
+						"error":     message,
+					},
+				})
+				return combined, status, err
+			}
+			wait := waits[transportRetry]
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:     "turn.delta",
+				Source:   "bridge",
+				Severity: "warning",
+				TurnID:   turnID,
+				Role:     role,
+				CLI:      cli,
+				Content:  fmt.Sprintf("%s 流连接中断，将在 %s后从同一原生会话恢复（第 %d/%d 次重试）。", cliDisplay(cli), humanRetryWait(wait), transportRetry+1, len(waits)),
+				Error:    visibleCLIError(err),
+				Data: map[string]any{
+					"relayOnly":         true,
+					"category":          "cli-transport-retry-wait",
+					"retry":             transportRetry + 1,
+					"maxRetries":        len(waits),
+					"retryAfterSeconds": int(wait.Seconds()),
+				},
+			})
+			m.resetNativeInteractiveSessionForContinuation(cli, workerSlot, state)
+			if waitErr := waitModelCapacityRetry(ctx, wait); waitErr != nil {
+				return combined, status, waitErr
+			}
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:     "turn.delta",
+				Source:   "bridge",
+				Severity: "info",
+				TurnID:   turnID,
+				Role:     role,
+				CLI:      cli,
+				Content:  fmt.Sprintf("正在从同一 %s 会话恢复当前回合（第 %d/%d 次重试）。", cliDisplay(cli), transportRetry+1, len(waits)),
+				Data: map[string]any{
+					"relayOnly":  true,
+					"category":   "cli-transport-retry-start",
+					"retry":      transportRetry + 1,
+					"maxRetries": len(waits),
+				},
+			})
+			callPrompt = composeCLITransportRecoveryPrompt(combined, transportRetry+1, len(waits))
 		}
-		combined = mergeOrchestrationTurnAttempts(combined, record)
+		record := combined
 		if err == nil && !orchestrationTurnNeedsContinuation(record, err) {
 			return combined, status, nil
 		}
-		if recoverableRelayCLIError(cli, content, err) && orchestrationTurnHasFinalConclusion(record) {
+		if recoverableRelayCLIError(cli, record.Content, err) && orchestrationTurnHasFinalConclusion(record) {
 			warning := visibleCLIError(err)
 			m.resetCodexInteractiveSessionAfterRecoverableError(workerSlot, state)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -981,6 +1103,9 @@ func mergeOrchestrationTurnAttempts(current, next orchestrationTurn) orchestrati
 	}
 	if strings.TrimSpace(next.Handoff) != "" {
 		current.Handoff = next.Handoff
+	}
+	if next.Relay.Structured {
+		current.Relay = next.Relay
 	}
 	if strings.TrimSpace(next.Err) != "" {
 		current.Err = next.Err
@@ -1125,6 +1250,35 @@ func composeInterruptedTurnContinuationPrompt(original string, record orchestrat
 	b.WriteString("Continue from the current state and finish this same turn with a concise final conclusion and handoff summary. If a command failed, explain how you handled it or what remains blocked instead of ending on the raw command event.\n\n")
 	b.WriteString("Original turn prompt:\n")
 	b.WriteString(trimForPrompt(original, 12000))
+	return b.String()
+}
+
+func composeCLITransportRecoveryPrompt(record orchestrationTurn, attempt, max int) string {
+	var b strings.Builder
+	b.WriteString("Codex Bridge is recovering this same orchestration turn after the provider stream disconnected. This is not a new user request. Resume from the current native conversation and workspace state; do not replay the original request or repeat completed commands.\n\n")
+	b.WriteString(orchestrationLanguageRule)
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("Transport recovery attempt: %d of %d.\n\n", attempt, max))
+	if strings.TrimSpace(record.Content) != "" {
+		b.WriteString("Visible assistant output already delivered before the disconnect:\n")
+		b.WriteString(trimForPrompt(record.Content, 3000))
+		b.WriteString("\n\n")
+	}
+	if len(record.Tools) > 0 {
+		b.WriteString("Command events already observed (inspect their effects; do not blindly repeat them):\n")
+		for _, line := range relayCommandSummaries(record.Tools, 8) {
+			b.WriteString("- ")
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+	}
+	if strings.TrimSpace(record.Err) != "" {
+		b.WriteString("Last transport error:\n")
+		b.WriteString(trimForPrompt(record.Err, 1200))
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Inspect the current project state, continue only unfinished work, and finish this same turn with the required concise conclusion and handoff summary. If recovery is impossible, report the concrete blocker.")
 	return b.String()
 }
 

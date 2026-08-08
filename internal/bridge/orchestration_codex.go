@@ -87,6 +87,9 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 	turnCtx, cancelTurn := context.WithCancel(ctx)
 	defer cancelTurn()
 	go runner.readEvents(turnCtx, codex.client, req, scope, func(update RunnerUpdate) {
+		if update.Notice != nil {
+			m.emit(payload.RunID, runnerNoticeOrchestrationEvent(turnID, role, "codex", update.Notice))
+		}
 		if update.Delta != "" {
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: update.Delta})
 		}
@@ -103,6 +106,11 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 	}, done)
 	res, err := codex.client.request(ctx, "turn/start", runner.turnStartParams(codex.threadID, prompt, req))
 	if err != nil {
+		// The failed submission reader shares the app-server event channel with
+		// the next retry. Join it before returning so it cannot consume events
+		// belonging to a later successful turn/start.
+		cancelTurn()
+		<-done
 		return "", snapshotTools(), codex.threadID, resumeMode, err
 	}
 	scope.setTurnID(appServerTurnIDFromResponse(res))
@@ -468,6 +476,9 @@ func (m *OrchestrationManager) runCodexAppServerWithThread(ctx context.Context, 
 			cwd:     m.cwd(payload),
 		},
 	}, func(update RunnerUpdate) {
+		if update.Notice != nil {
+			m.emit(payload.RunID, runnerNoticeOrchestrationEvent(turnID, role, "codex", update.Notice))
+		}
 		if update.Delta != "" {
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: update.Delta})
 		}

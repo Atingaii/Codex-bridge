@@ -172,6 +172,82 @@ func (m *OrchestrationManager) runRelayCLIWithCapacityRetries(ctx context.Contex
 	}
 }
 
+// runRelayCLIWithSubmissionRetries handles errors raised before Codex accepts
+// turn/start. Unlike stream recovery, the original prompt is safe and required
+// here because an active writer rejection means no new turn was created.
+func (m *OrchestrationManager) runRelayCLIWithSubmissionRetries(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, workerSlot, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, error) {
+	waits := m.codexThreadBusyRetryWaits
+	if len(waits) == 0 {
+		waits = defaultCodexThreadBusyRetryWaits
+	}
+	for retry := 0; ; retry++ {
+		content, tools, err := m.runRelayCLIWithCapacityRetries(ctx, payload, turnID, role, cli, workerSlot, prompt, state)
+		if err == nil || !isCodexThreadActiveWriterError(cli, err) {
+			return content, tools, err
+		}
+		if ctx.Err() != nil {
+			return content, tools, ctx.Err()
+		}
+		if retry >= len(waits) {
+			message := visibleCLIError(err)
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:     "turn.delta",
+				Source:   "bridge",
+				Severity: "error",
+				TurnID:   turnID,
+				Role:     role,
+				CLI:      cli,
+				Content:  fmt.Sprintf("Codex 原生会话持续被上一回合占用，已完成 %d 次退避重试，当前消息尚未提交。", len(waits)),
+				Error:    message,
+				Data: map[string]any{
+					"relayOnly": true,
+					"category":  "codex-thread-busy-retry-exhausted",
+					"attempts":  len(waits),
+					"error":     message,
+				},
+			})
+			return content, tools, err
+		}
+
+		wait := waits[retry]
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:     "turn.delta",
+			Source:   "bridge",
+			Severity: "warning",
+			TurnID:   turnID,
+			Role:     role,
+			CLI:      cli,
+			Content:  fmt.Sprintf("Codex 原生会话的上一回合仍在收尾，将在 %s后重新提交当前消息（第 %d/%d 次重试）。", humanRetryWait(wait), retry+1, len(waits)),
+			Error:    visibleCLIError(err),
+			Data: map[string]any{
+				"relayOnly":         true,
+				"category":          "codex-thread-busy-retry-wait",
+				"retry":             retry + 1,
+				"maxRetries":        len(waits),
+				"retryAfterSeconds": int(wait.Seconds()),
+			},
+		})
+		if waitErr := waitModelCapacityRetry(ctx, wait); waitErr != nil {
+			return content, tools, waitErr
+		}
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:     "turn.delta",
+			Source:   "bridge",
+			Severity: "info",
+			TurnID:   turnID,
+			Role:     role,
+			CLI:      cli,
+			Content:  fmt.Sprintf("正在向同一 Codex 原生会话重新提交当前消息（第 %d/%d 次重试）。", retry+1, len(waits)),
+			Data: map[string]any{
+				"relayOnly":  true,
+				"category":   "codex-thread-busy-retry-start",
+				"retry":      retry + 1,
+				"maxRetries": len(waits),
+			},
+		})
+	}
+}
+
 func isModelCapacityError(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
@@ -179,6 +255,14 @@ func isModelCapacityError(err error) bool {
 	message := strings.ToLower(stripANSI(err.Error()))
 	return strings.Contains(message, "selected model is at capacity") ||
 		(strings.Contains(message, "model") && strings.Contains(message, "at capacity"))
+}
+
+func isCodexThreadActiveWriterError(cli string, err error) bool {
+	if cli != "codex" || err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	message := strings.ToLower(stripANSI(err.Error()))
+	return strings.Contains(message, "thread ") && strings.Contains(message, "already has an active writer")
 }
 
 func waitModelCapacityRetry(ctx context.Context, wait time.Duration) error {
@@ -251,6 +335,53 @@ func visibleCLIError(err error) string {
 
 func recoverableRelayCLIError(cli, content string, err error) bool {
 	return cli == "codex" && strings.TrimSpace(content) != "" && isAppServerEmptyErrorAfterVisibleOutput(err)
+}
+
+func runnerNoticeOrchestrationEvent(turnID, role, cli string, notice *RunnerNotice) protocol.OrchestrationEventPayload {
+	event := protocol.OrchestrationEventPayload{
+		Kind:     "turn.delta",
+		Source:   "bridge",
+		TurnID:   turnID,
+		Role:     role,
+		CLI:      cli,
+		Severity: "info",
+		Data:     map[string]any{"relayOnly": true},
+	}
+	if notice == nil {
+		return event
+	}
+	event.Content = notice.Content
+	event.Error = notice.Error
+	if notice.Severity != "" {
+		event.Severity = notice.Severity
+	}
+	for key, value := range notice.Data {
+		event.Data[key] = value
+	}
+	if notice.Category != "" {
+		event.Data["category"] = notice.Category
+	}
+	return event
+}
+
+func isRecoverableCLITransportError(cli string, err error) bool {
+	if cli != "codex" || err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	message := strings.ToLower(stripANSI(err.Error()))
+	for _, marker := range []string{
+		"reconnecting",
+		"stream disconnected before completion",
+		"stream closed before response.completed",
+		"connection reset by peer",
+		"transport closed before completion",
+		"unexpected eof",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *OrchestrationManager) resetCodexInteractiveSessionAfterRecoverableError(workerSlot string, state *orchestrationSessionState) {

@@ -295,6 +295,33 @@ func TestCodexAppServerRunnerDoesNotRetryTurnStart(t *testing.T) {
 	}
 }
 
+func TestCodexAppServerRunnerWaitsForNativeReconnectCompletion(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerNativeReconnectThenCompletionScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+
+	var notices []RunnerNotice
+	result, err := NewCodexAppServerRunner(&cfg).Prompt(context.Background(), RunnerRequest{Content: "keep the turn alive"}, func(update RunnerUpdate) {
+		if update.Notice != nil {
+			notices = append(notices, *update.Notice)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "completed after native reconnect" {
+		t.Fatalf("result content = %q", result.Content)
+	}
+	if len(notices) != 1 || notices[0].Category != "codex-native-reconnect-progress" || notices[0].Data["attempt"] != 1 || notices[0].Data["max"] != 5 {
+		t.Fatalf("native reconnect notices = %#v", notices)
+	}
+}
+
 func TestCodexAppServerRunnerIgnoresStaleTurnCompleted(t *testing.T) {
 	tmp := t.TempDir()
 	codexPath := filepath.Join(tmp, "codex")
@@ -628,6 +655,32 @@ for line in sys.stdin:
         emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_app", "turnId": "turn_1", "itemId": "msg_1", "delta": "done"}})
         emit({"method": "turn/completed", "params": {"threadId": "thr_app", "turn": {"id": "turn_1", "items": [], "itemsView": "notLoaded", "status": "completed", "error": None, "startedAt": 1, "completedAt": 2, "durationMs": 1}}})
         sys.exit(0)
+`
+}
+
+func fakeCodexAppServerNativeReconnectThenCompletionScript() string {
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+def emit(obj):
+    print(json.dumps(obj, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": "thr_reconnect"}}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "turn/start":
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_reconnect", "status": "inProgress"}}})
+        emit({"method": "error", "params": {"threadId": "thr_reconnect", "turnId": "turn_reconnect", "message": "Reconnecting... 1/5"}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_reconnect", "turnId": "turn_reconnect", "delta": "completed after native reconnect"}})
+        emit({"method": "turn/completed", "params": {"threadId": "thr_reconnect", "turn": {"id": "turn_reconnect", "status": "completed"}}})
 `
 }
 

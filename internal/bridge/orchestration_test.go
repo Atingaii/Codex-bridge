@@ -1382,6 +1382,317 @@ func TestModelCapacityErrorRecognitionIsConservative(t *testing.T) {
 	}
 }
 
+func TestRecoverableCLITransportErrorRecognitionIsConservative(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cli  string
+		err  error
+		want bool
+	}{
+		{name: "codex reconnecting", cli: "codex", err: errors.New("Reconnecting... 1/5"), want: true},
+		{name: "codex stream closed", cli: "codex", err: errors.New("stream closed before response.completed"), want: true},
+		{name: "claude reconnect text", cli: "claude", err: errors.New("Reconnecting... 1/5"), want: false},
+		{name: "codex command failure", cli: "codex", err: errors.New("coqc exited with status 1"), want: false},
+		{name: "canceled", cli: "codex", err: context.Canceled, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isRecoverableCLITransportError(test.cli, test.err); got != test.want {
+				t.Fatalf("isRecoverableCLITransportError(%q, %v) = %v, want %v", test.cli, test.err, got, test.want)
+			}
+		})
+	}
+}
+
+func TestCodexThreadActiveWriterErrorRecognitionIsConservative(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cli  string
+		err  error
+		want bool
+	}{
+		{name: "codex active writer", cli: "codex", err: errors.New("thread 019fe187 already has an active writer"), want: true},
+		{name: "claude same text", cli: "claude", err: errors.New("thread 019fe187 already has an active writer"), want: false},
+		{name: "generic thread error", cli: "codex", err: errors.New("thread 019fe187 was not found"), want: false},
+		{name: "canceled", cli: "codex", err: context.Canceled, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isCodexThreadActiveWriterError(test.cli, test.err); got != test.want {
+				t.Fatalf("isCodexThreadActiveWriterError(%q, %v) = %v, want %v", test.cli, test.err, got, test.want)
+			}
+		})
+	}
+}
+
+func TestOrchestrationCodexActiveWriterRetriesOriginalPromptOnSameThread(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	statePath := filepath.Join(tmp, "active-writer-state.json")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerActiveWriterScript(statePath, 1)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	manager.codexThreadBusyRetryWaits = []time.Duration{0}
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:         "orc_active_writer_recovery",
+		Mode:          "collaboration",
+		FirstCLI:      "codex",
+		Prompt:        "continue the existing proof",
+		MaxTurns:      1,
+		CWD:           tmp,
+		Resume:        true,
+		CodexThreadID: "thr_active_writer",
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "codex", "上一回合仍在收尾") ||
+		!orchestrationEventsContain(events, "turn.delta", "codex", "重新提交当前消息") ||
+		!orchestrationEventsContain(events, "run.end", "", "active writer recovery completed") {
+		t.Fatalf("active-writer recovery was not visible or successful: %#v", events)
+	}
+	for _, event := range events {
+		if event.Kind == "run.error" {
+			t.Fatalf("active-writer recovery ended the run: %#v", event)
+		}
+	}
+	state := readActiveWriterFakeState(t, statePath)
+	if state.Processes != 1 || state.TurnStarts != 2 || len(state.Prompts) != 2 || state.Prompts[0] != state.Prompts[1] {
+		t.Fatalf("active-writer retry changed process or prompt: %#v", state)
+	}
+}
+
+func TestOrchestrationCodexActiveWriterRetryExhaustionPreservesReason(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	statePath := filepath.Join(tmp, "active-writer-state.json")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerActiveWriterScript(statePath, 99)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	manager.codexThreadBusyRetryWaits = []time.Duration{0}
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID: "orc_active_writer_exhausted", Mode: "collaboration", FirstCLI: "codex", Prompt: "continue", MaxTurns: 1, CWD: tmp,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "codex", "当前消息尚未提交") ||
+		!orchestrationEventsContain(events, "run.error", "codex", "already has an active writer") {
+		t.Fatalf("active-writer exhaustion did not preserve reason: %#v", events)
+	}
+	state := readActiveWriterFakeState(t, statePath)
+	if state.Processes != 1 || state.TurnStarts != 2 || len(state.Prompts) != 2 || state.Prompts[0] != state.Prompts[1] {
+		t.Fatalf("active-writer exhaustion attempts = %#v", state)
+	}
+}
+
+func TestOrchestrationCodexActiveWriterRetryWaitHonorsCancellation(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	statePath := filepath.Join(tmp, "active-writer-state.json")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerActiveWriterScript(statePath, 99)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	manager.codexThreadBusyRetryWaits = []time.Duration{time.Hour}
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.run(ctx, protocol.OrchestrationStartPayload{
+			RunID: "orc_active_writer_cancel", Mode: "collaboration", FirstCLI: "codex", Prompt: "continue", MaxTurns: 1, CWD: tmp,
+		})
+	}()
+
+	if !waitForOrchestrationEvent(t, out, "turn.delta", "codex", "将在 60 分钟后重新提交") {
+		t.Fatal("active-writer retry wait was not emitted")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("active-writer retry wait did not stop after cancellation")
+	}
+	events := drainOrchestrationEvents(t, out)
+	if orchestrationEventsContain(events, "turn.delta", "codex", "正在向同一 Codex 原生会话重新提交") {
+		t.Fatalf("active-writer retry started after cancellation: %#v", events)
+	}
+	state := readActiveWriterFakeState(t, statePath)
+	if state.TurnStarts != 1 {
+		t.Fatalf("active-writer retry submitted after cancellation: %#v", state)
+	}
+}
+
+func TestOrchestrationCodexTransportFailureResumesSameThread(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	statePath := filepath.Join(tmp, "transport-attempts")
+	promptPath := filepath.Join(tmp, "recovery-prompt")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerTransportRecoveryScript(statePath, promptPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "workspace-write"
+	cfg.Bridge.ApprovalPolicy = "untrusted"
+	manager := NewOrchestrationManager(&cfg)
+	manager.cliTransportRetryWaits = []time.Duration{0}
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID:    "orc_transport_recovery",
+		Mode:     "collaboration",
+		FirstCLI: "codex",
+		Prompt:   "finish without repeating side effects",
+		MaxTurns: 1,
+		CWD:      tmp,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "codex", "原生连接正在恢复（1/5）") ||
+		!orchestrationEventsContain(events, "turn.delta", "codex", "流连接中断，将在 0 秒后") ||
+		!orchestrationEventsContain(events, "turn.delta", "codex", "正在从同一 Codex 会话恢复当前回合") ||
+		!orchestrationEventsContain(events, "run.end", "", "transport recovery completed") {
+		t.Fatalf("transport recovery was not fully visible or successful: %#v", events)
+	}
+	for _, event := range events {
+		if event.Kind == "run.error" {
+			t.Fatalf("recoverable transport failure ended the run: %#v", event)
+		}
+		if event.Kind == "turn.end" && event.Error != "" {
+			t.Fatalf("successful transport recovery retained stale error: %#v", event)
+		}
+	}
+	prompt, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(prompt), "do not replay the original request") || strings.Contains(string(prompt), "finish without repeating side effects") {
+		t.Fatalf("unsafe transport recovery prompt = %q", prompt)
+	}
+	if attempts, err := os.ReadFile(statePath); err != nil || string(attempts) != "2" {
+		t.Fatalf("app-server process attempts = %q, err = %v", attempts, err)
+	}
+}
+
+func TestOrchestrationCodexTransportRetryExhaustionPreservesReason(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	statePath := filepath.Join(tmp, "transport-attempts")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerFailureScript(statePath, "Reconnecting... 5/5 (stream disconnected before completion: upstream closed)")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	manager.cliTransportRetryWaits = []time.Duration{0}
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID: "orc_transport_exhausted", Mode: "collaboration", FirstCLI: "codex", Prompt: "finish", MaxTurns: 1, CWD: tmp,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "codex", "已完成 1 次退避重试") ||
+		!orchestrationEventsContain(events, "run.error", "codex", "stream disconnected before completion") {
+		t.Fatalf("transport exhaustion did not retain its concrete reason: %#v", events)
+	}
+	if attempts, err := os.ReadFile(statePath); err != nil || string(attempts) != "2" {
+		t.Fatalf("transport exhaustion process attempts = %q, err = %v", attempts, err)
+	}
+}
+
+func TestOrchestrationCodexTransportRetryWaitHonorsCancellation(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	statePath := filepath.Join(tmp, "transport-attempts")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerFailureScript(statePath, "Reconnecting... 1/5 (stream closed before response.completed)")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	manager.cliTransportRetryWaits = []time.Duration{time.Hour}
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.run(ctx, protocol.OrchestrationStartPayload{
+			RunID: "orc_transport_cancel", Mode: "collaboration", FirstCLI: "codex", Prompt: "finish", MaxTurns: 1, CWD: tmp,
+		})
+	}()
+
+	if !waitForOrchestrationEvent(t, out, "turn.delta", "codex", "流连接中断，将在 60 分钟后") {
+		t.Fatal("transport retry wait was not emitted")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("transport retry wait did not stop after cancellation")
+	}
+	events := drainOrchestrationEvents(t, out)
+	if orchestrationEventsContain(events, "turn.delta", "codex", "正在从同一 Codex 会话恢复当前回合") {
+		t.Fatalf("transport retry started after cancellation: %#v", events)
+	}
+	if attempts, err := os.ReadFile(statePath); err != nil || string(attempts) != "1" {
+		t.Fatalf("canceled transport process attempts = %q, err = %v", attempts, err)
+	}
+}
+
+func TestOrchestrationCodexPermanentFailureDoesNotUseTransportRetry(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	statePath := filepath.Join(tmp, "transport-attempts")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerFailureScript(statePath, "coqc exited with status 1: proof obligation remains")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	manager.cliTransportRetryWaits = []time.Duration{0, 0, 0}
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID: "orc_permanent_error", Mode: "collaboration", FirstCLI: "codex", Prompt: "finish proof", MaxTurns: 1, CWD: tmp,
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "run.error", "codex", "coqc exited with status 1") {
+		t.Fatalf("permanent error was not reported: %#v", events)
+	}
+	if orchestrationEventsContain(events, "turn.delta", "codex", "流连接中断") {
+		t.Fatalf("permanent error incorrectly entered transport recovery: %#v", events)
+	}
+	if attempts, err := os.ReadFile(statePath); err != nil || string(attempts) != "1" {
+		t.Fatalf("permanent failure process attempts = %q, err = %v", attempts, err)
+	}
+}
+
 func TestRelayCLIModelCapacityRetriesSameTurn(t *testing.T) {
 	tmp := t.TempDir()
 	claudePath := filepath.Join(tmp, "claude")
@@ -1989,7 +2300,7 @@ func TestOrchestrationCancelStopsActiveClaudeInteractiveSession(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	go func() {
-		manager.Start(context.Background(), protocol.OrchestrationStartPayload{
+		manager.Start(protocol.OrchestrationStartPayload{
 			RunID:    "orc_cancel_claude",
 			Mode:     "collaboration",
 			FirstCLI: "claude",
@@ -3733,6 +4044,165 @@ for line in sys.stdin:
         emit({"method": "item/agentMessage/delta", "params": {"threadId": params.get("threadId") or "thr_empty_error_final", "turnId": "turn_1", "delta": text}})
         emit({"method": "error", "params": {"message": ""}})
         sys.exit(0)
+`
+}
+
+func fakeCodexAppServerTransportRecoveryScript(statePath, promptPath string) string {
+	stateRaw, _ := json.Marshal(statePath)
+	promptRaw, _ := json.Marshal(promptPath)
+	return `#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+state_path = pathlib.Path(` + string(stateRaw) + `)
+prompt_path = pathlib.Path(` + string(promptRaw) + `)
+attempt = int(state_path.read_text(encoding="utf-8")) if state_path.exists() else 0
+state_path.write_text(str(attempt + 1), encoding="utf-8")
+
+def emit(obj):
+    print(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+thread_id = "thr_transport_recovery"
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": thread_id}}})
+    elif method == "thread/resume":
+        if params.get("threadId") != thread_id:
+            emit({"id": msg["id"], "error": {"message": "wrong recovery thread"}})
+            sys.exit(2)
+        emit({"id": msg["id"], "result": {"thread": {"id": thread_id}}})
+    elif method == "thread/name/set":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "turn/start":
+        prompt = "\n".join(item.get("text", "") for item in params.get("input", []))
+        turn_id = "turn_%d" % (attempt + 1)
+        emit({"id": msg["id"], "result": {"turn": {"id": turn_id, "status": "inProgress"}}})
+        if attempt == 0:
+            emit({"method": "item/agentMessage/delta", "params": {"threadId": thread_id, "turnId": turn_id, "delta": "partial work before disconnect"}})
+            emit({"method": "error", "params": {"threadId": thread_id, "turnId": turn_id, "message": "Reconnecting... 1/5"}})
+            sys.exit(1)
+        prompt_path.write_text(prompt, encoding="utf-8")
+        text = "最终结论：transport recovery completed\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=same thread resumed; next=none; risks=none"
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": thread_id, "turnId": turn_id, "delta": text}})
+        emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed"}}})
+`
+}
+
+type activeWriterFakeState struct {
+	Processes  int      `json:"processes"`
+	TurnStarts int      `json:"turnStarts"`
+	Prompts    []string `json:"prompts"`
+}
+
+func readActiveWriterFakeState(t *testing.T, path string) activeWriterFakeState {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state activeWriterFakeState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func fakeCodexAppServerActiveWriterScript(statePath string, rejectCount int) string {
+	stateRaw, _ := json.Marshal(statePath)
+	return `#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+state_path = pathlib.Path(` + string(stateRaw) + `)
+reject_count = ` + strconv.Itoa(rejectCount) + `
+state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"processes": 0, "turnStarts": 0, "prompts": []}
+state["processes"] += 1
+state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+thread_id = "thr_active_writer"
+
+def emit(obj):
+    print(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": thread_id}}})
+    elif method == "thread/resume":
+        if params.get("threadId") != thread_id:
+            emit({"id": msg["id"], "error": {"message": "wrong recovery thread"}})
+        else:
+            emit({"id": msg["id"], "result": {"thread": {"id": thread_id}}})
+    elif method == "thread/name/set" or method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "turn/start":
+        prompt = "\n".join(item.get("text", "") for item in params.get("input", []))
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["turnStarts"] += 1
+        state["prompts"].append(prompt)
+        state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        if state["turnStarts"] <= reject_count:
+            emit({"id": msg["id"], "error": {"message": "thread " + thread_id + " already has an active writer"}})
+            continue
+        turn_id = "turn_active_writer"
+        emit({"id": msg["id"], "result": {"turn": {"id": turn_id, "status": "inProgress"}}})
+        text = "最终结论：active writer recovery completed\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=same prompt; next=none; risks=none"
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": thread_id, "turnId": turn_id, "delta": text}})
+        emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed"}}})
+`
+}
+
+func fakeCodexAppServerFailureScript(statePath, message string) string {
+	stateRaw, _ := json.Marshal(statePath)
+	messageRaw, _ := json.Marshal(message)
+	return `#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+state_path = pathlib.Path(` + string(stateRaw) + `)
+attempt = int(state_path.read_text(encoding="utf-8")) if state_path.exists() else 0
+state_path.write_text(str(attempt + 1), encoding="utf-8")
+message = ` + string(messageRaw) + `
+thread_id = "thr_failure"
+
+def emit(obj):
+    print(json.dumps(obj, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": thread_id}}})
+    elif method == "thread/resume":
+        if params.get("threadId") != thread_id:
+            emit({"id": msg["id"], "error": {"message": "wrong recovery thread"}})
+            sys.exit(2)
+        emit({"id": msg["id"], "result": {"thread": {"id": thread_id}}})
+    elif method == "thread/name/set":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "turn/start":
+        turn_id = "turn_%d" % (attempt + 1)
+        emit({"id": msg["id"], "result": {"turn": {"id": turn_id, "status": "inProgress"}}})
+        emit({"method": "error", "params": {"threadId": thread_id, "turnId": turn_id, "message": message}})
+        sys.exit(1)
 `
 }
 

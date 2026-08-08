@@ -101,6 +101,19 @@ type RunnerUpdate struct {
 	Delta   string
 	Content string
 	Tool    *RunnerToolEvent
+	Notice  *RunnerNotice
+}
+
+// RunnerNotice carries transient CLI lifecycle progress without mixing it into
+// assistant text. Orchestration persists these notices in its existing event
+// stream; ordinary chat runners may ignore them without changing transcript
+// content.
+type RunnerNotice struct {
+	Category string
+	Severity string
+	Content  string
+	Error    string
+	Data     map[string]any
 }
 
 type RunnerToolEvent struct {

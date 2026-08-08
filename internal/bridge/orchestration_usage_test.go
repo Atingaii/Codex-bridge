@@ -41,3 +41,16 @@ func TestMergeOrchestrationTurnAttemptsAggregatesUsage(t *testing.T) {
 		t.Fatalf("usage = %#v", got.Usage)
 	}
 }
+
+func TestMergeOrchestrationTurnAttemptsUsesLatestStructuredHandoff(t *testing.T) {
+	first := orchestrationTurn{TurnID: "t", Err: "stream disconnected", Relay: orchestrationRelayPacket{}}
+	next := newOrchestrationTurnRecord(
+		"t", "reviewer", "codex",
+		"最终结论：通过。\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=Main.v; verified=coqc Main.v; next=none; risks=none",
+		nil,
+	)
+	got := mergeOrchestrationTurnAttempts(first, next)
+	if !got.Relay.Structured || got.Relay.Status != "resolved" || got.Relay.To != "user" || got.Relay.Intent != "final" {
+		t.Fatalf("latest structured handoff was not retained: %#v", got.Relay)
+	}
+}

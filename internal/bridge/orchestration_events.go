@@ -300,6 +300,8 @@ func severityFromLegacyStatus(status string) string {
 const orchestrationSendTimeout = 3 * time.Second
 
 func (m *OrchestrationManager) send(env protocol.Envelope) {
+	m.sendMu.Lock()
+	defer m.sendMu.Unlock()
 	m.mu.Lock()
 	out := m.output
 	if out == nil {

@@ -543,10 +543,14 @@ func (s *Server) validateOrchestrationCapabilities(agentID, workerPair string) e
 	if agentID == "" {
 		return errors.New("agent id is required")
 	}
-	caps, ok := s.pool.AgentCapabilities(agentID)
-	if !ok {
+	connection, ok := s.pool.AgentConnectionInfo(agentID)
+	if !ok || connection.Capabilities == nil {
 		return errors.New("selected CLI endpoint is offline or did not advertise orchestration approval capabilities")
 	}
+	if bridgeVersionBefore(connection.Version, 0, 3, 1) {
+		return fmt.Errorf("selected CLI endpoint is running Bridge %s, which cancels active orchestration after a transient network disconnect; update Bridge to v0.3.1 or newer before starting or continuing orchestration", connection.Version)
+	}
+	caps := connection.Capabilities
 	required := orchestrationRequiredCLIs(workerPair)
 	missingCLI := missingOrchestrationCLIs(caps, required)
 	if len(missingCLI) > 0 {
@@ -563,6 +567,32 @@ func (s *Server) validateOrchestrationCapabilities(agentID, workerPair string) e
 		return fmt.Errorf("review-required orchestration needs browser approval for %s; reconnect the endpoint with a review-required bridge that supports app-server orchestration", strings.Join(missing, " and "))
 	}
 	return nil
+}
+
+func bridgeVersionBefore(value string, wantMajor, wantMinor, wantPatch int) bool {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "v")
+	if suffix := strings.IndexAny(value, "-+"); suffix >= 0 {
+		value = value[:suffix]
+	}
+	parts := strings.Split(value, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	got := [3]int{}
+	for i, part := range parts {
+		parsed, err := strconv.Atoi(part)
+		if err != nil || parsed < 0 {
+			return false
+		}
+		got[i] = parsed
+	}
+	want := [3]int{wantMajor, wantMinor, wantPatch}
+	for i := range got {
+		if got[i] != want[i] {
+			return got[i] < want[i]
+		}
+	}
+	return false
 }
 
 func orchestrationRequiredCLIs(workerPair string) []string {

@@ -1,3 +1,7 @@
+> **DEPRECATED - capacity retry is now one class in the unified transient CLI recovery policy**
+>
+> Current design: [Orchestration Transient CLI Recovery](orchestration-transient-cli-recovery.md). Historical only; do not implement from this doc.
+
 # Orchestration Model-Capacity Retries
 
 ## Goals

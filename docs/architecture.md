@@ -183,11 +183,20 @@ when no stdin side-channel exists. Both paths use
 `BridgeNoteData.InjectedText` so the browser timeline records exactly what
 Bridge said.
 
-When a CLI explicitly reports that its selected model is at capacity, Bridge
-keeps the same relay turn and performs bounded 10/30/60-second backoff retries.
-Waiting, retry start, and retry exhaustion are persisted as Bridge-originated
-`turn.delta` notices, and cancellation interrupts the wait. Other CLI errors
-remain terminal; this behavior neither starts a new run nor switches models.
+Transient orchestration failures use separate bounded recovery classes. An
+explicit model-capacity rejection keeps the same relay turn and replays the
+same prompt after 10/30/60-second backoffs. Codex app-server
+`Reconnecting N/M` progress first keeps the current native turn alive for a
+bounded grace period; if that native reconnect fails, Bridge recreates only
+the damaged app-server process and resumes the same Codex thread after
+5/15/30-second backoffs with accumulated output and command evidence instead
+of replaying the original task. When a restarted Bridge resumes a Codex thread
+whose prior native turn still owns the writer lease, it keeps that thread and
+retries the still-unaccepted original prompt after 5/15/30/60-second backoffs.
+Waiting, retry start, native progress, and retry exhaustion are persisted as
+Bridge-originated `turn.delta` notices, and cancellation interrupts every
+wait. Authentication, validation, command, and proof failures remain terminal. See
+[docs/features/orchestration-transient-cli-recovery.md](features/orchestration-transient-cli-recovery.md).
 
 Review-required Claude orchestration uses Claude Code's
 `--permission-prompt-tool` support.

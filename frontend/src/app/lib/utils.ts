@@ -1144,12 +1144,23 @@ export function normalizeOrchestrationWorkerPair(value?: string): WorkerPair {
 export function orchestrationCapabilityProblems(agent: Agent | null | undefined, t: UIText, workerPair: WorkerPair = 'claude-codex') {
   if (!agent) return [t.noBridgeConnected];
   if (!agent.online) return [t.agentOffline];
+  if (bridgeVersionBefore(agent.version, [0, 3, 1])) return [t.bridgeUpdateRequired];
   if (orchestrationApprovalMode(agent) !== 'review-required') return [];
   const problems: string[] = [];
   const required = normalizeOrchestrationWorkerPair(workerPair) === 'codex-codex' ? ['codex'] : ['claude', 'codex'];
   if (required.includes('claude') && !orchestrationCapability(agent, 'claude')?.browserApproval) problems.push(t.claudeOrchestrationApprovalMissing);
   if (required.includes('codex') && !orchestrationCapability(agent, 'codex')?.browserApproval) problems.push(t.codexOrchestrationApprovalMissing);
   return problems;
+}
+
+function bridgeVersionBefore(value: string | undefined, minimum: [number, number, number]) {
+  const match = value?.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
+  if (!match) return false;
+  const current = [Number(match[1]), Number(match[2]), Number(match[3])];
+  for (let index = 0; index < current.length; index += 1) {
+    if (current[index] !== minimum[index]) return current[index] < minimum[index];
+  }
+  return false;
 }
 
 export const activeSessionByAgentStorageKey = 'codexBridge.activeSessionByAgent';

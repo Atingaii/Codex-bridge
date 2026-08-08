@@ -531,7 +531,29 @@ export function mergeCommandData(previous?: CommandData, next?: CommandData): Co
       merged[field] = previous[field];
     }
   }
+  // Long-running CLIs report progress by repeatedly updating the same command
+  // id. Keep a bounded transcript rather than replacing it with only the last
+  // line, otherwise loading older event pages produces no visible change.
+  merged.output = mergeCommandOutput(previous?.output, next?.output);
   return merged;
+}
+
+const commandOutputHistoryLimit = 24000;
+
+export function mergeCommandOutput(previous?: string, next?: string) {
+  const earlier = String(previous || '');
+  const later = String(next || '');
+  if (!earlier) return later;
+  if (!later || later === earlier) return earlier;
+  if (later.startsWith(earlier)) return trimCommandOutputHistory(later);
+  if (earlier.endsWith(later)) return trimCommandOutputHistory(earlier);
+  return trimCommandOutputHistory(`${earlier}${earlier.endsWith('\n') || later.startsWith('\n') ? '' : '\n'}${later}`);
+}
+
+function trimCommandOutputHistory(output: string) {
+  if (output.length <= commandOutputHistoryLimit) return output;
+  const retained = commandOutputHistoryLimit - 80;
+  return `${output.slice(0, Math.floor(retained / 2))}\n\n... earlier command progress omitted ...\n\n${output.slice(-Math.ceil(retained / 2))}`;
 }
 
 export function orchestrationTurnKey(event: OrchestrationEvent) {

@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -43,5 +44,14 @@ func TestBridgeReconnectGraceUsesEffectiveBridgeBackoff(t *testing.T) {
 		if got := s.bridgeReconnectGrace(); got != tc.want {
 			t.Fatalf("bridgeReconnectGrace(%s, %s) = %s, want %s", tc.min, tc.max, got, tc.want)
 		}
+	}
+}
+
+func TestBoundedTransportReason(t *testing.T) {
+	if got := boundedTransportReason(nil); got != "unknown transport closure" {
+		t.Fatalf("nil reason = %q", got)
+	}
+	if got := boundedTransportReason(fmt.Errorf("websocket: close 1006 (abnormal closure)")); got != "websocket: close 1006 (abnormal closure)" {
+		t.Fatalf("reason = %q", got)
 	}
 }

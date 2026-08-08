@@ -608,19 +608,29 @@ func (s *Server) handleOrchestrationEvents(w http.ResponseWriter, r *http.Reques
 	if (hasAfterSeq || hasBeforeSeq) && limit > 1000 {
 		limit = 1000
 	}
+	// Read one extra record so the browser does not have to infer pagination
+	// from page size after reconnects or event de-duplication.
+	queryLimit := limit + 1
 	var events []store.OrchestrationEvent
 	if hasAfterSeq {
-		events, err = s.store.ListOrchestrationEventsAfter(r.Context(), runID, afterSeq, limit)
+		events, err = s.store.ListOrchestrationEventsAfter(r.Context(), runID, afterSeq, queryLimit)
 	} else if hasBeforeSeq {
-		events, err = s.store.ListOrchestrationEventsBefore(r.Context(), runID, beforeSeq, limit)
+		events, err = s.store.ListOrchestrationEventsBefore(r.Context(), runID, beforeSeq, queryLimit)
 	} else {
-		events, err = s.store.ListOrchestrationEvents(r.Context(), runID, limit)
+		events, err = s.store.ListOrchestrationEvents(r.Context(), runID, queryLimit)
 	}
 	if err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to list orchestration events")
 		return
 	}
-	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"events": events})
+	hasMoreBefore := false
+	if !hasAfterSeq && len(events) > limit {
+		hasMoreBefore = true
+		// All store methods return ascending events. Retain the newest page so
+		// the next beforeSeq cursor is adjacent to the currently displayed page.
+		events = events[len(events)-limit:]
+	}
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"events": events, "hasMoreBefore": hasMoreBefore})
 }
 
 func (s *Server) handleCancelOrchestration(w http.ResponseWriter, r *http.Request, uid string) {

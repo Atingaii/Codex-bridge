@@ -1099,6 +1099,18 @@ func TestOrchestrationEventsSeqWindowHTTP(t *testing.T) {
 	if rawEvents[0].(map[string]any)["seq"] != float64(2) || rawEvents[1].(map[string]any)["seq"] != float64(3) {
 		t.Fatalf("unexpected before event seqs = %#v", rawEvents)
 	}
+	if body["hasMoreBefore"] != true {
+		t.Fatalf("before-page hasMoreBefore = %#v, want true", body["hasMoreBefore"])
+	}
+
+	body = getJSON(t, s, userID, "/api/orchestrations/"+run.ID+"/events?beforeSeq=2&limit=2", http.StatusOK)
+	rawEvents, ok = body["events"].([]any)
+	if !ok || len(rawEvents) != 1 || rawEvents[0].(map[string]any)["seq"] != float64(1) {
+		t.Fatalf("earliest events body = %#v", body)
+	}
+	if body["hasMoreBefore"] != false {
+		t.Fatalf("earliest-page hasMoreBefore = %#v, want false", body["hasMoreBefore"])
+	}
 
 	errorBody := getJSON(t, s, userID, "/api/orchestrations/"+run.ID+"/events?afterSeq=bad", http.StatusBadRequest)
 	if errorBody["code"] != "BAD_QUERY" {

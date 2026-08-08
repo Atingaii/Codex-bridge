@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -61,14 +62,15 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if reg.Instance != "" && prevErr == nil && prevAgent.Instance != "" && prevAgent.Instance != reg.Instance {
-		s.scheduleAgentRunFailure(agent.ID, reg.Instance, 0)
+		s.scheduleAgentRunFailure(agent.ID, reg.Instance, 0, "bridge process restarted while run was active")
 	}
 
 	conn := NewBridgeConn(agent.ID, ws, s.cfg.Hub.MaxBridgeSendQueue, reg.Capabilities, strings.TrimSpace(reg.Version))
 	s.pool.RegisterAgent(conn)
+	disconnectReason := "bridge reverse WebSocket closed"
 	defer func() {
 		s.pool.UnregisterAgent(agent.ID, conn)
-		s.scheduleAgentRunFailure(agent.ID, reg.Instance, s.bridgeReconnectGrace())
+		s.scheduleAgentRunFailure(agent.ID, reg.Instance, s.bridgeReconnectGrace(), disconnectReason)
 	}()
 	go conn.WriteLoop(s.websocketPingInterval())
 	defer conn.Close()
@@ -84,13 +86,13 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 
 	ticker := time.NewTicker(s.websocketPingInterval())
 	defer ticker.Stop()
-	done := make(chan struct{})
+	readErr := make(chan error, 1)
 	go func() {
-		defer close(done)
 		_ = ws.SetReadDeadline(time.Now().Add(s.bridgeReadTimeout()))
 		for {
 			var env protocol.Envelope
 			if err := ws.ReadJSON(&env); err != nil {
+				readErr <- err
 				return
 			}
 			_ = ws.SetReadDeadline(time.Now().Add(s.bridgeReadTimeout()))
@@ -101,14 +103,31 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			disconnectReason = "bridge request context ended: " + boundedTransportReason(r.Context().Err())
 			return
-		case <-done:
+		case err := <-readErr:
+			disconnectReason = "bridge reverse WebSocket ended: " + boundedTransportReason(err)
 			return
 		case <-ticker.C:
 			_ = s.store.TouchAgent(r.Context(), agent.ID)
 			_ = conn.Send(protocol.MustEnvelope(protocol.TypeHeartbeat, "", map[string]any{"ts": time.Now().Unix()}))
 		}
 	}
+}
+
+func boundedTransportReason(err error) string {
+	if err == nil {
+		return "unknown transport closure"
+	}
+	message := strings.TrimSpace(err.Error())
+	if message == "" {
+		return "unknown transport closure"
+	}
+	const maxLength = 240
+	if len(message) > maxLength {
+		message = message[:maxLength] + "..."
+	}
+	return fmt.Sprintf("%s", message)
 }
 
 func (s *Server) bridgeReadTimeout() time.Duration {
@@ -158,7 +177,7 @@ func resilientWebSocketReadTimeout(configured, heartbeat time.Duration) time.Dur
 	return timeout
 }
 
-func (s *Server) scheduleAgentRunFailure(agentID, instance string, delay time.Duration) {
+func (s *Server) scheduleAgentRunFailure(agentID, instance string, delay time.Duration, disconnectReason string) {
 	go func() {
 		if delay > 0 {
 			time.Sleep(delay)
@@ -168,9 +187,14 @@ func (s *Server) scheduleAgentRunFailure(agentID, instance string, delay time.Du
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		reason := "bridge disconnected while run was active"
+		reason := strings.TrimSpace(disconnectReason)
+		if reason == "" {
+			reason = "bridge disconnected while run was active"
+		}
 		if delay == 0 {
 			reason = "bridge process restarted while run was active"
+		} else {
+			reason = fmt.Sprintf("Bridge did not reconnect within %s after transport loss: %s", delay, reason)
 		}
 		if n, err := s.store.MarkActiveRunsForAgentFailed(ctx, agentID, reason); err != nil {
 			slog.Error("[hub] mark active agent runs failed", "agent_id", agentID, "error", err)

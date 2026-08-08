@@ -15,7 +15,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Bridge reverse WebSocket | `internal/hub/ws_bridge.go`, `internal/bridge/client.go` |
 | Orchestration transport recovery | `internal/bridge/client.go:connectOnce`, `internal/bridge/orchestration_events.go:send`, `internal/hub/ws_bridge.go:bridgeReconnectGrace` |
 | Browser/Bridge connection pools | `internal/hub/pool.go` |
-| Orchestration HTTP/WS | `internal/hub/orchestration.go`, `internal/bridge/orchestration*.go` |
+| Orchestration HTTP/WS and event history | `internal/hub/orchestration.go:handleOrchestrationEvents`, `internal/hub/ws_bridge.go:handleBridgeWS`, `frontend/src/app/pages/OrchestrationWorkspace.tsx`, `internal/bridge/orchestration*.go` |
 | Orchestration runtime/usage statistics | `internal/hub/orchestration.go:handleOrchestrationStats`, `internal/bridge/orchestration_usage.go`, `frontend/src/app/pages/OrchestrationStatsPage.tsx` |
 | Runner abstraction | `internal/bridge/runner.go`, `internal/bridge/appserver_runner.go`, `internal/bridge/acp_runner.go`, `internal/bridge/acp_client.go`, `internal/bridge/session.go` |
 | SQLite schema and CRUD | `internal/store/store.go`, `internal/store/id.go` |

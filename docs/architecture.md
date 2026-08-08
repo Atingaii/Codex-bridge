@@ -30,6 +30,9 @@ the Hub-side active run through the Bridge's maximum retry delay, jitter, and a
 heartbeat window before declaring an offline machine failed. Process restart
 and explicit cancellation remain terminal. See
 [orchestration transport recovery](features/orchestration-transport-recovery.md).
+The event-history endpoint returns an authoritative earlier-page indicator, and
+a terminal offline error records the bounded transport close reason. See
+[orchestration history and terminal reasons](features/orchestration-history-and-terminal-reasons.md).
 
 CLI endpoints created with the review-required profile use
 `internal/bridge/appserver_runner.go` instead of `codex exec --json` for Codex

@@ -224,6 +224,7 @@ export const uiText = {
     backToRun: 'Back to run',
     noUsageYet: 'No token usage has been recorded yet.',
     runConclusion: 'Final conclusion',
+    unmetObligations: 'Outstanding items',
   },
   zh: {
     secureConnection: '安全连接到你的工作区',
@@ -446,6 +447,7 @@ export const uiText = {
     backToRun: '返回任务',
     noUsageYet: '暂未记录 Token 用量。',
     runConclusion: '最终结论',
+    unmetObligations: '未完成项',
   },
 };
 

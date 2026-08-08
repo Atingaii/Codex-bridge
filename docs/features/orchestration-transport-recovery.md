@@ -22,7 +22,8 @@ persisted events.
 3. Hub waits for the maximum Bridge reconnect backoff, possible jitter, and a
    heartbeat window before declaring an offline active run failed.
 4. Actual process shutdown, a changed Bridge instance, and explicit
-   cancellation retain their terminal behavior.
+   cancellation retain their terminal behavior. When reconnect grace expires,
+   the terminal failure preserves the bounded reverse WebSocket close reason.
 
 ## Implementation
 

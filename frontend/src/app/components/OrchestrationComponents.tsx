@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, AlertTriangle, Check, ChevronDown, Command, GitBranch, RefreshCw, Terminal, User, X, Sparkles } from 'lucide-react';
+import { Activity, AlertTriangle, Check, ChevronDown, Command, GitBranch, RefreshCw, Terminal, User, X, Sparkles, CircleCheckBig, CircleX } from 'lucide-react';
 import type { Agent, BridgeCLICapability, OrchestrationEvent, OrchestrationTimelineGroup, OrchestrationTimelineItem, OrchestrationVisibleEvent } from '../lib/types';
 import type { UIText } from '../lib/i18n';
 import { Button } from './ui';
@@ -21,8 +21,19 @@ import {
 export function RunConclusionCard({ conclusion, status, t }: { conclusion: NonNullable<OrchestrationEvent['runConclusion']>; status?: string; t: UIText }) {
   const outcome = conclusion.outcome || status || t.ready;
   const positive = outcome === 'satisfied' || outcome === 'completed';
-  return <section className={cn('mx-auto w-full max-w-4xl rounded-xl border-2 p-4 shadow-sm', positive ? 'border-emerald-500/40 bg-emerald-500/10' : 'border-primary/35 bg-primary/5')}>
-    <div className="flex items-start gap-3"><div className={cn('mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg', positive ? 'bg-emerald-500/15 text-emerald-600' : 'bg-primary/15 text-primary')}><Sparkles className="h-4 w-4" /></div><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 className="text-sm font-bold">{t.runConclusion}</h2><span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">{outcome}</span></div><div className="mt-2 text-sm leading-6"><MessageContent content={conclusion.summary || t.noVisibleAnswer} /></div>{conclusion.buildOrAuditCommands?.length ? <div className="mt-3 space-y-1 text-xs text-muted-foreground"><div className="font-semibold">{t.commands}</div>{conclusion.buildOrAuditCommands.map((command) => <code key={command} className="block rounded bg-background/60 px-2 py-1">{command}</code>)}</div> : null}</div></div>
+  const obligations = conclusion.unmetObligations || [];
+  return <section className={cn('mx-auto mt-5 w-full max-w-4xl rounded-lg border-2 p-5 shadow-sm', positive ? 'border-emerald-500/50 bg-emerald-500/10' : 'border-destructive/45 bg-destructive/10')}>
+    <div className="flex items-start gap-3">
+      <div className={cn('mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md', positive ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300' : 'bg-destructive/15 text-destructive')}>
+        {positive ? <CircleCheckBig className="h-5 w-5" /> : <CircleX className="h-5 w-5" />}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2"><h2 className="text-base font-bold">{t.runConclusion}</h2><span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">{outcome}</span></div>
+        <div className="mt-2 text-sm leading-6"><MessageContent content={conclusion.summary || t.noVisibleAnswer} /></div>
+        {obligations.length ? <div className="mt-3 border-t border-current/15 pt-3 text-xs"><div className="mb-1 font-semibold">{t.unmetObligations}</div><ul className="list-disc space-y-1 pl-4">{obligations.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
+        {conclusion.buildOrAuditCommands?.length ? <div className="mt-3 space-y-1 text-xs text-muted-foreground"><div className="font-semibold">{t.commands}</div>{conclusion.buildOrAuditCommands.map((command) => <code key={command} className="block rounded bg-background/60 px-2 py-1">{command}</code>)}</div> : null}
+      </div>
+    </div>
   </section>;
 }
 

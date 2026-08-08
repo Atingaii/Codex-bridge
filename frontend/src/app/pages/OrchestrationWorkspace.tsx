@@ -85,6 +85,11 @@ import {
 
 const orchestrationEventPageSize = 300;
 
+type OrchestrationEventsPage = {
+  events: OrchestrationEvent[];
+  hasMoreBefore?: boolean;
+};
+
 export function OrchestrationWorkspace({
   user,
   onLogout,
@@ -244,7 +249,7 @@ export function OrchestrationWorkspace({
       params.set('limit', String(orchestrationEventPageSize));
     }
     const query = params.toString();
-    const data = await api<{ events: OrchestrationEvent[] }>(`/api/orchestrations/${encodeURIComponent(runId)}/events${query ? `?${query}` : ''}`);
+    const data = await api<OrchestrationEventsPage>(`/api/orchestrations/${encodeURIComponent(runId)}/events${query ? `?${query}` : ''}`);
     const incoming = data.events || [];
     if (replace) {
       timelineOrderRef.current = 0;
@@ -261,9 +266,7 @@ export function OrchestrationWorkspace({
       eventMinSeqByRunRef.current[runId] = currentMinSeq > 0 ? Math.min(currentMinSeq, nextMinSeq) : nextMinSeq;
     }
     if (replace || mode === 'before') {
-      const lowestSeq = eventMinSeqByRunRef.current[runId] || 0;
-      const hasOlder = incoming.length >= orchestrationEventPageSize && lowestSeq > 1;
-      setHasOlderEventsByRun((current) => ({ ...current, [runId]: hasOlder }));
+      setHasOlderEventsByRun((current) => ({ ...current, [runId]: Boolean(data.hasMoreBefore) }));
     }
     setEvents((current) => {
       if (activeRunIdRef.current !== runId) return current;
@@ -1016,7 +1019,6 @@ export function OrchestrationWorkspace({
                       </Button>
                     </div>
                   )}
-                  {finalConclusion && !isRunning && <RunConclusionCard conclusion={finalConclusion} status={activeRun?.status} t={t} />}
                   {timelineGroups.map((group) => (
                     <OrchestrationTimelineGroupItem
                       key={group.key}
@@ -1027,6 +1029,7 @@ export function OrchestrationWorkspace({
                       t={t}
                     />
                   ))}
+                  {finalConclusion && !isRunning && <RunConclusionCard conclusion={finalConclusion} status={activeRun?.status} t={t} />}
                 </>
               )}
               <div ref={endRef} className="h-4" />

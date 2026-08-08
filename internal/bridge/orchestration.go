@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -563,16 +562,6 @@ func (m *OrchestrationManager) cancelApprovals(runID string) {
 
 func (m *OrchestrationManager) run(ctx context.Context, payload protocol.OrchestrationStartPayload) {
 	runCWD := m.cwd(payload)
-	if payload.TaskGraph != nil && len(payload.TaskGraph.Tasks) == 1 {
-		isolated, err := m.prepareDurableTaskWorkspace(runCWD, payload)
-		if err != nil {
-			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "run.error", Status: store.OrchestrationFailed, Error: err.Error()})
-			return
-		}
-		runCWD = isolated
-		payload.CWD = isolated
-		payload.RunCWD = isolated
-	}
 	profile := normalizeOrchestrationProfile(payload.Profile)
 	var bootstrapNote string
 	if profile == bridgeprofiles.Formal() {
@@ -585,9 +574,6 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			})
 			return
 		}
-		runCWD = harness.RunDir
-		payload.CWD = runCWD
-		payload.RunCWD = runCWD
 		payload.Prompt = harness.Prompt
 		payload.Files = nil
 		bootstrapNote = harness.BootstrapNote
@@ -880,112 +866,6 @@ func durableReviewerCanComplete(profile string, history []orchestrationTurn) boo
 		return false
 	}
 	return normalizeOrchestrationProfile(profile) != bridgeprofiles.Formal() || durableTaskHasFormalCheck(history)
-}
-
-// prepareDurableTaskWorkspace gives every task attempt a stable private copy
-// of the requested project. The Hub remains the authority for task state; the
-// Bridge only owns these ephemeral execution directories.
-func (m *OrchestrationManager) prepareDurableTaskWorkspace(base string, payload protocol.OrchestrationStartPayload) (string, error) {
-	task := payload.TaskGraph.Tasks[0]
-	base = expandHome(strings.TrimSpace(base))
-	if base == "" {
-		return "", errors.New("durable task workspace requires a base directory")
-	}
-	base, err := filepath.Abs(base)
-	if err != nil {
-		return "", fmt.Errorf("resolve durable task source: %w", err)
-	}
-	workspaceHome := strings.TrimSpace(m.cfg.Bridge.CWD)
-	if workspaceHome == "" {
-		workspaceHome, err = os.UserCacheDir()
-		if err != nil || strings.TrimSpace(workspaceHome) == "" {
-			workspaceHome = os.TempDir()
-		}
-		workspaceHome = filepath.Join(workspaceHome, "codex-bridge")
-	}
-	workspaceHome, err = filepath.Abs(expandHome(workspaceHome))
-	if err != nil {
-		return "", fmt.Errorf("resolve durable task workspace root: %w", err)
-	}
-	root := filepath.Join(workspaceHome, ".codex-bridge", "task-workspaces", payload.RunID, task.ID, task.AttemptID)
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return "", fmt.Errorf("create durable task workspace: %w", err)
-	}
-	marker := filepath.Join(root, ".source")
-	if existing, err := os.ReadFile(marker); err == nil && string(existing) == base {
-		return root, nil
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return "", err
-	}
-	for _, entry := range entries {
-		if entry.Name() == ".source" {
-			continue
-		}
-		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
-			return "", err
-		}
-	}
-	if err := copyDurableWorkspace(base, root); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(marker, []byte(base), 0o600); err != nil {
-		return "", err
-	}
-	return root, nil
-}
-
-func copyDurableWorkspace(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) || rel == ".codex-bridge" || strings.HasPrefix(rel, ".codex-bridge"+string(filepath.Separator)) {
-			if entry.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		target := filepath.Join(dst, rel)
-		if entry.IsDir() {
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-			return os.MkdirAll(target, info.Mode().Perm())
-		}
-		if !entry.Type().IsRegular() {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		source, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		destination, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
-		if err != nil {
-			_ = source.Close()
-			return err
-		}
-		_, copyErr := io.Copy(destination, source)
-		sourceCloseErr := source.Close()
-		closeErr := destination.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		if sourceCloseErr != nil {
-			return sourceCloseErr
-		}
-		return closeErr
-	})
 }
 
 func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, workerSlot, prompt string, state *orchestrationSessionState, runCWD string) (orchestrationTurn, string, error) {

@@ -128,19 +128,20 @@ Relay prompts reuse each worker's native session as the primary memory: a
 returning worker receives only the newest cross-worker handoff plus bounded
 command evidence instead of copies of its own earlier output. A worker entering
 the run for the first time still receives the bounded prior history it needs.
-For new formal-proof runs, Bridge first creates a persistent proof-run folder
-under the selected cwd, materializes uploaded projects or an empty `project/`
-directory there, and writes one `proof-notes.md` evidence ledger before
-scheduled CLI turns begin. This bootstrap is not a hidden verifier turn and
-does not consume the user's turn budget. Workers run project-appropriate proof
-assistant commands directly and update the ledger only with material targets,
+For new formal-proof runs, Bridge keeps the selected project directory as the
+CLI cwd and writes one `proof-notes/<run-id>.md` evidence ledger beneath its
+`.codex-bridge` metadata directory before scheduled CLI turns begin. Uploaded
+projects are materialized directly into that selected project directory. This
+bootstrap is not a hidden verifier turn and does not consume the user's turn
+budget. Workers run project-appropriate proof assistant commands directly and
+update the ledger only with material targets,
 obligations, command evidence, blockers, or decisions; Bridge does not generate
 a checker or run per-turn metadata synchronization. Bridge maintains follow-up
 requests inside one delimited block, retaining the newest eight bounded requests
 and a count of compacted predecessors without rewriting worker-owned evidence.
 See
 [docs/features/formal-proof-lightweight-workspace.md](features/formal-proof-lightweight-workspace.md).
-Follow-up prompts reuse the locked proof-run cwd through the existing `RunCWD`
+Follow-up prompts reuse the locked selected project cwd through the existing `RunCWD`
 continuity path. The native-session design is documented in
 [docs/features/native-interactive-orchestration.md](features/native-interactive-orchestration.md),
 and the relay contract is documented in

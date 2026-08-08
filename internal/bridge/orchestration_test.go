@@ -2392,20 +2392,15 @@ func TestFormalProofWorkspaceCreatesOnlyProjectAndNotes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRunDir := filepath.Join(tmp, ".codex-bridge", "proof-runs", "orc_text")
+	wantRunDir := tmp
 	if result.RunDir != wantRunDir {
 		t.Fatalf("run dir = %q, want %q", result.RunDir, wantRunDir)
 	}
-	entries, err := os.ReadDir(result.RunDir)
-	if err != nil {
-		t.Fatal(err)
+	if result.ProjectDir != tmp {
+		t.Fatalf("project dir = %q, want selected cwd %q", result.ProjectDir, tmp)
 	}
-	var names []string
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	if got, want := strings.Join(names, ","), "project,proof-notes.md"; got != want {
-		t.Fatalf("workspace entries = %q, want %q", got, want)
+	if wantNotes := filepath.Join(tmp, ".codex-bridge", "proof-notes", "orc_text.md"); result.NotesPath != wantNotes {
+		t.Fatalf("notes path = %q, want %q", result.NotesPath, wantNotes)
 	}
 	notes, err := os.ReadFile(result.NotesPath)
 	if err != nil {
@@ -2421,7 +2416,7 @@ func TestFormalProofWorkspaceCreatesOnlyProjectAndNotes(t *testing.T) {
 			t.Fatalf("prompt still requires removed artifact %q:\n%s", forbidden, result.Prompt)
 		}
 	}
-	if !strings.Contains(result.Prompt, "Formal-proof workspace") || !strings.Contains(result.Prompt, "proof-notes.md") {
+	if !strings.Contains(result.Prompt, "Formal-proof workspace") || !strings.Contains(result.Prompt, "proof-notes/orc_text.md") || !strings.Contains(result.Prompt, "Work directly in the selected project directory") {
 		t.Fatalf("prompt missing lightweight workspace instructions:\n%s", result.Prompt)
 	}
 }
@@ -2530,7 +2525,7 @@ func TestFormalProofWorkspaceExtractsZipAndRejectsTraversal(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unsafe archive path") {
 		t.Fatalf("expected unsafe archive path error, got %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(tmp, ".codex-bridge", "proof-runs", "escape.v")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(tmp, ".codex-bridge", "proof-notes", "escape.v")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("archive traversal wrote outside project, stat err=%v", err)
 	}
 }
@@ -2568,7 +2563,7 @@ func TestFormalProofWorkspaceResumeReusesRunCWDAndAppendsNotes(t *testing.T) {
 			t.Fatalf("follow-up notes missing %q:\n%s", want, notes)
 		}
 	}
-	if !strings.Contains(resumed.Prompt, "same proof run") {
+	if !strings.Contains(resumed.Prompt, "same project directory") {
 		t.Fatalf("resumed prompt missing same-run instruction:\n%s", resumed.Prompt)
 	}
 }
@@ -2693,7 +2688,7 @@ func TestFormalProofRunUsesLightweightWorkspaceWithoutConsumingTurns(t *testing.
 			}
 		}
 	}
-	wantRunDir := filepath.Join(tmp, ".codex-bridge", "proof-runs", "orc_workspace_run")
+	wantRunDir := tmp
 	if runStart.RunStartData == nil || runStart.RunStartData.CWD != wantRunDir {
 		t.Fatalf("run.start cwd = %#v, want %q", runStart.RunStartData, wantRunDir)
 	}
@@ -2710,7 +2705,7 @@ func TestFormalProofRunUsesLightweightWorkspaceWithoutConsumingTurns(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(claudePrompt), "Formal-proof workspace") || !strings.Contains(string(claudePrompt), "proof-notes.md") {
+	if !strings.Contains(string(claudePrompt), "Formal-proof workspace") || !strings.Contains(string(claudePrompt), "proof-notes/orc_workspace_run.md") || !strings.Contains(string(claudePrompt), "Work directly in the selected project directory") {
 		t.Fatalf("first CLI prompt missing lightweight workspace context:\n%s", claudePrompt)
 	}
 	if strings.Contains(string(claudePrompt), "check.sh") {
@@ -3198,65 +3193,6 @@ func TestFormalProofConvergenceRequiresReviewingCheckerCommand(t *testing.T) {
 	reviewer.Tools = []RunnerToolEvent{{Command: "coqc Main.v", Status: "completed", ExitCode: &exit}}
 	if !relayCanConverge("collaboration", "formal-proof", []orchestrationTurn{first, reviewer}) {
 		t.Fatal("formal proof did not converge from successful reviewing checker command")
-	}
-}
-
-func TestPrepareDurableTaskWorkspaceIsolatesNodes(t *testing.T) {
-	base := t.TempDir()
-	if err := os.WriteFile(filepath.Join(base, "input.txt"), []byte("original"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(base, "check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Default()
-	cfg.Bridge.CWD = t.TempDir()
-	manager := NewOrchestrationManager(&cfg)
-	payload := protocol.OrchestrationStartPayload{
-		RunID: "orc_isolated",
-		TaskGraph: &protocol.TaskGraphPayload{Tasks: []protocol.TaskPayload{{
-			ID: "task-a", AttemptID: "attempt-a", Role: store.TaskRoleWorker,
-		}}},
-	}
-	first, err := manager.prepareDurableTaskWorkspace(base, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload.TaskGraph.Tasks[0].ID = "task-b"
-	payload.TaskGraph.Tasks[0].AttemptID = "attempt-b"
-	second, err := manager.prepareDurableTaskWorkspace(base, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first == second || first == base || second == base {
-		t.Fatalf("workspaces are not isolated: base=%q first=%q second=%q", base, first, second)
-	}
-	if err := os.WriteFile(filepath.Join(first, "input.txt"), []byte("changed"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(second, "input.txt"))
-	if err != nil || string(data) != "original" {
-		t.Fatalf("second workspace content=%q err=%v", data, err)
-	}
-	data, err = os.ReadFile(filepath.Join(base, "input.txt"))
-	if err != nil || string(data) != "original" {
-		t.Fatalf("base workspace content=%q err=%v", data, err)
-	}
-	info, err := os.Stat(filepath.Join(first, "check.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o750 {
-		t.Fatalf("copied executable mode = %o, want 750", info.Mode().Perm())
-	}
-	payload.TaskGraph.Tasks[0].ID = "task-a"
-	payload.TaskGraph.Tasks[0].AttemptID = "attempt-retry"
-	retryWorkspace, err := manager.prepareDurableTaskWorkspace(base, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if retryWorkspace == first {
-		t.Fatal("retry attempt reused an earlier attempt workspace")
 	}
 }
 

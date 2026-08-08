@@ -170,17 +170,17 @@ machine-readable events.
 A: Yes, under the same-user invariant. The generated browser setup command must
 be run by the workspace OS user, from the target workspace directory. Bridge
 then writes native history under that user's `HOME` / `CODEX_HOME` / Claude
-home. Codex remains visible through Codex's native thread metadata, and Bridge
-materializes Claude stream-json transcripts so they appear in Claude Code's
-interactive `/resume` picker from the run cwd. The user can inspect Codex
-history from the same identity and cwd:
+home. Codex app-server creates a persisted native interactive-source thread,
+and Bridge materializes Claude stream-json transcripts so they appear in Claude
+Code's interactive `/resume` picker from the run cwd. The user can inspect
+Codex history from the same identity and cwd:
 
 ```bash
 cd /home/alice/project
-codex resume --include-non-interactive
+codex
 ```
 
-Use `codex resume --all --include-non-interactive` only when intentionally
-disabling Codex's cwd filter. `sudo -u <service-user>` is a legacy deployment
-diagnostic for endpoints that were incorrectly started by a central service
-user; it is not the normal user workflow.
+Then use `/resume` in the Codex interface. Use `codex resume --all` only when
+intentionally disabling Codex's cwd filter. `sudo -u <service-user>` is a
+legacy deployment diagnostic for endpoints that were incorrectly started by a
+central service user; it is not the normal user workflow.

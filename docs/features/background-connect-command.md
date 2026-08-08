@@ -146,8 +146,7 @@ binary.
 - Generated token responses and settings UI do not expose sudo/root commands.
 - Running the generated link command as user `alice` from `/work/repo` produces
   a user service and env file under Alice's home. Later native resume uses the
-  same identity, for example `cd /work/repo && codex resume
-  --include-non-interactive`.
+  same identity, for example `cd /work/repo && codex`, then `/resume`.
 
 ## Reviewer Q&A
 

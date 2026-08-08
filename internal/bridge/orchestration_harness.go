@@ -54,12 +54,9 @@ type formalProofHarnessFile struct {
 }
 
 func prepareFormalProofHarness(cfg *config.Config, payload protocol.OrchestrationStartPayload, baseCWD string) (formalProofHarnessResult, error) {
-	runDir := formalProofRunDir(baseCWD, payload.RunID)
-	if payload.Resume && strings.TrimSpace(payload.RunCWD) != "" {
-		runDir = formalProofExistingRunDir(baseCWD)
-	}
-	projectDir := filepath.Join(runDir, "project")
-	notesPath := filepath.Join(runDir, formalProofNotesFileName)
+	projectDir := formalProofProjectDir(baseCWD)
+	runDir := projectDir
+	notesPath := filepath.Join(projectDir, ".codex-bridge", "proof-notes", safeFileName(payload.RunID)+".md")
 	result := formalProofHarnessResult{
 		RunDir:     runDir,
 		ProjectDir: projectDir,
@@ -67,6 +64,9 @@ func prepareFormalProofHarness(cfg *config.Config, payload protocol.Orchestratio
 	}
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
 		return result, fmt.Errorf("create formal-proof project directory %q: %w", projectDir, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(notesPath), 0o700); err != nil {
+		return result, fmt.Errorf("create formal-proof notes directory %q: %w", filepath.Dir(notesPath), err)
 	}
 	result.Created = !formalProofNotesExists(notesPath)
 	decoded, err := decodeFormalProofHarnessFiles(cfg, payload.Files)
@@ -93,30 +93,14 @@ func prepareFormalProofHarness(cfg *config.Config, payload protocol.Orchestratio
 	}
 	result.Prompt = formalProofHarnessPrompt(payload.Prompt, result, payload.Resume)
 	if result.Created {
-		result.BootstrapNote = fmt.Sprintf("Formal-proof workspace created at %s. Project: %s. Notes: %s.", runDir, projectDir, notesPath)
+		result.BootstrapNote = fmt.Sprintf("Formal-proof notes created at %s. Source project and CLI working directory: %s.", notesPath, projectDir)
 	} else {
-		result.BootstrapNote = fmt.Sprintf("Formal-proof workspace reused at %s. Latest request was appended to %s.", runDir, notesPath)
+		result.BootstrapNote = fmt.Sprintf("Formal-proof project reused at %s. Latest request was appended to %s.", projectDir, notesPath)
 	}
 	return result, nil
 }
 
-func formalProofRunDir(baseCWD, runID string) string {
-	base := strings.TrimSpace(baseCWD)
-	if base == "" {
-		base = "."
-	}
-	base = expandHome(base)
-	if abs, err := filepath.Abs(base); err == nil {
-		base = abs
-	}
-	name := safeFileName(runID)
-	if name == "" {
-		name = "run"
-	}
-	return filepath.Join(base, ".codex-bridge", "proof-runs", name)
-}
-
-func formalProofExistingRunDir(baseCWD string) string {
+func formalProofProjectDir(baseCWD string) string {
 	base := strings.TrimSpace(baseCWD)
 	if base == "" {
 		base = "."
@@ -571,11 +555,8 @@ func formalProofHarnessPrompt(original string, result formalProofHarnessResult, 
 	var b strings.Builder
 	b.WriteString(strings.TrimSpace(original))
 	b.WriteString("\n\nFormal-proof workspace:\n")
-	b.WriteString("- Proof run folder: ")
+	b.WriteString("- CLI working directory and source project: ")
 	b.WriteString(result.RunDir)
-	b.WriteByte('\n')
-	b.WriteString("- Project folder: ")
-	b.WriteString(result.ProjectDir)
 	b.WriteByte('\n')
 	b.WriteString("- Persistent notes: ")
 	b.WriteString(result.NotesPath)
@@ -584,10 +565,10 @@ func formalProofHarnessPrompt(original string, result formalProofHarnessResult, 
 	b.WriteString(result.Assistant)
 	b.WriteByte('\n')
 	if resumed {
-		b.WriteString("- This is a follow-up in the same proof run. Continue from the existing project and notes.\n")
+		b.WriteString("- This is a follow-up in the same project directory. Continue from the existing sources and notes.\n")
 	} else {
 		b.WriteString("- The workspace was prepared before the first scheduled CLI turn and does not consume a turn.\n")
 	}
-	b.WriteString("\nWork in `project/`. Read `proof-notes.md` for durable task context, and update it only with material target, obligation, command evidence, blocker, or decision changes that a later worker needs. Run the project-appropriate proof assistant commands directly; no generated harness script or metadata synchronization is required.\n")
+	b.WriteString("\nWork directly in the selected project directory. Read the persistent notes for durable task context, and update them only with material target, obligation, command evidence, blocker, or decision changes that a later worker needs. Run the project-appropriate proof assistant commands directly; no generated harness script or metadata synchronization is required.\n")
 	return b.String()
 }

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 
 	"github.com/tencent/codex-bridge/internal/protocol"
@@ -33,19 +32,21 @@ func orchestrationTaskSpecs(baseDigest, workerPair, mode string) []store.CreateT
 	if protocol.NormalizeOrchestrationWorkerPair(workerPair) == protocol.WorkerPairCodexCodex {
 		workerA, workerB = "codex-a", "codex-b"
 	}
-	workerDuty := "Build one independent candidate in your isolated workspace. Inspect the actual project, make bounded changes, run focused checks, and finish with a structured handoff naming changed files, exact commands, remaining risks, and the workspace path. Do not modify the user's shared checkout."
+	workerDuty := "Build one independent candidate in the user's selected project directory. Inspect the actual project, make bounded changes, run focused checks, and finish with a structured handoff naming changed files, exact commands, and remaining risks."
 	if mode == "debate" {
-		workerDuty = "Develop one independent falsifiable solution or counterexample in your isolated workspace. Test the strongest claim, make bounded changes when justified, and finish with a structured handoff naming changed files, exact commands, remaining objections, and the workspace path. Do not modify the user's shared checkout."
+		workerDuty = "Develop one independent falsifiable solution or counterexample in the user's selected project directory. Test the strongest claim, make bounded changes when justified, and finish with a structured handoff naming changed files, exact commands, and remaining objections."
 	}
 	instructions := []orchestrationTaskInstruction{
 		{Instruction: workerDuty + " You are candidate A; do not wait for candidate B."},
 		{Instruction: workerDuty + " You are candidate B; do not copy or wait for candidate A."},
-		{Instruction: "Act as the sole integrator. Inspect both dependency workspaces and their compact evidence, compare their diffs, select or combine only justified changes in the integration workspace, resolve conflicts deterministically, and run integration checks. Finish with a structured handoff for an independent reviewer."},
-		{Instruction: "Act as the final independent reviewer. Inspect the integrated workspace, rerun relevant tests, audit the original requirement and risks, and fix only safe in-scope defects. You alone decide completion. Return a resolved structured handoff only when evidence supports it; otherwise return blocked or needs_next. Formal-proof work must include a successful proof-assistant checker or audit command in this reviewing turn."},
+		{Instruction: "Act as the sole integrator in the user's selected project directory. Inspect both candidate handoffs and their compact evidence, compare the resulting changes, resolve conflicts deterministically, and run integration checks. Finish with a structured handoff for an independent reviewer."},
+		{Instruction: "Act as the final independent reviewer in the user's selected project directory. Rerun relevant tests, audit the original requirement and risks, and fix only safe in-scope defects. You alone decide completion. Return a resolved structured handoff only when evidence supports it; otherwise return blocked or needs_next. Formal-proof work must include a successful proof-assistant checker or audit command in this reviewing turn."},
 	}
 	roles := []string{store.TaskRoleWorker, store.TaskRoleWorker, store.TaskRoleIntegrator, store.TaskRoleReviewer}
 	slots := []string{workerA, workerB, workerA, workerB}
-	deps := [][]int{nil, nil, {0, 1}, {2}}
+	// All nodes write to the user-selected checkout. Candidate B waits for A so
+	// durable scheduling never overlaps arbitrary filesystem side effects.
+	deps := [][]int{nil, {0}, {0, 1}, {2}}
 	out := make([]store.CreateTaskSpec, 0, len(instructions))
 	for i, instruction := range instructions {
 		raw, _ := json.Marshal(instruction)
@@ -149,19 +150,8 @@ func (s *Server) dispatchTaskAttempt(ctx context.Context, run store.Orchestratio
 	if len(evidence) > 0 {
 		raw, _ := json.Marshal(evidence)
 		payload.Context = strings.TrimSpace(payload.Context + "\n\nDependency evidence (compact JSON):\n" + string(raw))
-		if task.Role == store.TaskRoleIntegrator || task.Role == store.TaskRoleReviewer {
-			var dependencyCWDs []string
-			for _, item := range evidence {
-				if cwd, _ := item["cwd"].(string); strings.TrimSpace(cwd) != "" {
-					dependencyCWDs = append(dependencyCWDs, cwd)
-				}
-			}
-			slices.Sort(dependencyCWDs)
-			if len(dependencyCWDs) > 0 {
-				payload.RunCWD = dependencyCWDs[0]
-				payload.CWD = dependencyCWDs[0]
-				payload.Resume = task.Role == store.TaskRoleReviewer
-			}
+		if task.Role == store.TaskRoleReviewer {
+			payload.Resume = true
 		}
 	}
 	payload.MaxTurns = 1

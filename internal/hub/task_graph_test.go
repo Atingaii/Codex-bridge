@@ -35,7 +35,7 @@ func testBridgeConn(agentID string, queue int) *BridgeConn {
 	}
 }
 
-func decodeTaskDispatch(t *testing.T, env protocol.Envelope) protocol.TaskAttemptRef {
+func decodeTaskDispatchPayload(t *testing.T, env protocol.Envelope) protocol.OrchestrationStartPayload {
 	t.Helper()
 	payload, err := protocol.Decode[protocol.OrchestrationStartPayload](env)
 	if err != nil {
@@ -44,10 +44,41 @@ func decodeTaskDispatch(t *testing.T, env protocol.Envelope) protocol.TaskAttemp
 	if payload.TaskGraph == nil || len(payload.TaskGraph.Tasks) != 1 {
 		t.Fatalf("task dispatch payload = %#v", payload)
 	}
+	return payload
+}
+
+func decodeTaskDispatch(t *testing.T, env protocol.Envelope) protocol.TaskAttemptRef {
+	payload := decodeTaskDispatchPayload(t, env)
 	task := payload.TaskGraph.Tasks[0]
 	return protocol.TaskAttemptRef{
 		GraphID: payload.TaskGraph.ID, TaskID: task.ID, AttemptID: task.AttemptID,
 		Role: task.Role, WorkerSlot: task.WorkerSlot, PayloadDigest: task.PayloadDigest,
+	}
+}
+
+func TestDurableTaskDispatchRetainsSelectedCWD(t *testing.T) {
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	run := createOrchestrationRun(t, st, userID, agentID)
+	selectedCWD := t.TempDir()
+	payload := protocol.OrchestrationStartPayload{RunID: run.ID, Mode: "collaboration", WorkerPair: protocol.WorkerPairCodexCodex, Prompt: "verify", CWD: selectedCWD, MaxTurns: 1}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := taskPayloadDigest(string(raw))
+	graph, err := st.CreateOrchestrationTaskGraph(context.Background(), run.ID, string(raw), digest, orchestrationTaskSpecs(digest, payload.WorkerPair, payload.Mode))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := testBridgeConn(agentID, 2)
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+	if err := s.dispatchReadyTaskGraph(context.Background(), run, graph); err != nil {
+		t.Fatal(err)
+	}
+	dispatched := decodeTaskDispatchPayload(t, <-conn.send)
+	if dispatched.CWD != selectedCWD || dispatched.RunCWD != "" {
+		t.Fatalf("task cwd was rewritten: cwd=%q runCwd=%q, want cwd=%q", dispatched.CWD, dispatched.RunCWD, selectedCWD)
 	}
 }
 
@@ -71,19 +102,17 @@ func TestDurableTaskGraphReviewerIsOnlyPublicCompletionBarrier(t *testing.T) {
 	defer s.pool.UnregisterAgent(agentID, conn)
 
 	workerRefs := make([]protocol.TaskAttemptRef, 0, 2)
-	for i := 0; i < 2; i++ {
-		task, attempt, claimed, err := st.ClaimReadyTask(context.Background(), graph.Tasks[i].ID, "")
-		if err != nil || !claimed {
-			t.Fatalf("claim worker %d: claimed=%v err=%v", i, claimed, err)
-		}
-		workerRefs = append(workerRefs, protocol.TaskAttemptRef{
-			GraphID: graph.ID, TaskID: task.ID, AttemptID: attempt.ID, Role: task.Role,
-			WorkerSlot: task.WorkerSlot, PayloadDigest: task.PayloadDigest,
-		})
+	task, attempt, claimed, err := st.ClaimReadyTask(context.Background(), graph.Tasks[0].ID, "")
+	if err != nil || !claimed {
+		t.Fatalf("claim worker A: claimed=%v err=%v", claimed, err)
 	}
-	for _, ref := range workerRefs {
-		sendTaskLifecycle(s, run.ID, ref, nil)
+	workerRefs = append(workerRefs, protocol.TaskAttemptRef{GraphID: graph.ID, TaskID: task.ID, AttemptID: attempt.ID, Role: task.Role, WorkerSlot: task.WorkerSlot, PayloadDigest: task.PayloadDigest})
+	sendTaskLifecycle(s, run.ID, workerRefs[0], nil)
+	workerRefs = append(workerRefs, decodeTaskDispatch(t, <-conn.send))
+	if workerRefs[1].Role != store.TaskRoleWorker || workerRefs[1].TaskID == workerRefs[0].TaskID {
+		t.Fatalf("candidate B was not dispatched after A: %#v", workerRefs)
 	}
+	sendTaskLifecycle(s, run.ID, workerRefs[1], nil)
 	loaded, err := st.OrchestrationRunByID(context.Background(), run.ID, userID)
 	if err != nil {
 		t.Fatal(err)
@@ -143,9 +172,8 @@ func TestReconnectDispatchesOnlyReadyDurableTasks(t *testing.T) {
 
 	s.dispatchReadyTaskGraphsForAgent(context.Background(), agentID)
 	first := decodeTaskDispatch(t, <-conn.send)
-	second := decodeTaskDispatch(t, <-conn.send)
-	if first.TaskID == second.TaskID || first.Role != store.TaskRoleWorker || second.Role != store.TaskRoleWorker {
-		t.Fatalf("reconnect dispatches = %#v %#v", first, second)
+	if first.Role != store.TaskRoleWorker {
+		t.Fatalf("reconnect dispatch = %#v", first)
 	}
 	select {
 	case extra := <-conn.send:

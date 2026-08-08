@@ -32,7 +32,7 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P6.5 | Formal-proof lightweight workspace bootstrap | implemented |
 | P6.6 | Persistent per-context task queue | designed |
 | P6.7 | Structured Agent dialogue relay and evidence-based convergence | implemented |
-| P6.8 | Durable bounded task graph with isolated workers and reviewer barrier | implemented |
+| P6.8 | Durable bounded task graph with shared-CWD serialized workers and reviewer barrier | implemented |
 | P7 | Browser permission prompts over app-server | implemented for Codex chat and Codex orchestration |
 | P8 | Empty-reply hardening and accessible session deletion | implemented |
 | P8.1 | Same-thread chat recovery and bounded retry evidence | implemented |
@@ -70,9 +70,9 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 
 ## Maintenance Log
 
-- 2026-08-08: Added a Hub-persisted two-worker task graph with stable attempt
-  identity, ambiguity-safe restart recovery, isolated Bridge workspaces,
-  deterministic integration, and a final reviewer/formal-checker barrier.
+- 2026-08-08: Added a Hub-persisted task graph with stable attempt identity,
+  ambiguity-safe restart recovery, user-selected shared CWD execution,
+  serialized candidate writes, and a final reviewer/formal-checker barrier.
 - 2026-08-08: Removed bootstrap-admin cross-user and legacy-unowned CLI
   endpoint visibility, and protected existing machine ownership from
   reassignment during reconnect.

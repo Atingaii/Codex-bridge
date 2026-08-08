@@ -2,7 +2,8 @@
 
 ## Goals
 
-- Keep a stable run-scoped `project/` directory for uploaded proof sources.
+- Keep the user-selected project directory as the stable source directory for
+  uploaded proof sources.
 - Replace the multi-file Proof Harness and generated checker with one concise,
   persistent `proof-notes.md` evidence ledger.
 - Preserve formal-proof collaboration/debate prompts, proof-assistant command
@@ -19,20 +20,19 @@
 
 ## Design
 
-For a new `profile=formal-proof` run,
-`internal/bridge/orchestration_harness.go:prepareFormalProofHarness` creates:
+For a new `profile=formal-proof` run, Bridge uses the selected project directory
+as the CLI working directory and creates only this ledger:
 
 ```text
-<base>/.codex-bridge/proof-runs/<runID>/
-  project/
-  proof-notes.md
+<selected-project>/.codex-bridge/proof-notes/<runID>.md
 ```
 
-Uploaded regular files and safely extracted archives remain under `project/`.
-`proof-notes.md` records the original task, detected proof assistant, uploaded
-inputs, target/obligations, command evidence, blockers, and decisions. Workers
-update this document only when it helps preserve material state for a later
-turn; Bridge does not structurally validate it after every turn.
+Uploaded regular files and safely extracted archives are materialized in the
+selected project directory. The ledger records the original task, detected proof
+assistant, uploaded inputs, target/obligations, command evidence, blockers, and
+decisions. Workers update this document only when it helps preserve material
+state for a later turn; Bridge does not structurally validate it after every
+turn.
 
 A follow-up reuses the persisted `RunCWD` and records the latest user request in
 the same document. `internal/bridge/orchestration_harness.go:appendFormalProofFollowup`
@@ -45,8 +45,8 @@ historical `proof-harness/` layout remain usable: Bridge creates
 user work. Legacy unmarked follow-up entries are adopted into the bounded block
 on the next continuation.
 
-The generated prompt identifies `project/`, `proof-notes.md`, and the detected
-assistant. It asks workers to run the project-appropriate proof assistant
+The generated prompt identifies the selected project directory, ledger, and
+detected assistant. It asks workers to run the project-appropriate proof assistant
 commands directly and record only important evidence. It does not require
 `AGENTS.md`, `CLAUDE.md`, YAML state, decision directories, structural sync, or
 `check.sh`.
@@ -54,7 +54,7 @@ commands directly and record only important evidence. It does not require
 ## Data And Protocol Impact
 
 - No stored fields or wire payloads change.
-- `RunStartData.CWD` continues to be the proof-run directory.
+- `RunStartData.CWD` remains the user-selected project directory.
 - Existing bootstrap notes remain browser-visible but describe the lightweight
   workspace rather than a Harness.
 - The `formal-proof-harness-sync` Bridge note is no longer emitted.
@@ -70,12 +70,12 @@ commands directly and record only important evidence. It does not require
 
 ## Exit Gates
 
-- New formal-proof runs create only `project/` and `proof-notes.md` as Bridge
-  bootstrap artifacts.
+- New formal-proof runs create only the project-local `proof-notes/<runID>.md`
+  ledger as a Bridge bootstrap artifact.
 - No generated `check.sh`, YAML state, agent entry files, or governance
   subdirectories are created.
 - Upload extraction and traversal rejection remain covered by tests.
-- Follow-ups reuse the same run directory, preserve worker evidence, and keep a
+- Follow-ups reuse the same project directory, preserve worker evidence, and keep a
   bounded recent-request window in `proof-notes.md`.
 - Formal-proof collaboration/debate contract tests continue to pass.
 - `/usr/local/go/bin/go test ./...` and `make doc-lint` pass.

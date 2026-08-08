@@ -271,9 +271,9 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    the fixed candidate/integrator/reviewer graph.
 3. `internal/hub/orchestration.go:handleOrchestrationEvent` persists node events
    without allowing a node terminal event to bypass the reviewer barrier.
-4. `internal/bridge/orchestration.go:prepareDurableTaskWorkspace` isolates each
-   node; `internal/bridge/orchestration.go:run` applies the task role and formal
-   checker gate.
+4. `internal/bridge/orchestration.go:run` preserves the user-selected CWD for
+   each node; `internal/hub/task_graph.go:orchestrationTaskSpecs` serializes
+   writable nodes and `run` applies the task role and formal checker gate.
 5. Update [docs/features/durable-bounded-orchestration-task-graph.md](features/durable-bounded-orchestration-task-graph.md).
 
 ### Change Orchestration Strategy
@@ -310,10 +310,9 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    contracts, final adjudication, assessments, manual-build carry-over, command
    fingerprint decisions, and benchmark-specific detectors live under
    `internal/bridge/profiles/formalproof/`.
-   `internal/bridge/orchestration_harness.go` creates the persistent
-   formal-proof run folder, materializes `project/`, and maintains one
-   `proof-notes.md` evidence ledger before pointing the prompt and cwd at that
-   folder.
+   `internal/bridge/orchestration_harness.go` keeps the selected project as the
+   CLI cwd, materializes uploads there, and maintains one project-local
+   `proof-notes/<run-id>.md` evidence ledger.
 8. `internal/bridge/orchestration_relay.go:parseOrchestrationRelayPacket` parses
    anchored Agent message/handoff fields;
    `internal/bridge/orchestration_relay.go:formatRelayPriorTurn` sends their

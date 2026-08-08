@@ -5,8 +5,8 @@
 - Persist orchestration scheduling state in the existing Hub SQLite database.
 - Preserve exact task/attempt lineage across Hub and Bridge reconnects.
 - Represent uncertain delivery as `unknown` and prohibit automatic replay.
-- Permit at most two independent worker nodes to execute in isolated writable
-  workspaces.
+- Preserve durable candidate, integration, and review scheduling in the
+  user-selected writable project directory.
 - Serialize integration and require an independent final reviewer before the
   run may complete.
 - Require reviewing-turn proof-checker evidence for formal-proof completion.
@@ -20,7 +20,8 @@
 - No mailbox daemon, external queue, Redis, or second job store.
 - No arbitrary user-authored or model-authored graph topology.
 - No more than two parallel workers.
-- No parallel writes to the selected project checkout.
+- No parallel writes to the selected project checkout; graph nodes are serial
+  when using its shared directory.
 - No promise of exactly-once side effects inside arbitrary CLI commands.
   Dispatch and terminal recording are idempotent; filesystem/tool side effects
   remain subject to explicit reconciliation.
@@ -56,9 +57,10 @@ dependants. The graph state is derived from its nodes and final reviewer:
 | `blocked` | A dependency failed, was canceled, or became unknown. |
 | `canceled` | User canceled before successful completion. |
 
-Hub enforces a maximum of two active `worker` nodes per graph and only one
-active `integrator` or `reviewer`. The final graph cannot become `completed`
-unless the reviewer node is `succeeded`.
+Hub persists a bounded graph and dispatches candidate A, candidate B,
+integration, and review in order. This deliberately trades candidate parallelism
+for direct, visible work in the user's selected checkout. The final graph cannot
+become `completed` unless the reviewer node is `succeeded`.
 
 ## Durable Identity And Claims
 
@@ -93,17 +95,14 @@ Payloads stay compact. Worker handoffs carry the newest request, node role,
 artifact/diff reference, verification evidence, risks, and next action. Native
 CLI history remains the primary conversational memory.
 
-## Workspace Isolation And Integration
+## Shared Project Directory
 
-Bridge creates one private copied task directory per node below Bridge-owned
-metadata. Repository metadata (`.git`) and Bridge workspace metadata are
-excluded, and paths are derived from Hub-generated node ids.
-
-Workers never merge into the user's selected checkout. The integrator consumes
-worker diffs and evidence in a serial integration workspace. Conflicting or
-invalid patches fail integration and block review. Cleanup is conservative:
-active or unknown attempts retain their workspace for inspection; successful
-terminal graphs may remove temporary worktrees after evidence has been stored.
+Every node runs in the exact project directory selected for the orchestration.
+This preserves normal command-line behavior: starting `codex` or `claude` in
+that directory exposes the native conversation through `/resume`. Candidate B
+depends on candidate A, and the integrator/reviewer remain serial, so arbitrary
+filesystem writes never overlap. Hub task records retain durable handoffs and
+attempt evidence; they do not own copies of the checkout.
 
 ## Reviewer Barrier
 
@@ -156,8 +155,8 @@ decision because the previous attempt may already have changed external state.
    continued and link dispatch metadata to the existing start payload.
 3. Persist and reconcile graph-aware Bridge events without changing browser
    event rendering.
-4. Add Bridge workspace preparation and bounded worker execution, followed by
-   serial integration and reviewer execution.
+4. Preserve the selected CWD for every Bridge task and serialize writable
+   worker, integration, and reviewer execution.
 5. Reuse formal-proof checker recognition to enforce the reviewer barrier.
 6. Add store race/idempotency tests, Hub recovery tests, Bridge isolation tests,
    and end-to-end orchestration tests.
@@ -172,8 +171,8 @@ decision because the previous attempt may already have changed external state.
 - Restart recovery preserves ready work and converts ambiguous work to
   `unknown` without redispatch.
 - Retry preserves the original attempt and records parent lineage.
-- No graph has more than two running worker nodes.
-- Parallel workers receive distinct writable workspace paths.
+- No graph has overlapping writable nodes in the selected project directory.
+- Worker, integration, and reviewer events report the selected project CWD.
 - Integration and review never overlap and review starts only after successful
   integration.
 - The run cannot complete without reviewer success.

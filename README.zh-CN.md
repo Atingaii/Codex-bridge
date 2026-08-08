@@ -103,12 +103,12 @@ token 由网页生成，默认 24 小时内有效。一个 token 绑定一个 CL
 
 ```bash
 cd /home/zy/os
-codex resume --include-non-interactive
+codex
 ```
 
-要查看或直接恢复 Claude Code，请在同一个工作目录运行 `claude`，然后使用 `/resume`；Bridge 会把 Claude 自己写下的 stream-json transcript 规范成 `/resume` 选择器可见的本地会话，并同步 `~/.claude/history.jsonl` 与当前项目最近会话记录。运行结束元数据里的 `claude --resume <session-id>` 仍然是直接恢复入口，真实 transcript 位于 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`。
+在 Codex 界面中输入 `/resume` 即可从当前项目的原生会话列表选择 Bridge 编排产生的对话。要查看或直接恢复 Claude Code，请在同一个工作目录运行 `claude`，然后使用 `/resume`；Bridge 会把 Claude 自己写下的 stream-json transcript 规范成 `/resume` 选择器可见的本地会话，并同步 `~/.claude/history.jsonl` 与当前项目最近会话记录。运行结束元数据里的 `claude --resume <session-id>` 仍然是直接恢复入口，真实 transcript 位于 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`。
 
-如果要忽略 Codex cwd 过滤再使用 `codex resume --all --include-non-interactive`。正常接入流程不使用 sudo/root 命令，因为那会把原生会话写到另一个用户的 HOME 下。
+如果需要跨目录查找旧会话，可使用 `codex resume --all`。正常接入流程不使用 sudo/root 命令，因为那会把原生会话写到另一个用户的 HOME 下。
 
 ## 普通用户前置条件
 

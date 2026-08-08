@@ -135,6 +135,9 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("BRIDGE_APPROVAL_POLICY"); v != "" {
 		cfg.Bridge.ApprovalPolicy = v
 	}
+	if v := os.Getenv("BRIDGE_DURABLE_TASK_GRAPH"); v != "" {
+		cfg.Bridge.DurableTaskGraph = parseBool(v, cfg.Bridge.DurableTaskGraph)
+	}
 	if v := os.Getenv("BRIDGE_ACP_CLI"); v != "" {
 		cfg.Bridge.ACP.CLI = v
 	}

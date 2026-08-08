@@ -425,6 +425,55 @@ func TestAgentListIncludesOnlyVisibleOnlineConnectionMetadata(t *testing.T) {
 	}
 }
 
+func TestAdminAgentVisibilityIsOwnerScoped(t *testing.T) {
+	t.Parallel()
+
+	s, st := newAuthTestServer(t)
+	ctx := context.Background()
+	admin, err := st.UserByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminAgent, err := st.UpsertAgentForUser(ctx, admin.ID, "admin-cli", "machine-admin-owned", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyAgent, err := st.UpsertAgent(ctx, "legacy-cli", "machine-legacy-unowned", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherUser, err := st.UpsertUser(ctx, "admin-isolation-user", "abc1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAgent, err := st.UpsertAgentForUser(ctx, otherUser.ID, "other-cli", "machine-admin-hidden", "host", "inst", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := loginCookie(t, s, map[string]string{"username": "admin", "password": "secret12345"})
+	body := authRequestWithCookie(t, s, http.MethodGet, "/api/agents", cookie, http.StatusOK)
+	agents := body["agents"].([]any)
+	if len(agents) != 1 {
+		t.Fatalf("admin-visible agents = %#v, want only owned endpoint", agents)
+	}
+	visible := map[string]bool{}
+	for _, raw := range agents {
+		visible[raw.(map[string]any)["id"].(string)] = true
+	}
+	if !visible[adminAgent.ID] || visible[legacyAgent.ID] || visible[otherAgent.ID] {
+		t.Fatalf("admin agent visibility = %#v", visible)
+	}
+	authRequestWithCookie(t, s, http.MethodDelete, "/api/agents/"+legacyAgent.ID, cookie, http.StatusNotFound)
+	authRequestWithCookie(t, s, http.MethodDelete, "/api/agents/"+otherAgent.ID, cookie, http.StatusNotFound)
+	if _, err := st.AgentByID(ctx, legacyAgent.ID); err != nil {
+		t.Fatalf("unowned endpoint changed through admin path: %v", err)
+	}
+	if _, err := st.AgentByID(ctx, otherAgent.ID); err != nil {
+		t.Fatalf("foreign endpoint changed through admin path: %v", err)
+	}
+}
+
 func TestDeleteAgentRequestsOnlineBridgeShutdown(t *testing.T) {
 	t.Parallel()
 

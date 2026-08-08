@@ -76,6 +76,10 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 	if err := conn.Send(protocol.MustEnvelope(protocol.TypeRegistered, "", protocol.RegisteredPayload{AgentID: agent.ID})); err != nil {
 		return
 	}
+	// Registration acknowledgement must be the first outbound frame. The
+	// Bridge waits for it before starting its normal reader, so reconnect work
+	// queued earlier would be mistaken for a failed handshake.
+	s.dispatchReadyTaskGraphsForAgent(r.Context(), agent.ID)
 	slog.Info("[hub] bridge connected", "agent_id", agent.ID, "machine_id", agent.MachineID, "name", agent.Name)
 
 	ticker := time.NewTicker(s.websocketPingInterval())
@@ -224,7 +228,7 @@ func (s *Server) handleBridgeEnvelope(ctx context.Context, agentID string, env p
 		}
 		s.pool.BroadcastToBrowsers(env.Sid, env)
 	case protocol.TypeOrchestrationEvent:
-		s.handleOrchestrationEvent(ctx, env)
+		s.handleOrchestrationEventFromAgent(ctx, agentID, env)
 	case protocol.TypeError:
 		s.handleBridgeError(ctx, env)
 		s.pool.BroadcastToBrowsers(env.Sid, env)

@@ -264,6 +264,33 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 	}
 }
 
+func TestAgentOwnershipCannotBeReassignedByReconnect(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	owner, err := st.UpsertUser(ctx, "endpoint-owner", "secret12345")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := st.UpsertUser(ctx, "endpoint-other", "secret12345")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgentForUser(ctx, owner.ID, "owner-cli", "stable-machine-owner", "owner-host", "owner-instance", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertAgentForUser(ctx, other.ID, "hijack-cli", agent.MachineID, "other-host", "other-instance", nil); !errors.Is(err, ErrConflict) {
+		t.Fatalf("foreign reconnect error = %v, want conflict", err)
+	}
+	unchanged, err := st.AgentByID(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.UserID != owner.ID || unchanged.Name != "owner-cli" || unchanged.Hostname != "owner-host" {
+		t.Fatalf("foreign reconnect changed endpoint = %#v", unchanged)
+	}
+}
+
 func TestStoreRejectsQuotedEmptyPasswords(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)

@@ -88,13 +88,14 @@ type AgentShutdownPayload struct {
 }
 
 type BridgeCapabilities struct {
-	Runner         string                         `json:"runner,omitempty"`
-	Sandbox        string                         `json:"sandbox,omitempty"`
-	ApprovalPolicy string                         `json:"approvalPolicy,omitempty"`
-	Chat           map[string]BridgeCLICapability `json:"chat,omitempty"`
-	Orchestration  map[string]BridgeCLICapability `json:"orchestration,omitempty"`
-	Metadata       map[string]string              `json:"metadata,omitempty"`
-	ACP            *ACPCapability                 `json:"acp,omitempty"`
+	Runner           string                         `json:"runner,omitempty"`
+	Sandbox          string                         `json:"sandbox,omitempty"`
+	ApprovalPolicy   string                         `json:"approvalPolicy,omitempty"`
+	Chat             map[string]BridgeCLICapability `json:"chat,omitempty"`
+	Orchestration    map[string]BridgeCLICapability `json:"orchestration,omitempty"`
+	Metadata         map[string]string              `json:"metadata,omitempty"`
+	ACP              *ACPCapability                 `json:"acp,omitempty"`
+	DurableTaskGraph bool                           `json:"durableTaskGraph,omitempty"`
 }
 
 // ACPCapability advertises whether the endpoint can run an Agent Client
@@ -220,6 +221,33 @@ type OrchestrationStartPayload struct {
 	RunCWD                  string              `json:"runCwd,omitempty"`
 	Profile                 string              `json:"profile,omitempty"`
 	NativeContextCompaction string              `json:"nativeContextCompaction,omitempty"`
+	TaskGraph               *TaskGraphPayload   `json:"taskGraph,omitempty"`
+}
+
+type TaskGraphPayload struct {
+	ID            string        `json:"id"`
+	Generation    int           `json:"generation"`
+	ParallelLimit int           `json:"parallelLimit"`
+	Tasks         []TaskPayload `json:"tasks"`
+}
+
+type TaskPayload struct {
+	ID            string   `json:"id"`
+	AttemptID     string   `json:"attemptId"`
+	Name          string   `json:"name"`
+	Role          string   `json:"role"`
+	WorkerSlot    string   `json:"workerSlot,omitempty"`
+	PayloadDigest string   `json:"payloadDigest"`
+	Dependencies  []string `json:"dependencies,omitempty"`
+}
+
+type TaskAttemptRef struct {
+	GraphID       string `json:"graphId"`
+	TaskID        string `json:"taskId"`
+	AttemptID     string `json:"attemptId"`
+	Role          string `json:"role,omitempty"`
+	WorkerSlot    string `json:"workerSlot,omitempty"`
+	PayloadDigest string `json:"payloadDigest"`
 }
 
 type OrchestrationCancelPayload struct {
@@ -247,6 +275,7 @@ type OrchestrationEventPayload struct {
 	RunConclusion  *RunConclusion  `json:"runConclusion,omitempty"`
 	Data           map[string]any  `json:"data,omitempty"`
 	CreatedAt      int64           `json:"createdAt,omitempty"`
+	Task           *TaskAttemptRef `json:"task,omitempty"`
 }
 
 type ToolEvent struct {

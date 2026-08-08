@@ -191,7 +191,13 @@ func unixOrZero(t time.Time) int64 {
 }
 
 func (m *OrchestrationManager) emit(runID string, event protocol.OrchestrationEventPayload) {
-	event.RunID = runID
+	execution := m.executionFor(runID)
+	if execution.runID != "" {
+		event.RunID = execution.runID
+		event.Task = execution.task
+	} else {
+		event.RunID = runID
+	}
 	sourceProvided := strings.TrimSpace(event.Source) != ""
 	if event.Severity == "" {
 		event.Severity = severityFromLegacyStatus(event.Status)
@@ -216,6 +222,11 @@ func (m *OrchestrationManager) emit(runID string, event protocol.OrchestrationEv
 }
 
 func (m *OrchestrationManager) emitConclusionIfNeeded(runID string, terminal protocol.OrchestrationEventPayload) {
+	if execution := m.executionFor(runID); execution.task != nil {
+		// Task nodes carry their conclusion on the terminal event. The Hub emits
+		// one public conclusion only after the final reviewer barrier succeeds.
+		return
+	}
 	conclusion := terminal.RunConclusion
 	if conclusion == nil {
 		conclusion = runConclusionFromTerminalEvent(terminal)

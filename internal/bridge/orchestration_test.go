@@ -3058,6 +3058,91 @@ func TestFormalProofConvergenceRequiresReviewingCheckerCommand(t *testing.T) {
 	}
 }
 
+func TestPrepareDurableTaskWorkspaceIsolatesNodes(t *testing.T) {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "input.txt"), []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CWD = t.TempDir()
+	manager := NewOrchestrationManager(&cfg)
+	payload := protocol.OrchestrationStartPayload{
+		RunID: "orc_isolated",
+		TaskGraph: &protocol.TaskGraphPayload{Tasks: []protocol.TaskPayload{{
+			ID: "task-a", AttemptID: "attempt-a", Role: store.TaskRoleWorker,
+		}}},
+	}
+	first, err := manager.prepareDurableTaskWorkspace(base, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload.TaskGraph.Tasks[0].ID = "task-b"
+	payload.TaskGraph.Tasks[0].AttemptID = "attempt-b"
+	second, err := manager.prepareDurableTaskWorkspace(base, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || first == base || second == base {
+		t.Fatalf("workspaces are not isolated: base=%q first=%q second=%q", base, first, second)
+	}
+	if err := os.WriteFile(filepath.Join(first, "input.txt"), []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(second, "input.txt"))
+	if err != nil || string(data) != "original" {
+		t.Fatalf("second workspace content=%q err=%v", data, err)
+	}
+	data, err = os.ReadFile(filepath.Join(base, "input.txt"))
+	if err != nil || string(data) != "original" {
+		t.Fatalf("base workspace content=%q err=%v", data, err)
+	}
+	info, err := os.Stat(filepath.Join(first, "check.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o750 {
+		t.Fatalf("copied executable mode = %o, want 750", info.Mode().Perm())
+	}
+	payload.TaskGraph.Tasks[0].ID = "task-a"
+	payload.TaskGraph.Tasks[0].AttemptID = "attempt-retry"
+	retryWorkspace, err := manager.prepareDurableTaskWorkspace(base, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retryWorkspace == first {
+		t.Fatal("retry attempt reused an earlier attempt workspace")
+	}
+}
+
+func TestDurableReviewerRequiresResolvedEvidence(t *testing.T) {
+	exit := 0
+	reviewer := newOrchestrationTurnRecordWithSlot(
+		"review", store.TaskRoleReviewer, "codex", orchestrationCodexDefaultSlot,
+		"review complete", []RunnerToolEvent{{Command: "go test ./...", Status: "completed", ExitCode: &exit}},
+	)
+	if durableReviewerCanComplete("default", []orchestrationTurn{reviewer}) {
+		t.Fatal("unstructured reviewer response completed durable graph")
+	}
+	reviewer = newOrchestrationTurnRecordWithSlot(
+		"review", store.TaskRoleReviewer, "codex", orchestrationCodexDefaultSlot,
+		"最终结论：通过。\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=Main.go; verified=go test ./...; next=none; risks=none",
+		[]RunnerToolEvent{{Command: "go test ./...", Status: "completed", ExitCode: &exit}},
+	)
+	if !durableReviewerCanComplete("default", []orchestrationTurn{reviewer}) {
+		t.Fatal("resolved reviewer with successful evidence did not complete")
+	}
+	if durableReviewerCanComplete("formal-proof", []orchestrationTurn{reviewer}) {
+		t.Fatal("non-proof command completed formal reviewer")
+	}
+	reviewer.Tools = []RunnerToolEvent{{Command: "coqc Main.v", Status: "completed", ExitCode: &exit}}
+	if !durableReviewerCanComplete("formal-proof", []orchestrationTurn{reviewer}) {
+		t.Fatal("successful proof checker did not complete formal reviewer")
+	}
+}
+
 func TestOrchestrationTurnFinalConclusionRequiresAnchoredMarker(t *testing.T) {
 	progressOnly := "我检查了文件。sed 后段没有输出，说明文件比交接摘要里的行号更短。随后立即跑 coqc。"
 	record := newOrchestrationTurnRecord("turn_inline", "reviewer", "codex", progressOnly, nil)
@@ -3649,10 +3734,9 @@ func waitForPIDFile(t *testing.T, path string) int {
 		raw, err := os.ReadFile(path)
 		if err == nil {
 			pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-			if err != nil {
-				t.Fatalf("parse pid file %s: %v", path, err)
+			if err == nil && pid > 0 {
+				return pid
 			}
-			return pid
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

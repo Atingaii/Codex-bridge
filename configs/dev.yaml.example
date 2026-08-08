@@ -44,6 +44,8 @@ bridge:
   model: ""
   sandbox: workspace-write
   approval_policy: never
+  # Disable only while rolling out alongside a legacy Bridge binary.
+  durable_task_graph: true
   reconnect_min: 5s
   reconnect_max: 30s
   heartbeat_interval: 15s

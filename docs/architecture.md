@@ -57,7 +57,7 @@ Browser UI
   | POST /api/orchestrations
   | POST /api/orchestrations/<run>/prompts
   | WSS /ws/orchestrations?runId=<run>
-Hub (SQLite orchestration_runs + orchestration_events)
+Hub (SQLite runs/events + durable task graph/attempts)
   | reverse WSS orchestration_start / orchestration_event
 Bridge
   | run-scoped native CLI sessions
@@ -81,6 +81,13 @@ bounded fallback only when the structured packet is absent or malformed.
 Reviewer/critic turns may end the schedule below its configured ceiling only
 after an explicit resolved handoff with independent evidence; formal-proof
 runs additionally require a successful reviewing-turn checker/audit command.
+For graph-capable Bridges, a new run is scheduled as two bounded parallel
+candidate nodes followed by serial integration and an independent reviewer.
+Hub SQLite is the task authority; node attempts carry stable identities and
+payload digests, ambiguous restart state becomes `unknown`, and Bridge executes
+each node in a private copied workspace. Older Bridges and same-run follow-ups
+retain the serial relay behavior. See
+[ADR-008](adr/008-durable-orchestration-task-graph.md).
 Bridge persists the legacy
 Codex thread id, the `codex_thread_ids_json` slot map, and the stable Claude
 session id so follow-up prompts can resume native history after a Bridge
@@ -342,9 +349,11 @@ Registration is fail-closed and remains disabled unless enabled with both keys.
 Agents, sessions, orchestration runs, and conversation shares carry a user id.
 Every authenticated HTTP and WebSocket entry loads its parent record using the
 JWT subject before child messages, chat runs, or orchestration events can be
-read or changed. Normal users can use both chat and orchestration but see and
-control only their own enrolled endpoints and records. Public shares remain an
-explicit, revocable exception containing sanitized read-only data.
+read or changed. Every user, including the bootstrap administrator, can use
+both chat and orchestration but sees and controls only explicitly owned
+endpoints and records. Legacy unowned agents require an explicit ownership
+migration before use. Public shares remain an explicit, revocable exception
+containing sanitized read-only data.
 
 ## Storage
 
@@ -362,6 +371,9 @@ SQLite tables:
   cwd, and uploaded file metadata)
 - `orchestration_events` (including `source`, `severity`, lifecycle status,
   and typed event payload JSON)
+- `orchestration_task_graphs`, `orchestration_tasks`,
+  `orchestration_task_dependencies`, and `orchestration_task_attempts`
+  (bounded scheduling, dependency state, identity, retry lineage, and evidence)
 - `conversation_shares`
 
 Hub stores browser auth and chat history. Bridge stores only its generated `machine_id` and reads Codex/OpenAI credentials from its local environment.

@@ -8,7 +8,7 @@
 - Sign a newly registered user in with the existing HttpOnly JWT cookie.
 - Let users reveal or hide login, registration, and confirmation passwords
   independently without changing the submitted values.
-- Let non-admin users use chat while keeping agents, sessions, messages, runs,
+- Let every user, including the bootstrap administrator, use chat while keeping agents, sessions, messages, runs,
   orchestrations, and share-management operations scoped to their `users.id`.
 - Keep registration disabled and fail closed when Turnstile is incomplete or
   unavailable.
@@ -17,9 +17,9 @@
 
 - Email verification, password reset, invitations, account deletion, social
   login, billing, or organization/team membership.
-- Sharing a private Bridge between unrelated users. Each user enrolls their own
-  Bridge; the bootstrap administrator retains compatibility visibility of
-  legacy unowned agents.
+- Sharing a private Bridge between unrelated users. Each user, including the
+  bootstrap administrator, sees only agents explicitly owned by that user.
+  Legacy unowned agents require an explicit ownership migration before use.
 - Applying Turnstile to login or authenticated prompts. Login keeps its existing
   IP-and-username rate limit; registration gets a separate stricter limit.
 - Storing Cloudflare secrets or Turnstile tokens in SQLite, logs, API responses,
@@ -113,12 +113,11 @@ The callback only supplies a token. Cloudflare documents Siteverify as mandatory
 tokens expire, are single-use, and can be invalid or replayed. Only the Hub can
 keep the secret and make the authoritative decision.
 
-### Can users see the administrator's Bridge?
+### Can users see another user's Bridge?
 
-No. Normal users see agents whose `agents.user_id` matches their JWT subject.
-The bootstrap administrator's legacy visibility exists only for migration and
-operations; it does not grant normal users access to unowned or other-user
-agents.
+No. Users see agents whose `agents.user_id` matches their JWT subject. The
+bootstrap administrator follows the same ownership rule: administrator status
+does not reveal or authorize legacy unowned agents or another user's agents.
 
 ### Does registration break conversation continuity?
 

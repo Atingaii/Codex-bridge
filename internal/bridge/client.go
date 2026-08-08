@@ -262,12 +262,13 @@ func BridgeCapabilities(cfg *config.Config) *protocol.BridgeCapabilities {
 	codexAvailable := commandAvailable(bridgeCodexPath(cfg))
 	claudeAvailable := commandAvailable(bridgeClaudePath(cfg))
 	caps := &protocol.BridgeCapabilities{
-		Runner:         runner,
-		Sandbox:        cfg.Bridge.Sandbox,
-		ApprovalPolicy: cfg.Bridge.ApprovalPolicy,
-		Chat:           map[string]protocol.BridgeCLICapability{},
-		Orchestration:  map[string]protocol.BridgeCLICapability{},
-		Metadata:       map[string]string{"approvalMode": approvalMode(cfg)},
+		Runner:           runner,
+		Sandbox:          cfg.Bridge.Sandbox,
+		ApprovalPolicy:   cfg.Bridge.ApprovalPolicy,
+		Chat:             map[string]protocol.BridgeCLICapability{},
+		Orchestration:    map[string]protocol.BridgeCLICapability{},
+		Metadata:         map[string]string{"approvalMode": approvalMode(cfg)},
+		DurableTaskGraph: cfg.Bridge.DurableTaskGraph,
 	}
 	caps.Chat["codex"] = protocol.BridgeCLICapability{
 		Available:       codexAvailable && (runner == "codex-app-server" || runner == "codex-appserver" || runner == "app-server"),

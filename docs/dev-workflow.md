@@ -44,6 +44,7 @@ should list names and point here for detail.
 | `BRIDGE_MODEL` | Model argument for Codex runner | config `bridge.model` |
 | `BRIDGE_SANDBOX` | Codex sandbox policy | config `bridge.sandbox` |
 | `BRIDGE_APPROVAL_POLICY` | Codex approval policy | config `bridge.approval_policy` |
+| `BRIDGE_DURABLE_TASK_GRAPH` | Enable the bounded persistent orchestration task graph; set `false` only for legacy Bridge compatibility | config `bridge.durable_task_graph` |
 | `BRIDGE_LONG_COMMAND_OBSERVER_ENABLED` | Enables Bridge long-command observer notes during orchestration | config `bridge.long_command_observer.enabled` |
 | `BRIDGE_LONG_COMMAND_OBSERVER_AFTER` | Duration before a matching long command is observed, for example `2m` | config `bridge.long_command_observer.after` |
 | `LOG_LEVEL` | `debug`, `info`, `warn`, `error` | config `observability.log_level` |

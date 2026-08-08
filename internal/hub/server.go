@@ -170,6 +170,11 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) recoverInterruptedRuns(ctx context.Context) {
 	sweepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	if n, err := s.store.RecoverTaskGraphs(sweepCtx); err != nil {
+		slog.Error("[hub] durable task graph recovery failed", "error", err)
+	} else if n > 0 {
+		slog.Warn("[hub] marked ambiguous durable task attempts unknown", "count", n)
+	}
 	if n, err := s.store.MarkUnfinishedRunsFailed(sweepCtx, "hub restarted while run was active"); err != nil {
 		slog.Error("[hub] boot sweep for chat runs failed", "error", err)
 	} else if n > 0 {
@@ -875,29 +880,23 @@ func (s *Server) isAdminUser(user store.User) bool {
 }
 
 func (s *Server) visibleAgents(ctx context.Context, uid string) ([]store.Agent, error) {
-	user, err := s.store.UserByID(ctx, uid)
+	_, err := s.store.UserByID(ctx, uid)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, store.ErrNotFound
 		}
 		return nil, err
 	}
-	if s.isAdminUser(user) {
-		return s.store.ListAgents(ctx)
-	}
 	return s.store.ListAgentsForUser(ctx, uid, false)
 }
 
 func (s *Server) visibleAgentByID(ctx context.Context, uid, agentID string) (store.Agent, error) {
-	user, err := s.store.UserByID(ctx, uid)
+	_, err := s.store.UserByID(ctx, uid)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return store.Agent{}, store.ErrNotFound
 		}
 		return store.Agent{}, err
-	}
-	if s.isAdminUser(user) {
-		return s.store.AgentByID(ctx, agentID)
 	}
 	return s.store.AgentByIDForUser(ctx, agentID, uid, false)
 }

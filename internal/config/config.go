@@ -40,23 +40,27 @@ type HubConfig struct {
 }
 
 type BridgeConfig struct {
-	HubURL              string                    `yaml:"hub_url"`
-	Token               string                    `yaml:"token"`
-	TokenFile           string                    `yaml:"token_file"`
-	Name                string                    `yaml:"name"`
-	MachineIDFile       string                    `yaml:"machine_id_file"`
-	CWD                 string                    `yaml:"cwd"`
-	Runner              string                    `yaml:"runner"`
-	CodexPath           string                    `yaml:"codex_path"`
-	ClaudePath          string                    `yaml:"claude_path"`
-	ClaudeModel         string                    `yaml:"claude_model"`
-	ClaudeEffort        string                    `yaml:"claude_effort"`
-	Model               string                    `yaml:"model"`
-	Sandbox             string                    `yaml:"sandbox"`
-	ApprovalPolicy      string                    `yaml:"approval_policy"`
-	ReconnectMin        Duration                  `yaml:"reconnect_min"`
-	ReconnectMax        Duration                  `yaml:"reconnect_max"`
-	HeartbeatInterval   Duration                  `yaml:"heartbeat_interval"`
+	HubURL            string   `yaml:"hub_url"`
+	Token             string   `yaml:"token"`
+	TokenFile         string   `yaml:"token_file"`
+	Name              string   `yaml:"name"`
+	MachineIDFile     string   `yaml:"machine_id_file"`
+	CWD               string   `yaml:"cwd"`
+	Runner            string   `yaml:"runner"`
+	CodexPath         string   `yaml:"codex_path"`
+	ClaudePath        string   `yaml:"claude_path"`
+	ClaudeModel       string   `yaml:"claude_model"`
+	ClaudeEffort      string   `yaml:"claude_effort"`
+	Model             string   `yaml:"model"`
+	Sandbox           string   `yaml:"sandbox"`
+	ApprovalPolicy    string   `yaml:"approval_policy"`
+	ReconnectMin      Duration `yaml:"reconnect_min"`
+	ReconnectMax      Duration `yaml:"reconnect_max"`
+	HeartbeatInterval Duration `yaml:"heartbeat_interval"`
+	// DurableTaskGraph enables the bounded candidate/integrator/reviewer graph
+	// for orchestration. Keep this opt-out for staged rollouts and legacy
+	// Bridges; the default remains enabled.
+	DurableTaskGraph    bool                      `yaml:"durable_task_graph"`
 	MaxSessions         int                       `yaml:"max_sessions"`
 	LongCommandObserver LongCommandObserverConfig `yaml:"long_command_observer"`
 	ACP                 ACPConfig                 `yaml:"acp"`
@@ -149,6 +153,7 @@ func Default() Config {
 			ReconnectMin:      Duration{Duration: 5_000_000_000},
 			ReconnectMax:      Duration{Duration: 30_000_000_000},
 			HeartbeatInterval: Duration{Duration: 15_000_000_000},
+			DurableTaskGraph:  true,
 			MaxSessions:       8,
 			LongCommandObserver: LongCommandObserverConfig{
 				Enabled:         false,

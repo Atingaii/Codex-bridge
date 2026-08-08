@@ -7,16 +7,18 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	bridgeprofiles "github.com/tencent/codex-bridge/internal/bridge/profiles"
-	"github.com/tencent/codex-bridge/internal/config"
-	"github.com/tencent/codex-bridge/internal/protocol"
-	"github.com/tencent/codex-bridge/internal/store"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	bridgeprofiles "github.com/tencent/codex-bridge/internal/bridge/profiles"
+	"github.com/tencent/codex-bridge/internal/config"
+	"github.com/tencent/codex-bridge/internal/protocol"
+	"github.com/tencent/codex-bridge/internal/store"
 )
 
 type OrchestrationManager struct {
@@ -28,6 +30,12 @@ type OrchestrationManager struct {
 	pending     []protocol.Envelope
 	approvals   map[string]orchestrationApproval
 	conclusions map[string]bool
+	executions  map[string]orchestrationExecution
+}
+
+type orchestrationExecution struct {
+	runID string
+	task  *protocol.TaskAttemptRef
 }
 
 type orchestrationApproval struct {
@@ -104,6 +112,7 @@ func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
 		sessions:    make(map[string]*orchestrationNativeSession),
 		approvals:   make(map[string]orchestrationApproval),
 		conclusions: make(map[string]bool),
+		executions:  make(map[string]orchestrationExecution),
 	}
 }
 
@@ -134,18 +143,20 @@ func (m *OrchestrationManager) Start(parent context.Context, payload protocol.Or
 		}))
 		return
 	}
+	executionKey := orchestrationExecutionKey(payload)
+	publicRunID := payload.RunID
 	ctx, cancel := context.WithCancel(parent)
 	// Cancel and join any goroutine still owning this run id before starting
 	// the replacement: otherwise its stale terminal events interleave after
 	// the new run.start and the hub records the wrong final status.
 	for {
 		m.mu.Lock()
-		old := m.runs[payload.RunID]
+		old := m.runs[executionKey]
 		if old == nil {
 			break
 		}
-		oldSession := m.sessions[payload.RunID]
-		delete(m.sessions, payload.RunID)
+		oldSession := m.sessions[executionKey]
+		delete(m.sessions, executionKey)
 		m.mu.Unlock()
 		old.cancel()
 		if oldSession != nil {
@@ -156,22 +167,25 @@ func (m *OrchestrationManager) Start(parent context.Context, payload protocol.Or
 		}
 	}
 	handle := &orchestrationRunHandle{cancel: cancel, done: make(chan struct{})}
-	m.runs[payload.RunID] = handle
-	delete(m.conclusions, payload.RunID)
+	m.runs[executionKey] = handle
+	m.executions[executionKey] = orchestrationExecution{runID: publicRunID, task: orchestrationTaskRef(payload)}
+	delete(m.conclusions, executionKey)
 	m.mu.Unlock()
+	payload.RunID = executionKey
 
 	go func() {
 		defer close(handle.done)
 		defer func() {
 			cancel()
 			m.mu.Lock()
-			current := m.runs[payload.RunID]
-			if m.runs[payload.RunID] == handle {
-				delete(m.runs, payload.RunID)
+			current := m.runs[executionKey]
+			if m.runs[executionKey] == handle {
+				delete(m.runs, executionKey)
 			}
+			delete(m.executions, executionKey)
 			m.mu.Unlock()
 			if current == handle {
-				m.cancelApprovals(payload.RunID)
+				m.cancelApprovals(executionKey)
 			}
 		}()
 		m.run(ctx, payload)
@@ -180,13 +194,46 @@ func (m *OrchestrationManager) Start(parent context.Context, payload protocol.Or
 
 func (m *OrchestrationManager) Cancel(runID string) {
 	m.mu.Lock()
-	handle := m.runs[runID]
-	m.mu.Unlock()
-	if handle != nil {
-		handle.cancel()
+	var handles []*orchestrationRunHandle
+	var keys []string
+	for key, handle := range m.runs {
+		execution := m.executions[key]
+		if key == runID || execution.runID == runID {
+			handles = append(handles, handle)
+			keys = append(keys, key)
+		}
 	}
-	m.closeNativeSession(runID)
-	m.cancelApprovals(runID)
+	m.mu.Unlock()
+	for _, handle := range handles {
+		if handle != nil {
+			handle.cancel()
+		}
+	}
+	for _, key := range keys {
+		m.closeNativeSession(key)
+		m.cancelApprovals(key)
+	}
+}
+
+func orchestrationExecutionKey(payload protocol.OrchestrationStartPayload) string {
+	if payload.TaskGraph != nil && len(payload.TaskGraph.Tasks) == 1 && payload.TaskGraph.Tasks[0].AttemptID != "" {
+		return payload.RunID + ":" + payload.TaskGraph.Tasks[0].AttemptID
+	}
+	return payload.RunID
+}
+
+func orchestrationTaskRef(payload protocol.OrchestrationStartPayload) *protocol.TaskAttemptRef {
+	if payload.TaskGraph == nil || len(payload.TaskGraph.Tasks) != 1 {
+		return nil
+	}
+	task := payload.TaskGraph.Tasks[0]
+	return &protocol.TaskAttemptRef{GraphID: payload.TaskGraph.ID, TaskID: task.ID, AttemptID: task.AttemptID, Role: task.Role, WorkerSlot: task.WorkerSlot, PayloadDigest: task.PayloadDigest}
+}
+
+func (m *OrchestrationManager) executionFor(key string) orchestrationExecution {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.executions[key]
 }
 
 func (m *OrchestrationManager) CloseAll() {
@@ -437,7 +484,11 @@ func (r orchestrationApprovalRequester) RequestApproval(ctx context.Context, req
 	if req.RequestID == "" {
 		req.RequestID = fmt.Sprintf("apr_%d", time.Now().UnixNano())
 	}
-	req.RunID = r.runID
+	if execution := r.manager.executionFor(r.runID); execution.runID != "" {
+		req.RunID = execution.runID
+	} else {
+		req.RunID = r.runID
+	}
 	req.TurnID = r.turnID
 	if req.CWD == "" {
 		req.CWD = r.cwd
@@ -505,6 +556,16 @@ func (m *OrchestrationManager) cancelApprovals(runID string) {
 
 func (m *OrchestrationManager) run(ctx context.Context, payload protocol.OrchestrationStartPayload) {
 	runCWD := m.cwd(payload)
+	if payload.TaskGraph != nil && len(payload.TaskGraph.Tasks) == 1 {
+		isolated, err := m.prepareDurableTaskWorkspace(runCWD, payload)
+		if err != nil {
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "run.error", Status: store.OrchestrationFailed, Error: err.Error()})
+			return
+		}
+		runCWD = isolated
+		payload.CWD = isolated
+		payload.RunCWD = isolated
+	}
 	profile := normalizeOrchestrationProfile(payload.Profile)
 	var bootstrapNote string
 	if profile == bridgeprofiles.Formal() {
@@ -636,6 +697,17 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			return
 		}
 		turnPlan := roleForTurnWithWorkerPair(mode, workerPair, firstCLI, turn)
+		if payload.TaskGraph != nil && len(payload.TaskGraph.Tasks) == 1 {
+			task := payload.TaskGraph.Tasks[0]
+			turnPlan.Role = task.Role
+			turnPlan.WorkerSlot = task.WorkerSlot
+			switch task.WorkerSlot {
+			case orchestrationCodexDefaultSlot, orchestrationCodexSlotA, orchestrationCodexSlotB:
+				turnPlan.CLI = "codex"
+			case "claude":
+				turnPlan.CLI = "claude"
+			}
+		}
 		role, cli, workerSlot := turnPlan.Role, turnPlan.CLI, turnPlan.WorkerSlot
 		turnID := fmt.Sprintf("%s-%02d", payload.RunID, turn)
 		if payload.PromptSeq > 0 {
@@ -732,6 +804,23 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		}
 	}
 	finalContent := relayTerminalContent(history)
+	if payload.TaskGraph != nil && len(payload.TaskGraph.Tasks) == 1 {
+		task := payload.TaskGraph.Tasks[0]
+		if task.Role == store.TaskRoleReviewer && !durableReviewerCanComplete(profile, history) {
+			reason := "reviewer did not return a resolved structured handoff with independent command evidence"
+			if profile == bridgeprofiles.Formal() && !durableTaskHasFormalCheck(history) {
+				reason = "formal-proof reviewer did not record a successful checker command"
+			}
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:          "run.error",
+				Status:        store.OrchestrationFailed,
+				Error:         reason,
+				Content:       finalContent,
+				RunConclusion: runConclusionForStatus(store.OrchestrationFailed, reason, history),
+			})
+			return
+		}
+	}
 	finalRunEndData := runEndDataWithNativeResume(&protocol.RunEndData{
 		WorkerPair:         workerPair,
 		CodexThreadID:      sessionState.CodexThreadID,
@@ -758,6 +847,136 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		},
 	})
 	m.runFinalNativeMaintenance(ctx, workerPair, mode, firstCLI, len(history), &sessionState)
+}
+
+func durableTaskHasFormalCheck(history []orchestrationTurn) bool {
+	for _, turn := range history {
+		if relayHasSuccessfulFormalCheck(turn.Tools) {
+			return true
+		}
+	}
+	return false
+}
+
+func durableReviewerCanComplete(profile string, history []orchestrationTurn) bool {
+	if len(history) == 0 {
+		return false
+	}
+	record := history[len(history)-1]
+	packet := record.Relay
+	if record.Role != store.TaskRoleReviewer || !packet.Structured || packet.Status != "resolved" || packet.To != "user" || packet.Intent != "final" || !machineExplicitNone(packet.Next) || !machineExplicitNone(packet.Risks) {
+		return false
+	}
+	if machineNone(packet.Verified) && !relayHasSuccessfulCommand(record.Tools) {
+		return false
+	}
+	return normalizeOrchestrationProfile(profile) != bridgeprofiles.Formal() || durableTaskHasFormalCheck(history)
+}
+
+// prepareDurableTaskWorkspace gives every task attempt a stable private copy
+// of the requested project. The Hub remains the authority for task state; the
+// Bridge only owns these ephemeral execution directories.
+func (m *OrchestrationManager) prepareDurableTaskWorkspace(base string, payload protocol.OrchestrationStartPayload) (string, error) {
+	task := payload.TaskGraph.Tasks[0]
+	base = expandHome(strings.TrimSpace(base))
+	if base == "" {
+		return "", errors.New("durable task workspace requires a base directory")
+	}
+	base, err := filepath.Abs(base)
+	if err != nil {
+		return "", fmt.Errorf("resolve durable task source: %w", err)
+	}
+	workspaceHome := strings.TrimSpace(m.cfg.Bridge.CWD)
+	if workspaceHome == "" {
+		workspaceHome, err = os.UserCacheDir()
+		if err != nil || strings.TrimSpace(workspaceHome) == "" {
+			workspaceHome = os.TempDir()
+		}
+		workspaceHome = filepath.Join(workspaceHome, "codex-bridge")
+	}
+	workspaceHome, err = filepath.Abs(expandHome(workspaceHome))
+	if err != nil {
+		return "", fmt.Errorf("resolve durable task workspace root: %w", err)
+	}
+	root := filepath.Join(workspaceHome, ".codex-bridge", "task-workspaces", payload.RunID, task.ID, task.AttemptID)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", fmt.Errorf("create durable task workspace: %w", err)
+	}
+	marker := filepath.Join(root, ".source")
+	if existing, err := os.ReadFile(marker); err == nil && string(existing) == base {
+		return root, nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range entries {
+		if entry.Name() == ".source" {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			return "", err
+		}
+	}
+	if err := copyDurableWorkspace(base, root); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(marker, []byte(base), 0o600); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+func copyDurableWorkspace(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) || rel == ".codex-bridge" || strings.HasPrefix(rel, ".codex-bridge"+string(filepath.Separator)) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if entry.IsDir() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		source, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		destination, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+		if err != nil {
+			_ = source.Close()
+			return err
+		}
+		_, copyErr := io.Copy(destination, source)
+		sourceCloseErr := source.Close()
+		closeErr := destination.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if sourceCloseErr != nil {
+			return sourceCloseErr
+		}
+		return closeErr
+	})
 }
 
 func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, cli, workerSlot, prompt string, state *orchestrationSessionState, runCWD string) (orchestrationTurn, string, error) {

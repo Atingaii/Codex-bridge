@@ -129,7 +129,8 @@ export function canCancelOrchestrationStatus(status?: string) {
 }
 
 export function orchestrationRunStatusFromEvent(event: OrchestrationEvent) {
-  switch (event.kind) {
+  if (event.task) return '';
+	switch (event.kind) {
     case 'run.start':
       return 'running';
     case 'run.end':
@@ -706,6 +707,7 @@ export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: 
     }
 
     if (event.kind === 'run.end' || event.kind === 'run.error' || event.kind === 'run.cancelled') {
+      if (event.task) return;
       if (!ordered.some((candidate) => candidate.kind === 'run.conclusion' && candidate.runId === event.runId)) {
         const content = cleanOrchestrationDisplayContent(orchestrationStatusContent(event));
         const hasEquivalentVisibleConclusion = visible
@@ -965,6 +967,7 @@ export function isEmptyPagesReadFailureEvent(event: OrchestrationEvent) {
 }
 
 export function shouldShowOrchestrationStatus(event: OrchestrationEvent) {
+  if (event.task && (event.kind === 'run.end' || event.kind === 'run.error' || event.kind === 'run.cancelled')) return false;
   if (event.kind === 'run.start' || event.kind === 'turn.start') return true;
   if (event.kind === 'run.conclusion') return false;
   if (event.kind === 'run.end') {

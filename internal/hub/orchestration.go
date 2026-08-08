@@ -324,6 +324,13 @@ func (s *Server) startOrchestration(ctx context.Context, run store.Orchestration
 		Profile:                 req.Profile,
 		NativeContextCompaction: req.NativeContextCompaction,
 	}
+	if s.durableTaskGraphEnabled(run.AgentID) {
+		if err := s.createAndDispatchTaskGraph(ctx, run, payload); err != nil {
+			_ = s.store.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationFailed, err.Error())
+			return err
+		}
+		return nil
+	}
 	if err := s.pool.SendToAgent(run.AgentID, protocol.MustEnvelope(protocol.TypeOrchestrationStart, "", payload)); err != nil {
 		_ = s.store.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationFailed, err.Error())
 		_, _ = s.store.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
@@ -926,33 +933,57 @@ func validApprovalDecision(decision string) bool {
 }
 
 func (s *Server) handleOrchestrationEvent(ctx context.Context, env protocol.Envelope) {
+	s.handleOrchestrationEventFromAgent(ctx, "", env)
+}
+
+func (s *Server) handleOrchestrationEventFromAgent(ctx context.Context, agentID string, env protocol.Envelope) {
 	payload, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
 	if err != nil || payload.RunID == "" {
 		return
 	}
+	if agentID != "" {
+		run, err := s.store.OrchestrationRunByIDAnyUser(ctx, payload.RunID)
+		if err != nil || run.AgentID != agentID {
+			slog.Warn("[hub] rejected orchestration event from foreign bridge", "agent_id", agentID, "run_id", payload.RunID)
+			return
+		}
+	}
 	if suppressEmptyPagesReadFailure(payload) {
 		return
 	}
+	isTaskEvent := payload.Task != nil
+	if isTaskEvent {
+		// Persist node evidence first, then advance the graph. This keeps event
+		// sequence intuitive: the reviewer node's terminal evidence precedes the
+		// single public graph conclusion it authorizes.
+		payload.Status = ""
+		if payload.Data == nil {
+			payload.Data = map[string]any{}
+		}
+		payload.Data["task"] = payload.Task
+	}
 	status := payload.Status
 	runStatus := ""
-	switch payload.Kind {
-	case "run.start":
-		runStatus = store.OrchestrationRunning
-		if status == "" {
+	if !isTaskEvent {
+		switch payload.Kind {
+		case "run.start":
+			runStatus = store.OrchestrationRunning
+			if status == "" {
+				status = runStatus
+			}
+		case "run.end":
+			runStatus = store.OrchestrationCompleted
+			status = runStatus
+		case "run.error":
+			runStatus = store.OrchestrationFailed
+			status = runStatus
+		case "run.cancelled":
+			runStatus = store.OrchestrationCanceled
+			status = runStatus
+		case "run.canceling":
+			runStatus = store.OrchestrationCanceling
 			status = runStatus
 		}
-	case "run.end":
-		runStatus = store.OrchestrationCompleted
-		status = runStatus
-	case "run.error":
-		runStatus = store.OrchestrationFailed
-		status = runStatus
-	case "run.cancelled":
-		runStatus = store.OrchestrationCanceled
-		status = runStatus
-	case "run.canceling":
-		runStatus = store.OrchestrationCanceling
-		status = runStatus
 	}
 	if runStatus != "" {
 		if existing, err := s.store.OrchestrationRunByIDAnyUser(ctx, payload.RunID); err == nil && orchestrationTerminalStatus(existing.Status) {
@@ -981,6 +1012,7 @@ func (s *Server) handleOrchestrationEvent(ctx context.Context, env protocol.Enve
 		RunEndData:     payload.RunEndData,
 		BridgeNoteData: payload.BridgeNoteData,
 		RunConclusion:  payload.RunConclusion,
+		Task:           payload.Task,
 		Data:           payload.Data,
 	})
 	if err != nil {
@@ -988,6 +1020,11 @@ func (s *Server) handleOrchestrationEvent(ctx context.Context, env protocol.Enve
 		return
 	}
 	s.pool.BroadcastToOrchestrationBrowsers(payload.RunID, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", eventToPayload(event)))
+	if isTaskEvent {
+		if _, taskErr := s.handleTaskGraphEvent(ctx, payload); taskErr != nil {
+			slog.Error("[hub] durable task event failed", "run_id", payload.RunID, "task_id", payload.Task.TaskID, "error", taskErr)
+		}
+	}
 }
 
 func (s *Server) updateOrchestrationRunSessionFromEvent(ctx context.Context, payload protocol.OrchestrationEventPayload) {
@@ -1159,6 +1196,7 @@ func eventToPayload(event store.OrchestrationEvent) protocol.OrchestrationEventP
 		RunEndData:     event.RunEndData,
 		BridgeNoteData: event.BridgeNoteData,
 		RunConclusion:  event.RunConclusion,
+		Task:           event.Task,
 		Data:           event.Data,
 		CreatedAt:      event.CreatedAt,
 	}

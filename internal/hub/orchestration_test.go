@@ -197,6 +197,30 @@ func TestLateTerminalEventDoesNotReviveCanceledOrchestration(t *testing.T) {
 	}
 }
 
+func TestBridgeCannotWriteForeignOrchestration(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	run := createOrchestrationRun(t, st, userID, agentID)
+	s.handleOrchestrationEventFromAgent(context.Background(), "foreign-agent", protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+		RunID: run.ID, Kind: "run.end", Content: "forged completion",
+	}))
+	loaded, err := st.OrchestrationRunByID(context.Background(), run.ID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != store.OrchestrationQueued {
+		t.Fatalf("foreign bridge changed orchestration status to %q", loaded.Status)
+	}
+	events, err := st.ListOrchestrationEvents(context.Background(), run.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("foreign bridge persisted events: %#v", events)
+	}
+}
+
 func TestOrchestrationEventsPersistRunSessionState(t *testing.T) {
 	t.Parallel()
 
@@ -1139,7 +1163,7 @@ func newOrchestrationTestServer(t *testing.T) (*Server, *store.Store, string, st
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := st.UpsertAgent(context.Background(), "agent", "machine", "host", "instance", []string{t.TempDir()})
+	agent, err := st.UpsertAgentForUser(context.Background(), user.ID, "agent", "machine", "host", "instance", []string{t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}

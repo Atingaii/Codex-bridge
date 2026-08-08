@@ -1,3 +1,7 @@
+> **DEPRECATED - superseded by the durable bounded task graph design**
+>
+> Current design: [Durable Bounded Orchestration Task Graph](durable-bounded-orchestration-task-graph.md). Historical only; do not implement from this doc.
+
 # Persistent Task Queue
 
 ## Goal

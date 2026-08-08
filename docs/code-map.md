@@ -259,6 +259,20 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    renders those files.
 8. Update [docs/features/orchestration-continuity.md](features/orchestration-continuity.md).
 
+### Change Durable Orchestration Scheduling
+
+1. `internal/store/store.go:Migrate` owns the graph/task/dependency/attempt
+   schema; `internal/store/task_graph.go:ClaimReadyTask` owns atomic claims and
+   `internal/store/task_graph.go:RecoverTaskGraphs` owns restart ambiguity.
+2. `internal/hub/task_graph.go:createAndDispatchTaskGraph` creates and advances
+   the fixed candidate/integrator/reviewer graph.
+3. `internal/hub/orchestration.go:handleOrchestrationEvent` persists node events
+   without allowing a node terminal event to bypass the reviewer barrier.
+4. `internal/bridge/orchestration.go:prepareDurableTaskWorkspace` isolates each
+   node; `internal/bridge/orchestration.go:run` applies the task role and formal
+   checker gate.
+5. Update [docs/features/durable-bounded-orchestration-task-graph.md](features/durable-bounded-orchestration-task-graph.md).
+
 ### Change Orchestration Strategy
 
 1. `internal/protocol/envelope.go:NormalizeOrchestrationWorkerPair`,

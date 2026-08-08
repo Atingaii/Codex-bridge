@@ -220,7 +220,7 @@ func publicOrchestrationRun(run store.OrchestrationRun) publicOrchestrationRunRe
 		Profile:                 run.Profile,
 		NativeContextCompaction: run.NativeContextCompaction,
 		Prompt:                  run.Prompt,
-		CWD:                     run.CWD,
+		CWD:                     "",
 		MaxTurns:                run.MaxTurns,
 		Status:                  run.Status,
 		Error:                   run.Error,
@@ -275,6 +275,11 @@ func publicOrchestrationEvents(events []store.OrchestrationEvent) []publicOrches
 }
 
 func publicOrchestrationEventHidden(event store.OrchestrationEvent) bool {
+	// Durable node evidence may contain private task ids and Bridge-owned
+	// workspace paths. Anonymous shares expose only the graph-level conclusion.
+	if event.Task != nil {
+		return true
+	}
 	// turn.end is lifecycle, not an internal log row: failed turns carry
 	// severity "error" but the public timeline still needs the turn closed.
 	if event.Kind == "turn.end" {

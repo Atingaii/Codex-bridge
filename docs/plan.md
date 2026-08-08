@@ -32,6 +32,7 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P6.5 | Formal-proof lightweight workspace bootstrap | implemented |
 | P6.6 | Persistent per-context task queue | designed |
 | P6.7 | Structured Agent dialogue relay and evidence-based convergence | implemented |
+| P6.8 | Durable bounded task graph with isolated workers and reviewer barrier | implemented |
 | P7 | Browser permission prompts over app-server | implemented for Codex chat and Codex orchestration |
 | P8 | Empty-reply hardening and accessible session deletion | implemented |
 | P8.1 | Same-thread chat recovery and bounded retry evidence | implemented |
@@ -62,14 +63,18 @@ Let a single user talk from any browser to Codex CLI running on a private machin
   `internal/bridge/profiles/registry` + `internal/bridge/profiles/formalproof`;
   new formal-proof runs also get a persistent lightweight proof ledger under the
   run cwd before scheduled CLI turns begin.
-- Persistent task queue design is captured in
-  [docs/features/persistent-task-queue.md](features/persistent-task-queue.md):
-  Hub should persist per-chat-session and per-orchestration-run serial queues so
-  users can submit follow-up work while a task is still running. This is not yet
-  implemented.
+- The earlier serial persistent-queue proposal is deprecated. New graph-capable
+  orchestration runs use the Hub SQLite durable bounded task graph described in
+  [docs/features/durable-bounded-orchestration-task-graph.md](features/durable-bounded-orchestration-task-graph.md).
 
 ## Maintenance Log
 
+- 2026-08-08: Added a Hub-persisted two-worker task graph with stable attempt
+  identity, ambiguity-safe restart recovery, isolated Bridge workspaces,
+  deterministic integration, and a final reviewer/formal-checker barrier.
+- 2026-08-08: Removed bootstrap-admin cross-user and legacy-unowned CLI
+  endpoint visibility, and protected existing machine ownership from
+  reassignment during reconnect.
 - 2026-08-08: Added structured Agent-to-Agent relay packets, compact incremental
   cross-worker context, and conservative reviewer/critic-confirmed early
   convergence without changing orchestration APIs, UI, or native sessions.

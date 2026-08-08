@@ -187,6 +187,66 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE orchestration_events ADD COLUMN source TEXT;`,
 		`ALTER TABLE orchestration_events ADD COLUMN severity TEXT;`,
 		`CREATE INDEX IF NOT EXISTS idx_orchestration_events_run_seq ON orchestration_events(run_id, seq);`,
+		`CREATE TABLE IF NOT EXISTS orchestration_task_graphs (
+				id TEXT PRIMARY KEY,
+				run_id TEXT NOT NULL,
+				generation INTEGER NOT NULL,
+				status TEXT NOT NULL CHECK(status IN ('running','completed','failed','blocked','unknown','canceled')),
+				parallel_limit INTEGER NOT NULL DEFAULT 2,
+				payload_json TEXT NOT NULL,
+				payload_digest TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				finished_at INTEGER,
+				UNIQUE(run_id, generation),
+				FOREIGN KEY (run_id) REFERENCES orchestration_runs(id) ON DELETE CASCADE
+			);`,
+		`CREATE INDEX IF NOT EXISTS idx_orchestration_task_graphs_run ON orchestration_task_graphs(run_id, generation DESC);`,
+		`CREATE TABLE IF NOT EXISTS orchestration_tasks (
+				id TEXT PRIMARY KEY,
+				graph_id TEXT NOT NULL,
+				name TEXT NOT NULL,
+				role TEXT NOT NULL CHECK(role IN ('worker','integrator','reviewer')),
+				worker_slot TEXT,
+				status TEXT NOT NULL CHECK(status IN ('pending','ready','dispatching','running','unknown','succeeded','failed','blocked','canceled')),
+				position INTEGER NOT NULL,
+				payload_json TEXT NOT NULL,
+				payload_digest TEXT NOT NULL,
+				current_attempt_id TEXT,
+				error TEXT,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				started_at INTEGER,
+				finished_at INTEGER,
+				FOREIGN KEY (graph_id) REFERENCES orchestration_task_graphs(id) ON DELETE CASCADE
+			);`,
+		`CREATE INDEX IF NOT EXISTS idx_orchestration_tasks_graph_position ON orchestration_tasks(graph_id, position);`,
+		`CREATE INDEX IF NOT EXISTS idx_orchestration_tasks_graph_status ON orchestration_tasks(graph_id, status);`,
+		`CREATE TABLE IF NOT EXISTS orchestration_task_dependencies (
+				task_id TEXT NOT NULL,
+				depends_on_task_id TEXT NOT NULL,
+				PRIMARY KEY (task_id, depends_on_task_id),
+				FOREIGN KEY (task_id) REFERENCES orchestration_tasks(id) ON DELETE CASCADE,
+				FOREIGN KEY (depends_on_task_id) REFERENCES orchestration_tasks(id) ON DELETE CASCADE
+			);`,
+		`CREATE TABLE IF NOT EXISTS orchestration_task_attempts (
+				id TEXT PRIMARY KEY,
+				task_id TEXT NOT NULL,
+				attempt_no INTEGER NOT NULL,
+				retry_of_attempt_id TEXT,
+				payload_digest TEXT NOT NULL,
+				status TEXT NOT NULL CHECK(status IN ('pending','dispatching','running','unknown','succeeded','failed','canceled')),
+				evidence_json TEXT,
+				error TEXT,
+				created_at INTEGER NOT NULL,
+				dispatched_at INTEGER NOT NULL,
+				acknowledged_at INTEGER,
+				finished_at INTEGER,
+				UNIQUE(task_id, attempt_no),
+				FOREIGN KEY (task_id) REFERENCES orchestration_tasks(id) ON DELETE CASCADE,
+				FOREIGN KEY (retry_of_attempt_id) REFERENCES orchestration_task_attempts(id)
+			);`,
+		`CREATE INDEX IF NOT EXISTS idx_orchestration_task_attempts_task ON orchestration_task_attempts(task_id, attempt_no DESC);`,
 		`CREATE TABLE IF NOT EXISTS conversation_shares (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
@@ -308,7 +368,7 @@ func (s *Store) markActiveOrchestrationRunsFailed(ctx context.Context, agentID, 
 	}
 	defer tx.Rollback()
 
-	where := `status IN (?, ?)`
+	where := `status IN (?, ?) AND NOT EXISTS (SELECT 1 FROM orchestration_task_graphs g WHERE g.run_id = orchestration_runs.id AND g.status IN ('running','unknown'))`
 	args := []any{OrchestrationQueued, OrchestrationRunning}
 	if agentID != "" {
 		where = `agent_id = ? AND ` + where
@@ -708,18 +768,29 @@ func (s *Store) UpsertAgentForUser(ctx context.Context, userID, name, machineID,
 		INSERT INTO agents (id, user_id, name, machine_id, hostname, instance, working_dirs_json, last_seen_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(machine_id) DO UPDATE SET
-			user_id = COALESCE(excluded.user_id, agents.user_id),
+			user_id = CASE
+				WHEN agents.user_id IS NULL OR agents.user_id = '' THEN excluded.user_id
+				ELSE agents.user_id
+			END,
 			name = excluded.name,
 			hostname = excluded.hostname,
 			instance = excluded.instance,
 			working_dirs_json = excluded.working_dirs_json,
 			deleted_at = NULL,
 			last_seen_at = excluded.last_seen_at
+		WHERE agents.user_id IS NULL OR agents.user_id = '' OR agents.user_id = excluded.user_id
 	`, id, nullString(userID), name, machineID, hostname, instance, string(workingDirsJSON), now)
 	if err != nil {
 		return Agent{}, err
 	}
-	return s.AgentByMachineID(ctx, machineID)
+	agent, err := s.AgentByMachineID(ctx, machineID)
+	if err != nil {
+		return Agent{}, err
+	}
+	if userID != "" && agent.UserID != userID {
+		return Agent{}, ErrConflict
+	}
+	return agent, nil
 }
 
 func (s *Store) AgentByMachineID(ctx context.Context, machineID string) (Agent, error) {
@@ -1259,6 +1330,7 @@ type OrchestrationEvent struct {
 	RunEndData     *protocol.RunEndData     `json:"runEndData,omitempty"`
 	BridgeNoteData *protocol.BridgeNoteData `json:"bridgeNoteData,omitempty"`
 	RunConclusion  *protocol.RunConclusion  `json:"runConclusion,omitempty"`
+	Task           *protocol.TaskAttemptRef `json:"task,omitempty"`
 	Data           map[string]any           `json:"data,omitempty"`
 	CreatedAt      int64                    `json:"createdAt"`
 }
@@ -1585,6 +1657,29 @@ func (s *Store) CancelOrchestrationRunIfStillCanceling(ctx context.Context, id, 
 	}
 	if changed == 0 {
 		return OrchestrationEvent{}, false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_task_attempts
+		SET status = 'canceled', error = ?, finished_at = ?
+		WHERE status IN ('pending','dispatching','running')
+			AND task_id IN (SELECT t.id FROM orchestration_tasks t JOIN orchestration_task_graphs g ON g.id = t.graph_id WHERE g.run_id = ? AND g.status = 'running')
+	`, reason, now, id); err != nil {
+		return OrchestrationEvent{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_tasks
+		SET status = 'canceled', error = ?, updated_at = ?, finished_at = ?
+		WHERE status IN ('pending','ready','dispatching','running','unknown','blocked')
+			AND graph_id IN (SELECT id FROM orchestration_task_graphs WHERE run_id = ? AND status = 'running')
+	`, reason, now, now, id); err != nil {
+		return OrchestrationEvent{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_task_graphs
+		SET status = 'canceled', updated_at = ?, finished_at = ?
+		WHERE run_id = ? AND status = 'running'
+	`, now, now, id); err != nil {
+		return OrchestrationEvent{}, false, err
 	}
 
 	event := OrchestrationEvent{
@@ -1967,10 +2062,11 @@ func scanOrchestrationEvent(row interface{ Scan(dest ...any) error }) (Orchestra
 			RunEndData     *protocol.RunEndData     `json:"runEndData,omitempty"`
 			BridgeNoteData *protocol.BridgeNoteData `json:"bridgeNoteData,omitempty"`
 			RunConclusion  *protocol.RunConclusion  `json:"runConclusion,omitempty"`
+			Task           *protocol.TaskAttemptRef `json:"task,omitempty"`
 		}
 		if err := json.Unmarshal([]byte(dataJSON), &typed); err == nil && (typed.Extra != nil ||
 			typed.CommandData != nil || typed.RunStartData != nil || typed.TurnStartData != nil ||
-			typed.RunEndData != nil || typed.BridgeNoteData != nil || typed.RunConclusion != nil) {
+			typed.RunEndData != nil || typed.BridgeNoteData != nil || typed.RunConclusion != nil || typed.Task != nil) {
 			event.Data = typed.Extra
 			event.CommandData = typed.CommandData
 			event.RunStartData = typed.RunStartData
@@ -1978,6 +2074,7 @@ func scanOrchestrationEvent(row interface{ Scan(dest ...any) error }) (Orchestra
 			event.RunEndData = typed.RunEndData
 			event.BridgeNoteData = typed.BridgeNoteData
 			event.RunConclusion = typed.RunConclusion
+			event.Task = typed.Task
 		}
 	}
 	event.Source = normalizeOrchestrationEventSource(event.Source, event.Kind)
@@ -1994,7 +2091,7 @@ func scanOrchestrationEvent(row interface{ Scan(dest ...any) error }) (Orchestra
 
 func orchestrationEventDataJSON(event OrchestrationEvent) (string, error) {
 	if event.CommandData == nil && event.RunStartData == nil && event.TurnStartData == nil &&
-		event.RunEndData == nil && event.BridgeNoteData == nil && event.RunConclusion == nil {
+		event.RunEndData == nil && event.BridgeNoteData == nil && event.RunConclusion == nil && event.Task == nil {
 		if event.Data == nil {
 			return "", nil
 		}
@@ -2009,6 +2106,7 @@ func orchestrationEventDataJSON(event OrchestrationEvent) (string, error) {
 		RunEndData     *protocol.RunEndData     `json:"runEndData,omitempty"`
 		BridgeNoteData *protocol.BridgeNoteData `json:"bridgeNoteData,omitempty"`
 		RunConclusion  *protocol.RunConclusion  `json:"runConclusion,omitempty"`
+		Task           *protocol.TaskAttemptRef `json:"task,omitempty"`
 	}{
 		Extra:          event.Data,
 		CommandData:    event.CommandData,
@@ -2017,6 +2115,7 @@ func orchestrationEventDataJSON(event OrchestrationEvent) (string, error) {
 		RunEndData:     event.RunEndData,
 		BridgeNoteData: event.BridgeNoteData,
 		RunConclusion:  event.RunConclusion,
+		Task:           event.Task,
 	}
 	b, err := json.Marshal(typed)
 	return string(b), err

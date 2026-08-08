@@ -28,6 +28,7 @@ export type BridgeCapabilities = {
   orchestration?: Record<string, BridgeCLICapability | undefined>;
   acp?: ACPCapability;
   metadata?: Record<string, string | undefined>;
+  durableTaskGraph?: boolean;
 };
 
 // Mirrors internal/protocol/envelope.go:ACPCapability.
@@ -119,8 +120,18 @@ export type OrchestrationEvent = {
   runEndData?: RunEndData;
   bridgeNoteData?: BridgeNoteData;
   runConclusion?: RunConclusion;
+  task?: TaskAttemptRef;
   data?: Record<string, any>;
   createdAt?: number;
+};
+
+export type TaskAttemptRef = {
+  graphId: string;
+  taskId: string;
+  attemptId: string;
+  role?: string;
+  workerSlot?: string;
+  payloadDigest: string;
 };
 
 export type CommandData = {

@@ -40,6 +40,17 @@ func assertShellSyntax(t *testing.T, label, command string) {
 	}
 }
 
+func createAdminEnrollToken(t *testing.T, ctx context.Context, st *store.Store, token string, expiresAt *time.Time) {
+	t.Helper()
+	admin, err := st.UserByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateEnrollTokenForUser(ctx, token, admin.ID, "integration-test-cli", expiresAt); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEchoBridgeEndToEnd(t *testing.T) {
 	t.Parallel()
 
@@ -81,9 +92,7 @@ func TestEchoBridgeEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	serverErr := make(chan error, 1)
@@ -177,9 +186,7 @@ func TestEchoBridgeTwoSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
@@ -235,9 +242,7 @@ func TestBrowserCloseDoesNotStopActivePrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
@@ -334,9 +339,7 @@ func TestBrowserCloseExpiresLeaseAndClosesBridgeSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
@@ -396,9 +399,7 @@ func TestBrowserReconnectWithinLeaseReattachesWithoutClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
@@ -473,9 +474,7 @@ func TestDuplicatePromptRejectedWhileRunActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
@@ -555,9 +554,7 @@ func TestBrowserApprovalResponseRoutesToBridge(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
@@ -631,9 +628,7 @@ func TestOrchestrationApprovalResponseRoutesToBridge(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
@@ -725,6 +720,9 @@ func TestWebOrchestrationInitialRequestApprovesAndRemediatesMissingFileChange(t 
 	cfg.Bridge.ClaudePath = claudePath
 	cfg.Bridge.Sandbox = "workspace-write"
 	cfg.Bridge.ApprovalPolicy = "untrusted"
+	// This test preserves the pre-DAG serial relay contract. Durable graph
+	// behavior is covered by TestOrchestrationEndToEndWithFakeCLIs.
+	cfg.Bridge.DurableTaskGraph = false
 	cfg.Bridge.ReconnectMin.Duration = 50 * time.Millisecond
 	cfg.Bridge.ReconnectMax.Duration = 100 * time.Millisecond
 	cfg.Bridge.HeartbeatInterval.Duration = 200 * time.Millisecond
@@ -741,9 +739,7 @@ func TestWebOrchestrationInitialRequestApprovesAndRemediatesMissingFileChange(t 
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
@@ -865,9 +861,7 @@ func TestOrchestrationEndToEndWithFakeCLIs(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
@@ -962,9 +956,7 @@ func TestOrchestrationIsabellePromptStreamsUsefulCommandEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
@@ -1040,9 +1032,7 @@ func TestCoqTaskWebSmokeWithFakeBridge(t *testing.T) {
 				t.Fatal(err)
 			}
 			expires := time.Now().Add(time.Hour)
-			if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-				t.Fatal(err)
-			}
+			createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 			srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 			go func() { _ = srv.Run(ctx) }()
@@ -1235,10 +1225,19 @@ func TestNonAdminCanUseOnlyOwnedChatAndOrchestrationAPIs(t *testing.T) {
 	if err := st.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.UpsertUser(ctx, "admin", "secret"); err != nil {
+	admin, err := st.UpsertUser(ctx, "admin", "secret")
+	if err != nil {
 		t.Fatal(err)
 	}
 	worker, err := st.UpsertUser(ctx, "worker", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminAgent, err := st.UpsertAgentForUser(ctx, admin.ID, "admin-offline-cli", "admin-test-machine", "test-host", "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminSession, err := st.CreateSession(ctx, admin.ID, adminAgent.ID, "admin-ok")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1258,8 +1257,10 @@ func TestNonAdminCanUseOnlyOwnedChatAndOrchestrationAPIs(t *testing.T) {
 	if user := adminLogin["user"].(map[string]any); user["isAdmin"] != true {
 		t.Fatalf("admin login user = %#v", user)
 	}
-	waitAgents(t, adminClient, cfg.Bridge.HubURL)
-	adminSession := postJSON(t, adminClient, cfg.Bridge.HubURL+"/api/sessions", map[string]string{"title": "admin-ok"}, http.StatusCreated)["session"].(map[string]any)
+	adminAgents := getJSON(t, adminClient, cfg.Bridge.HubURL+"/api/agents", http.StatusOK)["agents"].([]any)
+	if len(adminAgents) != 1 || adminAgents[0].(map[string]any)["userId"] != admin.ID {
+		t.Fatalf("admin endpoint isolation failed: %#v", adminAgents)
+	}
 
 	workerClient := httpClient(t)
 	workerLogin := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "worker", "password": "secret"}, http.StatusOK)
@@ -1268,7 +1269,7 @@ func TestNonAdminCanUseOnlyOwnedChatAndOrchestrationAPIs(t *testing.T) {
 	}
 	workerSessions := getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/sessions", http.StatusOK)["sessions"]
 	if sessions, ok := workerSessions.([]any); ok && len(sessions) != 0 {
-		t.Fatalf("worker can see admin session %q: %#v", adminSession["id"], sessions)
+		t.Fatalf("worker can see admin session %q: %#v", adminSession.ID, sessions)
 	}
 	workerAgents := getJSON(t, workerClient, cfg.Bridge.HubURL+"/api/agents", http.StatusOK)["agents"].([]any)
 	if len(workerAgents) != 1 || workerAgents[0].(map[string]any)["userId"] != worker.ID {
@@ -1557,9 +1558,7 @@ func TestOrchestrationContinueReusesRunAndSendsContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
@@ -1680,9 +1679,7 @@ func TestTerminationFrameworkOrchestrationFullSnapshotFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
-	if err := st.CreateEnrollToken(ctx, cfg.Bridge.Token, &expires); err != nil {
-		t.Fatal(err)
-	}
+	createAdminEnrollToken(t, ctx, st, cfg.Bridge.Token, &expires)
 
 	srv := hub.NewServer(&cfg, st, hub.BuildInfo{Version: "test", BuildTime: "test"})
 	go func() { _ = srv.Run(ctx) }()
@@ -1733,7 +1730,7 @@ func TestTerminationFrameworkOrchestrationFullSnapshotFlow(t *testing.T) {
 	share := shareBody["share"].(map[string]any)
 	publicBody := getJSON(t, client, cfg.Bridge.HubURL+"/api/public/shares/"+url.PathEscape(share["id"].(string)), http.StatusOK)
 	assertRunHasFiles(t, publicBody["run"].(map[string]any), fileNames)
-	assertTerminationConclusionAfterCommand(t, publicBody["events"].([]any))
+	assertTerminationPublicConclusion(t, publicBody["events"].([]any))
 	if raw, err := json.Marshal(publicBody); err != nil {
 		t.Fatal(err)
 	} else {
@@ -2103,15 +2100,18 @@ func waitRunStatus(t *testing.T, client *http.Client, baseURL, sid, runID, want 
 func waitOrchestrationStatus(t *testing.T, client *http.Client, baseURL, runID, want string) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
+	var lastRun map[string]any
 	for time.Now().Before(deadline) {
 		body := getJSON(t, client, baseURL+"/api/orchestrations/"+url.PathEscape(runID), http.StatusOK)
 		run := body["run"].(map[string]any)
+		lastRun = run
 		if run["status"] == want {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for orchestration run %s status %s", runID, want)
+	events := getJSON(t, client, baseURL+"/api/orchestrations/"+url.PathEscape(runID)+"/events", http.StatusOK)
+	t.Fatalf("timed out waiting for orchestration run %s status %s; run=%#v events=%#v", runID, want, lastRun, events["events"])
 }
 
 func waitOrchestrationWSConnected(t *testing.T, ws *websocket.Conn, runID string) {
@@ -2233,7 +2233,7 @@ func observeOrchestrationAndApprove(t *testing.T, ws *websocket.Conn, runID stri
 			if strings.Contains(event.Content, "主定理 sorry 仍未消除") {
 				obs.sawUnresolvedRisk = true
 			}
-			if event.Kind == "run.end" || event.Kind == "run.error" || event.Kind == "run.cancelled" {
+			if event.Task == nil && (event.Kind == "run.end" || event.Kind == "run.error" || event.Kind == "run.cancelled") {
 				return obs
 			}
 		}
@@ -2383,8 +2383,27 @@ func assertTerminationConclusionAfterCommand(t *testing.T, events []any) {
 	}
 }
 
+func assertTerminationPublicConclusion(t *testing.T, events []any) {
+	t.Helper()
+	var conclusion string
+	for _, raw := range events {
+		event, _ := raw.(map[string]any)
+		kind, _ := event["kind"].(string)
+		if kind == "run.end" || kind == "run.conclusion" {
+			conclusion = fmt.Sprint(event["content"])
+		}
+	}
+	for _, want := range []string{"isabelle build -c -D /home/zy/os/termination_framework", "sorry"} {
+		if !strings.Contains(conclusion, want) {
+			t.Fatalf("public conclusion missing %q: %q", want, conclusion)
+		}
+	}
+}
+
 func fakeCodexScript() string {
-	return fakeCodexAppServerScript("fake-thread", nil, nil, []string{"fake codex reviewed the previous turn."})
+	return fakeCodexAppServerScript("fake-thread", nil, []map[string]any{{
+		"id": "cmd_review", "command": "go test ./...", "exitCode": 0, "output": "ok\n",
+	}}, []string{"fake codex reviewed the previous turn.\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=none; verified=go test ./...; next=none; risks=none"})
 }
 
 func fakeClaudeScript() string {
@@ -2401,7 +2420,7 @@ func fakeTerminationCodexScript() string {
 			"exitCode": 0,
 			"output":   "Build completed successfully.\n",
 		},
-	}, []string{"Msg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=Termination_Generated.thy; verified=isabelle build -c -D /home/zy/os/termination_framework; next=prove remaining sorry placeholders; risks=proof framework still contains sorry placeholders"})
+	}, []string{"最终结论：这是已通过 Isabelle checker 的可编译证明框架；按用户允许仍含 sorry，因此不是完全无 sorry 的最终证明。\n\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=Termination_Generated.thy; verified=isabelle build -c -D /home/zy/os/termination_framework; next=none; risks=none"})
 }
 
 func fakeTerminationClaudeScript() string {

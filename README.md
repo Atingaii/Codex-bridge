@@ -100,6 +100,10 @@ model and how local `claude --resume` / `codex resume` takeover works.
 
 ## Build & Install
 
+The Hub-generated installer downloads into a temporary file and uses bounded,
+backed-off resume attempts over HTTP/1.1. A transient TLS or edge interruption
+does not replace an already working Bridge binary with a partial download.
+
 ```bash
 make build-all                 # build the web UI, then the Go binary -> bin/codex-bridge
 ./bin/codex-bridge hub

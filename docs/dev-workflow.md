@@ -89,6 +89,9 @@ before starting, stops any existing same-directory user service, refuses to
 continue unless `codex` and `claude` are resolvable in the shell that runs the
 command, and only prints `codex-bridge connected` after the Bridge logs
 `[bridge] connected`; otherwise it prints recent log lines for diagnosis. It
+downloads the Bridge binary into a temporary file using bounded, backed-off
+resume attempts over HTTP/1.1, so transient TLS/edge interruptions do not
+replace the existing executable or restart the transfer from zero. It
 preserves `HOME`, `PATH`, `CODEX_HOME`, Claude config location variables,
 resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, common model credential
 variables such as `OPENAI_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and

@@ -11,8 +11,10 @@ Codex Bridge 让浏览器远程访问私有机器上的 Codex 和 Claude Code CL
 ## Bridge / ACP / resume 简明版
 
 用户侧执行网页里的 `curl .../install.sh | sh` 后，装到本机的核心就是
-`~/.local/bin/codex-bridge`。兼容软链 `acp-bridge` 和
-`agent-up.sh` / `agent-down.sh` 只负责旧命名与启停；Codex、Claude Code、
+`~/.local/bin/codex-bridge`。安装器通过 HTTP/1.1 下载到临时文件，并对
+TLS 或边缘网络中断执行有上限的退避续传；下载完整前不会覆盖当前可用版本。
+兼容软链 `acp-bridge` 和 `agent-up.sh` / `agent-down.sh` 只负责旧命名与
+启停；Codex、Claude Code、
 Gemini、CodeBuddy 等 agent CLI 仍然要用户自己安装和登录。Bridge 本身是通信与进程管理器：
 它从私有机器主动连到 Hub 的反向 WebSocket，然后按会话在工作目录里 `exec` 本机 CLI，
 所以 Hub 不需要访问你的工作目录，也不需要你的模型密钥。

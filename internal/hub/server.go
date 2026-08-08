@@ -591,7 +591,8 @@ func (s *Server) bridgePermissionProfile(hubURL, token, installCommand, profile 
 }
 
 func (s *Server) bridgeInstallCommand(hubURL string) string {
-	return fmt.Sprintf("curl -fsSL %s | sh", shellQuote(strings.TrimRight(hubURL, "/")+"/install.sh"))
+	installURL := shellQuote(strings.TrimRight(hubURL, "/") + "/install.sh")
+	return fmt.Sprintf("CB_INSTALL=$(mktemp) && trap 'rm -f \"$CB_INSTALL\"' EXIT HUP INT TERM && curl --http1.1 -fsSL --retry 8 --retry-all-errors --connect-timeout 20 -o \"$CB_INSTALL\" %s && sh \"$CB_INSTALL\"", installURL)
 }
 
 func bridgeSetupCommand(installCommand, connectCommand string) string {
@@ -652,9 +653,29 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 if command -v curl >/dev/null 2>&1; then
-  curl -fL --retry 3 -o "$TMP" "$DOWNLOAD_URL"
+  attempt=1
+  while ! curl --http1.1 -fL --connect-timeout 20 -C - -o "$TMP" "$DOWNLOAD_URL"; do
+    if [ "$attempt" -ge 8 ]; then
+      echo "bridge download failed after $attempt attempts" >&2
+      exit 1
+    fi
+    delay=$((attempt * 3))
+    echo "bridge download interrupted; resuming in ${delay}s (attempt $((attempt + 1))/8)" >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
 elif command -v wget >/dev/null 2>&1; then
-  wget -O "$TMP" "$DOWNLOAD_URL"
+  attempt=1
+  while ! wget -c -O "$TMP" "$DOWNLOAD_URL"; do
+    if [ "$attempt" -ge 8 ]; then
+      echo "bridge download failed after $attempt attempts" >&2
+      exit 1
+    fi
+    delay=$((attempt * 3))
+    echo "bridge download interrupted; resuming in ${delay}s (attempt $((attempt + 1))/8)" >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
 else
   echo "curl or wget is required" >&2
   exit 1

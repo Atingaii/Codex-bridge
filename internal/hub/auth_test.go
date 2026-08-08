@@ -314,8 +314,10 @@ func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
 	}
 	for _, want := range []string{
 		`TMP="${BIN}.tmp.$$"`,
-		`curl -fL --retry 3 -o "$TMP" "$DOWNLOAD_URL"`,
-		`wget -O "$TMP" "$DOWNLOAD_URL"`,
+		`curl --http1.1 -fL --connect-timeout 20 -C - -o "$TMP" "$DOWNLOAD_URL"`,
+		`wget -c -O "$TMP" "$DOWNLOAD_URL"`,
+		`bridge download interrupted; resuming`,
+		`bridge download failed after $attempt attempts`,
 		`mv -f "$TMP" "$BIN"`,
 	} {
 		if !strings.Contains(body, want) {

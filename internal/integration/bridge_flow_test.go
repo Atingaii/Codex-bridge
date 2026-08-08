@@ -1391,6 +1391,12 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		t.Fatalf("commands = %#v", commands)
 	}
 	installCommand := commands[0].(string)
+	if !strings.Contains(installCommand, "--retry-all-errors") {
+		t.Fatalf("install command missing transport retry policy: %q", installCommand)
+	}
+	if !strings.Contains(installCommand, "CB_INSTALL=$(mktemp)") || !strings.Contains(installCommand, `sh "$CB_INSTALL"`) {
+		t.Fatalf("install command must execute only a completely downloaded script: %q", installCommand)
+	}
 	if strings.Contains(installCommand, "\n") {
 		t.Fatalf("install command should be one line: %q", installCommand)
 	}

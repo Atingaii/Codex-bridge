@@ -115,7 +115,10 @@ imports the current module instead of throwing during startup.
 `internal/hub/server.go:handleInstallScript` downloads to a temporary file next
 to `~/.local/bin/codex-bridge` and then renames it into place. This avoids
 `Text file busy` when an older Bridge process is still executing the current
-binary.
+binary. Large binary downloads use HTTP/1.1 and up to eight bounded,
+backed-off resume attempts. A transient TLS or HTTP/2 edge failure therefore
+continues from the existing temporary file and never replaces the working
+Bridge with a partial download.
 
 ## Implementation Steps
 
@@ -137,6 +140,8 @@ binary.
 10. Update user-facing setup docs.
 11. Remove sudo/root setup commands from the token response and settings UI.
 12. Stop forcing CCB installation during `codex-bridge link`.
+13. Resume interrupted binary downloads with bounded backoff while preserving
+    the currently installed Bridge until the download completes.
 
 ## Exit Gates
 

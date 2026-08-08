@@ -284,10 +284,27 @@ export function OrchestrationWorkspace({
     setLoadingOlderEvents(true);
     stickToBottomRef.current = false;
     try {
-      await loadRunEvents(runId, false, 'before');
+      const incoming = await loadRunEvents(runId, false, 'before');
+      // A history page is intentionally inserted above the current viewport.
+      // Keeping the old scroll anchor makes a successful click look like a no-op,
+      // so reveal the newly loaded page and expand its turn groups.
+      if (incoming.length > 0) {
+        setCollapsedTimelineGroups((current) => {
+          const next = { ...current };
+          incoming.forEach((event) => {
+            if (event.turnId) next[`turn:${runId}:${event.turnId}`] = false;
+          });
+          return next;
+        });
+      }
       window.requestAnimationFrame(() => {
         const nextContainer = scrollRef.current;
         if (!nextContainer || activeRunIdRef.current !== runId) return;
+        if (incoming.length > 0) {
+          nextContainer.scrollTop = 0;
+          return;
+        }
+        // Preserve the current position only when the server has no page to add.
         const delta = nextContainer.scrollHeight - previousScrollHeight;
         nextContainer.scrollTop = previousScrollTop + Math.max(0, delta);
       });

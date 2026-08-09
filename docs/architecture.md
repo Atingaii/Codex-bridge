@@ -88,7 +88,8 @@ stream-json session. For Codex + Codex runs, Bridge keeps independent
 native context. Direct orchestration is a pass-through relay: the run's
 persisted `worker_pair` and `first_cli` settings decide which worker receives
 the browser task first, Bridge streams CLI deltas, typed command lifecycle and
-progress events, and
+progress events, coalescing only high-frequency command output updates before
+transport while preserving their text and terminal ordering, and
 terminal status to the browser, and the next worker receives a parsed
 Agent-to-Agent packet containing the newest request, changed files,
 verification, next action, risks, and useful command context. Full prose is a

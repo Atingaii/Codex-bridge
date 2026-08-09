@@ -99,7 +99,7 @@ Within every round, nodes maximize useful progress before handing off:
 - candidate B starts from the actual workspace and candidate A evidence, then
   improves it or pursues a materially different path instead of repeating the
   baseline scan;
-- the integrator resolves the candidates into the checkout and continues
+- the integrator resolves the candidates in the workspace and continues
   closing remaining gaps instead of only summarizing them;
 - the reviewer independently falsifies the result and may directly make safe
   in-scope fixes before reporting the remaining state.

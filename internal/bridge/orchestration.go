@@ -26,6 +26,7 @@ type OrchestrationManager struct {
 	lifetime    context.Context
 	stop        context.CancelFunc
 	sendMu      sync.Mutex
+	progressMu  sync.Mutex
 	mu          sync.Mutex
 	runs        map[string]*orchestrationRunHandle
 	sessions    map[string]*orchestrationNativeSession
@@ -34,6 +35,8 @@ type OrchestrationManager struct {
 	approvals   map[string]orchestrationApproval
 	conclusions map[string]bool
 	executions  map[string]orchestrationExecution
+	progress    map[commandProgressKey]*pendingCommandProgress
+	progressSeq uint64
 	// modelCapacityRetryWaits is intentionally kept on the manager rather than
 	// as global mutable test state. Production uses the default schedule; focused
 	// tests can shorten it without changing other concurrently running managers.
@@ -135,6 +138,7 @@ func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
 		approvals:                 make(map[string]orchestrationApproval),
 		conclusions:               make(map[string]bool),
 		executions:                make(map[string]orchestrationExecution),
+		progress:                  make(map[commandProgressKey]*pendingCommandProgress),
 		modelCapacityRetryWaits:   append([]time.Duration(nil), defaultModelCapacityRetryWaits...),
 		cliTransportRetryWaits:    append([]time.Duration(nil), defaultCLITransportRetryWaits...),
 		codexThreadBusyRetryWaits: append([]time.Duration(nil), defaultCodexThreadBusyRetryWaits...),
@@ -225,6 +229,7 @@ func (m *OrchestrationManager) Start(payload protocol.OrchestrationStartPayload)
 	go func() {
 		defer close(handle.done)
 		defer func() {
+			m.flushCommandProgressForRun(executionKey)
 			cancel()
 			m.mu.Lock()
 			current := m.runs[executionKey]
@@ -296,6 +301,7 @@ func (m *OrchestrationManager) executionFor(key string) orchestrationExecution {
 }
 
 func (m *OrchestrationManager) CloseAll() {
+	m.flushAllCommandProgress()
 	if m.stop != nil {
 		m.stop()
 	}

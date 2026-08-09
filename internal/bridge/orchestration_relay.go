@@ -823,7 +823,7 @@ func composeRelayPromptWithTaskScope(mode, firstCLI, profile, userPrompt, contex
 		b.WriteString("\n")
 	}
 	if taskScope != nil {
-		b.WriteString(fmt.Sprintf("This is collaboration round %d of %d, durable node %q. The internal runner envelope is one assignment only; it does not make this the first or final collaboration round. Start from the current checkout and supplied evidence rather than restarting a baseline scan.\n\n", taskScope.Round, taskScope.MaxRounds, taskScope.Name))
+		b.WriteString(fmt.Sprintf("This is collaboration round %d of %d, durable node %q. The internal runner envelope is one assignment only; it does not make this the first or final collaboration round. Start from the current workspace and supplied evidence rather than restarting a baseline scan.\n\n", taskScope.Round, taskScope.MaxRounds, taskScope.Name))
 	} else if turn == 1 {
 		b.WriteString("You are the first CLI handling the user's task. Your visible result will be handed to another CLI afterward, so include the important files changed, commands run, blockers, and useful next context in your final response.\n\n")
 	} else {
@@ -896,15 +896,15 @@ func composeRelayPromptWithTaskScope(mode, firstCLI, profile, userPrompt, contex
 func durableTaskRoleContract(scope durableTaskPromptScope) string {
 	switch scope.Name {
 	case "candidate-a":
-		return "Candidate A duty: choose the strongest viable route toward the user's goal, implement it deeply in the actual checkout, and validate it. Own progress rather than stopping at planning, a baseline scan, or the first proof/code fragment."
+		return "Candidate A duty: choose the strongest viable route toward the user's goal, implement it deeply in the actual workspace, and validate it. Own progress rather than stopping at planning, a baseline scan, or the first proof/code fragment."
 	case "candidate-b":
-		return "Candidate B duty: inspect the checkout and Candidate A evidence first, then improve the existing result or pursue a materially different viable route. Do not repeat Candidate A's baseline investigation or wait for another worker."
+		return "Candidate B duty: inspect the workspace and Candidate A evidence first, then improve the existing result or pursue a materially different viable route. Do not repeat Candidate A's baseline investigation or wait for another worker."
 	case "integrate":
-		return "Integrator duty: reconcile the candidates in the actual checkout, resolve conflicts and gaps, continue implementing what is still missing, and run integration checks. You are an active engineer, not a summary-only coordinator."
+		return "Integrator duty: reconcile the candidates in the actual workspace, resolve conflicts and gaps, continue implementing what is still missing, and run integration checks. You are an active engineer, not a summary-only coordinator."
 	case "review":
 		return "Independent Reviewer duty: try to falsify the current result against the original goal, run independent checks, inspect risks and shortcuts, and directly fix safe in-scope defects before reporting the remaining state. Review is active engineering, not passive approval."
 	default:
-		return fmt.Sprintf("Durable %s duty: continue the user's task from the actual checkout and compact evidence, make useful in-scope progress, validate it, and leave an exact peer handoff.", scope.Role)
+		return fmt.Sprintf("Durable %s duty: continue the user's task from the actual workspace and compact evidence, make useful in-scope progress, validate it, and leave an exact peer handoff.", scope.Role)
 	}
 }
 

@@ -82,7 +82,12 @@ func TestCommandProgressEmitsUpdateKind(t *testing.T) {
 	manager.emitTool("run-progress", "turn-progress", "reviewer", "codex", &RunnerToolEvent{
 		ID: "cmd-1", Status: "running", Command: "make check", Progress: true, Output: "partial",
 	})
-	env := <-out
+	var env protocol.Envelope
+	select {
+	case env = <-out:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for coalesced command progress")
+	}
 	var event protocol.OrchestrationEventPayload
 	if err := json.Unmarshal(env.Payload, &event); err != nil {
 		t.Fatal(err)
@@ -93,6 +98,89 @@ func TestCommandProgressEmitsUpdateKind(t *testing.T) {
 	if !strings.Contains(event.CommandData.Output, "partial") {
 		t.Fatalf("event output = %q", event.CommandData.Output)
 	}
+}
+
+func TestCommandProgressCoalescesAndFlushesBeforeEnd(t *testing.T) {
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 4)
+	manager.AttachOut(out)
+	for _, output := range []string{"first\n", "second\n", "third\n"} {
+		manager.emitTool("run-progress", "turn-progress", "reviewer", "codex", &RunnerToolEvent{
+			ID: "cmd-1", Status: "running", Command: "make check", Progress: true, Output: output,
+		})
+	}
+	exitCode := 0
+	manager.emitTool("run-progress", "turn-progress", "reviewer", "codex", &RunnerToolEvent{
+		ID: "cmd-1", Status: "completed", Command: "make check", ExitCode: &exitCode,
+	})
+
+	progress := decodeOrchestrationEvent(t, <-out)
+	terminal := decodeOrchestrationEvent(t, <-out)
+	if progress.Kind != "command.update" || terminal.Kind != "command.end" {
+		t.Fatalf("event order = %q, %q", progress.Kind, terminal.Kind)
+	}
+	if got, want := progress.CommandData.Output, "first\nsecond\nthird\n"; got != want {
+		t.Fatalf("coalesced output = %q, want %q", got, want)
+	}
+	if got, _ := progress.Data["output"].(string); got != progress.CommandData.Output {
+		t.Fatalf("legacy output = %q, commandData output = %q", got, progress.CommandData.Output)
+	}
+	select {
+	case unexpected := <-out:
+		t.Fatalf("unexpected extra event: %s", unexpected.Type)
+	default:
+	}
+}
+
+func TestCommandProgressKeepsCommandsSeparate(t *testing.T) {
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 4)
+	manager.AttachOut(out)
+	manager.emitTool("run-progress", "turn-progress", "reviewer", "codex", &RunnerToolEvent{
+		ID: "cmd-1", Status: "running", Progress: true, Output: "one",
+	})
+	manager.emitTool("run-progress", "turn-progress", "reviewer", "codex", &RunnerToolEvent{
+		ID: "cmd-2", Status: "running", Progress: true, Output: "two",
+	})
+	manager.flushAllCommandProgress()
+
+	first := decodeOrchestrationEvent(t, <-out)
+	second := decodeOrchestrationEvent(t, <-out)
+	if first.CommandData.ID != "cmd-1" || first.CommandData.Output != "one" {
+		t.Fatalf("first command progress = %#v", first.CommandData)
+	}
+	if second.CommandData.ID != "cmd-2" || second.CommandData.Output != "two" {
+		t.Fatalf("second command progress = %#v", second.CommandData)
+	}
+}
+
+func TestCommandStartAndEndRemainImmediate(t *testing.T) {
+	manager := NewOrchestrationManager(&config.Config{})
+	out := make(chan protocol.Envelope, 4)
+	manager.AttachOut(out)
+	manager.emitTool("run-lifecycle", "turn-lifecycle", "reviewer", "codex", &RunnerToolEvent{
+		ID: "cmd-1", Status: "running", Command: "make check",
+	})
+	exitCode := 0
+	manager.emitTool("run-lifecycle", "turn-lifecycle", "reviewer", "codex", &RunnerToolEvent{
+		ID: "cmd-1", Status: "completed", Command: "make check", ExitCode: &exitCode,
+	})
+
+	if event := decodeOrchestrationEvent(t, <-out); event.Kind != "command.start" {
+		t.Fatalf("first event kind = %q, want command.start", event.Kind)
+	}
+	if event := decodeOrchestrationEvent(t, <-out); event.Kind != "command.end" {
+		t.Fatalf("second event kind = %q, want command.end", event.Kind)
+	}
+}
+
+func decodeOrchestrationEvent(t *testing.T, env protocol.Envelope) protocol.OrchestrationEventPayload {
+	t.Helper()
+	var event protocol.OrchestrationEventPayload
+	if err := json.Unmarshal(env.Payload, &event); err != nil {
+		t.Fatal(err)
+	}
+	return event
 }
 
 func TestExplicitTimeoutWatchdogDoesNotInterruptUnboundedCommand(t *testing.T) {

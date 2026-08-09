@@ -1,6 +1,8 @@
 package bridge
 
 import (
+	"sort"
+
 	"github.com/tencent/codex-bridge/internal/protocol"
 	"github.com/tencent/codex-bridge/internal/store"
 	"log/slog"
@@ -8,6 +10,27 @@ import (
 	"strings"
 	"time"
 )
+
+const (
+	commandProgressFlushInterval = 150 * time.Millisecond
+	commandProgressFlushBytes    = 64 * 1024
+)
+
+type commandProgressKey struct {
+	runID   string
+	turnID  string
+	role    string
+	cli     string
+	command string
+}
+
+type pendingCommandProgress struct {
+	event    protocol.OrchestrationEventPayload
+	timer    *time.Timer
+	flushing bool
+	done     chan struct{}
+	order    uint64
+}
 
 func runConclusionForStatus(status, detail string, history []orchestrationTurn) *protocol.RunConclusion {
 	outcome := "blocked"
@@ -130,10 +153,11 @@ func conclusionEvidenceRefs(history []orchestrationTurn) []string {
 }
 
 func (m *OrchestrationManager) emitTool(runID, turnID, role, cli string, tool *RunnerToolEvent) {
-	if tool != nil {
-		tool.Command = redactSensitiveText(stripANSI(tool.Command))
-		tool.Output = redactSensitiveText(stripANSI(tool.Output))
+	if tool == nil {
+		return
 	}
+	tool.Command = redactSensitiveText(stripANSI(tool.Command))
+	tool.Output = redactSensitiveText(stripANSI(tool.Output))
 	kind := "command.end"
 	if tool.Progress {
 		kind = "command.update"
@@ -174,7 +198,7 @@ func (m *OrchestrationManager) emitTool(runID, turnID, role, cli string, tool *R
 	if !tool.StartedAt.IsZero() && !tool.CompletedAt.IsZero() {
 		commandData.DurationMs = tool.CompletedAt.Sub(tool.StartedAt).Milliseconds()
 	}
-	m.emit(runID, protocol.OrchestrationEventPayload{
+	event := protocol.OrchestrationEventPayload{
 		Kind:        kind,
 		TurnID:      turnID,
 		Role:        role,
@@ -182,7 +206,136 @@ func (m *OrchestrationManager) emitTool(runID, turnID, role, cli string, tool *R
 		Status:      tool.Status,
 		CommandData: commandData,
 		Data:        data,
-	})
+	}
+	key := commandProgressKey{runID: runID, turnID: turnID, role: role, cli: cli, command: tool.ID}
+	if kind == "command.update" && tool.ID != "" {
+		m.queueCommandProgress(key, event)
+		return
+	}
+	if kind == "command.end" && tool.ID != "" {
+		m.flushCommandProgressKey(key, nil)
+	}
+	m.emit(runID, event)
+}
+
+func (m *OrchestrationManager) queueCommandProgress(key commandProgressKey, event protocol.OrchestrationEventPayload) {
+	for {
+		m.progressMu.Lock()
+		pending := m.progress[key]
+		if pending != nil && pending.flushing {
+			done := pending.done
+			m.progressMu.Unlock()
+			<-done
+			continue
+		}
+		if pending == nil {
+			m.progressSeq++
+			pending = &pendingCommandProgress{event: event, order: m.progressSeq}
+			m.progress[key] = pending
+			pending.timer = time.AfterFunc(commandProgressFlushInterval, func() {
+				m.flushCommandProgressKey(key, pending)
+			})
+		} else {
+			mergeCommandProgress(&pending.event, event)
+		}
+		flushNow := commandProgressOutputBytes(pending.event) >= commandProgressFlushBytes
+		m.progressMu.Unlock()
+		if flushNow {
+			m.flushCommandProgressKey(key, pending)
+		}
+		return
+	}
+}
+
+func mergeCommandProgress(dst *protocol.OrchestrationEventPayload, src protocol.OrchestrationEventPayload) {
+	if dst.CommandData == nil || src.CommandData == nil {
+		return
+	}
+	dst.CommandData.Output += src.CommandData.Output
+	if src.CommandData.Status != "" {
+		dst.CommandData.Status = src.CommandData.Status
+		dst.Status = src.Status
+	}
+	if src.CommandData.Command != "" {
+		dst.CommandData.Command = src.CommandData.Command
+	}
+	if dst.Data == nil {
+		dst.Data = make(map[string]any)
+	}
+	dst.Data["output"] = dst.CommandData.Output
+	dst.Data["status"] = dst.CommandData.Status
+	dst.Data["command"] = dst.CommandData.Command
+}
+
+func commandProgressOutputBytes(event protocol.OrchestrationEventPayload) int {
+	if event.CommandData == nil {
+		return 0
+	}
+	return len(event.CommandData.Output)
+}
+
+func (m *OrchestrationManager) flushCommandProgressKey(key commandProgressKey, expected *pendingCommandProgress) {
+	for {
+		m.progressMu.Lock()
+		pending := m.progress[key]
+		if pending == nil || (expected != nil && pending != expected) {
+			m.progressMu.Unlock()
+			return
+		}
+		if pending.flushing {
+			done := pending.done
+			m.progressMu.Unlock()
+			<-done
+			if expected != nil {
+				return
+			}
+			continue
+		}
+		if pending.timer != nil {
+			pending.timer.Stop()
+		}
+		pending.flushing = true
+		pending.done = make(chan struct{})
+		event := pending.event
+		m.progressMu.Unlock()
+
+		m.emit(key.runID, event)
+
+		m.progressMu.Lock()
+		if m.progress[key] == pending {
+			delete(m.progress, key)
+		}
+		close(pending.done)
+		m.progressMu.Unlock()
+		return
+	}
+}
+
+func (m *OrchestrationManager) flushCommandProgressForRun(runID string) {
+	m.flushCommandProgressMatching(func(key commandProgressKey) bool { return key.runID == runID })
+}
+
+func (m *OrchestrationManager) flushAllCommandProgress() {
+	m.flushCommandProgressMatching(func(commandProgressKey) bool { return true })
+}
+
+func (m *OrchestrationManager) flushCommandProgressMatching(match func(commandProgressKey) bool) {
+	type orderedKey struct {
+		key   commandProgressKey
+		order uint64
+	}
+	m.progressMu.Lock()
+	keys := make([]orderedKey, 0, len(m.progress))
+	for key, pending := range m.progress {
+		if match(key) {
+			keys = append(keys, orderedKey{key: key, order: pending.order})
+		}
+	}
+	m.progressMu.Unlock()
+	sort.Slice(keys, func(i, j int) bool { return keys[i].order < keys[j].order })
+	for _, item := range keys {
+		m.flushCommandProgressKey(item.key, nil)
+	}
 }
 
 func unixOrZero(t time.Time) int64 {
@@ -193,6 +346,9 @@ func unixOrZero(t time.Time) int64 {
 }
 
 func (m *OrchestrationManager) emit(runID string, event protocol.OrchestrationEventPayload) {
+	if event.Kind == "turn.end" || event.Kind == "run.end" || event.Kind == "run.error" || event.Kind == "run.cancelled" {
+		m.flushCommandProgressForRun(runID)
+	}
 	execution := m.executionFor(runID)
 	if execution.task != nil && (event.Kind == "run.end" || event.Kind == "run.error" || event.Kind == "run.cancelled") {
 		m.closeNativeSession(runID)

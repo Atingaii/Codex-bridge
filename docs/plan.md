@@ -71,6 +71,11 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 
 ## Maintenance Log
 
+- 2026-08-09: Coalesced high-frequency native command progress at the Bridge
+  before transport and SQLite persistence, preserving full output and terminal
+  ordering without adding a database service or user configuration. Durable
+  orchestration prompts now use workspace-neutral wording and do not prescribe
+  a Git workflow.
 - 2026-08-08: Added a Hub-persisted task graph with stable attempt identity,
   ambiguity-safe restart recovery, user-selected shared CWD execution,
   serialized candidate writes, and a final reviewer/formal-checker barrier.

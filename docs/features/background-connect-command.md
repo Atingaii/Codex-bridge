@@ -115,10 +115,12 @@ imports the current module instead of throwing during startup.
 `internal/hub/server.go:handleInstallScript` downloads to a temporary file next
 to `~/.local/bin/codex-bridge` and then renames it into place. This avoids
 `Text file busy` when an older Bridge process is still executing the current
-binary. Large binary downloads use HTTP/1.1 and up to eight bounded,
-backed-off resume attempts. A transient TLS or HTTP/2 edge failure therefore
-continues from the existing temporary file and never replaces the working
-Bridge with a partial download.
+binary. Large binary downloads use HTTP/1.1, visible progress, low-speed
+detection, and up to eight bounded, backed-off resume attempts. If a server
+rejects the saved range (`416`), the installer removes only that temporary
+download and starts a fresh attempt. A transient TLS or HTTP/2 edge failure
+therefore continues from the existing temporary file and never replaces the
+working Bridge with a partial download.
 
 ## Implementation Steps
 

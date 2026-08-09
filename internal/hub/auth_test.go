@@ -314,10 +314,13 @@ func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
 	}
 	for _, want := range []string{
 		`TMP="${BIN}.tmp.$$"`,
-		`curl --http1.1 -fL --connect-timeout 20 -C - -o "$TMP" "$DOWNLOAD_URL"`,
-		`wget -c -O "$TMP" "$DOWNLOAD_URL"`,
+		`echo "Downloading Codex Bridge..."`,
+		`curl --http1.1 -fL --show-error --progress-bar --connect-timeout 20 --max-time 900 --speed-time 30 --speed-limit 1024 -C - -o "$TMP" "$DOWNLOAD_URL"`,
+		`wget --show-progress --timeout=30 --tries=1 -c -O "$TMP" "$DOWNLOAD_URL"`,
+		`Saved download is not resumable; restarting it...`,
 		`bridge download interrupted; resuming`,
 		`bridge download failed after $attempt attempts`,
+		`echo "Download complete."`,
 		`mv -f "$TMP" "$BIN"`,
 	} {
 		if !strings.Contains(body, want) {

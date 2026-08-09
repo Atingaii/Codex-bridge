@@ -698,9 +698,21 @@ cleanup() {
   rm -f "$TMP"
 }
 trap cleanup EXIT HUP INT TERM
+echo "Downloading Codex Bridge..."
 if command -v curl >/dev/null 2>&1; then
   attempt=1
-  while ! curl --http1.1 -fL --connect-timeout 20 -C - -o "$TMP" "$DOWNLOAD_URL"; do
+  while :; do
+    set +e
+    curl --http1.1 -fL --show-error --progress-bar --connect-timeout 20 --max-time 900 --speed-time 30 --speed-limit 1024 -C - -o "$TMP" "$DOWNLOAD_URL"
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+      break
+    fi
+    if [ "$status" -eq 33 ] && [ -s "$TMP" ]; then
+      echo "Saved download is not resumable; restarting it..." >&2
+      rm -f "$TMP"
+    fi
     if [ "$attempt" -ge 8 ]; then
       echo "bridge download failed after $attempt attempts" >&2
       exit 1
@@ -712,7 +724,14 @@ if command -v curl >/dev/null 2>&1; then
   done
 elif command -v wget >/dev/null 2>&1; then
   attempt=1
-  while ! wget -c -O "$TMP" "$DOWNLOAD_URL"; do
+  while :; do
+    set +e
+    wget --show-progress --timeout=30 --tries=1 -c -O "$TMP" "$DOWNLOAD_URL"
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+      break
+    fi
     if [ "$attempt" -ge 8 ]; then
       echo "bridge download failed after $attempt attempts" >&2
       exit 1
@@ -729,6 +748,7 @@ fi
 chmod +x "$TMP"
 mv -f "$TMP" "$BIN"
 trap - EXIT HUP INT TERM
+echo "Download complete."
 echo "installed $BIN"
 `, shellQuote(downloadURL))
 }

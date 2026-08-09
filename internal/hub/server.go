@@ -114,6 +114,10 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("POST /api/orchestrations", s.withAuth(s.handleCreateOrchestration))
 	mux.HandleFunc("GET /api/orchestrations/{runID}", s.withAuth(s.handleGetOrchestration))
 	mux.HandleFunc("GET /api/orchestrations/{runID}/stats", s.withAuth(s.handleOrchestrationStats))
+	mux.HandleFunc("GET /api/usage/overview", s.withAuth(s.handleUsageOverview))
+	mux.HandleFunc("GET /api/admin/usage", s.withAdmin(s.handleAdminUsage))
+	mux.HandleFunc("GET /api/admin/users/{userID}/usage", s.withAdmin(s.handleAdminUserUsage))
+	mux.HandleFunc("POST /api/orchestrations/{runID}/usage-sync", s.withAuth(s.handleOrchestrationUsageSync))
 	mux.HandleFunc("GET /api/orchestrations/{runID}/events", s.withAuth(s.handleOrchestrationEvents))
 	mux.HandleFunc("POST /api/orchestrations/{runID}/prompts", s.withAuth(s.handleContinueOrchestration))
 	mux.HandleFunc("POST /api/orchestrations/{runID}/cancel", s.withAuth(s.handleCancelOrchestration))
@@ -592,7 +596,7 @@ func (s *Server) bridgePermissionProfile(hubURL, token, installCommand, profile 
 
 func (s *Server) bridgeInstallCommand(hubURL string) string {
 	installURL := shellQuote(strings.TrimRight(hubURL, "/") + "/install.sh")
-	return fmt.Sprintf("CB_INSTALL=$(mktemp) && trap 'rm -f \"$CB_INSTALL\"' EXIT HUP INT TERM && curl --http1.1 -fsSL --retry 8 --retry-all-errors --connect-timeout 20 -o \"$CB_INSTALL\" %s && sh \"$CB_INSTALL\"", installURL)
+	return fmt.Sprintf("CB_INSTALL=$(mktemp) && trap 'rm -f \"$CB_INSTALL\"' EXIT HUP INT TERM && curl --http1.1 -fsSL --retry 8 --connect-timeout 20 -o \"$CB_INSTALL\" %s && sh \"$CB_INSTALL\"", installURL)
 }
 
 func bridgeSetupCommand(installCommand, connectCommand string) string {

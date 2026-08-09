@@ -28,6 +28,12 @@ assert.match(source, /group\.incomplete = terminalRun && !group\.complete && gro
 assert.match(source, /visible\.push\(statusVisibleEvent\(event, index, ':status'\)\);/);
 assert.doesNotMatch(source, /contentfulTurnEnds\.has\(orchestrationTurnKey\(event\)\)/);
 assert.match(source, /const rawContent = item\.content \|\| item\.error \|\| '';/);
+assert.match(utilsSource, /function isInternalOrchestrationBootstrapEvent\(event: OrchestrationEvent\)/);
+assert.match(utilsSource, /const round = firstNumber\(event\.task\?\.round, event\.turnStartData\?\.round/);
+assert.match(utilsSource, /if \(meta\.turnInfo\) group\.turnInfo = meta\.turnInfo;/);
+assert.doesNotMatch(orchestrationComponentsSource, /\{item\.kind\}/);
+assert.match(orchestrationComponentsSource, /case 'candidate-a': return chinese \? '候选方案 A' : 'Candidate A';/);
+assert.match(orchestrationComponentsSource, /case 'review': return chinese \? '独立审查者' : 'Independent Reviewer';/);
 assert.match(utilsSource, /export function upsertApprovalItem\(/);
 assert.match(utilsSource, /export function updateApprovalItemStatus\(/);
 assert.match(orchestrationWorkspaceSource, /upsertApprovalItem,/);
@@ -228,6 +234,23 @@ assert.ok(resumedFirstTurn);
 assert.equal(resumedFirstTurn.complete, true);
 assert.equal(resumedFirstTurn.incomplete, false);
 assert.ok(!resumedRunGroups.some((group) => group.turnId && group.incomplete));
+
+const structuredRoundMeta = { ordinal: 2, total: 4 };
+assert.deepEqual(structuredRoundMeta, { ordinal: 2, total: 4 });
+assert.notEqual(structuredRoundMeta.ordinal, Number('run4-p001-01'.match(/(\d+)$/)?.[1]));
+
+function isInternalBootstrap(event) {
+  return event.bridgeNoteData?.category === 'formal-proof-harness-bootstrap'
+    || event.data?.category === 'formal-proof-harness-bootstrap'
+    || (event.role === 'bootstrap' && event.cli === 'bridge');
+}
+
+const bridgeNotices = [
+  { kind: 'turn.delta', role: 'bootstrap', cli: 'bridge', content: 'Formal-proof notes created at /private/path' },
+  { kind: 'turn.delta', role: 'reviewer', cli: 'codex', severity: 'warning', content: '正在从同一会话恢复。', data: { category: 'cli-transport-retry-start' } },
+].filter((event) => !isInternalBootstrap(event));
+assert.equal(bridgeNotices.length, 1);
+assert.ok(bridgeNotices[0].content.includes('恢复'));
 
 function stringsTrim(value) {
   return typeof value === 'string' ? value.trim() : '';

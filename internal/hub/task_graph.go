@@ -27,31 +27,20 @@ func taskPayloadDigest(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func orchestrationTaskSpecs(baseDigest, workerPair, mode string, maxTurns ...int) []store.CreateTaskSpec {
+func orchestrationTaskSpecs(baseDigest, workerPair, mode string) []store.CreateTaskSpec {
 	workerA, workerB := "claude", "codex"
 	if protocol.NormalizeOrchestrationWorkerPair(workerPair) == protocol.WorkerPairCodexCodex {
 		workerA, workerB = "codex-a", "codex-b"
 	}
-	if len(maxTurns) > 0 && maxTurns[0] == 1 {
-		instruction := orchestrationTaskInstruction{Instruction: "Act as the sole autonomous executor and reviewer in the user's selected project directory. Fully investigate and complete the request, make all safe in-scope changes, run relevant checks, and use your own judgment rather than waiting for another agent. Finish with a user-ready resolved structured handoff only when the evidence supports completion; otherwise state the exact blocker and remaining work. Formal-proof work must include a successful proof-assistant checker or audit command."}
-		raw, _ := json.Marshal(instruction)
-		return []store.CreateTaskSpec{{
-			Name:          "solo",
-			Role:          store.TaskRoleReviewer,
-			WorkerSlot:    workerA,
-			PayloadJSON:   string(raw),
-			PayloadDigest: taskPayloadDigest(baseDigest, string(raw)),
-		}}
-	}
-	workerDuty := "Build one independent candidate in the user's selected project directory. Inspect the actual project, make bounded changes, run focused checks, and finish with a structured handoff naming changed files, exact commands, and remaining risks."
+	workerDuty := "Build one independent candidate in the user's selected project directory. Inspect the actual project, maximize useful implementation progress through viable approaches, run focused checks, and finish with an engineer-to-engineer handoff naming changed files, exact commands and results, repeated blockers, attempted approaches, and the next executable entry point."
 	if mode == "debate" {
 		workerDuty = "Develop one independent falsifiable solution or counterexample in the user's selected project directory. Test the strongest claim, make bounded changes when justified, and finish with a structured handoff naming changed files, exact commands, and remaining objections."
 	}
 	instructions := []orchestrationTaskInstruction{
-		{Instruction: workerDuty + " You are candidate A; do not wait for candidate B."},
-		{Instruction: workerDuty + " You are candidate B; do not copy or wait for candidate A."},
-		{Instruction: "Act as the sole integrator in the user's selected project directory. Inspect both candidate handoffs and their compact evidence, compare the resulting changes, resolve conflicts deterministically, and run integration checks. Finish with a structured handoff for an independent reviewer."},
-		{Instruction: "Act as the final independent reviewer in the user's selected project directory. Rerun relevant tests, audit the original requirement and risks, and fix only safe in-scope defects. You alone decide completion. Return a resolved structured handoff only when evidence supports it; otherwise return blocked or needs_next. Formal-proof work must include a successful proof-assistant checker or audit command in this reviewing turn."},
+		{Instruction: workerDuty + " You are candidate A; choose the strongest route, pursue it deeply, and do not wait for candidate B."},
+		{Instruction: workerDuty + " You are candidate B; start from candidate A's workspace and evidence, improve it or choose a materially different route, and do not repeat its baseline scan."},
+		{Instruction: "Act as the sole integrator in the user's selected project directory. Inspect both candidate handoffs and compact evidence, reconcile their actual changes, resolve conflicts, continue implementing remaining gaps, and run integration checks. Finish with an exact handoff for an independent reviewer rather than a summary-only report."},
+		{Instruction: "Act as the independent reviewer in the user's selected project directory. Rerun relevant tests, audit the original requirement and risks, and directly fix safe in-scope defects before reporting. Return resolved, blocked, or needs_next with independent command evidence; only the final configured round may address a resolved final conclusion to the user. Formal-proof work must include a successful proof-assistant checker or audit command in this reviewing turn."},
 	}
 	roles := []string{store.TaskRoleWorker, store.TaskRoleWorker, store.TaskRoleIntegrator, store.TaskRoleReviewer}
 	slots := []string{workerA, workerB, workerA, workerB}
@@ -79,14 +68,35 @@ func (s *Server) durableTaskGraphEnabled(agentID string) bool {
 }
 
 func (s *Server) createAndDispatchTaskGraph(ctx context.Context, run store.OrchestrationRun, payload protocol.OrchestrationStartPayload) error {
+	_, err := s.createAndDispatchTaskGraphAfter(ctx, run, payload, "")
+	return err
+}
+
+func (s *Server) createAndDispatchTaskGraphAfter(ctx context.Context, run store.OrchestrationRun, payload protocol.OrchestrationStartPayload, previousGraphID string) (bool, error) {
+	if payload.Round <= 0 {
+		payload.Round = 1
+	}
+	if payload.MaxRounds <= 0 {
+		payload.MaxRounds = payload.MaxTurns
+	}
 	baseJSON, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return false, err
 	}
 	baseDigest := taskPayloadDigest(string(baseJSON))
-	graph, err := s.store.CreateOrchestrationTaskGraph(ctx, run.ID, string(baseJSON), baseDigest, orchestrationTaskSpecs(baseDigest, payload.WorkerPair, payload.Mode, payload.MaxTurns))
+	specs := orchestrationTaskSpecs(baseDigest, payload.WorkerPair, payload.Mode)
+	var graph store.OrchestrationTaskGraph
+	created := true
+	if previousGraphID == "" {
+		graph, err = s.store.CreateOrchestrationTaskGraph(ctx, run.ID, string(baseJSON), baseDigest, specs)
+	} else {
+		graph, created, err = s.store.CreateNextOrchestrationTaskGraph(ctx, run.ID, previousGraphID, string(baseJSON), baseDigest, specs)
+	}
 	if err != nil {
-		return err
+		return false, err
+	}
+	if !created {
+		return false, nil
 	}
 	if err := s.dispatchReadyTaskGraph(ctx, run, graph); err != nil {
 		// A failed queue write is explicitly rolled back to ready. Keep the run
@@ -94,7 +104,7 @@ func (s *Server) createAndDispatchTaskGraph(ctx context.Context, run store.Orche
 		// transport pressure into a user-visible failed orchestration.
 		slog.Warn("[hub] initial durable task dispatch deferred", "run_id", run.ID, "error", err)
 	}
-	return nil
+	return true, nil
 }
 
 func (s *Server) dispatchReadyTaskGraph(ctx context.Context, run store.OrchestrationRun, graph store.OrchestrationTaskGraph) error {
@@ -161,13 +171,15 @@ func (s *Server) dispatchTaskAttempt(ctx context.Context, run store.Orchestratio
 	if len(evidence) > 0 {
 		raw, _ := json.Marshal(evidence)
 		payload.Context = strings.TrimSpace(payload.Context + "\n\nDependency evidence (compact JSON):\n" + string(raw))
-		if task.Role == store.TaskRoleReviewer {
-			payload.Resume = true
-		}
 	}
+	payload.CodexThreadID = run.CodexThreadID
+	payload.CodexThreadIDs = run.CodexThreadIDs
+	payload.ClaudeStarted = run.ClaudeStarted
+	payload.RunCWD = run.RunCWD
+	payload.Resume = payload.Resume || run.CodexThreadID != "" || len(run.CodexThreadIDs) > 0 || run.ClaudeStarted
+	maxRounds := payload.MaxRounds
 	payload.MaxTurns = 1
-	payload.MaxTurnsRequested = 1
-	payload.TaskGraph = &protocol.TaskGraphPayload{ID: graph.ID, Generation: graph.Generation, ParallelLimit: graph.ParallelLimit, Tasks: []protocol.TaskPayload{{
+	payload.TaskGraph = &protocol.TaskGraphPayload{ID: graph.ID, Generation: graph.Generation, Round: payload.Round, MaxRounds: maxRounds, ParallelLimit: graph.ParallelLimit, Tasks: []protocol.TaskPayload{{
 		ID: task.ID, AttemptID: attempt.ID, Name: task.Name, Role: task.Role, WorkerSlot: task.WorkerSlot, PayloadDigest: task.PayloadDigest, Dependencies: task.Dependencies,
 	}}}
 	return s.pool.SendToAgent(run.AgentID, protocol.MustEnvelope(protocol.TypeOrchestrationStart, "", payload))
@@ -198,6 +210,61 @@ func taskEvidence(payload protocol.OrchestrationEventPayload) map[string]any {
 		evidence["conclusion"] = payload.RunConclusion
 	}
 	return evidence
+}
+
+func nextTaskGraphPayload(graph store.OrchestrationTaskGraph, run store.OrchestrationRun, review protocol.OrchestrationEventPayload) (protocol.OrchestrationStartPayload, bool, error) {
+	var payload protocol.OrchestrationStartPayload
+	if err := json.Unmarshal([]byte(graph.PayloadJSON), &payload); err != nil {
+		return payload, false, fmt.Errorf("decode completed durable task payload: %w", err)
+	}
+	if payload.MaxRounds <= 0 {
+		payload.MaxRounds = payload.MaxTurns
+	}
+	if payload.Round <= 0 {
+		payload.Round = 1
+	}
+	if payload.Round >= payload.MaxRounds {
+		return payload, false, nil
+	}
+	payload.Round++
+	payload.Resume = true
+	payload.Files = nil
+	payload.CodexThreadID = run.CodexThreadID
+	payload.CodexThreadIDs = run.CodexThreadIDs
+	payload.ClaudeStarted = run.ClaudeStarted
+	payload.RunCWD = run.RunCWD
+	reviewContext := trimForContext(review.Content, 8*1024)
+	if review.RunConclusion != nil {
+		if raw, err := json.Marshal(review.RunConclusion); err == nil {
+			reviewContext = strings.TrimSpace(reviewContext + "\nConclusion: " + string(raw))
+		}
+	}
+	payload.Context = trimForContext(strings.TrimSpace(payload.Context+"\n\nPrevious round reviewer handoff:\n"+reviewContext), 64*1024)
+	return payload, true, nil
+}
+
+func (s *Server) advanceCompletedTaskGraph(ctx context.Context, run store.OrchestrationRun, graph store.OrchestrationTaskGraph, review protocol.OrchestrationEventPayload) (bool, error) {
+	next, advance, err := nextTaskGraphPayload(graph, run, review)
+	if err != nil || !advance {
+		return advance, err
+	}
+	created, err := s.createAndDispatchTaskGraphAfter(ctx, run, next, graph.ID)
+	if err != nil {
+		return false, err
+	}
+	if !created {
+		return true, nil
+	}
+	event, err := s.store.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
+		RunID: run.ID, Kind: "turn.delta", Source: "bridge", Severity: "info", Role: "summary",
+		Content: fmt.Sprintf("Collaboration round %d/%d completed; starting round %d/%d.", next.Round-1, next.MaxRounds, next.Round, next.MaxRounds),
+		Data:    map[string]any{"category": "orchestration-round-advance", "round": next.Round, "maxRounds": next.MaxRounds},
+	})
+	if err != nil {
+		return false, err
+	}
+	s.pool.BroadcastToOrchestrationBrowsers(run.ID, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", eventToPayload(event)))
+	return true, nil
 }
 
 func (s *Server) handleTaskGraphEvent(ctx context.Context, payload protocol.OrchestrationEventPayload) (bool, error) {
@@ -249,6 +316,13 @@ func (s *Server) handleTaskGraphEvent(ctx context.Context, payload protocol.Orch
 				return true, err
 			}
 			if orchestrationTerminalStatus(run.Status) {
+				return true, nil
+			}
+			advanced, err := s.advanceCompletedTaskGraph(ctx, run, updated, payload)
+			if err != nil {
+				return true, err
+			}
+			if advanced {
 				return true, nil
 			}
 			if err := s.store.UpdateOrchestrationRunStatus(ctx, payload.RunID, store.OrchestrationCompleted, ""); err != nil {

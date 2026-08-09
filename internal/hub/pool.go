@@ -49,6 +49,13 @@ func (p *Pool) AgentOnline(agentID string) bool {
 	return p.agents[agentID] != nil
 }
 
+func (p *Pool) AgentSupportsUsageLedger(agentID string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	conn := p.agents[agentID]
+	return conn != nil && conn.capabilities != nil && conn.capabilities.UsageLedger
+}
+
 func (p *Pool) DisconnectAgent(agentID string) {
 	p.mu.Lock()
 	conn := p.agents[agentID]

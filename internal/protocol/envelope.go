@@ -7,24 +7,26 @@ import (
 )
 
 const (
-	TypeRegister            = "register"
-	TypeRegistered          = "registered"
-	TypeHeartbeat           = "heartbeat"
-	TypeOpenSession         = "open_session"
-	TypeSessionOpened       = "session_opened"
-	TypePrompt              = "prompt"
-	TypeSessionUpdate       = "session_update"
-	TypePromptComplete      = "prompt_complete"
-	TypeApprovalRequest     = "approval_request"
-	TypeApprovalResponse    = "approval_response"
-	TypeCancel              = "cancel"
-	TypeCloseSession        = "close_session"
-	TypeOrchestrationStart  = "orchestration_start"
-	TypeOrchestrationEvent  = "orchestration_event"
-	TypeOrchestrationCancel = "orchestration_cancel"
-	TypeAgentShutdown       = "agent_shutdown"
-	TypeError               = "error"
-	TypeStatus              = "status"
+	TypeRegister                      = "register"
+	TypeRegistered                    = "registered"
+	TypeHeartbeat                     = "heartbeat"
+	TypeOpenSession                   = "open_session"
+	TypeSessionOpened                 = "session_opened"
+	TypePrompt                        = "prompt"
+	TypeSessionUpdate                 = "session_update"
+	TypePromptComplete                = "prompt_complete"
+	TypeApprovalRequest               = "approval_request"
+	TypeApprovalResponse              = "approval_response"
+	TypeCancel                        = "cancel"
+	TypeCloseSession                  = "close_session"
+	TypeOrchestrationStart            = "orchestration_start"
+	TypeOrchestrationEvent            = "orchestration_event"
+	TypeOrchestrationCancel           = "orchestration_cancel"
+	TypeOrchestrationUsageSyncRequest = "orchestration_usage_sync_request"
+	TypeOrchestrationUsageSyncResult  = "orchestration_usage_sync_result"
+	TypeAgentShutdown                 = "agent_shutdown"
+	TypeError                         = "error"
+	TypeStatus                        = "status"
 )
 
 type Envelope struct {
@@ -96,6 +98,7 @@ type BridgeCapabilities struct {
 	Metadata         map[string]string              `json:"metadata,omitempty"`
 	ACP              *ACPCapability                 `json:"acp,omitempty"`
 	DurableTaskGraph bool                           `json:"durableTaskGraph,omitempty"`
+	UsageLedger      bool                           `json:"usageLedger,omitempty"`
 }
 
 // ACPCapability advertises whether the endpoint can run an Agent Client
@@ -213,6 +216,8 @@ type OrchestrationStartPayload struct {
 	PromptSeq               int64               `json:"promptSeq,omitempty"`
 	MaxTurns                int                 `json:"maxTurns,omitempty"`
 	MaxTurnsRequested       int                 `json:"maxTurnsRequested,omitempty"`
+	Round                   int                 `json:"round,omitempty"`
+	MaxRounds               int                 `json:"maxRounds,omitempty"`
 	CWD                     string              `json:"cwd,omitempty"`
 	Files                   []AttachmentPayload `json:"files,omitempty"`
 	CodexThreadID           string              `json:"codexThreadId,omitempty"`
@@ -227,6 +232,8 @@ type OrchestrationStartPayload struct {
 type TaskGraphPayload struct {
 	ID            string        `json:"id"`
 	Generation    int           `json:"generation"`
+	Round         int           `json:"round"`
+	MaxRounds     int           `json:"maxRounds"`
 	ParallelLimit int           `json:"parallelLimit"`
 	Tasks         []TaskPayload `json:"tasks"`
 }
@@ -245,13 +252,59 @@ type TaskAttemptRef struct {
 	GraphID       string `json:"graphId"`
 	TaskID        string `json:"taskId"`
 	AttemptID     string `json:"attemptId"`
+	Name          string `json:"name,omitempty"`
 	Role          string `json:"role,omitempty"`
 	WorkerSlot    string `json:"workerSlot,omitempty"`
+	Round         int    `json:"round,omitempty"`
+	MaxRounds     int    `json:"maxRounds,omitempty"`
 	PayloadDigest string `json:"payloadDigest"`
 }
 
 type OrchestrationCancelPayload struct {
 	RunID string `json:"runId"`
+}
+
+type OrchestrationUsageSession struct {
+	CLI        string `json:"cli"`
+	WorkerSlot string `json:"workerSlot,omitempty"`
+	SessionID  string `json:"sessionId"`
+}
+
+type OrchestrationUsageSyncRequest struct {
+	RunID    string                      `json:"runId"`
+	Sessions []OrchestrationUsageSession `json:"sessions"`
+}
+
+type OrchestrationUsageEvent struct {
+	EventID          string `json:"eventId"`
+	CLI              string `json:"cli"`
+	WorkerSlot       string `json:"workerSlot,omitempty"`
+	SessionID        string `json:"sessionId"`
+	OccurredAt       int64  `json:"occurredAt,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	Model            string `json:"model,omitempty"`
+	InputTokens      int64  `json:"inputTokens"`
+	CacheReadTokens  int64  `json:"cacheReadTokens"`
+	CacheWriteTokens int64  `json:"cacheWriteTokens"`
+	OutputTokens     int64  `json:"outputTokens"`
+	ReasoningTokens  int64  `json:"reasoningTokens,omitempty"`
+}
+
+type OrchestrationUsageSessionResult struct {
+	CLI        string `json:"cli"`
+	WorkerSlot string `json:"workerSlot,omitempty"`
+	SessionID  string `json:"sessionId"`
+	Status     string `json:"status"`
+	EventCount int    `json:"eventCount"`
+	Error      string `json:"error,omitempty"`
+}
+
+type OrchestrationUsageSyncResult struct {
+	RunID     string                            `json:"runId"`
+	Status    string                            `json:"status"`
+	ScannedAt int64                             `json:"scannedAt"`
+	Sessions  []OrchestrationUsageSessionResult `json:"sessions"`
+	Events    []OrchestrationUsageEvent         `json:"events"`
 }
 
 type OrchestrationEventPayload struct {
@@ -309,6 +362,8 @@ type RunStartData struct {
 	FirstCLI                string `json:"firstCli,omitempty"`
 	MaxTurnsRequested       int    `json:"maxTurnsRequested,omitempty"`
 	MaxTurnsApplied         int    `json:"maxTurnsApplied,omitempty"`
+	Round                   int    `json:"round,omitempty"`
+	MaxRounds               int    `json:"maxRounds,omitempty"`
 	PromptSeq               int64  `json:"promptSeq,omitempty"`
 	Profile                 string `json:"profile,omitempty"`
 	NativeContextCompaction string `json:"nativeContextCompaction,omitempty"`
@@ -319,6 +374,8 @@ type TurnStartData struct {
 	WorkerSlot string `json:"workerSlot,omitempty"`
 	Turn       int    `json:"turn,omitempty"`
 	MaxTurns   int    `json:"maxTurns,omitempty"`
+	Round      int    `json:"round,omitempty"`
+	MaxRounds  int    `json:"maxRounds,omitempty"`
 	PromptText string `json:"promptText,omitempty"`
 	Profile    string `json:"profile,omitempty"`
 	ResumeMode string `json:"resumeMode,omitempty"`

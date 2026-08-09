@@ -14,6 +14,7 @@ import {
   Send,
   Server,
   Share2,
+  ShieldCheck,
   Square,
   Terminal,
   X,
@@ -905,6 +906,7 @@ export function Workspace({
               <GitBranch className="h-3.5 w-3.5" />
               {t.orchestrate}
             </Button>
+            {user.isAdmin && <Button variant="secondary" size="icon" className="h-8 w-8 rounded-lg" onClick={() => navigate('/admin/usage')} aria-label={t.adminDashboard} title={t.adminDashboard}><ShieldCheck className="h-3.5 w-3.5" /></Button>}
           </div>
         </header>
 

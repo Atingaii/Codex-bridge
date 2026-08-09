@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -301,6 +302,18 @@ type orchestrationUsageStats struct {
 	CostKnown        bool    `json:"costKnown"`
 	CostSource       string  `json:"costSource"`
 	PricingModel     string  `json:"pricingModel,omitempty"`
+	ReasoningTokens  int64   `json:"reasoningTokens,omitempty"`
+	CallCount        int     `json:"callCount,omitempty"`
+}
+
+type orchestrationRoundStats struct {
+	Round            int     `json:"round"`
+	InputTokens      int64   `json:"inputTokens"`
+	OutputTokens     int64   `json:"outputTokens"`
+	CacheTokens      int64   `json:"cacheTokens"`
+	TotalTokens      int64   `json:"totalTokens"`
+	EstimatedCostUSD float64 `json:"estimatedCostUsd"`
+	CallCount        int     `json:"callCount"`
 }
 
 type orchestrationRunStats struct {
@@ -312,6 +325,8 @@ type orchestrationRunStats struct {
 	OutputTokens     int64                     `json:"outputTokens"`
 	CacheReadTokens  int64                     `json:"cacheReadTokens"`
 	CacheWriteTokens int64                     `json:"cacheWriteTokens"`
+	CacheTokens      int64                     `json:"cacheTokens"`
+	TotalTokens      int64                     `json:"totalTokens"`
 	EstimatedCostUSD float64                   `json:"estimatedCostUsd"`
 	Estimated        bool                      `json:"estimated"`
 	Native           bool                      `json:"native"`
@@ -319,6 +334,158 @@ type orchestrationRunStats struct {
 	CostSource       string                    `json:"costSource"`
 	PricingModels    []string                  `json:"pricingModels,omitempty"`
 	ByCLI            []orchestrationUsageStats `json:"byCli"`
+	ReasoningTokens  int64                     `json:"reasoningTokens,omitempty"`
+	CallCount        int                       `json:"callCount,omitempty"`
+	AccountingStatus string                    `json:"accountingStatus"`
+	AccountingSource string                    `json:"accountingSource"`
+	ScannedAt        int64                     `json:"scannedAt,omitempty"`
+	Rounds           []orchestrationRoundStats `json:"rounds,omitempty"`
+}
+
+type orchestrationUsageOverviewItem struct {
+	RunID            string                    `json:"runId"`
+	Title            string                    `json:"title"`
+	MachineID        string                    `json:"machineId"`
+	MachineName      string                    `json:"machineName"`
+	Hostname         string                    `json:"hostname"`
+	CreatedAt        int64                     `json:"createdAt"`
+	Status           string                    `json:"status"`
+	InputTokens      int64                     `json:"inputTokens"`
+	OutputTokens     int64                     `json:"outputTokens"`
+	CacheTokens      int64                     `json:"cacheTokens"`
+	TotalTokens      int64                     `json:"totalTokens"`
+	EstimatedCostUSD float64                   `json:"estimatedCostUsd"`
+	CallCount        int                       `json:"callCount"`
+	CostKnown        bool                      `json:"costKnown"`
+	ByCLI            []orchestrationUsageStats `json:"byCli"`
+}
+
+type orchestrationUsageTrendPoint struct {
+	Date             string  `json:"date"`
+	InputTokens      int64   `json:"inputTokens"`
+	OutputTokens     int64   `json:"outputTokens"`
+	CacheTokens      int64   `json:"cacheTokens"`
+	TotalTokens      int64   `json:"totalTokens"`
+	EstimatedCostUSD float64 `json:"estimatedCostUsd"`
+	CallCount        int     `json:"callCount"`
+	CostKnown        bool    `json:"costKnown"`
+}
+
+type orchestrationUsageOverview struct {
+	InputTokens      int64                            `json:"inputTokens"`
+	OutputTokens     int64                            `json:"outputTokens"`
+	CacheTokens      int64                            `json:"cacheTokens"`
+	TotalTokens      int64                            `json:"totalTokens"`
+	EstimatedCostUSD float64                          `json:"estimatedCostUsd"`
+	CallCount        int                              `json:"callCount"`
+	Runs             int                              `json:"runs"`
+	Machines         int                              `json:"machines"`
+	Days             int                              `json:"days"`
+	TimezoneOffset   int                              `json:"timezoneOffset"`
+	CostKnown        bool                             `json:"costKnown"`
+	Trend            []orchestrationUsageTrendPoint   `json:"trend"`
+	Items            []orchestrationUsageOverviewItem `json:"items"`
+}
+
+func addDerivedTokenTotals(stats *orchestrationRunStats) {
+	stats.CacheTokens = stats.CacheReadTokens + stats.CacheWriteTokens
+	stats.TotalTokens = stats.InputTokens + stats.OutputTokens + stats.CacheTokens
+}
+
+func usageRoundNumber(data map[string]any) int {
+	if data == nil {
+		return 0
+	}
+	for _, key := range []string{"round", "ordinal"} {
+		switch value := data[key].(type) {
+		case float64:
+			if value > 0 {
+				return int(value)
+			}
+		case int:
+			if value > 0 {
+				return value
+			}
+		case int64:
+			if value > 0 {
+				return int(value)
+			}
+		}
+	}
+	return 0
+}
+
+type orchestrationRoundBoundary struct {
+	round int
+	at    int64
+}
+
+func orchestrationRoundBoundaries(events []store.OrchestrationEvent) []orchestrationRoundBoundary {
+	boundaries := map[int]int64{1: 0}
+	for _, event := range events {
+		round := usageRoundNumber(event.Data)
+		if event.Task != nil && event.Task.Round > 0 {
+			round = event.Task.Round
+		}
+		if event.TurnStartData != nil && event.TurnStartData.Round > 0 {
+			round = event.TurnStartData.Round
+		}
+		if event.RunStartData != nil && event.RunStartData.Round > 0 {
+			round = event.RunStartData.Round
+		}
+		if round <= 0 || event.CreatedAt <= 0 {
+			continue
+		}
+		if previous, ok := boundaries[round]; !ok || event.CreatedAt < previous {
+			boundaries[round] = event.CreatedAt
+		}
+	}
+	out := make([]orchestrationRoundBoundary, 0, len(boundaries))
+	for round, at := range boundaries {
+		out = append(out, orchestrationRoundBoundary{round: round, at: at})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].round < out[j].round })
+	return out
+}
+
+func orchestrationRoundForTime(boundaries []orchestrationRoundBoundary, at int64) int {
+	round := 1
+	for _, boundary := range boundaries {
+		if boundary.at <= at {
+			round = boundary.round
+		}
+	}
+	return round
+}
+
+func appendRoundUsage(rounds map[int]*orchestrationRoundStats, round int, input, output, cacheRead, cacheWrite int64, calls int) {
+	if round <= 0 {
+		round = 1
+	}
+	item := rounds[round]
+	if item == nil {
+		item = &orchestrationRoundStats{Round: round}
+		rounds[round] = item
+	}
+	item.InputTokens += input
+	item.OutputTokens += output
+	item.CacheTokens += cacheRead + cacheWrite
+	item.TotalTokens += input + output + cacheRead + cacheWrite
+	item.CallCount += calls
+}
+
+func finalizeOrchestrationRounds(stats *orchestrationRunStats, rounds map[int]*orchestrationRoundStats) {
+	if len(rounds) == 0 {
+		return
+	}
+	keys := make([]int, 0, len(rounds))
+	for round := range rounds {
+		keys = append(keys, round)
+	}
+	sort.Ints(keys)
+	for _, round := range keys {
+		stats.Rounds = append(stats.Rounds, *rounds[round])
+	}
 }
 
 func (s *Server) handleOrchestrationStats(w http.ResponseWriter, r *http.Request, uid string) {
@@ -336,17 +503,228 @@ func (s *Server) handleOrchestrationStats(w http.ResponseWriter, r *http.Request
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration statistics")
 		return
 	}
-	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"stats": buildOrchestrationRunStats(run, events)})
+	ledger, err := s.store.ListOrchestrationUsageEvents(r.Context(), run.ID)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load usage ledger")
+		return
+	}
+	syncs, err := s.store.ListOrchestrationUsageSyncs(r.Context(), run.ID)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load usage sync state")
+		return
+	}
+	if len(syncs) == 0 && orchestrationTerminalStatus(run.Status) {
+		_ = s.requestOrchestrationUsageSync(run, events)
+	}
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"stats": buildOrchestrationRunStatsWithLedger(run, events, ledger, syncs)})
+}
+
+func (s *Server) handleUsageOverview(w http.ResponseWriter, r *http.Request, uid string) {
+	days, timezoneOffset, cutoff, err := usageOverviewRange(r)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_RANGE", err.Error())
+		return
+	}
+	runs, err := s.store.ListAllOrchestrationRuns(r.Context(), uid)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load usage overview")
+		return
+	}
+	overview := orchestrationUsageOverview{Days: days, TimezoneOffset: timezoneOffset, CostKnown: true}
+	machineSet := map[string]bool{}
+	trend := map[string]*orchestrationUsageTrendPoint{}
+	for _, run := range runs {
+		events, eventErr := s.store.ListOrchestrationEvents(r.Context(), run.ID, 10000)
+		if eventErr != nil {
+			continue
+		}
+		ledger, ledgerErr := s.store.ListOrchestrationUsageEvents(r.Context(), run.ID)
+		if ledgerErr != nil {
+			ledger = nil
+		}
+		syncs, syncErr := s.store.ListOrchestrationUsageSyncs(r.Context(), run.ID)
+		if syncErr != nil {
+			syncs = nil
+		}
+		filteredEvents := filterOverviewTimeline(events, cutoff)
+		filteredLedger := filterOverviewLedger(run, ledger, cutoff)
+		stats := buildOrchestrationRunStatsWithLedger(run, filteredEvents, filteredLedger, syncs)
+		if stats.TotalTokens == 0 && stats.CallCount == 0 {
+			continue
+		}
+		appendOverviewTrend(trend, run, filteredEvents, filteredLedger, syncs, timezoneOffset)
+		agent, agentErr := s.store.AgentByIDForUser(r.Context(), run.AgentID, uid, false)
+		machineID, machineName, hostname := run.AgentID, run.AgentID, ""
+		if agentErr == nil {
+			machineID, machineName, hostname = agent.MachineID, agent.Name, agent.Hostname
+		}
+		machineSet[machineID] = true
+		overview.Runs++
+		overview.InputTokens += stats.InputTokens
+		overview.OutputTokens += stats.OutputTokens
+		overview.CacheTokens += stats.CacheTokens
+		overview.TotalTokens += stats.TotalTokens
+		overview.EstimatedCostUSD += stats.EstimatedCostUSD
+		overview.CallCount += stats.CallCount
+		overview.CostKnown = overview.CostKnown && stats.CostKnown
+		overview.Items = append(overview.Items, orchestrationUsageOverviewItem{
+			RunID: run.ID, Title: run.Title, MachineID: machineID, MachineName: machineName, Hostname: hostname,
+			CreatedAt: run.CreatedAt, Status: run.Status, InputTokens: stats.InputTokens, OutputTokens: stats.OutputTokens,
+			CacheTokens: stats.CacheTokens, TotalTokens: stats.TotalTokens, EstimatedCostUSD: stats.EstimatedCostUSD,
+			CallCount: stats.CallCount, CostKnown: stats.CostKnown, ByCLI: stats.ByCLI,
+		})
+	}
+	overview.Machines = len(machineSet)
+	for _, point := range trend {
+		overview.Trend = append(overview.Trend, *point)
+	}
+	sort.Slice(overview.Trend, func(i, j int) bool { return overview.Trend[i].Date < overview.Trend[j].Date })
+	if overview.Runs == 0 {
+		overview.CostKnown = false
+	}
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"overview": overview})
+}
+
+func usageOverviewRange(r *http.Request) (days, timezoneOffset int, cutoff int64, err error) {
+	days = 30
+	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || (parsed != 0 && parsed != 7 && parsed != 30 && parsed != 90) {
+			return 0, 0, 0, errors.New("days must be one of 0, 7, 30, or 90")
+		}
+		days = parsed
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("timezoneOffset")); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < -840 || parsed > 840 {
+			return 0, 0, 0, errors.New("timezoneOffset must be between -840 and 840")
+		}
+		timezoneOffset = parsed
+	}
+	if days == 0 {
+		return days, timezoneOffset, 0, nil
+	}
+	now := time.Now().Add(-time.Duration(timezoneOffset) * time.Minute)
+	localMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	cutoff = localMidnight.Add(-time.Duration(days-1)*24*time.Hour + time.Duration(timezoneOffset)*time.Minute).Unix()
+	return days, timezoneOffset, cutoff, nil
+}
+
+func filterOverviewTimeline(events []store.OrchestrationEvent, cutoff int64) []store.OrchestrationEvent {
+	if cutoff == 0 {
+		return events
+	}
+	filtered := make([]store.OrchestrationEvent, 0, len(events))
+	for _, event := range events {
+		if event.Kind != "turn.usage" || event.CreatedAt >= cutoff {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
+}
+
+func filterOverviewLedger(run store.OrchestrationRun, events []protocol.OrchestrationUsageEvent, cutoff int64) []protocol.OrchestrationUsageEvent {
+	if cutoff == 0 {
+		return events
+	}
+	filtered := make([]protocol.OrchestrationUsageEvent, 0, len(events))
+	for _, event := range events {
+		at := event.OccurredAt
+		if at == 0 {
+			at = run.CreatedAt
+		}
+		if at >= cutoff {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
+}
+
+func overviewDate(at int64, timezoneOffset int) string {
+	return time.Unix(at, 0).Add(-time.Duration(timezoneOffset) * time.Minute).UTC().Format("2006-01-02")
+}
+
+func overviewTrendPoint(trend map[string]*orchestrationUsageTrendPoint, date string) *orchestrationUsageTrendPoint {
+	point := trend[date]
+	if point == nil {
+		point = &orchestrationUsageTrendPoint{Date: date, CostKnown: true}
+		trend[date] = point
+	}
+	return point
+}
+
+func appendOverviewTrend(trend map[string]*orchestrationUsageTrendPoint, run store.OrchestrationRun, timeline []store.OrchestrationEvent, ledger []protocol.OrchestrationUsageEvent, syncs []store.OrchestrationUsageSync, timezoneOffset int) {
+	if len(syncs) > 0 {
+		for _, event := range ledger {
+			at := event.OccurredAt
+			if at == 0 {
+				at = run.CreatedAt
+			}
+			point := overviewTrendPoint(trend, overviewDate(at, timezoneOffset))
+			point.InputTokens += event.InputTokens
+			point.OutputTokens += event.OutputTokens
+			point.CacheTokens += event.CacheReadTokens + event.CacheWriteTokens
+			point.TotalTokens += event.InputTokens + event.OutputTokens + event.CacheReadTokens + event.CacheWriteTokens
+			point.CallCount++
+			if quote, ok := usagepricing.EstimateNormalized(event.CLI, event.Model, event.InputTokens, event.OutputTokens, event.CacheReadTokens, event.CacheWriteTokens); ok {
+				point.EstimatedCostUSD += quote.CostUSD
+			} else {
+				point.CostKnown = false
+			}
+		}
+		return
+	}
+	for _, event := range timeline {
+		if event.Kind != "turn.usage" || event.Data == nil {
+			continue
+		}
+		usage := orchestrationUsageFromData(event.Data)
+		if usage.CLI == "" {
+			usage.CLI = event.CLI
+		}
+		usage.applyOfficialCatalogFallback()
+		point := overviewTrendPoint(trend, overviewDate(event.CreatedAt, timezoneOffset))
+		point.InputTokens += usage.InputTokens
+		point.OutputTokens += usage.OutputTokens
+		point.CacheTokens += usage.CacheReadTokens + usage.CacheWriteTokens
+		point.TotalTokens += usage.InputTokens + usage.OutputTokens + usage.CacheReadTokens + usage.CacheWriteTokens
+		point.EstimatedCostUSD += usage.EstimatedCostUSD
+		point.CallCount++
+		if !usage.CostKnown {
+			point.CostKnown = false
+		}
+	}
 }
 
 func buildOrchestrationRunStats(run store.OrchestrationRun, events []store.OrchestrationEvent) orchestrationRunStats {
-	stats := orchestrationRunStats{RunID: run.ID, FinishedAt: run.FinishedAt}
+	return buildOrchestrationRunStatsWithLedger(run, events, nil, nil)
+}
+
+func orchestrationStatsStartTime(run store.OrchestrationRun, events []store.OrchestrationEvent) int64 {
+	// created_at is the stable beginning of the whole orchestration. Event
+	// windows are capped, so relying only on the first visible run.start would
+	// incorrectly measure just the last continuation round.
+	startedAt := run.CreatedAt
+	for _, event := range events {
+		if event.Kind == "run.start" && (startedAt == 0 || event.CreatedAt < startedAt) {
+			startedAt = event.CreatedAt
+		}
+	}
+	return startedAt
+}
+
+func buildOrchestrationRunStatsWithLedger(run store.OrchestrationRun, events []store.OrchestrationEvent, ledger []protocol.OrchestrationUsageEvent, syncs []store.OrchestrationUsageSync) orchestrationRunStats {
+	stats := orchestrationRunStats{RunID: run.ID, FinishedAt: run.FinishedAt, StartedAt: orchestrationStatsStartTime(run, events)}
+	if len(syncs) > 0 {
+		return buildLedgerOrchestrationRunStats(run, events, ledger, syncs)
+	}
+	stats.AccountingStatus = "legacy-incomplete"
+	stats.AccountingSource = "turn-snapshots"
 	byCLI := map[string]*orchestrationUsageStats{}
+	rounds := map[int]*orchestrationRoundStats{}
+	boundaries := orchestrationRoundBoundaries(events)
 	usageCount := 0
 	for _, event := range events {
-		if event.Kind == "run.start" && (stats.StartedAt == 0 || event.CreatedAt < stats.StartedAt) {
-			stats.StartedAt = event.CreatedAt
-		}
 		if event.Kind != "turn.usage" || event.Data == nil {
 			continue
 		}
@@ -363,6 +741,7 @@ func buildOrchestrationRunStats(run store.OrchestrationRun, events []store.Orche
 		stats.OutputTokens += usage.OutputTokens
 		stats.CacheReadTokens += usage.CacheReadTokens
 		stats.CacheWriteTokens += usage.CacheWriteTokens
+		appendRoundUsage(rounds, orchestrationRoundForTime(boundaries, event.CreatedAt), usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens, 1)
 		stats.EstimatedCostUSD += usage.EstimatedCostUSD
 		stats.Estimated = stats.Estimated || usage.Estimated
 		stats.Native = stats.Native || usage.Native
@@ -421,7 +800,156 @@ func buildOrchestrationRunStats(run store.OrchestrationRun, events []store.Orche
 	for _, usage := range byCLI {
 		stats.ByCLI = append(stats.ByCLI, *usage)
 	}
+	addDerivedTokenTotals(&stats)
+	finalizeOrchestrationRounds(&stats, rounds)
 	return stats
+}
+
+func buildLedgerOrchestrationRunStats(run store.OrchestrationRun, timeline []store.OrchestrationEvent, events []protocol.OrchestrationUsageEvent, syncs []store.OrchestrationUsageSync) orchestrationRunStats {
+	stats := orchestrationRunStats{RunID: run.ID, FinishedAt: run.FinishedAt, StartedAt: orchestrationStatsStartTime(run, timeline), Native: true, AccountingStatus: "complete", AccountingSource: "local-cli-ledger", CostKnown: len(events) > 0}
+	if stats.StartedAt == 0 {
+		stats.StartedAt = run.CreatedAt
+	}
+	end := run.FinishedAt
+	if end == 0 && run.Status == store.OrchestrationRunning {
+		end = time.Now().Unix()
+	}
+	if end >= stats.StartedAt {
+		stats.RuntimeSeconds = end - stats.StartedAt
+	}
+	byCLI := map[string]*orchestrationUsageStats{}
+	rounds := map[int]*orchestrationRoundStats{}
+	boundaries := orchestrationRoundBoundaries(timeline)
+	for _, sync := range syncs {
+		if sync.ScannedAt > stats.ScannedAt {
+			stats.ScannedAt = sync.ScannedAt
+		}
+		if sync.Status != "complete" {
+			stats.AccountingStatus = "partial"
+		}
+	}
+	for _, event := range events {
+		stats.InputTokens += event.InputTokens
+		stats.CacheReadTokens += event.CacheReadTokens
+		stats.CacheWriteTokens += event.CacheWriteTokens
+		stats.OutputTokens += event.OutputTokens
+		stats.ReasoningTokens += event.ReasoningTokens
+		stats.CallCount++
+		appendRoundUsage(rounds, orchestrationRoundForTime(boundaries, event.OccurredAt), event.InputTokens, event.OutputTokens, event.CacheReadTokens, event.CacheWriteTokens, 1)
+		key := event.CLI + "\x00" + event.Model
+		item := byCLI[key]
+		if item == nil {
+			item = &orchestrationUsageStats{CLI: event.CLI, Model: event.Model, Native: true, CostKnown: true}
+			byCLI[key] = item
+		}
+		item.InputTokens += event.InputTokens
+		item.CacheReadTokens += event.CacheReadTokens
+		item.CacheWriteTokens += event.CacheWriteTokens
+		item.OutputTokens += event.OutputTokens
+		item.ReasoningTokens += event.ReasoningTokens
+		item.CallCount++
+		// Pricing is resolved from the concrete model, not the transport provider.
+		// Local relays commonly report provider=custom while still using a model
+		// with a known public catalog price. Unknown models remain unpriced.
+		quote, ok := usagepricing.EstimateNormalized(event.CLI, event.Model, event.InputTokens, event.OutputTokens, event.CacheReadTokens, event.CacheWriteTokens)
+		if ok {
+			stats.EstimatedCostUSD += quote.CostUSD
+			item.EstimatedCostUSD += quote.CostUSD
+			stats.PricingModels = appendUnique(stats.PricingModels, quote.PricingModel)
+			item.PricingModel = quote.PricingModel
+			item.CostSource = quote.Source
+			if stats.CostSource == "" {
+				stats.CostSource = quote.Source
+			} else if stats.CostSource != quote.Source {
+				stats.CostSource = "mixed"
+			}
+		} else {
+			stats.CostKnown = false
+			item.CostKnown = false
+		}
+	}
+	if len(events) == 0 {
+		stats.CostKnown = false
+	}
+	for _, item := range byCLI {
+		stats.ByCLI = append(stats.ByCLI, *item)
+	}
+	addDerivedTokenTotals(&stats)
+	finalizeOrchestrationRounds(&stats, rounds)
+	return stats
+}
+
+func (s *Server) handleOrchestrationUsageSync(w http.ResponseWriter, r *http.Request, uid string) {
+	run, err := s.store.OrchestrationRunByID(r.Context(), r.PathValue("runID"), uid)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "orchestration run not found")
+		return
+	}
+	events, err := s.store.ListOrchestrationEvents(r.Context(), run.ID, 10000)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration run")
+		return
+	}
+	if err := s.requestOrchestrationUsageSync(run, events); err != nil {
+		serverutil.WriteError(w, http.StatusConflict, "AGENT_OFFLINE", err.Error())
+		return
+	}
+	serverutil.WriteJSON(w, http.StatusAccepted, map[string]any{"status": "syncing"})
+}
+
+func (s *Server) requestOrchestrationUsageSync(run store.OrchestrationRun, events []store.OrchestrationEvent) error {
+	if !s.pool.AgentSupportsUsageLedger(run.AgentID) {
+		return errors.New("connected Bridge does not support the local usage ledger")
+	}
+	sessions := orchestrationUsageSessions(run, events)
+	if len(sessions) == 0 {
+		return errors.New("native session metadata unavailable")
+	}
+	return s.pool.SendToAgent(run.AgentID, protocol.MustEnvelope(protocol.TypeOrchestrationUsageSyncRequest, "", protocol.OrchestrationUsageSyncRequest{RunID: run.ID, Sessions: sessions}))
+}
+
+func orchestrationUsageSessions(run store.OrchestrationRun, events []store.OrchestrationEvent) []protocol.OrchestrationUsageSession {
+	seen := map[string]bool{}
+	var sessions []protocol.OrchestrationUsageSession
+	add := func(cli, slot, id string) {
+		id = strings.TrimSpace(id)
+		key := cli + "\x00" + slot + "\x00" + id
+		if id != "" && !seen[key] {
+			seen[key] = true
+			sessions = append(sessions, protocol.OrchestrationUsageSession{CLI: cli, WorkerSlot: slot, SessionID: id})
+		}
+	}
+	for slot, id := range run.CodexThreadIDs {
+		add("codex", slot, id)
+	}
+	if len(run.CodexThreadIDs) == 0 {
+		add("codex", "codex", run.CodexThreadID)
+	}
+	for _, event := range events {
+		if event.RunEndData == nil {
+			continue
+		}
+		add("claude", "claude", event.RunEndData.ClaudeSessionID)
+		for _, native := range event.RunEndData.NativeResume {
+			add(native.CLI, native.CLI, native.ID)
+		}
+	}
+	return sessions
+}
+
+func (s *Server) handleOrchestrationUsageSyncResult(ctx context.Context, agentID string, env protocol.Envelope) {
+	result, err := protocol.Decode[protocol.OrchestrationUsageSyncResult](env)
+	if err != nil || result.RunID == "" {
+		return
+	}
+	run, err := s.store.OrchestrationRunByIDAnyUser(ctx, result.RunID)
+	if err != nil || run.AgentID != agentID {
+		slog.Warn("[hub] rejected usage ledger from foreign bridge", "agent_id", agentID, "run_id", result.RunID)
+		return
+	}
+	if err := s.store.ReplaceOrchestrationUsage(ctx, result); err != nil {
+		slog.Error("[hub] persist usage ledger failed", "run_id", result.RunID, "error", err)
+	}
 }
 
 func orchestrationUsageFromData(data map[string]any) orchestrationUsageStats {
@@ -879,6 +1407,13 @@ func int64QueryParam(w http.ResponseWriter, r *http.Request, name string) (int64
 }
 
 func compactOrchestrationContext(run store.OrchestrationRun, events []store.OrchestrationEvent) string {
+	filtered := make([]store.OrchestrationEvent, 0, len(events))
+	for _, event := range events {
+		if !isInternalOrchestrationBootstrapEvent(event) {
+			filtered = append(filtered, event)
+		}
+	}
+	events = filtered
 	events = mergeOrchestrationDeltasForContext(events)
 	var userMessages []string
 	var turnNotes []string
@@ -932,6 +1467,14 @@ func compactOrchestrationContext(run store.OrchestrationRun, events []store.Orch
 	writeContextSection(&b, "Run outcomes", lastN(outcomes, 8))
 	writeContextSection(&b, "Unresolved blockers or errors", lastN(blockers, 6))
 	return trimForContext(b.String(), 14000)
+}
+
+func isInternalOrchestrationBootstrapEvent(event store.OrchestrationEvent) bool {
+	if event.BridgeNoteData != nil && event.BridgeNoteData.Category == "formal-proof-harness-bootstrap" {
+		return true
+	}
+	return stringFromMap(event.Data, "category") == "formal-proof-harness-bootstrap" ||
+		(event.Role == "bootstrap" && event.CLI == "bridge")
 }
 
 func mergeOrchestrationDeltasForContext(events []store.OrchestrationEvent) []store.OrchestrationEvent {
@@ -1248,6 +1791,15 @@ func (s *Server) handleOrchestrationEventFromAgent(ctx context.Context, agentID 
 		return
 	}
 	s.pool.BroadcastToOrchestrationBrowsers(payload.RunID, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", eventToPayload(event)))
+	if !isTaskEvent && (payload.Kind == "run.end" || payload.Kind == "run.error" || payload.Kind == "run.cancelled") {
+		if run, loadErr := s.store.OrchestrationRunByIDAnyUser(ctx, payload.RunID); loadErr == nil {
+			if events, listErr := s.store.ListOrchestrationEvents(ctx, payload.RunID, 10000); listErr == nil {
+				if syncErr := s.requestOrchestrationUsageSync(run, events); syncErr != nil {
+					slog.Info("[hub] deferred orchestration usage sync", "run_id", payload.RunID, "reason", syncErr)
+				}
+			}
+		}
+	}
 	if isTaskEvent {
 		if _, taskErr := s.handleTaskGraphEvent(ctx, payload); taskErr != nil {
 			slog.Error("[hub] durable task event failed", "run_id", payload.RunID, "task_id", payload.Task.TaskID, "error", taskErr)

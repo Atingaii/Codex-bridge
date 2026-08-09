@@ -18,6 +18,10 @@
 - Treat Codex `thread ... already has an active writer` as a temporary native
   thread lease conflict after process/Bridge restart, without losing or
   rewriting the prompt that Codex has not accepted yet.
+- Release every durable task attempt's app-server process and thread
+  subscription before publishing its terminal event, including error and
+  cancellation paths, so native TUI resume is not left behind an orphaned
+  writer.
 
 ## Non-Goals
 
@@ -91,6 +95,8 @@ slot, workspace, and native thread ID.
    thread.
 8. Cover recognition, native reconnect success, active-writer recovery,
    exhaustion, permanent failures, and cancellation.
+9. Close durable task native sessions before terminal delivery so the next
+   graph node and external TUI resume cannot race a stale writer lease.
 
 ## Exit Gates
 
@@ -103,6 +109,8 @@ slot, workspace, and native thread ID.
 - Active-writer retry preserves the original prompt because `turn/start` did
   not accept it, and its budget is independent from transport recovery.
 - Exhaustion retains the last concrete provider/transport reason.
+- Successful, failed, and canceled durable task attempts release their Codex
+  app-server writer before Hub observes the terminal event.
 - Focused Bridge tests, full Go tests, build, document lint, and diff checks
   pass.
 

@@ -13,7 +13,7 @@ func createHubTaskGraph(t *testing.T, st *store.Store, run store.OrchestrationRu
 	t.Helper()
 	payload := protocol.OrchestrationStartPayload{
 		RunID: run.ID, Mode: "collaboration", WorkerPair: protocol.WorkerPairCodexCodex,
-		Prompt: "verify the implementation", CWD: t.TempDir(), MaxTurns: 1,
+		Prompt: "verify the implementation", CWD: t.TempDir(), MaxTurns: 1, MaxTurnsRequested: 1, Round: 1, MaxRounds: 1,
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -82,10 +82,33 @@ func TestDurableTaskDispatchRetainsSelectedCWD(t *testing.T) {
 	}
 }
 
-func TestOrchestrationTaskSpecsOneTurnIsSolo(t *testing.T) {
-	specs := orchestrationTaskSpecs("digest", protocol.WorkerPairCodexCodex, "collaboration", 1)
-	if len(specs) != 1 || specs[0].Name != "solo" || specs[0].Role != store.TaskRoleReviewer {
-		t.Fatalf("one-turn specs = %#v", specs)
+func TestDurableTaskDispatchRefreshesNativeSessionState(t *testing.T) {
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	run := createOrchestrationRun(t, st, userID, agentID)
+	graph := createHubTaskGraph(t, st, run)
+	if err := st.UpdateOrchestrationRunSessionState(context.Background(), run.ID, "thread-a", map[string]string{"codex-a": "thread-a"}, true, "/private/run-cwd"); err != nil {
+		t.Fatal(err)
+	}
+	run, err := st.OrchestrationRunByID(context.Background(), run.ID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := testBridgeConn(agentID, 2)
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+	if err := s.dispatchReadyTaskGraph(context.Background(), run, graph); err != nil {
+		t.Fatal(err)
+	}
+	dispatched := decodeTaskDispatchPayload(t, <-conn.send)
+	if !dispatched.Resume || dispatched.CodexThreadID != "thread-a" || dispatched.CodexThreadIDs["codex-a"] != "thread-a" || !dispatched.ClaudeStarted || dispatched.RunCWD != "/private/run-cwd" {
+		t.Fatalf("native session state was stale: %#v", dispatched)
+	}
+}
+
+func TestOrchestrationTaskSpecsAlwaysCreateCompleteRound(t *testing.T) {
+	specs := orchestrationTaskSpecs("digest", protocol.WorkerPairCodexCodex, "collaboration")
+	if len(specs) != 4 || specs[0].Name != "candidate-a" || specs[1].Name != "candidate-b" || specs[2].Role != store.TaskRoleIntegrator || specs[3].Role != store.TaskRoleReviewer {
+		t.Fatalf("round specs = %#v", specs)
 	}
 }
 
@@ -166,6 +189,63 @@ func TestDurableTaskGraphReviewerIsOnlyPublicCompletionBarrier(t *testing.T) {
 	}
 	if publicEnd != 1 || publicConclusion != 1 {
 		t.Fatalf("public terminal events: run.end=%d conclusion=%d events=%#v", publicEnd, publicConclusion, events)
+	}
+}
+
+func TestDurableTaskGraphRunsEveryConfiguredRound(t *testing.T) {
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	run := createOrchestrationRun(t, st, userID, agentID)
+	payload := protocol.OrchestrationStartPayload{
+		RunID: run.ID, Mode: "collaboration", WorkerPair: protocol.WorkerPairCodexCodex,
+		Prompt: "finish across two rounds", CWD: t.TempDir(), MaxTurns: 2, MaxTurnsRequested: 2,
+	}
+	conn := testBridgeConn(agentID, 16)
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+	if err := s.createAndDispatchTaskGraph(context.Background(), run, payload); err != nil {
+		t.Fatal(err)
+	}
+
+	completeRound := func(wantRound int, conclusion *protocol.RunConclusion) {
+		t.Helper()
+		for position := 0; position < 4; position++ {
+			dispatched := decodeTaskDispatchPayload(t, <-conn.send)
+			if dispatched.MaxTurns != 1 || dispatched.MaxTurnsRequested != 2 {
+				t.Fatalf("round %d node limits = %d requested=%d", wantRound, dispatched.MaxTurns, dispatched.MaxTurnsRequested)
+			}
+			if dispatched.TaskGraph.Round != wantRound || dispatched.TaskGraph.MaxRounds != 2 {
+				t.Fatalf("round metadata = %#v, want %d/2", dispatched.TaskGraph, wantRound)
+			}
+			task := dispatched.TaskGraph.Tasks[0]
+			ref := protocol.TaskAttemptRef{GraphID: dispatched.TaskGraph.ID, TaskID: task.ID, AttemptID: task.AttemptID, Role: task.Role, WorkerSlot: task.WorkerSlot, PayloadDigest: task.PayloadDigest}
+			var nodeConclusion *protocol.RunConclusion
+			if position == 3 {
+				nodeConclusion = conclusion
+			}
+			sendTaskLifecycle(s, run.ID, ref, nodeConclusion)
+		}
+	}
+
+	completeRound(1, &protocol.RunConclusion{Outcome: "blocked", Summary: "more work remains", UnmetObligations: []string{"finish implementation"}})
+	loaded, err := st.OrchestrationRunByID(context.Background(), run.ID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != store.OrchestrationRunning {
+		t.Fatalf("intermediate review ended run: %#v", loaded)
+	}
+	graph, err := st.TaskGraphByRun(context.Background(), run.ID)
+	if err != nil || graph.Generation != 2 || graph.Status != store.TaskGraphRunning {
+		t.Fatalf("next graph = %#v err=%v", graph, err)
+	}
+
+	completeRound(2, &protocol.RunConclusion{Outcome: "satisfied", Summary: "final review passed"})
+	loaded, err = st.OrchestrationRunByID(context.Background(), run.ID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != store.OrchestrationCompleted {
+		t.Fatalf("final round did not complete run: %#v", loaded)
 	}
 }
 

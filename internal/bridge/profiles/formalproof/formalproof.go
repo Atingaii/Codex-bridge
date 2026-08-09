@@ -29,7 +29,7 @@ func RelayGuidance(userPrompt, mode, role string) string {
 	b.WriteString("- For recursive or termination obligations, state the measure/relation or semantic-equivalence obligation before coding. If you use bounded/fuel wrappers, fixed default fuel, or structurally recursive helper functions, also prove equivalence to the original semantics plus decrease/well-foundedness and fuel sufficiency; otherwise report needs_next or blocked.\n")
 	b.WriteString("- Include audit evidence when available: source-only shortcut scans, the project build command, Coq/Rocq Print Assumptions or equivalent dependency audit, Lean #print axioms, Isabelle thm_oracles/oracle-free audit, and the named target theorem/fact.\n")
 	b.WriteString("- Keep handoffs falsifiable: target theorem/fact, uploaded-source mapping, branch/decrease obligation, semantic constraints, attempted proof path, exact blocker, commands run, and remaining risks.\n")
-	b.WriteString("- Browser-visible result rule: the final answer must include a concise Chinese \"最终测试结果/最终结论\" section that says whether the original user requirement is satisfied, lists the exact build/audit commands, and names any unmet proof obligation. Do not leave the user to infer the result only from command logs.\n")
+	b.WriteString("- Whole-run result rule: the final user-facing answer produced after independent review must include a concise Chinese \"最终测试结果/最终结论\" section that says whether the original user requirement is satisfied, lists the exact build/audit commands, and names any unmet proof obligation. Intermediate engineers should preserve the same evidence in their peer handoff without pretending the run has ended.\n")
 	if guidance := systemARelayGuidance(userPrompt); guidance != "" {
 		b.WriteString(guidance)
 	}

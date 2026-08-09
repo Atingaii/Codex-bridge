@@ -77,13 +77,15 @@ export function OrchestrationEventItem({ item, t }: { item: OrchestrationVisible
   const isUser = item.kind === 'user.message';
   const isRun = item.kind.startsWith('run.');
   const avatar = orchestrationAvatar(item, t);
-  const title = isUser ? t.user : isRun ? t.run : item.type === 'command' ? t.commands : `${item.role || t.agent}${item.cli ? ` · ${avatar.label}` : ''}`;
+  const roleLabel = orchestrationRoleLabel(item.role, item.taskName, t);
+  const title = isUser ? t.user : isRun ? t.run : item.type === 'command' ? t.commands : `${roleLabel}${item.cli ? ` · ${avatar.label}` : ''}`;
   const rawContent = item.content || item.error || '';
   const content = isUser ? rawContent : stripMachineContractLines(rawContent);
   const status = isUser ? '' : item.status;
+  const roleTone = orchestrationRoleTone(item.role, item.taskName);
 
   return (
-    <div className="flex gap-4 w-full max-w-4xl mx-auto rounded-lg border border-border/70 bg-card/50 px-3 py-3 group">
+    <div className={cn('group mx-auto flex w-full max-w-4xl gap-4 rounded-lg border px-3 py-3', roleTone.card)}>
       <div className="shrink-0 mt-1">
         <div className={cn(
           "h-6 w-6 rounded-md flex items-center justify-center shadow-sm border",
@@ -94,8 +96,8 @@ export function OrchestrationEventItem({ item, t }: { item: OrchestrationVisible
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 mb-1 min-h-6">
-          <span className="text-xs font-semibold capitalize">{title}</span>
-          <span className="text-[10px] text-muted-foreground">{item.kind}</span>
+          <span className={cn('rounded-md px-1.5 py-0.5 text-xs font-semibold', roleTone.badge)}>{title}</span>
+          {item.turnInfo && <span className="text-[10px] font-medium text-muted-foreground">{orchestrationTurnLabel(item.turnInfo, t)}</span>}
           {item.createdAt && <span className="text-[10px] text-muted-foreground">{formatTime(item.createdAt)}</span>}
           {status && <span className="ml-auto rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
         </div>
@@ -188,8 +190,11 @@ export function OrchestrationTimelineGroupItem({
     );
   }
 
-  const avatar = orchestrationAvatar({ kind: 'turn.delta', cli: group.cli }, t);
+  const avatar = orchestrationAvatar({ kind: 'turn.delta', cli: group.cli, role: group.role }, t);
   const turnLabel = orchestrationTurnLabel(group.turnInfo || {}, t) || group.turnId || t.thread;
+  const roleLabel = orchestrationRoleLabel(group.role, group.taskName, t);
+  const roleTone = orchestrationRoleTone(group.role, group.taskName);
+  const roundTone = orchestrationRoundTone(group.turnInfo?.ordinal);
   const countLabel = orchestrationTimelineGroupCountLabel(group, t);
   const stateLabel = group.incomplete ? t.turnMissingEnd : group.active ? t.running : group.hasError ? t.error : group.complete ? t.ready : t.status;
 
@@ -200,7 +205,7 @@ export function OrchestrationTimelineGroupItem({
         onClick={onToggle}
         className={cn(
           "mx-auto flex w-full max-w-4xl items-center gap-3 rounded-lg border bg-muted/15 px-3 py-2 text-left hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-          group.incomplete || group.hasError ? "border-destructive/35" : "border-border/70",
+          group.incomplete || group.hasError ? "border-destructive/35" : roundTone.header,
         )}
         aria-expanded={!collapsed}
         title={collapsed ? t.expandTurn : t.collapseTurn}
@@ -213,8 +218,8 @@ export function OrchestrationTimelineGroupItem({
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-xs font-semibold">{turnLabel}</span>
-            <span className="text-[10px] text-muted-foreground">{group.role || t.agent}{group.cli ? ` · ${avatar.label}` : ''}</span>
+            <span className={cn('shrink-0 rounded-md px-2 py-0.5 text-xs font-bold', roundTone.badge)}>{turnLabel}</span>
+            <span className={cn('truncate rounded-md px-1.5 py-0.5 text-[10px] font-semibold', roleTone.badge)}>{roleLabel}{group.cli ? ` · ${avatar.label}` : ''}</span>
             {group.createdAt && <span className="hidden text-[10px] text-muted-foreground sm:inline">{formatTime(group.createdAt)}</span>}
           </div>
           <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[10px] text-muted-foreground">
@@ -351,7 +356,7 @@ function orchestrationTimelineGroupCountLabel(group: OrchestrationTimelineGroup,
   return parts.length ? parts.join(' · ') : t.noVisibleAnswer;
 }
 
-function orchestrationAvatar(event: Pick<OrchestrationEvent, 'kind' | 'cli'>, t: UIText) {
+function orchestrationAvatar(event: Pick<OrchestrationEvent, 'kind' | 'cli' | 'role'>, t: UIText) {
   const cli = (event.cli || '').toLowerCase();
   if (event.kind === 'user.message') {
     return {
@@ -404,6 +409,57 @@ function orchestrationAvatar(event: Pick<OrchestrationEvent, 'kind' | 'cli'>, t:
     className: 'bg-primary border-primary text-primary-foreground',
     icon: <Terminal className="h-3.5 w-3.5" />,
   };
+}
+
+function orchestrationRoleLabel(role: string | undefined, taskName: string | undefined, t: UIText) {
+  const chinese = t.turnPrefix === '第';
+  switch (taskName) {
+    case 'candidate-a': return chinese ? '候选方案 A' : 'Candidate A';
+    case 'candidate-b': return chinese ? '候选方案 B' : 'Candidate B';
+    case 'integrate': return chinese ? '集成者' : 'Integrator';
+    case 'review': return chinese ? '独立审查者' : 'Independent Reviewer';
+  }
+  switch (role) {
+    case 'worker': return chinese ? '候选执行者' : 'Candidate';
+    case 'integrator': return chinese ? '集成者' : 'Integrator';
+    case 'reviewer': return chinese ? '独立审查者' : 'Independent Reviewer';
+    default: return role || t.agent;
+  }
+}
+
+function orchestrationRoleTone(role?: string, taskName?: string) {
+  if (taskName === 'review' || role === 'reviewer') {
+    return {
+      card: 'border-violet-500/25 bg-violet-500/[0.035]',
+      badge: 'bg-violet-500/10 text-violet-700 dark:text-violet-300',
+    };
+  }
+  if (taskName === 'integrate' || role === 'integrator') {
+    return {
+      card: 'border-amber-500/25 bg-amber-500/[0.035]',
+      badge: 'bg-amber-500/10 text-amber-800 dark:text-amber-300',
+    };
+  }
+  if (taskName?.startsWith('candidate-') || role === 'worker') {
+    return {
+      card: 'border-sky-500/25 bg-sky-500/[0.035]',
+      badge: 'bg-sky-500/10 text-sky-800 dark:text-sky-300',
+    };
+  }
+  return {
+    card: 'border-border/70 bg-card/50',
+    badge: 'bg-muted/60 text-foreground',
+  };
+}
+
+function orchestrationRoundTone(round?: number) {
+  const tones = [
+    { header: 'border-sky-500/30 bg-sky-500/[0.045]', badge: 'bg-sky-500/12 text-sky-800 dark:text-sky-300' },
+    { header: 'border-teal-500/30 bg-teal-500/[0.045]', badge: 'bg-teal-500/12 text-teal-800 dark:text-teal-300' },
+    { header: 'border-amber-500/30 bg-amber-500/[0.045]', badge: 'bg-amber-500/12 text-amber-800 dark:text-amber-300' },
+    { header: 'border-violet-500/30 bg-violet-500/[0.045]', badge: 'bg-violet-500/12 text-violet-800 dark:text-violet-300' },
+  ];
+  return tones[((round || 1) - 1) % tones.length];
 }
 
 function ClaudeMark() {

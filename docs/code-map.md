@@ -17,7 +17,8 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Orchestration transient CLI recovery | `internal/bridge/appserver_runner.go:readEvents`, `internal/bridge/orchestration_relay.go:isRecoverableCLITransportError`, `internal/bridge/orchestration.go:runRelayTurnWithContinuations`, `docs/features/orchestration-transient-cli-recovery.md` |
 | Browser/Bridge connection pools | `internal/hub/pool.go` |
 | Orchestration HTTP/WS and event history | `internal/hub/orchestration.go:handleOrchestrationEvents`, `internal/hub/ws_bridge.go:handleBridgeWS`, `frontend/src/app/pages/OrchestrationWorkspace.tsx`, `internal/bridge/orchestration*.go` |
-| Orchestration runtime/usage statistics | `internal/hub/orchestration.go:handleOrchestrationStats`, `internal/bridge/orchestration_usage.go`, `internal/usagepricing/catalog.go:Estimate`, `frontend/src/app/pages/OrchestrationStatsPage.tsx` |
+| Orchestration runtime/usage statistics | `internal/hub/orchestration.go:handleOrchestrationStats`, `internal/bridge/usage_ledger.go:scanOrchestrationUsage`, `internal/store/orchestration_usage.go:ReplaceOrchestrationUsage`, `internal/usagepricing/catalog.go:EstimateNormalized`, `frontend/src/app/pages/OrchestrationStatsPage.tsx` |
+| Administrator activity/usage dashboard | `internal/hub/admin.go:handleAdminUsage`, `internal/hub/admin.go:handleAdminUserUsage`, `internal/store/admin_analytics.go:AdminUsageSnapshot`, `internal/store/admin_analytics.go:AdminUserDetailSnapshot`, `frontend/src/app/pages/AdminUsagePage.tsx`, `frontend/src/app/pages/AdminUserUsagePage.tsx` |
 | Runner abstraction | `internal/bridge/runner.go`, `internal/bridge/appserver_runner.go`, `internal/bridge/acp_runner.go`, `internal/bridge/acp_client.go`, `internal/bridge/session.go` |
 | SQLite schema and CRUD | `internal/store/store.go`, `internal/store/id.go` |
 | Wire protocol | `internal/protocol/envelope.go` |
@@ -266,14 +267,19 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 
 1. `internal/store/store.go:Migrate` owns the graph/task/dependency/attempt
    schema; `internal/store/task_graph.go:ClaimReadyTask` owns atomic claims and
+   `internal/store/task_graph.go:CreateNextOrchestrationTaskGraph` owns
+   idempotent generation advancement, while
    `internal/store/task_graph.go:RecoverTaskGraphs` owns restart ambiguity.
 2. `internal/hub/task_graph.go:createAndDispatchTaskGraph` creates and advances
-   the fixed candidate/integrator/reviewer graph.
+   each fixed candidate/integrator/reviewer generation;
+   `internal/hub/task_graph.go:advanceCompletedTaskGraph` consumes the explicit
+   round budget without opening a new run.
 3. `internal/hub/orchestration.go:handleOrchestrationEvent` persists node events
    without allowing a node terminal event to bypass the reviewer barrier.
 4. `internal/bridge/orchestration.go:run` preserves the user-selected CWD for
    each node; `internal/hub/task_graph.go:orchestrationTaskSpecs` serializes
-   writable nodes and `run` applies the task role and formal checker gate.
+   writable nodes and `run` applies the task role, intermediate/final reviewer
+   gates, and formal checker gate.
 5. Update [docs/features/durable-bounded-orchestration-task-graph.md](features/durable-bounded-orchestration-task-graph.md).
 
 ### Change Orchestration Strategy

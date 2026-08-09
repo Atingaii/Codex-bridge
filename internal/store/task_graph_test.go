@@ -110,6 +110,20 @@ func TestTaskGraphRequiresReviewerAndPreservesEvidence(t *testing.T) {
 	}
 }
 
+func TestCreateNextTaskGraphIsIdempotentForPreviousGeneration(t *testing.T) {
+	st := openTestStore(t)
+	first := createTestTaskGraph(t, st)
+	specs := []CreateTaskSpec{{Name: "review", Role: TaskRoleReviewer, PayloadJSON: `{}`, PayloadDigest: "next"}}
+	next, created, err := st.CreateNextOrchestrationTaskGraph(context.Background(), first.RunID, first.ID, `{}`, "next-base", specs)
+	if err != nil || !created || next.Generation != 2 {
+		t.Fatalf("first successor = %#v created=%v err=%v", next, created, err)
+	}
+	duplicate, created, err := st.CreateNextOrchestrationTaskGraph(context.Background(), first.RunID, first.ID, `{}`, "duplicate-base", specs)
+	if err != nil || created || duplicate.ID != "" {
+		t.Fatalf("duplicate successor = %#v created=%v err=%v", duplicate, created, err)
+	}
+}
+
 func TestRecoverTaskGraphsMarksAmbiguousAttemptUnknown(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)

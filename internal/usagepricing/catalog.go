@@ -51,6 +51,24 @@ func Estimate(cli, model string, inputTokens, outputTokens, cacheReadTokens, cac
 	return Quote{PricingModel: rates.Model, CostUSD: cost, Source: source}, true
 }
 
+// EstimateNormalized prices a ledger event whose inputTokens already excludes
+// cache reads. This avoids subtracting cached input a second time.
+func EstimateNormalized(cli, model string, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens int64) (Quote, bool) {
+	rates, ok := Resolve(cli, model)
+	if !ok || inputTokens+outputTokens+cacheReadTokens+cacheWriteTokens <= 0 {
+		return Quote{}, false
+	}
+	if cacheWriteTokens > 0 && rates.CacheWritePerMillion == 0 {
+		return Quote{}, false
+	}
+	cost := float64(inputTokens)*rates.InputPerMillion/1e6 + float64(cacheReadTokens)*rates.CachedPerMillion/1e6 + float64(cacheWriteTokens)*rates.CacheWritePerMillion/1e6 + float64(outputTokens)*rates.OutputPerMillion/1e6
+	source := "catalog"
+	if strings.HasPrefix(rates.Model, "gpt-") {
+		source = SourceOfficialCatalog
+	}
+	return Quote{PricingModel: rates.Model, CostUSD: cost, Source: source}, true
+}
+
 func Resolve(cli, model string) (Rates, bool) {
 	cli = strings.ToLower(strings.TrimSpace(cli))
 	model = strings.ToLower(strings.TrimSpace(model))

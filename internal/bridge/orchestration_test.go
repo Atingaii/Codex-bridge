@@ -1496,6 +1496,67 @@ func TestOrchestrationCodexActiveWriterRetryExhaustionPreservesReason(t *testing
 	}
 }
 
+func TestDurableTaskTerminalReleasesCodexWriterBeforeDelivery(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	statePath := filepath.Join(tmp, "durable-task-writer-state.json")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerActiveWriterScript(statePath, 0)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 128)
+	manager.AttachOut(out)
+	defer manager.CloseAll()
+
+	payload := protocol.OrchestrationStartPayload{
+		RunID: "orc_durable_writer_release", Mode: "collaboration", WorkerPair: protocol.WorkerPairCodexCodex,
+		Prompt: "review one durable task", MaxTurns: 1, MaxTurnsRequested: 1, CWD: tmp,
+		TaskGraph: &protocol.TaskGraphPayload{ID: "otg_writer", Generation: 1, Round: 1, MaxRounds: 1, Tasks: []protocol.TaskPayload{{
+			ID: "otk_writer", AttemptID: "ota_writer", Role: store.TaskRoleReviewer, WorkerSlot: orchestrationCodexSlotA, PayloadDigest: "digest",
+		}}},
+	}
+	manager.Start(payload)
+	var terminal protocol.OrchestrationEventPayload
+	ok := false
+	deadline := time.After(5 * time.Second)
+	for !ok {
+		select {
+		case env := <-out:
+			if env.Type != protocol.TypeOrchestrationEvent {
+				continue
+			}
+			event, err := protocol.Decode[protocol.OrchestrationEventPayload](env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if event.Kind == "run.error" {
+				terminal, ok = event, true
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for durable reviewer failure")
+		}
+	}
+	if !ok || terminal.Task == nil || terminal.Task.AttemptID != "ota_writer" {
+		t.Fatalf("durable terminal event = %#v", terminal)
+	}
+	manager.mu.Lock()
+	handle := manager.runs[orchestrationExecutionKey(payload)]
+	manager.mu.Unlock()
+	if handle != nil {
+		<-handle.done
+	}
+	executionKey := orchestrationExecutionKey(payload)
+	manager.mu.Lock()
+	_, sessionExists := manager.sessions[executionKey]
+	manager.mu.Unlock()
+	if sessionExists {
+		t.Fatal("durable task terminal event was delivered before native session cleanup")
+	}
+}
+
 func TestOrchestrationCodexActiveWriterRetryWaitHonorsCancellation(t *testing.T) {
 	tmp := t.TempDir()
 	codexPath := filepath.Join(tmp, "codex")
@@ -2580,6 +2641,59 @@ func TestFirstWorkerEntryRetainsNecessaryRelayHistory(t *testing.T) {
 	}
 }
 
+func TestDurableTaskPromptUsesOuterRoundAndActiveRole(t *testing.T) {
+	tests := []struct {
+		name    string
+		scope   durableTaskPromptScope
+		want    []string
+		notWant []string
+	}{
+		{
+			name:  "candidate in intermediate round",
+			scope: durableTaskPromptScope{Name: "candidate-a", Role: store.TaskRoleWorker, Round: 2, MaxRounds: 4},
+			want: []string{
+				"Candidate A duty", "collaboration round 2 of 4", "Maximize useful progress",
+				"materially same obstacle recurs", "later durable node or collaboration round",
+			},
+			notWant: []string{"You are the first CLI", "final formal-proof turn", "Relay turn: 1 of 1", "three failed strategies"},
+		},
+		{
+			name:    "integrator keeps implementing",
+			scope:   durableTaskPromptScope{Name: "integrate", Role: store.TaskRoleIntegrator, Round: 3, MaxRounds: 4},
+			want:    []string{"Integrator duty", "continue implementing", "not a summary-only coordinator"},
+			notWant: []string{"final configured round's independent review"},
+		},
+		{
+			name:    "intermediate reviewer hands to peer",
+			scope:   durableTaskPromptScope{Name: "review", Role: store.TaskRoleReviewer, Round: 3, MaxRounds: 4},
+			want:    []string{"Independent Reviewer duty", "directly fix safe in-scope defects", "to=<peer>"},
+			notWant: []string{"final formal-proof turn", "to=<user>"},
+		},
+		{
+			name:    "only final reviewer synthesizes",
+			scope:   durableTaskPromptScope{Name: "review", Role: store.TaskRoleReviewer, Round: 4, MaxRounds: 4},
+			want:    []string{"final formal-proof turn", "to=<user>", "intent=<final"},
+			notWant: []string{"You are the first CLI", "Relay turn: 1 of 1"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prompt := composeRelayPromptWithTaskScope("collaboration", "codex", "formal-proof", "prove theorem Main", "", false, test.scope.Role, "codex", orchestrationCodexSlotA, 1, 1, nil, &test.scope)
+			for _, want := range test.want {
+				if !strings.Contains(prompt, want) {
+					t.Fatalf("task prompt missing %q:\n%s", want, prompt)
+				}
+			}
+			for _, notWant := range test.notWant {
+				if strings.Contains(prompt, notWant) {
+					t.Fatalf("task prompt unexpectedly contains %q:\n%s", notWant, prompt)
+				}
+			}
+		})
+	}
+}
+
 func TestRelayCommandSummariesCoalesceLifecycleAndKeepRecentAudit(t *testing.T) {
 	exit := 0
 	tools := []RunnerToolEvent{
@@ -3365,6 +3479,19 @@ func TestRunConclusionUsesExplicitFinalHandoffStatus(t *testing.T) {
 	}
 }
 
+func TestFailedFinalReviewerWithRemainingWorkConcludesBlocked(t *testing.T) {
+	history := []orchestrationTurn{{Content: "最终结论：轮次耗尽。\nHandoff: status=needs_next; changed=Main.v; verified=coqc Main.v; next=replace Admitted; risks=theorem incomplete"}}
+	conclusion := runConclusionForStatus(store.OrchestrationFailed, "configured collaboration rounds exhausted", history)
+	if conclusion.Outcome != "blocked" {
+		t.Fatalf("outcome = %q, want blocked", conclusion.Outcome)
+	}
+	for _, want := range []string{"replace Admitted", "theorem incomplete"} {
+		if !containsTestString(conclusion.UnmetObligations, want) {
+			t.Fatalf("unmet obligations %#v missing %q", conclusion.UnmetObligations, want)
+		}
+	}
+}
+
 func TestParseOrchestrationRelayPacketRequiresAnchoredMessageAndHandoff(t *testing.T) {
 	content := "已完成修复。\n\nMsg: to=reviewer; intent=review; need=verify parser\nHandoff: status=needs_next; changed=parser.go; verified=go test ./...; next=review edge; risks=none"
 	packet := parseOrchestrationRelayPacket(content)
@@ -3523,6 +3650,17 @@ func TestDurableReviewerRequiresResolvedEvidence(t *testing.T) {
 	)
 	if !durableReviewerCanComplete("default", []orchestrationTurn{reviewer}) {
 		t.Fatal("resolved reviewer with successful evidence did not complete")
+	}
+	blocked := newOrchestrationTurnRecordWithSlot(
+		"review", store.TaskRoleReviewer, "codex", orchestrationCodexDefaultSlot,
+		"最终结论：还需继续。\nMsg: to=user; intent=continue; need=finish\nHandoff: status=blocked; changed=Main.go; verified=go test ./...; next=finish proof; risks=admitted theorem",
+		[]RunnerToolEvent{{Command: "go test ./...", Status: "completed", ExitCode: &exit}},
+	)
+	if !durableReviewerCanAdvance("default", []orchestrationTurn{blocked}) {
+		t.Fatal("valid blocked reviewer handoff did not advance an intermediate round")
+	}
+	if durableReviewerCanComplete("default", []orchestrationTurn{blocked}) {
+		t.Fatal("blocked reviewer handoff completed final round")
 	}
 	if durableReviewerCanComplete("formal-proof", []orchestrationTurn{reviewer}) {
 		t.Fatal("non-proof command completed formal reviewer")

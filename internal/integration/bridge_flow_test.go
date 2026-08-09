@@ -1391,8 +1391,11 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		t.Fatalf("commands = %#v", commands)
 	}
 	installCommand := commands[0].(string)
-	if !strings.Contains(installCommand, "--retry-all-errors") {
-		t.Fatalf("install command missing transport retry policy: %q", installCommand)
+	if !strings.Contains(installCommand, "--retry 8") {
+		t.Fatalf("install command missing compatible transport retry policy: %q", installCommand)
+	}
+	if strings.Contains(installCommand, "--retry-all-errors") {
+		t.Fatalf("install command requires curl 7.71 or newer: %q", installCommand)
 	}
 	if !strings.Contains(installCommand, "CB_INSTALL=$(mktemp)") || !strings.Contains(installCommand, `sh "$CB_INSTALL"`) {
 		t.Fatalf("install command must execute only a completely downloaded script: %q", installCommand)

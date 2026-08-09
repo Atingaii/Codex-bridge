@@ -90,15 +90,18 @@ terminal status to the browser, and the next worker receives a parsed
 Agent-to-Agent packet containing the newest request, changed files,
 verification, next action, risks, and useful command context. Full prose is a
 bounded fallback only when the structured packet is absent or malformed.
-Reviewer/critic turns may end the schedule below its configured ceiling only
-after an explicit resolved handoff with independent evidence; formal-proof
-runs additionally require a successful reviewing-turn checker/audit command.
-For graph-capable Bridges, a new run is scheduled as two bounded parallel
-candidate nodes followed by serial integration and an independent reviewer.
-Hub SQLite is the task authority; node attempts carry stable identities and
-payload digests, ambiguous restart state becomes `unknown`, and Bridge executes
-each node in a private copied workspace. Older Bridges and same-run follow-ups
-retain the serial relay behavior. See
+Direct serial relay reviewer/critic turns may end below their configured ceiling
+only after an explicit resolved handoff with independent evidence. For
+graph-capable Bridges, `max_turns` instead budgets whole collaboration rounds:
+each round runs two bounded candidates, serial integration, and an independent
+reviewer, and Hub automatically creates every configured generation under the
+same run id. Intermediate valid `resolved`, `needs_next`, and `blocked`
+handoffs advance the graph; only the final generation applies the resolved
+completion barrier. Formal-proof review additionally requires a successful
+reviewing-turn checker/audit command. Hub SQLite is the task authority; node
+attempts carry stable identities and payload digests, ambiguous restart state
+becomes `unknown`, and Bridge executes each node serially in the selected
+project workspace. Older Bridges retain the serial relay behavior. See
 [ADR-008](adr/008-durable-orchestration-task-graph.md).
 Bridge persists the legacy
 Codex thread id, the `codex_thread_ids_json` slot map, and the stable Claude
@@ -170,11 +173,16 @@ diagnostics and is stripped from public shares. Every terminal run emits one
 structured `run.conclusion` event before `run.end`, `run.error`, or
 `run.cancelled`.
 
-Each completed relay turn also emits a persisted `turn.usage` event containing
-per-CLI/model input, output, cache, and estimated-cost fields. The Hub exposes
-owner-scoped aggregation at `/api/orchestrations/{runID}/stats`; runtime uses
-the run timestamps, and missing native provider accounting remains visibly
-labelled as an estimate.
+Legacy Bridges emit a persisted `turn.usage` snapshot after each relay turn.
+Current Bridges additionally handle `orchestration_usage_sync_request` by
+scanning only the named native CLI session logs read-only and returning
+normalized, content-free usage events. The Hub validates run ownership and
+stores those events idempotently in a separate ledger. Terminal runs trigger a
+sync automatically, while the owner-scoped statistics endpoint and retry route
+support historical backfill. Ledger statistics distinguish non-cached input,
+cache read/write, output, and reasoning; legacy snapshots remain visible but
+are explicitly incomplete. See
+[docs/features/embedded-cli-usage-ledger.md](features/embedded-cli-usage-ledger.md).
 
 Bridge long-command observation is controlled by
 `bridge.long_command_observer`. Matching Claude commands can receive a tagged
@@ -193,6 +201,9 @@ the damaged app-server process and resumes the same Codex thread after
 of replaying the original task. When a restarted Bridge resumes a Codex thread
 whose prior native turn still owns the writer lease, it keeps that thread and
 retries the still-unaccepted original prompt after 5/15/30/60-second backoffs.
+Durable task attempts close their short-lived app-server process and unsubscribe
+the persisted thread before emitting any terminal event, including failures, so
+the next graph node or an external `codex resume` cannot inherit a stale writer.
 Waiting, retry start, native progress, and retry exhaustion are persisted as
 Bridge-originated `turn.delta` notices, and cancellation interrupts every
 wait. Authentication, validation, command, and proof failures remain terminal. See
@@ -389,6 +400,16 @@ endpoints and records. Legacy unowned agents require an explicit ownership
 migration before use. Public shares remain an explicit, revocable exception
 containing sanitized read-only data.
 
+The bootstrap administrator additionally has one explicit, read-only
+cross-user analytics boundary: `GET /api/admin/usage` and
+`GET /api/admin/users/{userID}/usage`. The overview exposes aggregate activity,
+endpoint, workload, Token, and price-estimate fields. User detail adds
+conversation titles, type, status, endpoint label, timestamps, activity counts,
+and per-conversation usage. Prompts, message bodies, workspace paths, and native
+session identifiers are excluded, and the detail endpoint does not grant access
+to user-scoped mutation APIs. See
+[docs/features/admin-usage-dashboard.md](features/admin-usage-dashboard.md).
+
 ## Storage
 
 SQLite tables:
@@ -405,6 +426,8 @@ SQLite tables:
   cwd, and uploaded file metadata)
 - `orchestration_events` (including `source`, `severity`, lifecycle status,
   and typed event payload JSON)
+- `orchestration_usage_syncs` and `orchestration_usage_events` (private native
+  session scan state and normalized per-call counters; no transcript content)
 - `orchestration_task_graphs`, `orchestration_tasks`,
   `orchestration_task_dependencies`, and `orchestration_task_attempts`
   (bounded scheduling, dependency state, identity, retry lineage, and evidence)

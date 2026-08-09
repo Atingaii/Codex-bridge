@@ -10,6 +10,8 @@ import { OrchestrationWorkspace } from './pages/OrchestrationWorkspace';
 import { OrchestrationStatsPage } from './pages/OrchestrationStatsPage';
 import { PublicSharePage } from './pages/PublicSharePage';
 import { Workspace } from './pages/Workspace';
+import { AdminUsagePage } from './pages/AdminUsagePage';
+import { AdminUserUsagePage } from './pages/AdminUserUsagePage';
 
 export default function App() {
   const [user, setUser] = useState<UserAccount | null>(null);
@@ -49,6 +51,13 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePop);
   }, []);
 
+  useEffect(() => {
+    if (!booting && user && path.startsWith('/admin') && !user.isAdmin) {
+      window.history.replaceState({}, '', '/');
+      setPath('/');
+    }
+  }, [booting, path, user]);
+
   const navigate = useCallback((nextPath: string, options: { replace?: boolean } = {}) => {
     if (window.location.pathname !== nextPath) {
       if (options.replace) {
@@ -84,10 +93,17 @@ export default function App() {
     return <ConversationSnapshotPage t={t} />;
   }
 
+  if (path.startsWith('/admin')) {
+    if (!user.isAdmin) return null;
+    const adminUserMatch = path.match(/^\/admin\/usage\/users\/([^/]+)$/);
+    if (adminUserMatch) return <AdminUserUsagePage userID={decodeURIComponent(adminUserMatch[1])} t={t} navigate={navigate} />;
+    return <AdminUsagePage t={t} navigate={navigate} />;
+  }
+
   if (path.startsWith('/orchestrate')) {
-    if (path.startsWith('/orchestrate/stats')) {
+    if (path.startsWith('/orchestrate/stats') || path.startsWith('/orchestrate/usage')) {
       const runId = new URLSearchParams(window.location.search).get('run') || localStorage.getItem('codexBridge.activeOrchestrationRunId') || '';
-      return <OrchestrationStatsPage t={t} navigate={navigate} runId={runId} />;
+      return <OrchestrationStatsPage t={t} navigate={navigate} runId={path.startsWith('/orchestrate/usage') ? '' : runId} />;
     }
     return (
       <OrchestrationWorkspace

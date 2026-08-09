@@ -1,75 +1,77 @@
 # Codex Bridge
 
-[![CI](https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](go.mod)
-[![Platform](https://img.shields.io/badge/platform-Linux-555)](docs/deployment.md)
+<p align="center">
+  <img src="docs/assets/codex-bridge-hero.webp" alt="Codex Bridge：连接 IDE 与 Codex 的桥梁" width="100%" />
+</p>
 
-Remote browser access to the **Codex** and **Claude Code** CLIs running on your
-own machine — 1:1 chat with a single CLI, plus multi-CLI orchestration that
-relays turns between a native Codex session and a native Claude Code session.
+<p align="center"><strong>让浏览器安全访问私有机器上的 Codex 与 Claude Code，并进行多 CLI 编排。</strong></p>
 
-[简体中文](README.zh-CN.md) · [Live Help Guide](https://sparkon.cn/help) · [Deployment Guide](docs/deployment.md) · [Architecture](docs/architecture.md)
+<p align="center">
+  <a href="https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml"><img src="https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml/badge.svg" alt="CI 状态" /></a>
+  <a href="go.mod"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25+" /></a>
+  <a href="docs/deployment.md"><img src="https://img.shields.io/badge/platform-Linux-555" alt="Linux" /></a>
+</p>
+
+<p align="center">
+  <a href="README.zh-CN.md">中文接入指南</a> ·
+  <a href="https://sparkon.cn/help">在线图文教程</a> ·
+  <a href="docs/deployment.md">部署指南</a> ·
+  <a href="docs/architecture.md">架构说明</a>
+</p>
+
+Codex Bridge 将公网 Hub 与私有工作区分离：Hub 负责浏览器访问、认证和历史持久化；
+Bridge 从你的机器反向连接 Hub，并在本地工作目录中运行 Codex、Claude Code 等 CLI。
+Hub 不需要访问你的文件系统，也不需要保存模型密钥。
 
 ```text
-Browser ──WSS──> Hub (public) <──reverse WS── Bridge (your machine) ──> Codex / Claude
+浏览器 ── WSS ──> 公网 Hub <── 反向 WS ── Bridge（你的机器） ──> Codex / Claude Code
 ```
 
-## Features
+## 核心能力
 
-- One Go binary, two modes: `hub` (public server) and `bridge` (your machine).
-- Hub serves HTTPS/WSS behind a reverse proxy, embeds the static web UI, and
-  stores history in SQLite — no Redis, Postgres, or external build pipeline.
-- Bridge reverse-connects to the Hub and runs a selectable runner: `echo`,
-  `codex exec --json`, the `codex app-server` runner, or the `acp` runner
-  (resident Agent session + native local `/resume` takeover).
-- Multi-CLI orchestration relays turns between native Codex and Claude Code
-  sessions, with browser-side command/file approvals in review-required mode.
-- Optional self-service registration uses Cloudflare Turnstile server-side
-  verification; every user's endpoints and private conversation data remain
-  isolated by account.
-- Closing the browser tab leases the live chat session by default; reopen the
-  same `sid` before `hub.browser_lease_ttl` expires to reattach to the same
-  Bridge-side CLI process.
+- 一个 Go 二进制，提供 `hub` 公网服务和 `bridge` 私有端两种运行模式。
+- Hub 内嵌静态 Web UI，使用 SQLite 保存用户、会话、消息、编排事件和用量记录。
+- Bridge 通过反向 WebSocket 主动连接 Hub，不要求私有机器开放入站端口。
+- 支持 Codex、Claude Code、ACP 常驻会话和确定性的 `echo` runner。
+- 支持单 CLI 对话，以及 Codex 与 Claude Code 之间的多轮协作、辩论和形式化证明编排。
+- 浏览器断开后保留会话租约；在 TTL 内重新打开相同会话，可继续原生 CLI 上下文。
+- 记录输入、输出、缓存读取、缓存写入和推理 Token，并按机器、项目、模型和编排任务汇总。
+- 提供管理员用量面板，按用户查看活跃状态、在线端点、任务规模、Token 与官方 API 标价估算。
+- 支持浏览器端命令/文件审批、端点修复命令、原生 `resume` 和移动端 WebView 包装。
 
-## Requirements
+## 运行要求
 
-| To do this | You need |
+| 用途 | 要求 |
 | --- | --- |
-| Build from source | Go 1.25+, Node 20+ (for the web UI) |
-| Run a Bridge | Codex CLI and/or Claude Code installed and authenticated |
-| Run a production Hub | A TLS-terminating reverse proxy (Caddy config provided) |
+| 从源码构建 | Go 1.25+、Node.js 20+ |
+| 运行 Bridge | 已安装并完成认证的 Codex CLI 和/或 Claude Code |
+| 运行生产 Hub | TLS 终止反向代理，例如 Caddy 或 Nginx |
 
-> The web UI is compiled into the binary. When building from source, build the
-> frontend first (`make frontend` / `make build-all`) so the embedded assets are
-> current.
+Web UI 会编译进 Go 二进制。从源码构建时先运行 `make frontend`，或直接运行
+`make build-all` 刷新嵌入资源。
 
-## Get the code
+## 快速开始
 
 ```bash
 git clone https://github.com/Atingaii/Codex-bridge.git
 cd Codex-bridge
-```
 
-## Quick Start (from source)
-
-```bash
-# 1. Config
 cp configs/dev.yaml.example configs/dev.yaml
-# Edit configs/dev.yaml: set auth.bootstrap_password and a strong auth.jwt_secret.
+# 编辑 configs/dev.yaml，设置 auth.bootstrap_password 和随机 jwt_secret
 
-# 2. Create a login user and an enroll token
 go run . user --username admin --password 'change-me'
 go run . enroll
-# Put the printed token into configs/dev.yaml under bridge.token
-
-# 3. Run Hub and Bridge (two terminals)
-make run-hub      # or: go run . hub
-make run-bridge   # or: go run . bridge
+# 将输出的 token 写入 configs/dev.yaml 的 bridge.token
 ```
 
-Open <http://127.0.0.1:8088>.
+分别打开两个终端启动 Hub 和 Bridge：
 
-For Codex instead of echo, set `bridge.runner` in `configs/dev.yaml`:
+```bash
+make run-hub
+make run-bridge
+```
+
+然后访问 <http://127.0.0.1:8088>。使用 Codex 时，在配置中设置：
 
 ```yaml
 bridge:
@@ -79,234 +81,105 @@ bridge:
   approval_policy: never
 ```
 
-For a resident-session chat backed by an Agent Client Protocol (ACP) adapter
-(keeps one Agent process alive across turns and exposes a native local
-`/resume` takeover), use the `acp` runner:
+需要常驻 Agent 会话时，将 `bridge.runner` 设为 `acp`，并参考
+[ACP runner 文档](docs/features/acp-runner.md)。
 
-```yaml
-bridge:
-  runner: acp
-  cwd: /path/to/workspace
-  acp:
-    cli: claude            # claude | codex
-    claude_command: npx
-    claude_args: ["-y", "@zed-industries/claude-code-acp"]
-    codex_command: codex-acp
-    prefer_native_resume: true
-```
+## 用户侧接入
 
-See [docs/features/acp-runner.md](docs/features/acp-runner.md) for the dual-ID
-model and how local `claude --resume` / `codex resume` takeover works.
-
-## Build & Install
-
-The Hub-generated installer downloads into a temporary file and uses bounded,
-backed-off resume attempts over HTTP/1.1. A transient TLS or edge interruption
-does not replace an already working Bridge binary with a partial download.
+生产 Hub 的设置页面会生成一条“安装并连接”命令。进入目标工作目录后，用与本地 CLI
+相同的系统用户执行即可。命令会安装或更新 Bridge，并优先启动 `systemd --user` 服务；
+没有 user systemd 时会退回后台进程。
 
 ```bash
-make build-all                 # build the web UI, then the Go binary -> bin/codex-bridge
-./bin/codex-bridge hub
-sudo make install              # optional: install to /usr/local/bin/codex-bridge
-make help                      # list all targets
+# 直接执行网页设置页生成的单行命令
 ```
 
-## Deployment
+Bridge 日志位于 `~/.codex-bridge/logs/`。安装命令会保留当前 shell 的 `HOME`、`PATH`、
+`CODEX_HOME`、Claude 配置目录、模型凭据和代理变量，避免后台服务与前台 CLI 使用不同环境。
+Bridge 只有在日志确认 `[bridge] connected` 后才会报告连接成功。
 
-| Method | When to use | Where |
+同一个浏览器会话使用同一个 `sid`，后续消息会复用同一个本地 CLI/ACP 进程。浏览器关闭后，
+在租约 TTL 内重新打开相同会话即可继续；事后也可以在相同工作目录中使用 `codex resume` 或
+Claude Code 的 `/resume` 查看 CLI 自己落盘的原生记录。
+
+## 部署方式
+
+| 方式 | 适用场景 | 入口 |
 | --- | --- | --- |
-| From source | Local development, single host | [Quick Start](#quick-start-from-source) |
-| `make` binary | Reproducible local/staging build | [Build & Install](#build--install) |
-| Portable package | Copy archive to a fresh Linux server and run one script | [docs/deployment.md](docs/deployment.md#option-c--portable-package) |
-| Docker | Containerized Hub | [docs/deployment.md](docs/deployment.md#option-d--docker) |
-| systemd + Caddy | Production with TLS | [docs/deployment.md](docs/deployment.md#option-e--production-systemd--caddy) |
+| 源码运行 | 本地开发、单机测试 | [快速开始](#快速开始) |
+| Make 构建 | 可重复的本地或预发布构建 | [构建与安装](#构建与安装) |
+| Portable 包 | 拷贝到 Linux 服务器后解压运行 | [部署指南](docs/deployment.md#option-c--portable-package) |
+| Docker | 容器化运行 Hub | [部署指南](docs/deployment.md#option-d--docker) |
+| systemd + Caddy | 带 TLS 的生产环境 | [部署指南](docs/deployment.md#option-e--production-systemd--caddy) |
 
-The full multi-method guide — prerequisites, production config, verification,
-and troubleshooting — is in **[docs/deployment.md](docs/deployment.md)**.
+完整的生产配置、反向代理、验证和排错步骤见 [docs/deployment.md](docs/deployment.md)。
 
-### Portable package, at a glance
+## 构建与安装
+
+```bash
+make test
+make build-all                 # 构建前端并生成 bin/codex-bridge
+./bin/codex-bridge hub
+sudo make install              # 可选：安装到 /usr/local/bin
+```
+
+构建 portable 包：
 
 ```bash
 make portable-package
 scp dist/codex-bridge-*-linux-amd64.tar.gz user@server:/opt/
-
-ssh user@server
-cd /opt
-tar -xzf codex-bridge-*-linux-amd64.tar.gz
-cd codex-bridge-*-linux-amd64
-ADMIN_USERNAME=admin ADMIN_PASSWORD='change-me' APP_HOST=0.0.0.0 APP_PORT=8088 ./start.sh
 ```
 
-The extracted package initializes package-local SQLite state, admin login,
-Bridge token, logs, and pid files. It defaults to `BRIDGE_RUNNER=echo` for a
-first smoke test; set `BRIDGE_RUNNER=codex` and `BRIDGE_CWD=/path/to/workspace`
-after the target server has Codex CLI installed and authenticated.
+生产环境必须替换默认密码和 JWT secret，并将 Hub 放在 HTTPS 反向代理后面。配置文件、
+环境变量和 systemd 示例统一见 [开发与部署工作流](docs/dev-workflow.md)。
 
-### Production (systemd + Caddy), at a glance
+## 自建 Hub 的常用命令
 
 ```bash
-make build-all
-sudo make install
-sudo mkdir -p /opt/codex-bridge/configs /opt/codex-bridge/data
-sudo cp configs/dev.yaml.example /opt/codex-bridge/configs/prod.yaml   # then edit for prod
-sudo cp deploy/Caddyfile /etc/caddy/Caddyfile                          # edit the domain first
-sudo cp deploy/systemd-hub.service /etc/systemd/system/codex-bridge-hub.service
-sudo cp deploy/systemd-bridge.service /etc/systemd/system/codex-bridge-bridge.service
-sudo systemctl daemon-reload && sudo systemctl enable --now codex-bridge-hub codex-bridge-bridge
-sudo systemctl reload caddy
+codex-bridge hub
+codex-bridge user --username admin --password '...'
+codex-bridge enroll --ttl 24h
+
+codex-bridge link <token>       # 安装并作为后台服务连接，推荐
+codex-bridge connect <token>    # 前台连接，用于调试
+codex-bridge bridge             # 使用配置文件连接
 ```
 
-Production config keys (`/opt/codex-bridge/configs/prod.yaml`): `gateway.host:
-127.0.0.1`, `gateway.port: 8088`, `hub.cookie_secure: true`, a fresh
-`auth.jwt_secret`, `bridge.hub_url: https://<your-domain>`, and `bridge.token` /
-`bridge.token_file`. See the [deployment guide](docs/deployment.md) for details.
+## 界面与编排
 
-## Commands
+登录后可以在设置页管理多个 CLI 端，并在顶部切换目标机器。编排页支持默认模式和
+形式化证明模式；每一轮会记录参与角色、结构化事件、命令证据、Token 用量和最终结论。
+只有显式点击“新运行”才会创建新的编排上下文，继续输入会沿用当前 `runID`。
+
+“需要确认”权限策略会把 Codex 和 Claude Code 的命令/文件审批回传到浏览器；“无需授权”
+保持可信机器模式。删除在线端点时，Hub 会先要求本地 Bridge 停止对应服务，再撤销端点和 token。
+
+bootstrap 管理员可通过工作区盾牌图标进入 `/admin/usage`。管理员用量面板支持 7 天、30 天、
+90 天及全部时间范围，展示用户活跃状态、在线 Bridge、聊天与编排任务、模型调用、输入/输出/
+缓存/总 Token 和官方 API 标价费用趋势，并支持用户搜索与排序。点击用户可进入只读详情，
+按标题查看该用户的聊天会话与编排任务、状态、端点、活动时间及每条对话用量。详情不返回
+提示词、消息正文、本地路径或原生 CLI Session ID，也不能进入或修改他人的会话；普通用户
+仍只能访问自己的用量数据。
+
+## 文档
+
+- [中文接入指南](README.zh-CN.md)：SparkAPI Hub、ACP、resume 和常见使用流程
+- [在线图文教程](https://sparkon.cn/help)：注册、接入、对话、编排、证明和排错
+- [部署指南](docs/deployment.md)：源码、Portable、Docker、systemd + Caddy
+- [架构说明](docs/architecture.md)：组件、数据流和协议
+- [开发工作流](docs/dev-workflow.md)：环境变量、YAML 配置和本地开发
+- [代码地图](docs/code-map.md)：修改不同模块时需要同步的文件
+- [管理员用量面板](docs/features/admin-usage-dashboard.md)：权限、统计口径和隐私边界
+- [功能设计](docs/features/)：各项用户功能的设计文档
+
+## 开发约定
+
+非平凡的架构、协议、持久化和用户功能改动需要先更新 ADR 或功能设计文档；提交前请检查
+`docs/change-impact.md`，并运行：
 
 ```bash
-codex-bridge hub                  # public Hub server
-codex-bridge user --username admin --password '...'   # create/update a login user
-codex-bridge enroll --ttl 24h     # mint an enroll token for a new endpoint
-
-codex-bridge link <token>         # endpoint: install + run as a background service (recommended)
-codex-bridge connect <token>      # endpoint: run in the foreground (used internally by `link`)
-codex-bridge bridge               # endpoint: run from configs/<env>.yaml (advanced/dev)
+make doc-lint
+go test ./...
 ```
 
-For a real endpoint, use the single command the Hub **Settings** page generates;
-it runs `codex-bridge link`. `connect` and `bridge` are lower-level entry points.
-
-Browser self-registration is disabled by default. Create or update approved
-users with `codex-bridge user --username <name> --password <password>`, or
-explicitly enable `auth.registration` with a Cloudflare Turnstile Managed
-widget. The Hub must receive the site key, server-only secret, and production
-hostname; it validates every registration token with Siteverify before creating
-the isolated account.
-
-After login, create a CLI token in Settings and copy the single install-and-connect
-command from the target workspace, as the same OS user that runs Codex CLI and
-Claude Code. The command writes logs under `~/.codex-bridge/logs/` and only
-prints `codex-bridge connected` after the Bridge logs `[bridge] connected`;
-otherwise it prints recent log lines for diagnosis. It preserves `HOME`,
-`PATH`, `CODEX_HOME`, Claude config location variables, resolved Codex/Claude
-CLI paths, common model credentials, and common proxy variables for the
-background service so WSL/Linux shells that need a custom CLI, native history
-home, or proxy path keep working after `systemd --user` starts the Bridge.
-Generated user services keep the Bridge parent alive if a memory-heavy child
-process is OOM-killed. If either CLI is missing from the shell running the
-command, setup exits before registering an unusable endpoint.
-
-The Settings flow offers two permission profiles. Review required uses the
-Codex app-server runner so Codex command/file approval requests appear in the
-browser for chat and orchestration. Auto execute keeps the previous
-trusted-machine mode with `danger-full-access` and no prompts; Bridge maps that
-profile to Claude Code's bypass permission mode and scopes any root-only
-`IS_SANDBOX` handling to the managed Claude child process. Claude Code
-orchestration also uses browser-side approval in review-required mode through
-Claude Code's permission prompt MCP hook. A single workspace-contained `cat`,
-`coqc`, or batch `coqtop` command can be approved automatically after strict
-validation; shell composition, redirection, expansion, unknown options, and
-path escape continue to require browser review. Hub-managed orchestration uses the
-selected Bridge connection for the whole run, alternates direct Claude Code and
-Codex CLI turns, carries compact turn summaries forward, and shows each
-endpoint's approval capabilities before a run starts. The orchestration page
-also has a `default` / `formal-proof` profile selector and a native context
-maintenance setting; formal-proof guidance and post-turn native compaction are
-explicit opt-ins and are persisted with the run. Codex uses its app-server
-compaction RPC when available; CLI surfaces without a verified control channel
-are skipped with Bridge notes instead of receiving model-visible slash commands.
-In the formal-proof profile, collaboration uses proof-author/auditor contracts
-and debate uses falsifiable proposer/adversarial-critic contracts; both require
-unchanged statement identity, proof-state evidence, exact checker commands, and
-a final trust/dependency audit without adding hidden turns or changing the UI.
-Run-end metadata includes
-direct native resume commands for Codex and Claude Code when their native ids
-are available. Orchestration timelines use typed events with `source`,
-`severity`, command payloads, and one structured final conclusion so Bridge
-notes and CLI output remain distinguishable.
-Existing endpoints can be expanded under Settings -> Agents & Runtime to
-generate a repair command. That command downloads the current Bridge binary and
-reconnects the same endpoint with its existing machine id, name, and known
-working directory. Deleting an online endpoint asks its local Bridge to stop the
-matching generated user service and exit before the Hub hides the endpoint and
-revokes consumed enroll tokens.
-
-## Android APK
-
-The Android wrapper uses Capacitor and points at `https://sparkapi.tech`.
-
-```bash
-cd frontend
-npm run android:build
-
-cd ../android
-ANDROID_HOME=/usr/lib/android-sdk \
-ANDROID_SDK_ROOT=/usr/lib/android-sdk \
-JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
-./gradlew assembleDebug
-```
-
-The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
-
-## Configuration
-
-Config loads from `configs/${APP_ENV:-dev}.yaml`, then selected environment variables override it. Set `CODEX_BRIDGE_CONFIG_DIR` to read config files from another directory.
-
-Common overrides:
-
-- `APP_HOST`, `APP_PORT`
-- `HUB_DB_PATH`, `HUB_COOKIE_SECURE`, `HUB_BROWSER_LEASE_TTL`
-- `JWT_SECRET`, `HUB_USERNAME`, `HUB_PASSWORD`
-- `REGISTRATION_ENABLED`, `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET`, `TURNSTILE_HOSTNAME`
-- `BRIDGE_HUB_URL`, `BRIDGE_TOKEN`, `BRIDGE_TOKEN_FILE`
-- `BRIDGE_NAME`, `BRIDGE_CWD`, `BRIDGE_RUNNER`, `BRIDGE_MODEL`
-- `BRIDGE_SANDBOX`, `BRIDGE_APPROVAL_POLICY`
-- `BRIDGE_LONG_COMMAND_OBSERVER_ENABLED`, `BRIDGE_LONG_COMMAND_OBSERVER_AFTER`
-- `LOG_LEVEL`, `LOG_FORMAT`
-
-Useful session behavior:
-
-```yaml
-hub:
-  # Keeps the Bridge-side session alive briefly after the last browser tab closes.
-  browser_lease_ttl: 5m
-  # Legacy close-on-tab-close mode. Set true only if tab close should kill the
-  # backend session after browser_close_grace instead of using the lease.
-  browser_close_session: false
-```
-
-Optional orchestration long-command observation is configured under
-`bridge.long_command_observer`; see `docs/dev-workflow.md` for the full env and
-YAML reference.
-
-## Notes
-
-`codex exec --json` remains the automated trusted-machine runner. The
-review-required profile uses the `codex app-server` JSON-RPC runner so approval
-requests can round-trip through Hub and the browser for both chat and Codex
-orchestration.
-Run setup/repair commands from the same shell where Codex and Claude credentials
-work; the generated background service preserves common model credential
-variables such as `OPENAI_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` in its private
-0600 env file.
-
-## Documentation
-
-The public [screenshot help guide](https://sparkon.cn/help) covers account
-registration, Turnstile, endpoint enrollment, chat, collaboration/debate
-orchestration, formal-proof runs, context reduction, sharing, and troubleshooting.
-
-- [Deployment Guide](docs/deployment.md) — all deployment methods, production setup, troubleshooting
-- [Architecture](docs/architecture.md) — components, data flow, protocol
-- [Developer Workflow](docs/dev-workflow.md) — full env/YAML reference, local dev
-- [Code Map](docs/code-map.md) — "change X → edit Y" guidance
-- [Feature designs](docs/features/) — per-feature design docs
-
-## Project Workflow
-
-Engineering rules are documented in `AGENTS.md`. The short version:
-
-- Non-trivial behavior changes need an ADR or `docs/features/` design first.
-- Check `docs/change-impact.md` for coupled docs/tests before submitting.
-- Commit messages use a final `Doc-Impact: ...` footer.
-- Run `make doc-lint` when documentation, env vars, anchors, or rules change.
+具体规则见 [AGENTS.md](AGENTS.md)。

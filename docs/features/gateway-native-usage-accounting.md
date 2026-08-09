@@ -1,3 +1,8 @@
+> **DEPRECATED - per-turn snapshots cannot account for every native model call**
+>
+> Current design: [Embedded CLI Usage Ledger](embedded-cli-usage-ledger.md).
+> Historical only; do not implement from this doc.
+
 # Gateway Native Usage Accounting
 
 ## Goal

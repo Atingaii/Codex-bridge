@@ -1,12 +1,20 @@
 # Codex Bridge 中文接入指南
 
-[![CI](https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](go.mod)
-[![Platform](https://img.shields.io/badge/platform-Linux-555)](docs/deployment.md)
+<p align="center">
+  <img src="docs/assets/codex-bridge-hero.webp" alt="Codex Bridge：连接 IDE 与 Codex 的桥梁" width="100%" />
+</p>
 
-[English](README.md) · [在线图文教程](https://sparkon.cn/help) · [部署指南](docs/deployment.md) · [架构](docs/architecture.md)
+<p align="center"><strong>让浏览器安全访问私有机器上的 Codex 与 Claude Code，并进行多 CLI 编排。</strong></p>
 
-Codex Bridge 让浏览器远程访问私有机器上的 Codex 和 Claude Code CLI：既可与单个 CLI 一对一聊天，也可通过编排在一个长驻的原生 Codex 会话与一个长驻的原生 Claude Code 会话之间逐轮中转（Bridge 只回传输出与轮次上下文，不注入额外的校验/补救轮次，因此你可以在工作目录里 `resume` 这些原生会话）。Hub 是公网入口和 Web UI，Bridge 从私有机器反向连接 Hub，所以 Hub 不需要保存 `OPENAI_API_KEY`，也不需要直连你的工作目录。
+<p align="center">
+  <a href="https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml"><img src="https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml/badge.svg" alt="CI 状态" /></a>
+  <a href="go.mod"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25+" /></a>
+  <a href="docs/deployment.md"><img src="https://img.shields.io/badge/platform-Linux-555" alt="Linux" /></a>
+</p>
+
+<p align="center"><a href="README.md">English</a> · <a href="https://sparkon.cn/help">在线图文教程</a> · <a href="docs/deployment.md">部署指南</a> · <a href="docs/architecture.md">架构</a></p>
+
+Codex Bridge 将公网 Hub 与私有工作区分离：Hub 负责浏览器访问和历史持久化，反向连接的 Bridge 在已有文件与凭据的私有机器上运行 Codex 和 Claude Code CLI。
 
 ## Bridge / ACP / resume 简明版
 
@@ -142,6 +150,7 @@ codex
 - 删除 CLI 端会让 Hub 通知在线 Bridge 停止对应本地服务并退出，同时让已消费 token
   失效；离线端点仍会从页面隐藏并撤销旧 token。
 - 非管理员只能看到自己接入的 CLI 端；管理员可以看到所有 CLI 端。
+- bootstrap 管理员可以点击工作区的盾牌图标进入 `/admin/usage`，按 7 天、30 天、90 天或全部时间查看各用户的活跃状态、在线 Bridge、聊天与编排任务、模型调用、输入/输出/缓存/总 Token 及官方 API 标价费用趋势，并可搜索和排序用户。点击用户可进入只读详情，按标题查看其聊天会话和编排任务、状态、端点、时间及每条对话用量。详情不展示提示词、消息正文、本地路径或原生 CLI Session ID，也不能进入或修改他人的会话；普通用户不能访问管理员接口。
 - Orchestrate 页面只有点击“新运行”才会开启新的编排会话；在当前任务框继续输入会沿用当前 run，并把历史事件压缩成上下文继续运行。
 
 ## 自建 Hub

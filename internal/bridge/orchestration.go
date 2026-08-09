@@ -276,7 +276,17 @@ func orchestrationTaskRef(payload protocol.OrchestrationStartPayload) *protocol.
 		return nil
 	}
 	task := payload.TaskGraph.Tasks[0]
-	return &protocol.TaskAttemptRef{GraphID: payload.TaskGraph.ID, TaskID: task.ID, AttemptID: task.AttemptID, Role: task.Role, WorkerSlot: task.WorkerSlot, PayloadDigest: task.PayloadDigest}
+	return &protocol.TaskAttemptRef{
+		GraphID:       payload.TaskGraph.ID,
+		TaskID:        task.ID,
+		AttemptID:     task.AttemptID,
+		Name:          task.Name,
+		Role:          task.Role,
+		WorkerSlot:    task.WorkerSlot,
+		Round:         payload.TaskGraph.Round,
+		MaxRounds:     payload.TaskGraph.MaxRounds,
+		PayloadDigest: task.PayloadDigest,
+	}
 }
 
 func (m *OrchestrationManager) executionFor(key string) orchestrationExecution {
@@ -655,6 +665,11 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	if maxTurns > 12 {
 		maxTurns = 12
 	}
+	round, maxRounds := 0, 0
+	if payload.TaskGraph != nil {
+		round = payload.TaskGraph.Round
+		maxRounds = payload.TaskGraph.MaxRounds
+	}
 	nativeContextCompaction := protocol.NormalizeNativeContextCompaction(payload.NativeContextCompaction)
 	nativeSession := m.nativeSession(payload.RunID, runCWD)
 	nativeSession.mu.Lock()
@@ -689,6 +704,8 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			FirstCLI:                firstCLI,
 			MaxTurnsRequested:       maxTurnsRequested,
 			MaxTurnsApplied:         maxTurns,
+			Round:                   round,
+			MaxRounds:               maxRounds,
 			PromptSeq:               payload.PromptSeq,
 			Profile:                 profile,
 			NativeContextCompaction: nativeContextCompaction,
@@ -701,6 +718,8 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			"maxTurns":                maxTurns,
 			"maxTurnsRequested":       maxTurnsRequested,
 			"maxTurnsApplied":         maxTurns,
+			"round":                   round,
+			"maxRounds":               maxRounds,
 			"promptSeq":               payload.PromptSeq,
 			"profile":                 profile,
 			"nativeContextCompaction": nativeContextCompaction,
@@ -753,7 +772,12 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			turnID = fmt.Sprintf("%s-p%03d-%02d", payload.RunID, payload.PromptSeq, turn)
 		}
 		clearRelayResumeMode(cli, workerSlot, &sessionState)
-		prompt := composeRelayPromptWithWorkerSlot(mode, firstCLI, profile, payload.Prompt, payload.Context, payload.Resume, role, cli, workerSlot, turn, maxTurns, history)
+		var taskScope *durableTaskPromptScope
+		if payload.TaskGraph != nil && len(payload.TaskGraph.Tasks) == 1 {
+			task := payload.TaskGraph.Tasks[0]
+			taskScope = &durableTaskPromptScope{Name: task.Name, Role: task.Role, Round: payload.TaskGraph.Round, MaxRounds: payload.TaskGraph.MaxRounds}
+		}
+		prompt := composeRelayPromptWithTaskScope(mode, firstCLI, profile, payload.Prompt, payload.Context, payload.Resume, role, cli, workerSlot, turn, maxTurns, history, taskScope)
 		resumeMode := plannedRelayResumeMode(cli, workerSlot, sessionState)
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:    "turn.start",
@@ -766,6 +790,8 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 				WorkerSlot: workerSlot,
 				Turn:       turn,
 				MaxTurns:   maxTurns,
+				Round:      round,
+				MaxRounds:  maxRounds,
 				PromptText: prompt,
 				Profile:    profile,
 				ResumeMode: resumeMode,
@@ -847,11 +873,23 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	finalContent := relayTerminalContent(history)
 	if payload.TaskGraph != nil && len(payload.TaskGraph.Tasks) == 1 {
 		task := payload.TaskGraph.Tasks[0]
-		if task.Role == store.TaskRoleReviewer && !durableReviewerCanComplete(profile, history) {
+		finalRound := payload.TaskGraph.MaxRounds <= 0 || payload.TaskGraph.Round >= payload.TaskGraph.MaxRounds
+		if task.Role == store.TaskRoleReviewer && !durableReviewerCanAdvance(profile, history) {
 			reason := "reviewer did not return a resolved structured handoff with independent command evidence"
 			if profile == bridgeprofiles.Formal() && !durableTaskHasFormalCheck(history) {
 				reason = "formal-proof reviewer did not record a successful checker command"
 			}
+			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+				Kind:          "run.error",
+				Status:        store.OrchestrationFailed,
+				Error:         reason,
+				Content:       finalContent,
+				RunConclusion: runConclusionForStatus(store.OrchestrationFailed, reason, history),
+			})
+			return
+		}
+		if task.Role == store.TaskRoleReviewer && finalRound && !durableReviewerCanComplete(profile, history) {
+			reason := fmt.Sprintf("configured collaboration rounds exhausted after round %d with unresolved obligations", payload.TaskGraph.Round)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 				Kind:          "run.error",
 				Status:        store.OrchestrationFailed,
@@ -900,15 +938,24 @@ func durableTaskHasFormalCheck(history []orchestrationTurn) bool {
 }
 
 func durableReviewerCanComplete(profile string, history []orchestrationTurn) bool {
+	if !durableReviewerCanAdvance(profile, history) {
+		return false
+	}
+	record := history[len(history)-1]
+	packet := record.Relay
+	return packet.Status == "resolved" && packet.To == "user" && packet.Intent == "final" && machineExplicitNone(packet.Next) && machineExplicitNone(packet.Risks)
+}
+
+func durableReviewerCanAdvance(profile string, history []orchestrationTurn) bool {
 	if len(history) == 0 {
 		return false
 	}
 	record := history[len(history)-1]
 	packet := record.Relay
-	if record.Role != store.TaskRoleReviewer || !packet.Structured || packet.Status != "resolved" || packet.To != "user" || packet.Intent != "final" || !machineExplicitNone(packet.Next) || !machineExplicitNone(packet.Risks) {
+	if record.Role != store.TaskRoleReviewer || !packet.Structured || (packet.Status != "resolved" && packet.Status != "needs_next" && packet.Status != "blocked") {
 		return false
 	}
-	if len(history) > 1 && machineNone(packet.Verified) && !relayHasSuccessfulCommand(record.Tools) {
+	if !relayHasSuccessfulCommand(record.Tools) {
 		return false
 	}
 	return normalizeOrchestrationProfile(profile) != bridgeprofiles.Formal() || durableTaskHasFormalCheck(history)

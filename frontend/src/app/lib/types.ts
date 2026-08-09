@@ -113,6 +113,18 @@ export type OrchestrationUsageStats = {
   costKnown: boolean;
   costSource?: string;
 	pricingModel?: string;
+  reasoningTokens?: number;
+	callCount?: number;
+};
+
+export type OrchestrationRoundStats = {
+  round: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  callCount: number;
 };
 
 export type OrchestrationRunStats = {
@@ -130,7 +142,152 @@ export type OrchestrationRunStats = {
   costKnown: boolean;
   costSource?: string;
 	pricingModels?: string[];
+  reasoningTokens?: number;
+  callCount?: number;
+  accountingStatus: 'complete' | 'partial' | 'legacy-incomplete' | string;
+  accountingSource: 'local-cli-ledger' | 'turn-snapshots' | string;
+  scannedAt?: number;
   byCli: OrchestrationUsageStats[];
+  cacheTokens: number;
+  totalTokens: number;
+  rounds?: OrchestrationRoundStats[];
+};
+
+export type OrchestrationUsageOverviewItem = {
+  runId: string;
+  title: string;
+  machineId: string;
+  machineName: string;
+  hostname?: string;
+  createdAt: number;
+  status: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  callCount: number;
+  costKnown: boolean;
+  byCli: OrchestrationUsageStats[];
+};
+
+export type OrchestrationUsageTrendPoint = {
+  date: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  callCount: number;
+  costKnown: boolean;
+};
+
+export type OrchestrationUsageOverview = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  callCount: number;
+  runs: number;
+  machines: number;
+  days: number;
+  timezoneOffset: number;
+  costKnown: boolean;
+  trend: OrchestrationUsageTrendPoint[];
+  items: OrchestrationUsageOverviewItem[];
+};
+
+export type AdminUsageTrendPoint = {
+  date: string;
+  activeUsers: number;
+  chatMessages: number;
+  orchestrationRuns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  costKnown: boolean;
+  callCount: number;
+};
+
+export type AdminUserUsage = {
+  userId: string;
+  username: string;
+  createdAt: number;
+  lastActiveAt: number;
+  activityStatus: 'online' | 'active' | 'idle' | 'inactive';
+  onlineAgents: number;
+  totalAgents: number;
+  chatSessions: number;
+  orchestrationRuns: number;
+  runningRuns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  costKnown: boolean;
+  callCount: number;
+};
+
+export type AdminUsageOverview = {
+  days: number;
+  timezoneOffset: number;
+  users: number;
+  activeUsers: number;
+  onlineUsers: number;
+  onlineAgents: number;
+  totalAgents: number;
+  chatSessions: number;
+  orchestrationRuns: number;
+  runningRuns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  costKnown: boolean;
+  callCount: number;
+  trend: AdminUsageTrendPoint[];
+  items: AdminUserUsage[];
+};
+
+export type AdminConversationUsage = {
+  id: string;
+  kind: 'chat' | 'orchestration';
+  title: string;
+  agentName: string;
+  status: string;
+  mode?: string;
+  maxTurns?: number;
+  activityCount: number;
+  createdAt: number;
+  updatedAt: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  costKnown: boolean;
+  callCount: number;
+};
+
+export type AdminUserUsageDetail = {
+  userId: string;
+  username: string;
+  createdAt: number;
+  days: number;
+  timezoneOffset: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  costKnown: boolean;
+  callCount: number;
+  conversations: AdminConversationUsage[];
 };
 
 export type OrchestrationEvent = {
@@ -162,8 +319,11 @@ export type TaskAttemptRef = {
   graphId: string;
   taskId: string;
   attemptId: string;
+  name?: string;
   role?: string;
   workerSlot?: string;
+  round?: number;
+  maxRounds?: number;
   payloadDigest: string;
 };
 
@@ -190,6 +350,8 @@ export type RunStartData = {
   firstCli?: string;
   maxTurnsRequested?: number;
   maxTurnsApplied?: number;
+  round?: number;
+  maxRounds?: number;
   promptSeq?: number;
   profile?: string;
   nativeContextCompaction?: NativeContextCompaction;
@@ -200,6 +362,8 @@ export type TurnStartData = {
   workerSlot?: string;
   turn?: number;
   maxTurns?: number;
+  round?: number;
+  maxRounds?: number;
   promptText?: string;
   profile?: string;
   resumeMode?: string;
@@ -293,6 +457,8 @@ export type OrchestrationTimelineGroup = {
   turnId?: string;
   role?: string;
   cli?: string;
+  taskName?: string;
+  workerSlot?: string;
   turnInfo?: OrchestrationTurnInfo;
   items: OrchestrationTimelineItem[];
   messageCount: number;
@@ -315,6 +481,9 @@ export type OrchestrationVisibleEvent =
       kind: string;
       role?: string;
       cli?: string;
+      taskName?: string;
+      workerSlot?: string;
+      turnInfo?: OrchestrationTurnInfo;
       turnId?: string;
       content: string;
       status?: string;
@@ -331,6 +500,9 @@ export type OrchestrationVisibleEvent =
       kind: string;
       role?: string;
       cli?: string;
+      taskName?: string;
+      workerSlot?: string;
+      turnInfo?: OrchestrationTurnInfo;
       turnId?: string;
       content: string;
       status?: string;
@@ -346,6 +518,9 @@ export type OrchestrationVisibleEvent =
       kind: string;
       role?: string;
       cli?: string;
+      taskName?: string;
+      workerSlot?: string;
+      turnInfo?: OrchestrationTurnInfo;
       turnId?: string;
       content: string;
       status?: string;

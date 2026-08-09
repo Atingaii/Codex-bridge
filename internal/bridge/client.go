@@ -271,6 +271,7 @@ func BridgeCapabilities(cfg *config.Config) *protocol.BridgeCapabilities {
 		Orchestration:    map[string]protocol.BridgeCLICapability{},
 		Metadata:         map[string]string{"approvalMode": approvalMode(cfg)},
 		DurableTaskGraph: cfg.Bridge.DurableTaskGraph,
+		UsageLedger:      true,
 	}
 	caps.Chat["codex"] = protocol.BridgeCLICapability{
 		Available:       codexAvailable && (runner == "codex-app-server" || runner == "codex-appserver" || runner == "app-server"),
@@ -431,6 +432,15 @@ func (c *Client) handleEnvelope(ctx context.Context, env protocol.Envelope, out 
 	case protocol.TypeOrchestrationCancel:
 		payload, _ := protocol.Decode[protocol.OrchestrationCancelPayload](env)
 		c.orchestrations.Cancel(payload.RunID)
+	case protocol.TypeOrchestrationUsageSyncRequest:
+		payload, err := protocol.Decode[protocol.OrchestrationUsageSyncRequest](env)
+		if err != nil || payload.RunID == "" {
+			return
+		}
+		go func() {
+			result := scanOrchestrationUsage(payload)
+			send(out, protocol.MustEnvelope(protocol.TypeOrchestrationUsageSyncResult, "", result))
+		}()
 	default:
 		send(out, protocol.MustEnvelope(protocol.TypeError, env.Sid, protocol.ErrorPayload{Code: "BAD_TYPE", Message: "unsupported bridge frame"}))
 	}

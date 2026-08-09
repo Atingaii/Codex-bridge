@@ -20,7 +20,7 @@ func runConclusionForStatus(status, detail string, history []orchestrationTurn) 
 		outcome = "errored"
 	}
 	handoff := finalMachineHandoff(history)
-	if status == store.OrchestrationCompleted && (handoff.Status == "blocked" || handoff.Status == "needs_next") {
+	if (status == store.OrchestrationCompleted || status == store.OrchestrationFailed) && (handoff.Status == "blocked" || handoff.Status == "needs_next") {
 		outcome = "blocked"
 	}
 	summary := strings.TrimSpace(detail)
@@ -192,6 +192,9 @@ func unixOrZero(t time.Time) int64 {
 
 func (m *OrchestrationManager) emit(runID string, event protocol.OrchestrationEventPayload) {
 	execution := m.executionFor(runID)
+	if execution.task != nil && (event.Kind == "run.end" || event.Kind == "run.error" || event.Kind == "run.cancelled") {
+		m.closeNativeSession(runID)
+	}
 	if execution.runID != "" {
 		event.RunID = execution.runID
 		event.Task = execution.task

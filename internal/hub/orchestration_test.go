@@ -22,7 +22,7 @@ func TestBuildOrchestrationRunStatsAggregatesUsage(t *testing.T) {
 		{Kind: "turn.usage", CLI: "codex", Data: map[string]any{"cli": "codex", "model": "gpt-5-codex", "inputTokens": float64(10), "outputTokens": float64(4), "cacheReadTokens": float64(2), "estimatedCostUsd": .01, "estimated": true}},
 		{Kind: "turn.usage", CLI: "claude", Data: map[string]any{"cli": "claude", "model": "claude-sonnet-4", "inputTokens": float64(8), "outputTokens": float64(3), "estimatedCostUsd": .02, "estimated": true}},
 	})
-	if stats.RuntimeSeconds != 29 || stats.InputTokens != 18 || stats.OutputTokens != 7 || stats.CacheReadTokens != 2 || len(stats.ByCLI) != 2 || !stats.Estimated {
+	if stats.RuntimeSeconds != 30 || stats.InputTokens != 18 || stats.OutputTokens != 7 || stats.CacheReadTokens != 2 || len(stats.ByCLI) != 2 || !stats.Estimated {
 		t.Fatalf("stats = %#v", stats)
 	}
 }
@@ -55,6 +55,123 @@ func TestBuildOrchestrationRunStatsDoesNotPresentPartialCostAsComplete(t *testin
 	})
 	if stats.CostKnown {
 		t.Fatalf("partial aggregate marked complete: %#v", stats)
+	}
+}
+
+func TestBuildLedgerOrchestrationRunStatsNormalizesCalls(t *testing.T) {
+	run := store.OrchestrationRun{ID: "orc_ledger", CreatedAt: 100, FinishedAt: 110, Status: store.OrchestrationCompleted}
+	stats := buildOrchestrationRunStatsWithLedger(run, nil, []protocol.OrchestrationUsageEvent{{CLI: "codex", Provider: "openai", Model: "gpt-5.6-sol", InputTokens: 20, CacheReadTokens: 80, OutputTokens: 5, ReasoningTokens: 2}}, []store.OrchestrationUsageSync{{Status: "complete", ScannedAt: 105}})
+	if stats.AccountingStatus != "complete" || stats.AccountingSource != "local-cli-ledger" || stats.InputTokens != 20 || stats.CacheReadTokens != 80 || stats.OutputTokens != 5 || stats.ReasoningTokens != 2 || stats.CallCount != 1 || stats.CacheTokens != 80 || stats.TotalTokens != 105 || len(stats.Rounds) != 1 || stats.Rounds[0].TotalTokens != 105 || !stats.CostKnown {
+		t.Fatalf("stats = %#v", stats)
+	}
+}
+
+func TestBuildLedgerOrchestrationRunStatsUsesFirstRunStartAcrossRounds(t *testing.T) {
+	run := store.OrchestrationRun{ID: "orc_ledger_rounds", CreatedAt: 100, FinishedAt: 130, Status: store.OrchestrationCompleted}
+	stats := buildOrchestrationRunStatsWithLedger(run, []store.OrchestrationEvent{
+		{Kind: "run.start", CreatedAt: 101},
+		{Kind: "run.end", CreatedAt: 110},
+		{Kind: "run.start", CreatedAt: 111},
+	}, []protocol.OrchestrationUsageEvent{{CLI: "codex", Provider: "custom", Model: "gpt-5.6-sol", InputTokens: 20, OutputTokens: 5}}, []store.OrchestrationUsageSync{{Status: "complete", ScannedAt: 130}})
+	if stats.StartedAt != 100 || stats.RuntimeSeconds != 30 {
+		t.Fatalf("stats = %#v", stats)
+	}
+	if !stats.CostKnown || stats.EstimatedCostUSD <= 0 {
+		t.Fatalf("custom provider should use known model pricing: %#v", stats)
+	}
+}
+
+func TestUsageOverviewRange(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      string
+		wantDays   int
+		wantOffset int
+		wantCutoff bool
+		wantErr    bool
+	}{
+		{name: "default", wantDays: 30, wantCutoff: true},
+		{name: "seven days in utc plus eight", query: "?days=7&timezoneOffset=-480", wantDays: 7, wantOffset: -480, wantCutoff: true},
+		{name: "all history", query: "?days=0&timezoneOffset=840", wantDays: 0, wantOffset: 840},
+		{name: "unsupported days", query: "?days=14", wantErr: true},
+		{name: "invalid days", query: "?days=recent", wantErr: true},
+		{name: "invalid timezone", query: "?timezoneOffset=841", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/api/usage/overview"+test.query, nil)
+			days, offset, cutoff, err := usageOverviewRange(r)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("usageOverviewRange() error = nil")
+				}
+				return
+			}
+			if err != nil || days != test.wantDays || offset != test.wantOffset || (cutoff != 0) != test.wantCutoff {
+				t.Fatalf("usageOverviewRange() = (%d, %d, %d, %v)", days, offset, cutoff, err)
+			}
+		})
+	}
+}
+
+func TestUsageOverviewFiltersUsageByEventTime(t *testing.T) {
+	const cutoff = int64(200)
+	timeline := []store.OrchestrationEvent{
+		{Kind: "run.start", CreatedAt: 100},
+		{Kind: "turn.usage", CreatedAt: 199},
+		{Kind: "turn.usage", CreatedAt: 200},
+	}
+	filteredTimeline := filterOverviewTimeline(timeline, cutoff)
+	if len(filteredTimeline) != 2 || filteredTimeline[0].Kind != "run.start" || filteredTimeline[1].CreatedAt != cutoff {
+		t.Fatalf("filtered timeline = %#v", filteredTimeline)
+	}
+
+	run := store.OrchestrationRun{CreatedAt: 150}
+	ledger := []protocol.OrchestrationUsageEvent{
+		{EventID: "before", OccurredAt: 199},
+		{EventID: "at-cutoff", OccurredAt: 200},
+		{EventID: "run-fallback"},
+	}
+	filteredLedger := filterOverviewLedger(run, ledger, cutoff)
+	if len(filteredLedger) != 1 || filteredLedger[0].EventID != "at-cutoff" {
+		t.Fatalf("filtered ledger = %#v", filteredLedger)
+	}
+}
+
+func TestAppendOverviewTrendUsesLocalDaysAndPreservesUnknownCost(t *testing.T) {
+	trend := map[string]*orchestrationUsageTrendPoint{}
+	events := []protocol.OrchestrationUsageEvent{
+		{
+			EventID: "known", CLI: "codex", Model: "gpt-5.6-sol", OccurredAt: time.Date(2026, 8, 9, 15, 30, 0, 0, time.UTC).Unix(),
+			InputTokens: 10, CacheReadTokens: 20, OutputTokens: 5,
+		},
+		{
+			EventID: "unknown", CLI: "custom", Model: "unknown-model", OccurredAt: time.Date(2026, 8, 9, 16, 30, 0, 0, time.UTC).Unix(),
+			InputTokens: 7, OutputTokens: 3,
+		},
+	}
+	appendOverviewTrend(trend, store.OrchestrationRun{}, nil, events, []store.OrchestrationUsageSync{{Status: "complete"}}, -480)
+
+	first := trend["2026-08-09"]
+	if first == nil || first.TotalTokens != 35 || first.CacheTokens != 20 || first.CallCount != 1 || !first.CostKnown || first.EstimatedCostUSD <= 0 {
+		t.Fatalf("first local day = %#v", first)
+	}
+	second := trend["2026-08-10"]
+	if second == nil || second.TotalTokens != 10 || second.CallCount != 1 || second.CostKnown || second.EstimatedCostUSD != 0 {
+		t.Fatalf("second local day = %#v", second)
+	}
+}
+
+func TestUsageSyncResultRejectsForeignAgent(t *testing.T) {
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	run := createOrchestrationRun(t, st, userID, agentID)
+	s.handleOrchestrationUsageSyncResult(context.Background(), "foreign-agent", protocol.MustEnvelope(protocol.TypeOrchestrationUsageSyncResult, "", protocol.OrchestrationUsageSyncResult{RunID: run.ID, ScannedAt: 1, Sessions: []protocol.OrchestrationUsageSessionResult{{CLI: "codex", SessionID: "session-12345678", Status: "complete", EventCount: 1}}, Events: []protocol.OrchestrationUsageEvent{{EventID: "event-1", CLI: "codex", SessionID: "session-12345678", InputTokens: 10}}}))
+	events, err := st.ListOrchestrationUsageEvents(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("foreign usage persisted: %#v", events)
 	}
 }
 
@@ -354,6 +471,28 @@ func TestCompactOrchestrationContextIncludesTurnEndConclusion(t *testing.T) {
 	}
 	if !strings.Contains(contextSummary, "Tool outcomes and commands") || !strings.Contains(contextSummary, "go test ./...") {
 		t.Fatalf("context summary missing command context:\n%s", contextSummary)
+	}
+}
+
+func TestCompactOrchestrationContextOmitsFormalProofBootstrap(t *testing.T) {
+	t.Parallel()
+	run := store.OrchestrationRun{ID: "orc_context_bootstrap", Mode: "collaboration", Status: store.OrchestrationRunning, CWD: "/repo"}
+	contextSummary := compactOrchestrationContext(run, []store.OrchestrationEvent{
+		{
+			RunID: run.ID, Kind: "turn.delta", Role: "bootstrap", CLI: "bridge",
+			Content:        "Formal-proof notes created at /private/proof-notes.md.",
+			BridgeNoteData: &protocol.BridgeNoteData{Category: "formal-proof-harness-bootstrap"},
+		},
+		{
+			RunID: run.ID, Kind: "turn.delta", Role: "reviewer", CLI: "codex",
+			Content: "连接恢复后继续执行。", Data: map[string]any{"category": "cli-transport-retry-start"},
+		},
+	})
+	if strings.Contains(contextSummary, "proof-notes") || strings.Contains(contextSummary, "Formal-proof notes created") {
+		t.Fatalf("bootstrap detail leaked into compact context:\n%s", contextSummary)
+	}
+	if !strings.Contains(contextSummary, "连接恢复后继续执行") {
+		t.Fatalf("actionable recovery detail was removed:\n%s", contextSummary)
 	}
 }
 

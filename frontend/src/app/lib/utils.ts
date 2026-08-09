@@ -316,11 +316,12 @@ export function orchestrationTimelineGroups(
   const completeTurnKeys = completedOrchestrationTurnGroupKeys(events, run?.id);
   const terminalClosedTurnKeys = terminalClosedOrchestrationTurnGroupKeys(events, run?.id);
 
-  const ensureTurnGroup = (item: OrchestrationTimelineItem, meta: { runId?: string; turnId?: string; role?: string; cli?: string }) => {
+  const ensureTurnGroup = (item: OrchestrationTimelineItem, meta: { runId?: string; turnId?: string; role?: string; cli?: string; taskName?: string; workerSlot?: string; turnInfo?: OrchestrationTurnInfo }) => {
     const key = orchestrationTimelineTurnGroupKey(meta);
     let group = turnGroups.get(key);
     if (!group) {
-      const turnInfo = parseOrchestrationTurnInfo(meta.turnId);
+      const parsedTurnInfo = parseOrchestrationTurnInfo(meta.turnId);
+      const turnInfo = meta.turnInfo || (typeof parsedTurnInfo.ordinal === 'number' && run?.maxTurns ? { ...parsedTurnInfo, total: run.maxTurns } : parsedTurnInfo);
       group = {
         type: 'turn',
         key,
@@ -328,7 +329,9 @@ export function orchestrationTimelineGroups(
         turnId: meta.turnId,
         role: meta.role,
         cli: meta.cli,
-        turnInfo: typeof turnInfo.ordinal === 'number' && run?.maxTurns ? { ...turnInfo, total: run.maxTurns } : turnInfo,
+        taskName: meta.taskName,
+        workerSlot: meta.workerSlot,
+        turnInfo,
         items: [],
         messageCount: 0,
         commandCount: 0,
@@ -346,6 +349,9 @@ export function orchestrationTimelineGroups(
     } else {
       group.role = group.role || meta.role;
       group.cli = group.cli || meta.cli;
+      group.taskName = group.taskName || meta.taskName;
+      group.workerSlot = group.workerSlot || meta.workerSlot;
+      if (meta.turnInfo) group.turnInfo = meta.turnInfo;
     }
     return group;
   };
@@ -422,6 +428,9 @@ function orchestrationTimelineItemTurnMeta(item: OrchestrationTimelineItem) {
       turnId: item.event.turnId,
       role: item.event.role,
       cli: item.event.cli,
+      taskName: item.event.taskName,
+      workerSlot: item.event.workerSlot,
+      turnInfo: item.event.turnInfo,
     };
   }
   return {
@@ -572,14 +581,21 @@ export function parseOrchestrationTurnInfo(turnId?: string): OrchestrationTurnIn
 
 export function orchestrationTurnInfoFromEvents(events: OrchestrationEvent[], runId: string, maxTurns?: number, includeTotal = true): OrchestrationTurnInfo {
   let latest: OrchestrationEvent | null = null;
+  let latestRound: OrchestrationEvent | null = null;
   for (const event of events) {
-    if (event.runId !== runId || !event.turnId) continue;
-    if (!latest || compareOrchestrationEvents(latest, event) <= 0) latest = event;
+    if (event.runId !== runId) continue;
+    if ((event.runStartData?.round || event.turnStartData?.round) && (!latestRound || compareOrchestrationEvents(latestRound, event) <= 0)) latestRound = event;
+    if (event.turnId && (!latest || compareOrchestrationEvents(latest, event) <= 0)) latest = event;
+  }
+  if (latestRound) {
+    const round = latestRound.turnStartData?.round || latestRound.runStartData?.round;
+    const rounds = latestRound.turnStartData?.maxRounds || latestRound.runStartData?.maxRounds || maxTurns;
+    if (round) return includeTotal && rounds ? { ordinal: round, total: rounds } : { ordinal: round };
   }
   if (!latest) return {};
   const info = parseOrchestrationTurnInfo(latest.turnId);
-  const turn = latest.turnStartData?.turn;
-  const total = latest.turnStartData?.maxTurns || maxTurns;
+  const turn = latest.turnStartData?.round || latest.runStartData?.round || latest.turnStartData?.turn;
+  const total = latest.turnStartData?.maxRounds || latest.runStartData?.maxRounds || latest.turnStartData?.maxTurns || maxTurns;
   const ordinal = typeof turn === 'number' && turn > 0 ? turn : info.ordinal;
   if (typeof ordinal !== 'number') return info;
   if (includeTotal && total) {
@@ -608,6 +624,7 @@ export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: 
   let segmentVisibleStart = 0;
 
   ordered.forEach((event, index) => {
+    if (isInternalOrchestrationBootstrapEvent(event)) return;
     if (event.kind === 'user.message') {
       const content = stringsTrim(event.content);
       if (!content) return;
@@ -618,6 +635,7 @@ export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: 
         kind: event.kind,
         role: event.role,
         cli: event.cli,
+        ...orchestrationVisibleTaskMeta(event),
         turnId: event.turnId,
         content,
         status: event.status,
@@ -640,6 +658,7 @@ export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: 
         kind: event.kind,
         role: event.role,
         cli: event.cli,
+        ...orchestrationVisibleTaskMeta(event),
         turnId: event.turnId,
         content,
         status: event.status,
@@ -660,6 +679,7 @@ export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: 
         kind: event.kind,
         role: event.role,
         cli: event.cli,
+        ...orchestrationVisibleTaskMeta(event),
         turnId: event.turnId,
         content,
         status: event.status,
@@ -687,6 +707,7 @@ export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: 
           kind: event.kind,
           role: event.role,
           cli: event.cli,
+          ...orchestrationVisibleTaskMeta(event),
           turnId: event.turnId,
           content,
           status: event.status,
@@ -716,6 +737,7 @@ export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: 
           kind: event.kind,
           role: 'summary',
           cli: event.cli,
+          ...orchestrationVisibleTaskMeta(event),
           turnId: event.turnId,
           content,
           status: event.status,
@@ -743,6 +765,7 @@ export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: 
             kind: event.kind,
             role: 'summary',
             cli: event.cli,
+            ...orchestrationVisibleTaskMeta(event),
             turnId: event.turnId,
             content,
             status: event.status,
@@ -767,6 +790,27 @@ export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: 
 
   });
   return visible;
+}
+
+function isInternalOrchestrationBootstrapEvent(event: OrchestrationEvent) {
+  return event.bridgeNoteData?.category === 'formal-proof-harness-bootstrap'
+    || event.data?.category === 'formal-proof-harness-bootstrap'
+    || (event.role === 'bootstrap' && event.cli === 'bridge');
+}
+
+function orchestrationVisibleTaskMeta(event: OrchestrationEvent) {
+  const round = firstNumber(event.task?.round, event.turnStartData?.round, event.runStartData?.round, numberFromRecord(event.data, 'round'));
+  const maxRounds = firstNumber(event.task?.maxRounds, event.turnStartData?.maxRounds, event.runStartData?.maxRounds, numberFromRecord(event.data, 'maxRounds'));
+  return {
+    taskName: event.task?.name,
+    workerSlot: event.task?.workerSlot || event.turnStartData?.workerSlot,
+    turnInfo: hasNumber(round) ? { ordinal: round, ...(hasNumber(maxRounds) ? { total: maxRounds } : {}) } : undefined,
+  };
+}
+
+function numberFromRecord(data: Record<string, any> | undefined, key: string) {
+  const value = data?.[key];
+  return hasNumber(value) ? value : undefined;
 }
 
 export function finalizeTerminalCommandEvent(event: OrchestrationEvent, runStatus?: string): OrchestrationEvent {
@@ -1007,6 +1051,7 @@ export function statusVisibleEvent(event: OrchestrationEvent, index: number, key
     kind: event.kind,
     role: event.role,
     cli: event.cli,
+    ...orchestrationVisibleTaskMeta(event),
     turnId: event.turnId,
     content: orchestrationStatusContent(event),
     status: event.status,

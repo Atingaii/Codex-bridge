@@ -83,6 +83,7 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 	// queued earlier would be mistaken for a failed handshake.
 	s.dispatchReadyTaskGraphsForAgent(r.Context(), agent.ID)
 	slog.Info("[hub] bridge connected", "agent_id", agent.ID, "machine_id", agent.MachineID, "name", agent.Name)
+	s.scheduleHistoricalUsageBackfill(agent.ID)
 
 	ticker := time.NewTicker(s.websocketPingInterval())
 	defer ticker.Stop()
@@ -113,6 +114,31 @@ func (s *Server) handleBridgeWS(w http.ResponseWriter, r *http.Request) {
 			_ = conn.Send(protocol.MustEnvelope(protocol.TypeHeartbeat, "", map[string]any{"ts": time.Now().Unix()}))
 		}
 	}
+}
+
+func (s *Server) scheduleHistoricalUsageBackfill(agentID string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		runs, err := s.store.ListTerminalOrchestrationRunsByAgent(ctx, agentID, 50)
+		if err != nil {
+			slog.Warn("[hub] historical usage run lookup failed", "agent_id", agentID, "error", err)
+			return
+		}
+		for _, run := range runs {
+			syncs, err := s.store.ListOrchestrationUsageSyncs(ctx, run.ID)
+			if err != nil || len(syncs) > 0 {
+				continue
+			}
+			events, err := s.store.ListOrchestrationEvents(ctx, run.ID, 10000)
+			if err != nil {
+				continue
+			}
+			if err := s.requestOrchestrationUsageSync(run, events); err != nil {
+				slog.Debug("[hub] historical usage backfill unavailable", "run_id", run.ID, "error", err)
+			}
+		}
+	}()
 }
 
 func boundedTransportReason(err error) string {
@@ -262,6 +288,8 @@ func (s *Server) handleBridgeEnvelope(ctx context.Context, agentID string, env p
 		s.pool.BroadcastToBrowsers(env.Sid, env)
 	case protocol.TypeOrchestrationEvent:
 		s.handleOrchestrationEventFromAgent(ctx, agentID, env)
+	case protocol.TypeOrchestrationUsageSyncResult:
+		s.handleOrchestrationUsageSyncResult(ctx, agentID, env)
 	case protocol.TypeError:
 		s.handleBridgeError(ctx, env)
 		s.pool.BroadcastToBrowsers(env.Sid, env)

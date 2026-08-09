@@ -16,9 +16,11 @@ import {
   Server,
   Settings,
   Share2,
+  ShieldCheck,
   ShieldQuestion,
   Square,
   BarChart3,
+  PieChart,
   Swords,
   UsersRound,
 } from 'lucide-react';
@@ -951,6 +953,10 @@ export function OrchestrationWorkspace({
             <Button variant="secondary" size="icon" className="h-8 w-8 rounded-lg" onClick={() => navigate(activeRun ? `/orchestrate/stats?run=${encodeURIComponent(activeRun.id)}` : '/orchestrate/stats')} aria-label={t.runStatistics} title={t.runStatistics}>
               <BarChart3 className="h-3.5 w-3.5" />
             </Button>
+            <Button variant="secondary" size="icon" className="h-8 w-8 rounded-lg" onClick={() => navigate('/orchestrate/usage')} aria-label={t.usageOverview} title={t.usageOverview}>
+              <PieChart className="h-3.5 w-3.5" />
+            </Button>
+            {user.isAdmin && <Button variant="secondary" size="icon" className="h-8 w-8 rounded-lg" onClick={() => navigate('/admin/usage')} aria-label={t.adminDashboard} title={t.adminDashboard}><ShieldCheck className="h-3.5 w-3.5" /></Button>}
             <Button
               variant="ghost"
               size="icon"

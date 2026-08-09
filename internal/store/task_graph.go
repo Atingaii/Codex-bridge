@@ -94,27 +94,47 @@ type CreateTaskSpec struct {
 // attempts atomically. Ready worker attempts are dispatching because the graph
 // is returned only for inclusion in the immediately following Bridge frame.
 func (s *Store) CreateOrchestrationTaskGraph(ctx context.Context, runID, payloadJSON, payloadDigest string, specs []CreateTaskSpec) (OrchestrationTaskGraph, error) {
+	graph, _, err := s.createOrchestrationTaskGraph(ctx, runID, "", payloadJSON, payloadDigest, specs)
+	return graph, err
+}
+
+// CreateNextOrchestrationTaskGraph creates exactly one successor for the
+// expected latest graph. Duplicate terminal deliveries become a no-op.
+func (s *Store) CreateNextOrchestrationTaskGraph(ctx context.Context, runID, previousGraphID, payloadJSON, payloadDigest string, specs []CreateTaskSpec) (OrchestrationTaskGraph, bool, error) {
+	if strings.TrimSpace(previousGraphID) == "" {
+		return OrchestrationTaskGraph{}, false, errors.New("previous graph id is required")
+	}
+	return s.createOrchestrationTaskGraph(ctx, runID, previousGraphID, payloadJSON, payloadDigest, specs)
+}
+
+func (s *Store) createOrchestrationTaskGraph(ctx context.Context, runID, previousGraphID, payloadJSON, payloadDigest string, specs []CreateTaskSpec) (OrchestrationTaskGraph, bool, error) {
 	if strings.TrimSpace(runID) == "" || strings.TrimSpace(payloadJSON) == "" || strings.TrimSpace(payloadDigest) == "" || len(specs) == 0 {
-		return OrchestrationTaskGraph{}, errors.New("run id, payload, and task specs are required")
+		return OrchestrationTaskGraph{}, false, errors.New("run id, payload, and task specs are required")
 	}
 	now := time.Now().Unix()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return OrchestrationTaskGraph{}, err
+		return OrchestrationTaskGraph{}, false, err
 	}
 	defer tx.Rollback()
-	var generation int
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(generation), 0) + 1 FROM orchestration_task_graphs WHERE run_id = ?`, runID).Scan(&generation); err != nil {
-		return OrchestrationTaskGraph{}, err
+	var latestID string
+	var latestGeneration int
+	err = tx.QueryRowContext(ctx, `SELECT id, generation FROM orchestration_task_graphs WHERE run_id = ? ORDER BY generation DESC LIMIT 1`, runID).Scan(&latestID, &latestGeneration)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return OrchestrationTaskGraph{}, false, err
 	}
+	if previousGraphID != "" && latestID != previousGraphID {
+		return OrchestrationTaskGraph{}, false, nil
+	}
+	generation := latestGeneration + 1
 	graph := OrchestrationTaskGraph{ID: NewID("otg"), RunID: runID, Generation: generation, Status: TaskGraphRunning, ParallelLimit: 2, PayloadJSON: payloadJSON, PayloadDigest: payloadDigest, CreatedAt: now, UpdatedAt: now}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO orchestration_task_graphs (id, run_id, generation, status, parallel_limit, payload_json, payload_digest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, graph.ID, runID, generation, graph.Status, graph.ParallelLimit, graph.PayloadJSON, graph.PayloadDigest, now, now); err != nil {
-		return OrchestrationTaskGraph{}, err
+		return OrchestrationTaskGraph{}, false, err
 	}
 	graph.Tasks = make([]OrchestrationTask, len(specs))
 	for i, spec := range specs {
 		if !validTaskRole(spec.Role) || strings.TrimSpace(spec.PayloadDigest) == "" || strings.TrimSpace(spec.PayloadJSON) == "" {
-			return OrchestrationTaskGraph{}, fmt.Errorf("invalid task spec at position %d", i)
+			return OrchestrationTaskGraph{}, false, fmt.Errorf("invalid task spec at position %d", i)
 		}
 		status := TaskPending
 		if len(spec.Dependencies) == 0 {
@@ -126,24 +146,24 @@ func (s *Store) CreateOrchestrationTaskGraph(ctx context.Context, runID, payload
 		}
 		graph.Tasks[i] = task
 		if _, err := tx.ExecContext(ctx, `INSERT INTO orchestration_tasks (id, graph_id, name, role, worker_slot, status, position, payload_json, payload_digest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, task.ID, graph.ID, task.Name, task.Role, nullString(task.WorkerSlot), task.Status, task.Position, task.PayloadJSON, task.PayloadDigest, now, now); err != nil {
-			return OrchestrationTaskGraph{}, err
+			return OrchestrationTaskGraph{}, false, err
 		}
 	}
 	for i, spec := range specs {
 		for _, dependency := range spec.Dependencies {
 			if dependency < 0 || dependency >= i {
-				return OrchestrationTaskGraph{}, fmt.Errorf("invalid dependency %d for task %d", dependency, i)
+				return OrchestrationTaskGraph{}, false, fmt.Errorf("invalid dependency %d for task %d", dependency, i)
 			}
 			graph.Tasks[i].Dependencies = append(graph.Tasks[i].Dependencies, graph.Tasks[dependency].ID)
 			if _, err := tx.ExecContext(ctx, `INSERT INTO orchestration_task_dependencies (task_id, depends_on_task_id) VALUES (?, ?)`, graph.Tasks[i].ID, graph.Tasks[dependency].ID); err != nil {
-				return OrchestrationTaskGraph{}, err
+				return OrchestrationTaskGraph{}, false, err
 			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return OrchestrationTaskGraph{}, err
+		return OrchestrationTaskGraph{}, false, err
 	}
-	return graph, nil
+	return graph, true, nil
 }
 
 // ClaimReadyTask is the only ready -> dispatching transition. It checks the

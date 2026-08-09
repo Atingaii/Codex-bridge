@@ -410,7 +410,7 @@ func TestBridgeInstallCommandIsShortAndPortable(t *testing.T) {
 
 	s, _ := newAuthTestServer(t)
 	command := s.bridgeInstallCommand("https://sparkapi.test")
-	if want := "curl -fsSL 'https://sparkapi.test/install.sh' | sh"; command != want {
+	if want := "curl -fL --max-time 120 'https://sparkapi.test/install.sh' | sh"; command != want {
 		t.Fatalf("install command = %q, want %q", command, want)
 	}
 	if len(command) > 80 {

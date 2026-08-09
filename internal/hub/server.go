@@ -638,7 +638,7 @@ func (s *Server) bridgePermissionProfile(hubURL, token, installCommand, profile 
 
 func (s *Server) bridgeInstallCommand(hubURL string) string {
 	installURL := shellQuote(strings.TrimRight(hubURL, "/") + "/install.sh")
-	return fmt.Sprintf("curl -fsSL %s | sh", installURL)
+	return fmt.Sprintf("curl -fL --max-time 120 %s | sh", installURL)
 }
 
 func bridgeSetupCommand(installCommand, connectCommand string) string {

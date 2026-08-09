@@ -116,9 +116,10 @@ imports the current module instead of throwing during startup.
 to `~/.local/bin/codex-bridge` and then renames it into place. This avoids
 `Text file busy` when an older Bridge process is still executing the current
 binary. The generated outer command stays deliberately short:
-`curl -fsSL <hub>/install.sh | sh`. This avoids copy-time escaping failures in
-zsh and other interactive shells. Compatibility, progress, retry, and update
-logic live in the downloaded installer instead of the user-visible command.
+`curl -fL --max-time 120 <hub>/install.sh | sh`. It remains visible and bounded
+without risking copy-time escaping failures in zsh and other interactive
+shells. Compatibility, retry, and update logic live in the downloaded
+installer instead of the user-visible command.
 Large binary downloads use HTTP/1.1, visible progress, low-speed
 detection, and up to eight bounded, backed-off resume attempts. HTTP/1.1 is
 enabled only when the installed curl recognizes it; wget uses options shared by

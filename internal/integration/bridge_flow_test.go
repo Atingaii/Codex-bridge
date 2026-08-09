@@ -1391,7 +1391,7 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		t.Fatalf("commands = %#v", commands)
 	}
 	installCommand := commands[0].(string)
-	if want := "curl -fsSL '" + cfg.Bridge.HubURL + "/install.sh' | sh"; installCommand != want {
+	if want := "curl -fL --max-time 120 '" + cfg.Bridge.HubURL + "/install.sh' | sh"; installCommand != want {
 		t.Fatalf("install command = %q, want %q", installCommand, want)
 	}
 	if strings.Contains(installCommand, "\n") {

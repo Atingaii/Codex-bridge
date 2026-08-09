@@ -638,7 +638,7 @@ func (s *Server) bridgePermissionProfile(hubURL, token, installCommand, profile 
 
 func (s *Server) bridgeInstallCommand(hubURL string) string {
 	installURL := shellQuote(strings.TrimRight(hubURL, "/") + "/install.sh")
-	return fmt.Sprintf("CB_INSTALL=$(mktemp) && trap 'rm -f \"$CB_INSTALL\"' EXIT HUP INT TERM && curl --http1.1 -fsSL --retry 8 --connect-timeout 20 -o \"$CB_INSTALL\" %s && sh \"$CB_INSTALL\"", installURL)
+	return fmt.Sprintf("CB_INSTALL=$(mktemp) && trap 'rm -f \"$CB_INSTALL\"' EXIT HUP INT TERM && echo 'Downloading Codex Bridge installer...' && curl --http1.1 -fL --show-error --progress-bar --retry 8 --connect-timeout 20 --max-time 120 --speed-time 20 --speed-limit 1 -o \"$CB_INSTALL\" %s && echo 'Starting Codex Bridge update...' && sh \"$CB_INSTALL\"", installURL)
 }
 
 func bridgeSetupCommand(installCommand, connectCommand string) string {
@@ -754,6 +754,13 @@ echo "installed $BIN"
 SYSTEMD_DIR="${HOME}/.config/systemd/user"
 SERVICES_DIR="${HOME}/.codex-bridge/services"
 LOG_DIR="${HOME}/.codex-bridge/logs"
+run_systemctl() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 30s systemctl "$@"
+  else
+    systemctl "$@"
+  fi
+}
 systemd_units=""
 if command -v systemctl >/dev/null 2>&1 && [ -d "$SYSTEMD_DIR" ]; then
   for unit_path in "$SYSTEMD_DIR"/codex-bridge-*.service; do
@@ -770,10 +777,11 @@ if command -v systemctl >/dev/null 2>&1 && [ -d "$SYSTEMD_DIR" ]; then
   done
 fi
 if [ -n "$systemd_units" ]; then
-  if systemctl --user daemon-reload; then
+  echo "Refreshing existing Codex Bridge services..."
+  if run_systemctl --user daemon-reload; then
     for unit in $systemd_units; do
       echo "Restarting $unit..."
-      if ! systemctl --user restart "$unit"; then
+      if ! run_systemctl --user restart "$unit"; then
         echo "Codex Bridge was updated, but $unit could not be restarted." >&2
       fi
     done

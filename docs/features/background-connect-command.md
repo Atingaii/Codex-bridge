@@ -115,7 +115,10 @@ imports the current module instead of throwing during startup.
 `internal/hub/server.go:handleInstallScript` downloads to a temporary file next
 to `~/.local/bin/codex-bridge` and then renames it into place. This avoids
 `Text file busy` when an older Bridge process is still executing the current
-binary. Large binary downloads use HTTP/1.1, visible progress, low-speed
+binary. The generated outer install command prints before downloading the
+installer, shows transfer progress, and applies low-speed and total-time
+boundaries so a connected but stalled transfer cannot look idle forever.
+Large binary downloads use HTTP/1.1, visible progress, low-speed
 detection, and up to eight bounded, backed-off resume attempts. If a server
 rejects the saved range (`416`), the installer removes only that temporary
 download and starts a fresh attempt. A transient TLS or HTTP/2 edge failure
@@ -127,8 +130,10 @@ already linked endpoints without adding another user-facing command or daemon:
 
 - It enumerates only `codex-bridge-*.service` files under the current user's
   `~/.config/systemd/user/`, reloads the user manager once, and restarts each
-  exact discovered unit name. An unavailable user manager is reported but does
-  not turn a successful binary installation into a destructive partial update.
+  exact discovered unit name. Where the standard `timeout` utility is
+  available, each user-manager operation is bounded to 30 seconds. An
+  unavailable or stalled user manager is reported but does not turn a
+  successful binary installation into a destructive partial update.
 - The `nohup` fallback records its released process id in
   `~/.codex-bridge/services/<cwd-hash>.pid`. On a later install, the script
   accepts only numeric PIDs whose `/proc/<pid>/exe` resolves to the installed

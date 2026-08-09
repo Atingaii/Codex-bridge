@@ -1394,6 +1394,11 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	if !strings.Contains(installCommand, "--retry 8") {
 		t.Fatalf("install command missing compatible transport retry policy: %q", installCommand)
 	}
+	for _, want := range []string{"Downloading Codex Bridge installer...", "--progress-bar", "--max-time 120", "--speed-time 20", "Starting Codex Bridge update..."} {
+		if !strings.Contains(installCommand, want) {
+			t.Fatalf("install command missing visible bounded download option %q: %q", want, installCommand)
+		}
+	}
 	if strings.Contains(installCommand, "--retry-all-errors") {
 		t.Fatalf("install command requires curl 7.71 or newer: %q", installCommand)
 	}

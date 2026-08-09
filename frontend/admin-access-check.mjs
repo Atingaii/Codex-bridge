@@ -14,5 +14,6 @@ assert.match(workspace, /user\.isAdmin && <Button[\s\S]{0,400}?navigate\('\/admi
 assert.match(orchestration, /user\.isAdmin && <Button[\s\S]{0,400}?navigate\('\/admin\/usage'\)/);
 assert.match(overview, /navigate\(`\/admin\/usage\/users\/\$\{encodeURIComponent\(item\.userId\)\}`\)/);
 assert.match(detail, /\/api\/admin\/users\/\$\{encodeURIComponent\(userID\)\}\/usage/);
+assert.match(detail, /\/api\/admin\/users\/\$\{encodeURIComponent\(userID\)\}\/conversations/);
 assert.doesNotMatch(detail, /\/api\/sessions\/|\/api\/orchestrations\/\$\{/);
-assert.doesNotMatch(detail, /prompt|remoteThreadId|runCwd|message\.content/i);
+assert.doesNotMatch(detail, /remoteThreadId|runCwd|codexThreadId|claudeSessionId/i);

@@ -290,6 +290,22 @@ export type AdminUserUsageDetail = {
   conversations: AdminConversationUsage[];
 };
 
+export type AdminConversationContentItem = {
+  role?: string;
+  source?: string;
+  kind: string;
+  content: string;
+  createdAt: number;
+};
+
+export type AdminConversationContent = {
+  id: string;
+  kind: AdminConversationUsage['kind'];
+  title: string;
+  prompt?: string;
+  items: AdminConversationContentItem[];
+};
+
 export type OrchestrationEvent = {
   id?: string;
   runId: string;

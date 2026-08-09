@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -117,6 +118,7 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("GET /api/usage/overview", s.withAuth(s.handleUsageOverview))
 	mux.HandleFunc("GET /api/admin/usage", s.withAdmin(s.handleAdminUsage))
 	mux.HandleFunc("GET /api/admin/users/{userID}/usage", s.withAdmin(s.handleAdminUserUsage))
+	mux.HandleFunc("GET /api/admin/users/{userID}/conversations/{kind}/{conversationID}", s.withAdmin(s.handleAdminConversationContent))
 	mux.HandleFunc("POST /api/orchestrations/{runID}/usage-sync", s.withAuth(s.handleOrchestrationUsageSync))
 	mux.HandleFunc("GET /api/orchestrations/{runID}/events", s.withAuth(s.handleOrchestrationEvents))
 	mux.HandleFunc("POST /api/orchestrations/{runID}/prompts", s.withAuth(s.handleContinueOrchestration))
@@ -201,9 +203,16 @@ func (s *Server) staticHandler() http.Handler {
 		panic(err)
 	}
 	fileServer := http.FileServer(http.FS(sub))
+	currentJS := currentStaticAsset(sub, ".js")
+	currentCSS := currentStaticAsset(sub, ".css")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
 			http.NotFound(w, r)
+			return
+		}
+		if target := staleStaticAssetTarget(sub, r.URL.Path, currentJS, currentCSS); target != "" {
+			w.Header().Set("Cache-Control", "no-store")
+			http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 			return
 		}
 		switch {
@@ -229,6 +238,39 @@ func (s *Server) staticHandler() http.Handler {
 		}
 		fileServer.ServeHTTP(w, r)
 	})
+}
+
+var staticEntryAssetPattern = regexp.MustCompile(`/assets/index-[A-Za-z0-9_-]+\.(?:js|css)`)
+
+func currentStaticAsset(root fs.FS, extension string) string {
+	index, err := fs.ReadFile(root, "index.html")
+	if err != nil {
+		return ""
+	}
+	for _, match := range staticEntryAssetPattern.FindAllString(string(index), -1) {
+		if strings.HasSuffix(match, extension) {
+			return match
+		}
+	}
+	return ""
+}
+
+func staleStaticAssetTarget(root fs.FS, path, currentJS, currentCSS string) string {
+	base := filepathBase(path)
+	if !strings.HasPrefix(path, "/assets/index-") {
+		return ""
+	}
+	if _, err := fs.Stat(root, strings.TrimPrefix(path, "/")); err == nil {
+		return ""
+	}
+	switch {
+	case strings.HasSuffix(base, ".js"):
+		return currentJS
+	case strings.HasSuffix(base, ".css"):
+		return currentCSS
+	default:
+		return ""
+	}
 }
 
 func filepathBase(path string) string {

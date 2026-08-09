@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 )
 
 // AdminUsageSnapshot is a content-free, read-only projection for the Hub's
@@ -70,6 +71,22 @@ type AdminConversationUsageEvent struct {
 	AdminUsageEvent
 }
 
+type AdminConversationContent struct {
+	ID     string
+	Kind   string
+	Title  string
+	Prompt string
+	Items  []AdminConversationContentItem
+}
+
+type AdminConversationContentItem struct {
+	Role      string
+	Source    string
+	Kind      string
+	Content   string
+	CreatedAt int64
+}
+
 func (s *Store) AdminUsageSnapshot(ctx context.Context, cutoff int64, timezoneOffset int) (AdminUsageSnapshot, error) {
 	users, err := s.adminUsageUsers(ctx, cutoff)
 	if err != nil {
@@ -100,6 +117,75 @@ func (s *Store) AdminUserDetailSnapshot(ctx context.Context, userID string, cuto
 		return AdminUserDetailSnapshot{}, err
 	}
 	return AdminUserDetailSnapshot{User: user, Conversations: conversations, UsageEvents: events}, nil
+}
+
+// AdminConversationContent returns the narrow, read-only content projection
+// exposed by the administrator API. Ownership is checked in the same query
+// that loads the conversation, and operational/native metadata is never read.
+func (s *Store) AdminConversationContent(ctx context.Context, userID, kind, conversationID string) (AdminConversationContent, error) {
+	content := AdminConversationContent{ID: conversationID, Kind: kind}
+	switch kind {
+	case "chat":
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(title,'') FROM sessions WHERE id = ? AND user_id = ?`, conversationID, userID).Scan(&content.Title); err != nil {
+			return AdminConversationContent{}, storeError(err)
+		}
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT role, content, created_at FROM messages
+			WHERE session_id = ? ORDER BY created_at, id`, conversationID)
+		if err != nil {
+			return AdminConversationContent{}, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item AdminConversationContentItem
+			if err := rows.Scan(&item.Role, &item.Content, &item.CreatedAt); err != nil {
+				return AdminConversationContent{}, err
+			}
+			item.Kind = "message"
+			content.Items = append(content.Items, item)
+		}
+		return content, rows.Err()
+	case "orchestration":
+		if err := s.db.QueryRowContext(ctx, `
+			SELECT title, prompt FROM orchestration_runs WHERE id = ? AND user_id = ?`, conversationID, userID,
+		).Scan(&content.Title, &content.Prompt); err != nil {
+			return AdminConversationContent{}, storeError(err)
+		}
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT role, source, kind, GROUP_CONCAT(content, ''), MIN(created_at)
+			FROM (
+				SELECT id, seq, COALESCE(role,'') AS role, COALESCE(source,'') AS source,
+					kind, COALESCE(turn_id,'') AS turn_id, content, created_at
+				FROM orchestration_events
+				WHERE run_id = ? AND content IS NOT NULL AND content != ''
+					AND kind IN ('user.message', 'turn.delta', 'run.error', 'run.conclusion')
+				ORDER BY seq
+			)
+			GROUP BY CASE WHEN kind = 'turn.delta' AND turn_id != ''
+				THEN 'turn:' || turn_id || ':' || role || ':' || source ELSE id END
+			ORDER BY MIN(seq)`, conversationID)
+		if err != nil {
+			return AdminConversationContent{}, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item AdminConversationContentItem
+			if err := rows.Scan(&item.Role, &item.Source, &item.Kind, &item.Content, &item.CreatedAt); err != nil {
+				return AdminConversationContent{}, err
+			}
+			content.Items = append(content.Items, item)
+		}
+		return content, rows.Err()
+	default:
+		return AdminConversationContent{}, ErrNotFound
+	}
+}
+
+func storeError(err error) error {
+	if err == sql.ErrNoRows {
+		return ErrNotFound
+	}
+	return err
 }
 
 func (s *Store) adminUserConversations(ctx context.Context, userID string, cutoff int64) ([]AdminConversation, error) {
@@ -198,19 +284,31 @@ func (s *Store) adminUserConversationUsage(ctx context.Context, userID string, c
 
 func (s *Store) adminUsageUsers(ctx context.Context, cutoff int64) ([]AdminUserUsage, error) {
 	rows, err := s.db.QueryContext(ctx, `
+		WITH
+		agent_activity AS (
+			SELECT user_id, MAX(last_seen_at) AS last_active_at
+			FROM agents WHERE deleted_at IS NULL AND user_id IS NOT NULL GROUP BY user_id
+		),
+		session_stats AS (
+			SELECT user_id, MAX(updated_at) AS last_active_at,
+				SUM(CASE WHEN ? = 0 OR created_at >= ? THEN 1 ELSE 0 END) AS conversation_count
+			FROM sessions GROUP BY user_id
+		),
+		orchestration_stats AS (
+			SELECT user_id, MAX(updated_at) AS last_active_at,
+				SUM(CASE WHEN ? = 0 OR created_at >= ? THEN 1 ELSE 0 END) AS conversation_count,
+				SUM(CASE WHEN status IN ('queued','running','canceling') THEN 1 ELSE 0 END) AS running_count
+			FROM orchestration_runs GROUP BY user_id
+		)
 		SELECT u.id, u.username, u.created_at,
 			MAX(u.created_at,
-				COALESCE((SELECT MAX(a.last_seen_at) FROM agents a WHERE a.user_id = u.id AND a.deleted_at IS NULL), 0),
-				COALESCE((SELECT MAX(se.updated_at) FROM sessions se WHERE se.user_id = u.id), 0),
-				COALESCE((SELECT MAX(m.created_at) FROM messages m JOIN sessions se ON se.id = m.session_id WHERE se.user_id = u.id), 0),
-				COALESCE((SELECT MAX(r.updated_at) FROM runs r JOIN sessions se ON se.id = r.session_id WHERE se.user_id = u.id), 0),
-				COALESCE((SELECT MAX(o.updated_at) FROM orchestration_runs o WHERE o.user_id = u.id), 0),
-				COALESCE((SELECT MAX(e.created_at) FROM orchestration_events e JOIN orchestration_runs o ON o.id = e.run_id WHERE o.user_id = u.id), 0)
+				COALESCE(a.last_active_at, 0), COALESCE(se.last_active_at, 0), COALESCE(o.last_active_at, 0)
 			) AS last_active_at,
-			(SELECT COUNT(*) FROM sessions se WHERE se.user_id = u.id AND (? = 0 OR se.created_at >= ?)),
-			(SELECT COUNT(*) FROM orchestration_runs o WHERE o.user_id = u.id AND (? = 0 OR o.created_at >= ?)),
-			(SELECT COUNT(*) FROM orchestration_runs o WHERE o.user_id = u.id AND o.status IN ('queued','running','canceling'))
+			COALESCE(se.conversation_count, 0), COALESCE(o.conversation_count, 0), COALESCE(o.running_count, 0)
 		FROM users u
+		LEFT JOIN agent_activity a ON a.user_id = u.id
+		LEFT JOIN session_stats se ON se.user_id = u.id
+		LEFT JOIN orchestration_stats o ON o.user_id = u.id
 		ORDER BY lower(u.username), u.id`, cutoff, cutoff, cutoff, cutoff)
 	if err != nil {
 		return nil, err
@@ -332,10 +430,10 @@ func (s *Store) adminActivityEvents(ctx context.Context, cutoff int64, timezoneO
 		FROM orchestration_runs o WHERE ? = 0 OR o.created_at >= ?
 		GROUP BY o.user_id, ((o.created_at - ?) / 86400)
 		UNION ALL
-		SELECT o.user_id, ((e.created_at - ?) / 86400) * 86400 + ?, 'orchestration_event', COUNT(*)
-		FROM orchestration_events e JOIN orchestration_runs o ON o.id = e.run_id
-		WHERE ? = 0 OR e.created_at >= ?
-		GROUP BY o.user_id, ((e.created_at - ?) / 86400)`,
+		SELECT o.user_id, ((o.updated_at - ?) / 86400) * 86400 + ?, 'orchestration_activity', COUNT(*)
+		FROM orchestration_runs o
+		WHERE ? = 0 OR o.updated_at >= ?
+		GROUP BY o.user_id, ((o.updated_at - ?) / 86400)`,
 		offsetSeconds, offsetSeconds, cutoff, cutoff, offsetSeconds,
 		offsetSeconds, offsetSeconds, cutoff, cutoff, offsetSeconds,
 		offsetSeconds, offsetSeconds, cutoff, cutoff, offsetSeconds)

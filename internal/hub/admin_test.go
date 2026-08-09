@@ -106,7 +106,7 @@ func TestAdminUsageRouteRequiresAdministrator(t *testing.T) {
 	}
 }
 
-func TestAdminUserUsageDetailRequiresAdministratorAndOmitsConversationContent(t *testing.T) {
+func TestAdminConversationContentRequiresAdministratorAndChecksOwnership(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(t.TempDir() + "/hub.db")
 	if err != nil {
@@ -145,9 +145,15 @@ func TestAdminUserUsageDetailRequiresAdministratorAndOmitsConversationContent(t 
 	if err := st.UpdateSessionRemoteThread(ctx, session.ID, member.ID, "SECRET_REMOTE_THREAD"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateOrchestrationRun(ctx, store.CreateOrchestrationRunParams{
+	orchestration, err := st.CreateOrchestrationRun(ctx, store.CreateOrchestrationRunParams{
 		UserID: member.ID, AgentID: agent.ID, Title: "Visible proof title", Mode: "collaboration",
 		Prompt: "SECRET_PROMPT", CWD: "/SECRET/WORKSPACE/PATH", MaxTurns: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
+		RunID: orchestration.ID, Kind: "turn.delta", Role: "worker", Source: "cli", Content: "SECRET_ORCHESTRATION_MESSAGE",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -156,8 +162,8 @@ func TestAdminUserUsageDetailRequiresAdministratorAndOmitsConversationContent(t 
 	cfg.Auth.BootstrapUsername = "admin"
 	cfg.Auth.JWTSecret = "01234567890123456789012345678901"
 	s := NewServer(&cfg, st, BuildInfo{})
-	handler := s.withAdmin(s.handleAdminUserUsage)
-	request := func(userID, targetID string) *httptest.ResponseRecorder {
+	usageHandler := s.withAdmin(s.handleAdminUserUsage)
+	requestUsage := func(userID, targetID string) *httptest.ResponseRecorder {
 		token, _, signErr := s.signer.Sign(userID)
 		if signErr != nil {
 			t.Fatal(signErr)
@@ -166,16 +172,16 @@ func TestAdminUserUsageDetailRequiresAdministratorAndOmitsConversationContent(t 
 		r.SetPathValue("userID", targetID)
 		r.AddCookie(&http.Cookie{Name: accessCookieName, Value: token})
 		w := httptest.NewRecorder()
-		handler(w, r)
+		usageHandler(w, r)
 		return w
 	}
-	if got := request(member.ID, member.ID); got.Code != http.StatusForbidden || !strings.Contains(got.Body.String(), "ADMIN_ONLY") {
+	if got := requestUsage(member.ID, member.ID); got.Code != http.StatusForbidden || !strings.Contains(got.Body.String(), "ADMIN_ONLY") {
 		t.Fatalf("member detail status/body = %d %s, want 403 ADMIN_ONLY", got.Code, got.Body.String())
 	}
-	if got := request(admin.ID, "usr_missing"); got.Code != http.StatusNotFound {
+	if got := requestUsage(admin.ID, "usr_missing"); got.Code != http.StatusNotFound {
 		t.Fatalf("missing detail status = %d, want 404", got.Code)
 	}
-	got := request(admin.ID, member.ID)
+	got := requestUsage(admin.ID, member.ID)
 	if got.Code != http.StatusOK {
 		t.Fatalf("admin detail status = %d body=%s", got.Code, got.Body.String())
 	}
@@ -188,6 +194,51 @@ func TestAdminUserUsageDetailRequiresAdministratorAndOmitsConversationContent(t 
 	for _, expected := range []string{"Visible chat title", "Visible proof title", "member-laptop", `"totalTokens":105`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("admin detail missing %q: %s", expected, body)
+		}
+	}
+
+	contentHandler := s.withAdmin(s.handleAdminConversationContent)
+	requestContent := func(actorID, targetID, kind, conversationID string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/api/admin/users/"+targetID+"/conversations/"+kind+"/"+conversationID, nil)
+		r.SetPathValue("userID", targetID)
+		r.SetPathValue("kind", kind)
+		r.SetPathValue("conversationID", conversationID)
+		if actorID != "" {
+			token, _, signErr := s.signer.Sign(actorID)
+			if signErr != nil {
+				t.Fatal(signErr)
+			}
+			r.AddCookie(&http.Cookie{Name: accessCookieName, Value: token})
+		}
+		w := httptest.NewRecorder()
+		contentHandler(w, r)
+		return w
+	}
+	if got := requestContent("", member.ID, "chat", session.ID); got.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated content status = %d, want 401", got.Code)
+	}
+	if got := requestContent(member.ID, member.ID, "chat", session.ID); got.Code != http.StatusForbidden || !strings.Contains(got.Body.String(), "ADMIN_ONLY") {
+		t.Fatalf("member content status/body = %d %s, want 403 ADMIN_ONLY", got.Code, got.Body.String())
+	}
+	if got := requestContent(admin.ID, admin.ID, "chat", session.ID); got.Code != http.StatusNotFound {
+		t.Fatalf("wrong-owner content status = %d, want 404", got.Code)
+	}
+	chat := requestContent(admin.ID, member.ID, "chat", session.ID)
+	if chat.Code != http.StatusOK || !strings.Contains(chat.Body.String(), "SECRET_MESSAGE_BODY") {
+		t.Fatalf("admin chat content status/body = %d %s", chat.Code, chat.Body.String())
+	}
+	orchestrationContent := requestContent(admin.ID, member.ID, "orchestration", orchestration.ID)
+	if orchestrationContent.Code != http.StatusOK {
+		t.Fatalf("admin orchestration content status/body = %d %s", orchestrationContent.Code, orchestrationContent.Body.String())
+	}
+	for _, expected := range []string{"SECRET_PROMPT", "SECRET_ORCHESTRATION_MESSAGE"} {
+		if !strings.Contains(orchestrationContent.Body.String(), expected) {
+			t.Fatalf("admin orchestration content missing %q: %s", expected, orchestrationContent.Body.String())
+		}
+	}
+	for _, forbidden := range []string{"SECRET/WORKSPACE/PATH", "SECRET_REMOTE_THREAD", "remoteThreadId", "codexThreadId", "runCwd"} {
+		if strings.Contains(chat.Body.String(), forbidden) || strings.Contains(orchestrationContent.Body.String(), forbidden) {
+			t.Fatalf("admin conversation content leaked %q", forbidden)
 		}
 	}
 }

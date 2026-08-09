@@ -14,14 +14,17 @@
 - Let the administrator open one user's read-only detail page to identify that
   user's chat sessions and orchestration tasks by title, endpoint, status,
   activity time, and per-conversation usage.
+- Let the administrator inspect one selected conversation's message bodies or
+  orchestration prompt on demand, with an explicit ownership check and without
+  loading content into aggregate/list responses.
 
 ## Non-goals
 
 - User creation, deletion, impersonation, password reset, quota enforcement, or
   billing settlement.
-- Exposing prompts, message bodies, workspace paths, native CLI session
-  identifiers, or other conversation content. User-authored conversation
-  titles are visible because they are the detail view's identifying metadata.
+- Exposing workspace paths, native CLI session identifiers, credentials,
+  attachments, or private Bridge execution metadata. Message bodies and the
+  original orchestration prompt are the only conversation content exposed.
 - Opening another user's writable workspace, impersonating that user, or
   reusing the existing user-scoped conversation APIs.
 - Changing Bridge protocol frames, local CLI collection, or requiring a Bridge
@@ -42,6 +45,14 @@ Hub identifier, title, kind, endpoint label, status, mode/turn limit where
 applicable, timestamps, activity count, and normalized usage totals. Unknown
 users return `404 NOT_FOUND`; non-admin callers receive `403 ADMIN_ONLY` before
 the target user is resolved.
+
+`GET /api/admin/users/{userID}/conversations/{kind}/{conversationID}` uses the
+same administrator middleware and performs a server-side ownership check before
+returning content. For `chat`, the response contains ordered message roles,
+bodies, and timestamps. For `orchestration`, it contains the original prompt
+and ordered user-visible event text. It never returns workspace paths, native
+CLI identifiers, credentials, files, or writable conversation handles. A
+conversation that does not belong to the path's user returns `404 NOT_FOUND`.
 
 `internal/store/admin_analytics.go:AdminUsageSnapshot` performs read-only
 aggregation over existing Hub tables. Online state is added by
@@ -70,8 +81,12 @@ creation timestamps, determine whether Tokens fall inside the selected range.
 3. Add `/admin/usage`, administrator-only navigation, trend controls, user
    search/sort, desktop table, and mobile user summaries.
 4. Make user rows open `/admin/usage/users/{userID}` and add a responsive,
-   read-only conversation detail view without message-body access.
-5. Rebuild `internal/web/static/` and run repository exit gates.
+   read-only conversation list.
+5. Add an administrator-only, ownership-checked content endpoint and load one
+   selected conversation into a read-only detail panel on demand.
+6. Keep the current and immediately previous hashed UI assets embedded so a
+   cached HTML document cannot white-screen during a rolling deployment.
+7. Rebuild `internal/web/static/` and run repository exit gates.
 
 ## Exit Gates
 
@@ -79,7 +94,10 @@ creation timestamps, determine whether Tokens fall inside the selected range.
   user aggregates.
 - [x] The same 401/403 boundary protects user detail, unknown targets return
   404, and an administrator can load only the documented metadata projection.
-- [x] No content, prompt, path, or native session field is returned.
+- [x] Lists contain no message or prompt content; the content endpoint returns
+  only message bodies, orchestration prompt/event text, roles, and timestamps.
+- [x] Wrong-user conversation IDs return 404, while workspace paths and native
+  session fields remain absent from every administrator response.
 - [x] Daily buckets honor range and browser timezone.
 - [x] Native ledger and legacy orchestration usage are not double counted.
 - [x] Unknown catalog pricing produces `costKnown=false`.
@@ -104,3 +122,9 @@ marked as incomplete instead of silently treating unknown usage as free.
 **Does a remote Bridge need to be updated?**
 
 No. The feature reads Hub persistence and the Hub's live connection pool only.
+
+**Why is conversation content loaded separately?**
+
+It keeps overview and user-list queries bounded, makes the sensitive read
+operation visible in routing and authorization tests, and avoids transferring
+every conversation body when the administrator needs only one.

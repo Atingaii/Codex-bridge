@@ -402,11 +402,13 @@ containing sanitized read-only data.
 
 The bootstrap administrator additionally has one explicit, read-only
 cross-user analytics boundary: `GET /api/admin/usage` and
-`GET /api/admin/users/{userID}/usage`. The overview exposes aggregate activity,
-endpoint, workload, Token, and price-estimate fields. User detail adds
-conversation titles, type, status, endpoint label, timestamps, activity counts,
-and per-conversation usage. Prompts, message bodies, workspace paths, and native
-session identifiers are excluded, and the detail endpoint does not grant access
+`GET /api/admin/users/{userID}/usage`, plus the on-demand read endpoint
+`GET /api/admin/users/{userID}/conversations/{kind}/{conversationID}`. The
+overview exposes aggregate activity, endpoint, workload, Token, and
+price-estimate fields. User detail adds conversation metadata and usage without
+content. The final endpoint checks ownership and returns only message bodies or
+the orchestration prompt and visible text events. Workspace paths and native
+session identifiers are excluded, and no administrator endpoint grants access
 to user-scoped mutation APIs. See
 [docs/features/admin-usage-dashboard.md](features/admin-usage-dashboard.md).
 

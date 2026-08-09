@@ -87,6 +87,22 @@ type adminUserUsageDetail struct {
 	Conversations []adminConversationUsage `json:"conversations"`
 }
 
+type adminConversationContent struct {
+	ID     string                         `json:"id"`
+	Kind   string                         `json:"kind"`
+	Title  string                         `json:"title"`
+	Prompt string                         `json:"prompt,omitempty"`
+	Items  []adminConversationContentItem `json:"items"`
+}
+
+type adminConversationContentItem struct {
+	Role      string `json:"role,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Kind      string `json:"kind"`
+	Content   string `json:"content"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
 func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request, _ string) {
 	days, timezoneOffset, cutoff, err := usageOverviewRange(r)
 	if err != nil {
@@ -119,6 +135,30 @@ func (s *Server) handleAdminUserUsage(w http.ResponseWriter, r *http.Request, _ 
 	}
 	detail := buildAdminUserUsageDetail(snapshot, days, timezoneOffset)
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"detail": detail})
+}
+
+func (s *Server) handleAdminConversationContent(w http.ResponseWriter, r *http.Request, _ string) {
+	content, err := s.store.AdminConversationContent(
+		r.Context(), r.PathValue("userID"), r.PathValue("kind"), r.PathValue("conversationID"),
+	)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "conversation not found")
+			return
+		}
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load administrator conversation content")
+		return
+	}
+	response := adminConversationContent{
+		ID: content.ID, Kind: content.Kind, Title: content.Title, Prompt: content.Prompt,
+		Items: make([]adminConversationContentItem, 0, len(content.Items)),
+	}
+	for _, item := range content.Items {
+		response.Items = append(response.Items, adminConversationContentItem{
+			Role: item.Role, Source: item.Source, Kind: item.Kind, Content: item.Content, CreatedAt: item.CreatedAt,
+		})
+	}
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"conversation": response})
 }
 
 func buildAdminUserUsageDetail(snapshot store.AdminUserDetailSnapshot, days, timezoneOffset int) adminUserUsageDetail {

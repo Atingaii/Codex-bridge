@@ -129,6 +129,33 @@ func TestStaticHandlerCacheHeaders(t *testing.T) {
 	}
 }
 
+func TestStaticHandlerRedirectsStaleHashedAssets(t *testing.T) {
+	s := &Server{}
+	root, err := fs.Sub(web.StaticFS, "static")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		path      string
+		extension string
+	}{
+		{path: "/assets/index-stale.js", extension: ".js"},
+		{path: "/assets/index-stale.css", extension: ".css"},
+	} {
+		rr := httptest.NewRecorder()
+		s.staticHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if rr.Code != http.StatusTemporaryRedirect {
+			t.Fatalf("%s status = %d, want 307", tc.path, rr.Code)
+		}
+		if location := rr.Header().Get("Location"); location != currentStaticAsset(root, tc.extension) {
+			t.Fatalf("%s location = %q", tc.path, location)
+		}
+		if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("%s Cache-Control = %q, want no-store", tc.path, got)
+		}
+	}
+}
+
 func TestValidatePromptAttachments(t *testing.T) {
 	cfg := config.Default()
 	cfg.Hub.MaxAttachmentBytes = 10

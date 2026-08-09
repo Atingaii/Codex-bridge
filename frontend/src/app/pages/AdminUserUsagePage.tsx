@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Coins, Layers3, MessageSquare, Monitor, RefreshCw, Search, ShieldCheck, Workflow } from 'lucide-react';
+import { ArrowLeft, ChevronRight, Coins, FileText, Layers3, MessageSquare, Monitor, RefreshCw, Search, ShieldCheck, Workflow } from 'lucide-react';
 import { api } from '../lib/api';
-import type { AdminConversationUsage, AdminUserUsageDetail } from '../lib/types';
+import type { AdminConversationContent, AdminConversationContentItem, AdminConversationUsage, AdminUserUsageDetail } from '../lib/types';
 import type { UIText } from '../lib/i18n';
 import { Button, Input } from '../components/ui';
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '../components/ui/sheet';
 
 type Range = 7 | 30 | 90 | 0;
 type Kind = 'all' | AdminConversationUsage['kind'];
@@ -28,6 +29,10 @@ export function AdminUserUsagePage({ userID, t, navigate }: { userID: string; t:
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [selected, setSelected] = useState<AdminConversationUsage | null>(null);
+  const [content, setContent] = useState<AdminConversationContent | null>(null);
+  const [contentLoading, setContentLoading] = useState(false);
+  const [contentError, setContentError] = useState('');
 
   const load = async () => {
     setLoading(true); setError('');
@@ -42,6 +47,18 @@ export function AdminUserUsagePage({ userID, t, navigate }: { userID: string; t:
     }
   };
   useEffect(() => { void load(); }, [range, userID]);
+
+  const openConversation = async (item: AdminConversationUsage) => {
+    setSelected(item); setContent(null); setContentError(''); setContentLoading(true);
+    try {
+      const data = await api<{ conversation: AdminConversationContent }>(`/api/admin/users/${encodeURIComponent(userID)}/conversations/${encodeURIComponent(item.kind)}/${encodeURIComponent(item.id)}`);
+      setContent(data.conversation);
+    } catch (err) {
+      setContentError(err instanceof Error ? err.message : t.failedLoadOrchestration);
+    } finally {
+      setContentLoading(false);
+    }
+  };
 
   const conversations = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -73,23 +90,50 @@ export function AdminUserUsagePage({ userID, t, navigate }: { userID: string; t:
         <div className="flex items-start gap-2 rounded-md border border-border bg-muted/20 px-3 py-2.5 text-xs text-muted-foreground"><ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>{t.readOnlyMetadataNotice}</span></div>
         <section>
           <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between"><div><h3 className="text-sm font-semibold">{t.userConversationDetails}</h3><p className="mt-1 text-xs text-muted-foreground">{conversations.length} / {detail.conversations.length}</p></div><div className="flex flex-col gap-3 sm:flex-row"><Control label={t.conversationType}>{kinds.map((item) => <Choice key={item.value} active={kind === item.value} onClick={() => setKind(item.value)}>{item.label}</Choice>)}</Control><div><div className="mb-1.5 text-[11px] text-muted-foreground">{t.search}</div><div className="relative w-full sm:w-64"><Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t.searchConversations} className="h-9 pl-9" /></div></div></div></div>
-          <div className="hidden overflow-hidden rounded-lg border border-border bg-card md:block"><table className="w-full table-fixed text-left text-xs"><thead className="border-b border-border bg-muted/20 text-muted-foreground"><tr><th className="w-[29%] px-4 py-3 font-medium">{t.conversationTitle}</th><th className="w-[13%] px-4 py-3 font-medium">{t.conversationType}</th><th className="w-[16%] px-4 py-3 font-medium">{t.status}</th><th className="w-[16%] px-4 py-3 font-medium">{t.endpointsMetric}</th><th className="w-[14%] px-4 py-3 font-medium">{t.totalTokens}</th><th className="w-[12%] px-4 py-3 font-medium">{t.estimatedCost}</th></tr></thead><tbody className="divide-y divide-border">{conversations.map((item) => <ConversationRow key={`${item.kind}:${item.id}`} item={item} t={t} />)}</tbody></table></div>
-          <div className="space-y-2 md:hidden">{conversations.map((item) => <ConversationCard key={`${item.kind}:${item.id}`} item={item} t={t} />)}</div>
+          <div className="hidden overflow-hidden rounded-lg border border-border bg-card md:block"><table className="w-full table-fixed text-left text-xs"><thead className="border-b border-border bg-muted/20 text-muted-foreground"><tr><th className="w-[29%] px-4 py-3 font-medium">{t.conversationTitle}</th><th className="w-[13%] px-4 py-3 font-medium">{t.conversationType}</th><th className="w-[16%] px-4 py-3 font-medium">{t.status}</th><th className="w-[16%] px-4 py-3 font-medium">{t.endpointsMetric}</th><th className="w-[14%] px-4 py-3 font-medium">{t.totalTokens}</th><th className="w-[12%] px-4 py-3 font-medium">{t.estimatedCost}</th></tr></thead><tbody className="divide-y divide-border">{conversations.map((item) => <ConversationRow key={`${item.kind}:${item.id}`} item={item} t={t} onOpen={openConversation} />)}</tbody></table></div>
+          <div className="space-y-2 md:hidden">{conversations.map((item) => <ConversationCard key={`${item.kind}:${item.id}`} item={item} t={t} onOpen={openConversation} />)}</div>
           {!conversations.length && <div className="rounded-lg border border-dashed border-border p-12 text-center text-sm text-muted-foreground">{t.noConversationsFound}</div>}
         </section>
       </> : null}
     </main>
+    <Sheet open={selected !== null} onOpenChange={(open) => { if (!open) { setSelected(null); setContent(null); setContentError(''); } }}>
+      <SheetContent className="w-[min(94vw,760px)] gap-0 sm:max-w-[760px]">
+        <SheetHeader className="border-b border-border pr-12">
+          <SheetTitle className="truncate text-base">{selected?.title || t.conversationContent}</SheetTitle>
+          <SheetDescription>{t.conversationContentSubtitle}</SheetDescription>
+        </SheetHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+          {contentLoading && <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground"><RefreshCw className="h-4 w-4 animate-spin" />{t.loadingConversationContent}</div>}
+          {contentError && <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{contentError}</div>}
+          {content && <ConversationContentView content={content} t={t} />}
+        </div>
+      </SheetContent>
+    </Sheet>
   </div>;
 }
 
-function ConversationRow({ item, t }: { item: AdminConversationUsage; t: UIText }) {
+function ConversationRow({ item, t, onOpen }: { item: AdminConversationUsage; t: UIText; onOpen: (item: AdminConversationUsage) => void }) {
   const Icon = item.kind === 'chat' ? MessageSquare : Workflow;
-  return <tr className="hover:bg-muted/20"><td className="px-4 py-3"><div className="flex min-w-0 items-start gap-2.5"><Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" /><div className="min-w-0"><div className="truncate text-sm font-medium" title={item.title}>{item.title || '—'}</div><div className="mt-1 text-muted-foreground" title={new Date(item.updatedAt * 1000).toLocaleString()}>{new Date(item.updatedAt * 1000).toLocaleString()}</div></div></div></td><td className="px-4 py-3"><div className="font-medium">{item.kind === 'chat' ? t.chatConversations : t.orchestrationConversations}</div>{item.mode && <div className="mt-1 text-muted-foreground">{item.mode} · {item.maxTurns}</div>}</td><td className="px-4 py-3"><Status status={item.status} /><div className="mt-1.5 text-muted-foreground">{item.activityCount.toLocaleString()} {t.activityCountMetric}</div></td><td className="px-4 py-3"><div className="truncate font-medium" title={item.agentName}>{item.agentName || '—'}</div><div className="mt-1 text-muted-foreground"><Monitor className="mr-1 inline h-3 w-3" />{t.endpointsMetric}</div></td><td className="px-4 py-3"><div className="font-medium tabular-nums" title={item.totalTokens.toLocaleString()}>{compact(item.totalTokens)}</div><div className="mt-1 text-muted-foreground">{item.callCount.toLocaleString()} {t.callsMetric}</div></td><td className="px-4 py-3 font-medium tabular-nums">{item.callCount ? `$${item.estimatedCostUsd.toFixed(4)}${item.costKnown ? '' : '*'}` : '—'}</td></tr>;
+  return <tr className="cursor-pointer hover:bg-muted/30" onClick={() => void onOpen(item)} title={t.openConversationContent}><td className="px-4 py-3"><div className="flex min-w-0 items-start gap-2.5"><Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" /><div className="min-w-0"><div className="flex items-center gap-1.5"><div className="truncate text-sm font-medium" title={item.title}>{item.title || '—'}</div><ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /></div><div className="mt-1 text-muted-foreground" title={new Date(item.updatedAt * 1000).toLocaleString()}>{new Date(item.updatedAt * 1000).toLocaleString()}</div></div></div></td><td className="px-4 py-3"><div className="font-medium">{item.kind === 'chat' ? t.chatConversations : t.orchestrationConversations}</div>{item.mode && <div className="mt-1 text-muted-foreground">{item.mode} · {item.maxTurns}</div>}</td><td className="px-4 py-3"><Status status={item.status} /><div className="mt-1.5 text-muted-foreground">{item.activityCount.toLocaleString()} {t.activityCountMetric}</div></td><td className="px-4 py-3"><div className="truncate font-medium" title={item.agentName}>{item.agentName || '—'}</div><div className="mt-1 text-muted-foreground"><Monitor className="mr-1 inline h-3 w-3" />{t.endpointsMetric}</div></td><td className="px-4 py-3"><div className="font-medium tabular-nums" title={item.totalTokens.toLocaleString()}>{compact(item.totalTokens)}</div><div className="mt-1 text-muted-foreground">{item.callCount.toLocaleString()} {t.callsMetric}</div></td><td className="px-4 py-3 font-medium tabular-nums">{item.callCount ? `$${item.estimatedCostUsd.toFixed(4)}${item.costKnown ? '' : '*'}` : '—'}</td></tr>;
 }
 
-function ConversationCard({ item, t }: { item: AdminConversationUsage; t: UIText }) {
+function ConversationCard({ item, t, onOpen }: { item: AdminConversationUsage; t: UIText; onOpen: (item: AdminConversationUsage) => void }) {
   const Icon = item.kind === 'chat' ? MessageSquare : Workflow;
-  return <article className="rounded-lg border border-border bg-card p-4"><div className="flex min-w-0 items-start justify-between gap-3"><div className="flex min-w-0 items-start gap-2.5"><Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" /><div className="min-w-0"><h4 className="break-words text-sm font-semibold">{item.title || '—'}</h4><p className="mt-1 truncate text-xs text-muted-foreground">{item.agentName || '—'}</p></div></div><Status status={item.status} /></div><div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-xs"><Datum label={t.conversationType} value={item.kind === 'chat' ? t.chatConversations : t.orchestrationConversations} /><Datum label={t.activityCountMetric} value={item.activityCount.toLocaleString()} /><Datum label={t.totalTokens} value={compact(item.totalTokens)} title={item.totalTokens.toLocaleString()} /><Datum label={t.estimatedCost} value={item.callCount ? `$${item.estimatedCostUsd.toFixed(4)}${item.costKnown ? '' : '*'}` : '—'} /></div><p className="mt-3 text-[11px] text-muted-foreground">{new Date(item.updatedAt * 1000).toLocaleString()}</p></article>;
+  return <button type="button" onClick={() => void onOpen(item)} className="block w-full rounded-lg border border-border bg-card p-4 text-left transition-colors hover:border-primary/40 hover:bg-muted/20" aria-label={`${t.openConversationContent}: ${item.title}`}><div className="flex min-w-0 items-start justify-between gap-3"><div className="flex min-w-0 items-start gap-2.5"><Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" /><div className="min-w-0"><h4 className="flex items-center gap-1 break-words text-sm font-semibold">{item.title || '—'}<ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /></h4><p className="mt-1 truncate text-xs text-muted-foreground">{item.agentName || '—'}</p></div></div><Status status={item.status} /></div><div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-xs"><Datum label={t.conversationType} value={item.kind === 'chat' ? t.chatConversations : t.orchestrationConversations} /><Datum label={t.activityCountMetric} value={item.activityCount.toLocaleString()} /><Datum label={t.totalTokens} value={compact(item.totalTokens)} title={item.totalTokens.toLocaleString()} /><Datum label={t.estimatedCost} value={item.callCount ? `$${item.estimatedCostUsd.toFixed(4)}${item.costKnown ? '' : '*'}` : '—'} /></div><p className="mt-3 text-[11px] text-muted-foreground">{new Date(item.updatedAt * 1000).toLocaleString()}</p></button>;
+}
+
+function ConversationContentView({ content, t }: { content: AdminConversationContent; t: UIText }) {
+  return <div className="space-y-4">
+    {content.prompt && <section><div className="mb-2 flex items-center gap-2 text-xs font-semibold"><FileText className="h-3.5 w-3.5 text-muted-foreground" />{t.initialPrompt}</div><div className="whitespace-pre-wrap break-words rounded-md border border-amber-500/25 bg-amber-500/5 p-3 text-sm leading-6">{content.prompt}</div></section>}
+    <section className="space-y-3">{content.items.map((item, index) => <ContentItem key={`${item.createdAt}:${index}`} item={item} />)}</section>
+    {!content.prompt && !content.items.length && <div className="rounded-md border border-dashed border-border p-10 text-center text-sm text-muted-foreground">{t.noConversationContent}</div>}
+  </div>;
+}
+
+function ContentItem({ item }: { item: AdminConversationContentItem }) {
+  const label = item.role || item.source || item.kind;
+  const user = item.role === 'user' || item.source === 'user' || item.kind === 'user.message';
+  return <article className={`rounded-md border p-3 ${user ? 'border-sky-500/25 bg-sky-500/5' : 'border-border bg-muted/20'}`}><div className="mb-2 flex items-center justify-between gap-3 text-[11px] text-muted-foreground"><span className="font-medium text-foreground">{label}</span><time className="shrink-0">{new Date(item.createdAt * 1000).toLocaleString()}</time></div><div className="whitespace-pre-wrap break-words text-sm leading-6">{item.content}</div></article>;
 }
 
 function Status({ status }: { status: string }) { return <span className={`inline-flex max-w-full rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusStyle(status)}`}>{status}</span>; }

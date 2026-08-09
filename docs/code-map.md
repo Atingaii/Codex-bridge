@@ -361,8 +361,8 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 2. `internal/bridge/orchestration_events.go:emit` normalizes source/severity and
    emits exactly one `run.conclusion` before terminal run events.
 3. `internal/bridge/orchestration_events.go:emitTool` maps `RunnerToolEvent` into
-   typed `CommandData`; frontend command cards must use `commandData`, not
-   free-form `data` keys.
+   typed `CommandData` and emits start/update/end lifecycle kinds; frontend
+   command cards must use `commandData`, not free-form `data` keys.
 4. `internal/store/store.go:AddOrchestrationEvent` persists typed event
    payloads and keeps legacy `Data` compatibility for older rows.
 5. `internal/hub/orchestration.go:handleOrchestrationEvent` persists the

@@ -125,6 +125,7 @@ type RunnerToolEvent struct {
 	StartedAt             time.Time
 	CompletedAt           time.Time
 	WillSuppressOnFailure bool
+	Progress bool
 }
 
 type ApprovalRequester interface {

@@ -545,7 +545,7 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 				}
 			case "item/commandExecution/outputDelta":
 				if id := nestedString(map[string]any{"params": msg.Params}, "params", "itemId"); id != "" {
-					onUpdate(RunnerUpdate{Tool: &RunnerToolEvent{ID: id, Output: nestedString(map[string]any{"params": msg.Params}, "params", "delta"), Status: "running"}})
+					onUpdate(RunnerUpdate{Tool: &RunnerToolEvent{ID: id, Output: nestedString(map[string]any{"params": msg.Params}, "params", "delta"), Status: "running", Progress: true}})
 				}
 			case "turn/completed":
 				if terminal, err := appServerCompletedTurnState(msg); !terminal {

@@ -85,7 +85,8 @@ stream-json session. For Codex + Codex runs, Bridge keeps independent
 `codex-a` and `codex-b` app-server threads so each participant has distinct
 native context. Direct orchestration is a pass-through relay: the run's
 persisted `worker_pair` and `first_cli` settings decide which worker receives
-the browser task first, Bridge streams CLI deltas, typed command events, and
+the browser task first, Bridge streams CLI deltas, typed command lifecycle and
+progress events, and
 terminal status to the browser, and the next worker receives a parsed
 Agent-to-Agent packet containing the newest request, changed files,
 verification, next action, risks, and useful command context. Full prose is a
@@ -165,7 +166,8 @@ only calls the neutral registry boundary.
 Orchestration events use a typed contract in
 `internal/protocol/envelope.go:OrchestrationEventPayload`. `source`
 distinguishes `cli`, `bridge`, and `user` events; `severity` carries
-Bridge-internal log levels without overloading lifecycle `status`; command,
+Bridge-internal log levels without overloading lifecycle `status`; command
+start/update/end,
 run-start, turn-start, run-end, Bridge-note, and final-conclusion details live
 in typed sub-payloads. `turn.start.content` is a one-line status; the full
 local prompt is kept in `TurnStartData.PromptText` for authenticated local

@@ -1433,7 +1433,7 @@ func compactOrchestrationContext(run store.OrchestrationRun, events []store.Orch
 			}
 		case event.Kind == "turn.delta" && strings.TrimSpace(event.Content) != "":
 			turnNotes = append(turnNotes, formatOrchestrationActor(event)+": "+trimForContext(event.Content, 900))
-		case event.Kind == "command.end" || event.Kind == "command.start":
+		case event.Kind == "command.end" || event.Kind == "command.start" || event.Kind == "command.update":
 			command := stringFromMap(event.Data, "command")
 			if command == "" {
 				continue

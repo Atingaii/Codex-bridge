@@ -135,7 +135,9 @@ func (m *OrchestrationManager) emitTool(runID, turnID, role, cli string, tool *R
 		tool.Output = redactSensitiveText(stripANSI(tool.Output))
 	}
 	kind := "command.end"
-	if isRunningToolStatus(tool.Status) {
+	if tool.Progress {
+		kind = "command.update"
+	} else if isRunningToolStatus(tool.Status) {
 		kind = "command.start"
 	}
 	data := map[string]any{

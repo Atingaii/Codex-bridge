@@ -86,6 +86,10 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 	// callback mutates while the error paths below read them.
 	turnCtx, cancelTurn := context.WithCancel(ctx)
 	defer cancelTurn()
+	timeouts := newExplicitTimeoutWatchdogs(m, payload.RunID, turnID, role, "codex", func() {
+		codex.client.closeWithTimeout(appServerPrepareCloseTimeout)
+	})
+	defer timeouts.Close()
 	go runner.readEvents(turnCtx, codex.client, req, scope, func(update RunnerUpdate) {
 		if update.Notice != nil {
 			m.emit(payload.RunID, runnerNoticeOrchestrationEvent(turnID, role, "codex", update.Notice))
@@ -97,6 +101,7 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: update.Content})
 		}
 		if update.Tool != nil {
+			timeouts.Observe(update.Tool)
 			toolsMu.Lock()
 			stampToolTiming(update.Tool, toolStarts)
 			tools = append(tools, *update.Tool)
@@ -116,6 +121,9 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 	scope.setTurnID(appServerTurnIDFromResponse(res))
 	select {
 	case result := <-done:
+		if timeoutErr := timeouts.Err(); timeoutErr != nil {
+			return strings.TrimSpace(result.result.Content), snapshotTools(), codex.threadID, resumeMode, timeoutErr
+		}
 		if len(result.result.Usage) > 0 {
 			m.recordNativeUsage(turnID, "codex", m.cfg.Bridge.Model, result.result.Usage)
 		}
@@ -357,14 +365,19 @@ func (m *OrchestrationManager) runCodexExecAttempt(ctx context.Context, payload 
 	if err := cmd.Start(); err != nil {
 		return codexExecAttempt{threadID: threadID, err: err}
 	}
+	timeouts := newExplicitTimeoutWatchdogs(m, payload.RunID, turnID, role, "codex", cancel)
+	defer timeouts.Close()
 	_, _ = io.WriteString(stdin, prompt)
 	_ = stdin.Close()
 
-	scanResult, scanErr := m.scanCodexJSONLResult(stdout, payload.RunID, turnID, role)
+	scanResult, scanErr := m.scanCodexJSONLResult(stdout, payload.RunID, turnID, role, timeouts)
 	if scanErr != nil {
 		cancel()
 	}
 	waitErr := cmd.Wait()
+	if timeoutErr := timeouts.Err(); timeoutErr != nil {
+		return codexExecAttempt{content: scanResult.Content, tools: scanResult.Tools, threadID: firstNonEmpty(scanResult.ThreadID, threadID), threadStarted: scanResult.ThreadStarted, usage: scanResult.Usage, err: timeoutErr}
+	}
 	if err := ctx.Err(); err != nil {
 		return codexExecAttempt{content: scanResult.Content, tools: scanResult.Tools, threadID: firstNonEmpty(scanResult.ThreadID, threadID), threadStarted: scanResult.ThreadStarted, usage: scanResult.Usage, err: err}
 	}
@@ -459,9 +472,13 @@ func (m *OrchestrationManager) codexOrchestrationArgs(payload protocol.Orchestra
 func (m *OrchestrationManager) runCodexAppServerWithThread(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt, threadID string) (string, []RunnerToolEvent, string, string, error) {
 	runner := NewCodexAppServerRunner(m.cfg)
 	defer runner.Close()
+	turnCtx, cancelTurn := context.WithCancel(ctx)
+	defer cancelTurn()
+	timeouts := newExplicitTimeoutWatchdogs(m, payload.RunID, turnID, role, "codex", cancelTurn)
+	defer timeouts.Close()
 	var tools []RunnerToolEvent
 	toolStarts := make(map[string]time.Time)
-	result, err := runner.Prompt(ctx, RunnerRequest{
+	result, err := runner.Prompt(turnCtx, RunnerRequest{
 		Content:        prompt,
 		RemoteThreadID: threadID,
 		RunID:          payload.RunID,
@@ -486,11 +503,15 @@ func (m *OrchestrationManager) runCodexAppServerWithThread(ctx context.Context, 
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{Kind: "turn.delta", TurnID: turnID, Role: role, CLI: "codex", Content: update.Content})
 		}
 		if update.Tool != nil {
+			timeouts.Observe(update.Tool)
 			stampToolTiming(update.Tool, toolStarts)
 			tools = append(tools, *update.Tool)
 			m.emitTool(payload.RunID, turnID, role, "codex", update.Tool)
 		}
 	})
+	if timeoutErr := timeouts.Err(); timeoutErr != nil {
+		err = timeoutErr
+	}
 	mode := "codex-fresh"
 	if threadID != "" {
 		mode = "codex-thread-resume"
@@ -505,7 +526,7 @@ func (m *OrchestrationManager) shouldRunCodexAppServer() bool {
 	return !m.bypassApprovalsAndSandbox()
 }
 
-func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, turnID, role string) (codexScanResult, error) {
+func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, turnID, role string, timeouts ...*explicitTimeoutWatchdogs) (codexScanResult, error) {
 	reader := bufio.NewReaderSize(stdout, 64*1024)
 	var content strings.Builder
 	var eventErr string
@@ -517,6 +538,7 @@ func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, tur
 	toolStarts := make(map[string]time.Time)
 	observer := m.longCommandObserverConfig()
 	activeObservers := make(map[string]context.CancelFunc)
+	startedTools := make(map[string]bool)
 	defer func() {
 		for _, cancel := range activeObservers {
 			cancel()
@@ -526,7 +548,14 @@ func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, tur
 		if tool == nil {
 			return
 		}
+		if tool.ID != "" && isRunningToolStatus(tool.Status) {
+			tool.Progress = startedTools[tool.ID]
+			startedTools[tool.ID] = true
+		}
 		stampToolTiming(tool, toolStarts)
+		if len(timeouts) > 0 {
+			timeouts[0].Observe(tool)
+		}
 		if tool.ID != "" {
 			if isRunningToolStatus(tool.Status) && m.longCommandObserverMatches(observer, "codex", tool.Command) {
 				if activeObservers[tool.ID] == nil {

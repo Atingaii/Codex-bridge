@@ -99,6 +99,7 @@ type claudeScanOptions struct {
 	IdleCloseAfter      time.Duration
 	ReturnAfterResult   bool
 	LongCommandObserver longCommandObserverConfig
+	ExplicitTimeouts    *explicitTimeoutWatchdogs
 }
 
 type longCommandObserverConfig struct {
@@ -132,6 +133,12 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 	if claude.approvalServer != nil {
 		claude.approvalServer.updateTurn(turnID, role)
 	}
+	timeouts := newExplicitTimeoutWatchdogs(m, payload.RunID, turnID, role, "claude", func() {
+		if claude.cmd != nil && claude.cmd.Process != nil {
+			_ = terminateProcessGroup(claude.cmd.Process.Pid)
+		}
+	})
+	defer timeouts.Close()
 	observer := m.longCommandObserverConfig()
 	content, tools, err := m.scanClaudeJSONLWithOptions(claude.stdout, payload.RunID, turnID, role, claudeScanOptions{
 		Input:               claude.stdin,
@@ -139,7 +146,11 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 		LongCommandObserver: observer,
 		NudgeAfter:          observer.After,
 		ReturnAfterResult:   true,
+		ExplicitTimeouts:    timeouts,
 	})
+	if timeoutErr := timeouts.Err(); timeoutErr != nil {
+		err = timeoutErr
+	}
 	if err != nil && claude.stderr != nil {
 		msg := strings.TrimSpace(claude.stderr.String())
 		if msg != "" {
@@ -314,6 +325,8 @@ func (m *OrchestrationManager) runClaudeWithSessionAttempt(ctx context.Context, 
 	if err := cmd.Start(); err != nil {
 		return "", nil, err
 	}
+	timeouts := newExplicitTimeoutWatchdogs(m, payload.RunID, turnID, role, "claude", cancel)
+	defer timeouts.Close()
 	if useStreamInput {
 		if err := writeClaudeStreamUserMessage(stdin, prompt); err != nil {
 			cancel()
@@ -332,11 +345,15 @@ func (m *OrchestrationManager) runClaudeWithSessionAttempt(ctx context.Context, 
 		CanNudge:            useStreamInput,
 		NudgeAfter:          observer.After,
 		LongCommandObserver: observer,
+		ExplicitTimeouts:    timeouts,
 	})
 	if scanErr != nil {
 		cancel()
 	}
 	waitErr := cmd.Wait()
+	if timeoutErr := timeouts.Err(); timeoutErr != nil {
+		return content, tools, timeoutErr
+	}
 	if err := ctx.Err(); err != nil {
 		return content, tools, err
 	}
@@ -818,6 +835,7 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 		if tool.ID != "" && tool.Command == "" {
 			tool.Command = toolCommands[tool.ID]
 		}
+		options.ExplicitTimeouts.Observe(tool)
 		if tool.ID != "" && strings.EqualFold(tool.Status, "in_progress") && isClaudeReadCommand(tool.Command) {
 			copy := *tool
 			copy.Command = tool.Command

@@ -323,6 +323,7 @@ func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
 		`timeout 900 wget -c -O "$TMP" "$DOWNLOAD_URL"`,
 		`wget -c -O "$TMP" "$DOWNLOAD_URL"`,
 		`Saved download is not resumable; restarting it...`,
+		`echo "curl download failed; trying wget..."`,
 		`bridge download interrupted; resuming`,
 		`bridge download failed after $attempt attempts`,
 		`echo "Download complete."`,
@@ -350,6 +351,57 @@ func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
 	cmd.Stdin = strings.NewReader(body)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("install script shell syntax: %v: %s", err, output)
+	}
+}
+
+func TestInstallScriptFallsBackFromCurlToPortableWget(t *testing.T) {
+	t.Parallel()
+
+	s, _ := newAuthTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/install.sh", nil)
+	req.Host = "sparkapi.test"
+	rr := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("install HTTP status = %d: %s", rr.Code, rr.Body.String())
+	}
+
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	binDir := filepath.Join(tmp, "bin")
+	for _, dir := range []string{home, binDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExecutable(t, filepath.Join(binDir, "curl"), `#!/bin/sh
+case " $* " in *' --version '*) exit 0 ;; esac
+exit 2
+`)
+	writeExecutable(t, filepath.Join(binDir, "wget"), `#!/bin/sh
+out=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '-O' ]; then out=$2; shift 2; continue; fi
+  shift
+done
+cp /bin/true "$out"
+`)
+	scriptPath := filepath.Join(tmp, "install.sh")
+	if err := os.WriteFile(scriptPath, rr.Body.Bytes(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", scriptPath)
+	cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+binDir+":/usr/bin:/bin")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("execute install script: %v\n%s", err, output)
+	}
+	installed := filepath.Join(home, ".local", "bin", "codex-bridge")
+	if _, err := os.Stat(installed); err != nil {
+		t.Fatalf("portable wget did not install binary: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "curl download failed; trying wget...") {
+		t.Fatalf("installer did not report transport fallback: %s", output)
 	}
 }
 

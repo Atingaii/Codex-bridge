@@ -717,6 +717,20 @@ if command -v curl >/dev/null 2>&1; then
       echo "Saved download is not resumable; restarting it..." >&2
       rm -f "$TMP"
     fi
+    if command -v wget >/dev/null 2>&1; then
+      echo "curl download failed; trying wget..." >&2
+      set +e
+      if command -v timeout >/dev/null 2>&1; then
+        timeout 900 wget -c -O "$TMP" "$DOWNLOAD_URL"
+      else
+        wget -c -O "$TMP" "$DOWNLOAD_URL"
+      fi
+      wget_status=$?
+      set -e
+      if [ "$wget_status" -eq 0 ]; then
+        break
+      fi
+    fi
     if [ "$attempt" -ge 8 ]; then
       echo "bridge download failed after $attempt attempts" >&2
       exit 1

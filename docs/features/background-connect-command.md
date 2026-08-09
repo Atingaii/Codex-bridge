@@ -127,8 +127,8 @@ enabled only when the installed curl recognizes it; wget uses options shared by
 GNU wget and common BusyBox builds. If a server
 rejects the saved range (`416`), the installer removes only that temporary
 download and starts a fresh attempt. A transient TLS or HTTP/2 edge failure
-therefore continues from the existing temporary file and never replaces the
-working Bridge with a partial download.
+therefore tries wget when available, continues from the existing temporary
+file, and never replaces the working Bridge with a partial download.
 
 After the atomic replacement succeeds, the same install command refreshes
 already linked endpoints without adding another user-facing command or daemon:

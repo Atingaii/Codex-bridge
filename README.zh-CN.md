@@ -7,7 +7,7 @@
 <p align="center"><strong>让浏览器安全访问私有机器上的 Codex 与 Claude Code，并进行多 CLI 编排。</strong></p>
 
 <p align="center">
-  <a href="https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml"><img src="https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml/badge.svg" alt="CI 状态" /></a>
+  <a href="https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push" alt="main 分支 CI 状态" /></a>
   <a href="go.mod"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25+" /></a>
   <a href="docs/deployment.md"><img src="https://img.shields.io/badge/platform-Linux-555" alt="Linux" /></a>
 </p>

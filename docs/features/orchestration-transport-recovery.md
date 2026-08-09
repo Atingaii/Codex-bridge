@@ -27,6 +27,10 @@ persisted events.
    long offline period cannot deadlock or reorder terminal state.
 4. Hub waits for the maximum Bridge reconnect backoff, possible jitter, and a
    heartbeat window before declaring an offline active run failed.
+   After an established connection drops, Bridge makes one immediate reconnect
+   attempt. A failed dial then enters the configured exponential backoff with
+   jitter, and a connection that stayed alive for 30 seconds resets that
+   backoff to its minimum.
 5. Actual process shutdown, a changed Bridge instance, and explicit
    cancellation retain their terminal behavior. When reconnect grace expires,
    the terminal failure preserves the bounded reverse WebSocket close reason.
@@ -46,6 +50,8 @@ persisted events.
   recovery, while accepting development/test builds whose versions are not
   release semver strings.
 - Size Hub's offline grace window to cover the Bridge retry schedule.
+- Retry once immediately after an established transport drops, while retaining
+  bounded exponential backoff for an unavailable Hub or network.
 - Verify the socket disconnect path preserves active run handles, run contexts
   are owned by the manager rather than the socket reader, detached events are
   buffered for the replacement connection, and explicit cancellation still
@@ -57,6 +63,8 @@ persisted events.
 - A short Bridge transport loss does not emit run.cancelled.
 - Reconnected Bridge output is persisted and available to the browser's normal
   event reload.
+- A transient disconnect does not spend the minimum backoff interval offline;
+  repeated connection failures remain rate-limited and capped.
 - A pre-`v0.3.1` endpoint receives an actionable orchestration rejection instead
   of accepting a task it will cancel on the next transient transport loss.
 - A permanently offline Bridge eventually causes a visible failed run.

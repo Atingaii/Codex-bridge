@@ -200,9 +200,15 @@ export function mergeOrchestrationEvents(current: OrchestrationEvent[], incoming
   return Array.from(merged.values()).sort(compareOrchestrationEvents);
 }
 
-export function upsertOrchestrationRun(current: OrchestrationRun[], next: OrchestrationRun) {
-  const found = current.some((run) => run.id === next.id);
-  const runs = found ? current.map((run) => run.id === next.id ? { ...run, ...next } : run) : [next, ...current];
+export function isOrchestrationRun(value: unknown): value is OrchestrationRun {
+  return Boolean(value && typeof value === 'object' && typeof (value as { id?: unknown }).id === 'string' && (value as { id: string }).id.trim());
+}
+
+export function upsertOrchestrationRun(current: Array<OrchestrationRun | null | undefined>, next?: OrchestrationRun | null) {
+  const validCurrent = current.filter(isOrchestrationRun);
+  if (!isOrchestrationRun(next)) return validCurrent;
+  const found = validCurrent.some((run) => run.id === next.id);
+  const runs = found ? validCurrent.map((run) => run.id === next.id ? { ...run, ...next } : run) : [next, ...validCurrent];
   return runs.slice().sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
 }
 

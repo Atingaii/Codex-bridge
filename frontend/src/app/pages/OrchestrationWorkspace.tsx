@@ -61,6 +61,7 @@ import {
   copyText,
   forgetActiveOrchestrationRunForAgent,
   isNearBottom,
+  isOrchestrationRun,
   mergeOrchestrationEvents,
   mergeOrchestrationFiles,
   normalizeOrchestrationWorkerPair,
@@ -222,7 +223,7 @@ export function OrchestrationWorkspace({
     params.set('limit', '50');
     if (agentId) params.set('agentId', agentId);
     const data = await api<{ runs: OrchestrationRun[] }>(`/api/orchestrations?${params.toString()}`);
-    const incoming = data.runs || [];
+    const incoming = Array.isArray(data.runs) ? data.runs.filter(isOrchestrationRun) : [];
     setRuns((current) => {
       if (!agentId) return incoming;
       return mergeOrchestrationRunsPreservingOtherAgents(current, incoming, agentId);
@@ -232,9 +233,10 @@ export function OrchestrationWorkspace({
 
   const loadRun = useCallback(async (runId: string) => {
     const data = await api<{ run: OrchestrationRun }>(`/api/orchestrations/${encodeURIComponent(runId)}`);
+    if (!isOrchestrationRun(data.run)) throw new Error(t.failedLoadOrchestration);
     setRuns((current) => upsertOrchestrationRun(current, data.run));
     return data.run;
-  }, []);
+  }, [t.failedLoadOrchestration]);
 
   const loadRunEvents = useCallback(async (runId: string, replace = false, mode: 'latest' | 'after' | 'before' = 'latest') => {
     const params = new URLSearchParams();
@@ -581,8 +583,37 @@ export function OrchestrationWorkspace({
   }, [activateRun, loadAgents, loadRun, loadRuns, pathRunId, switchAgentRun]);
 
   useEffect(() => {
-    refreshOrchestration().catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
-    return () => closeWS();
+    let stopped = false;
+    let retryTimer: number | null = null;
+    const retry = () => {
+      if (stopped || document.visibilityState !== 'visible' || !navigator.onLine) return;
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      void refreshOrchestration()
+        .then(() => {
+          if (!stopped) setError('');
+        })
+        .catch((err) => {
+          if (stopped) return;
+          setError(err instanceof Error ? err.message : t.failedLoadOrchestration);
+          retryTimer = window.setTimeout(retry, 3000);
+        });
+    };
+    const recover = () => {
+      if (document.visibilityState === 'visible' && navigator.onLine) retry();
+    };
+    retry();
+    window.addEventListener('online', recover);
+    document.addEventListener('visibilitychange', recover);
+    return () => {
+      stopped = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      window.removeEventListener('online', recover);
+      document.removeEventListener('visibilitychange', recover);
+      closeWS();
+    };
   }, []);
 
   useEffect(() => {
@@ -1309,9 +1340,9 @@ function minOrchestrationEventSeq(events: OrchestrationEvent[], initial = 0) {
 
 function mergeOrchestrationRunsPreservingOtherAgents(current: OrchestrationRun[], incoming: OrchestrationRun[], agentId: string) {
   const merged = new Map<string, OrchestrationRun>();
-  current.forEach((run) => {
+  current.filter(isOrchestrationRun).forEach((run) => {
     if (run.agentId !== agentId) merged.set(run.id, run);
   });
-  incoming.forEach((run) => merged.set(run.id, run));
+  incoming.filter(isOrchestrationRun).forEach((run) => merged.set(run.id, run));
   return Array.from(merged.values()).sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
 }

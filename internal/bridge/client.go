@@ -61,6 +61,7 @@ func (c *Client) Run(ctx context.Context) error {
 		maxDelay = minDelay
 	}
 	delay := minDelay
+	immediateRetryAvailable := true
 
 	for {
 		if c.shutdownRequested() {
@@ -73,14 +74,23 @@ func (c *Client) Run(ctx context.Context) error {
 		if c.shutdownRequested() {
 			return nil
 		}
-		// A connection that stayed alive has recovered from the transient
-		// failure. Do not carry a previous outage's maximum backoff into the
-		// next unrelated outage.
-		if !c.connectedAt.IsZero() && time.Since(c.connectedAt) >= 30*time.Second {
-			delay = minDelay
+		connectedFor := time.Duration(0)
+		if !c.connectedAt.IsZero() {
+			connectedFor = time.Since(c.connectedAt)
 		}
-		slog.Warn("[bridge] disconnected", "error", err, "retry_in", delay.String())
-		timer := time.NewTimer(delay + time.Duration(rand.Int63n(int64(delay/2+1))))
+		wait, nextDelay, nextImmediateRetryAvailable := bridgeReconnectDelay(
+			delay, minDelay, maxDelay, connectedFor, immediateRetryAvailable,
+		)
+		if wait > 0 {
+			wait += time.Duration(rand.Int63n(int64(wait/2 + 1)))
+		}
+		delay = nextDelay
+		immediateRetryAvailable = nextImmediateRetryAvailable
+		slog.Warn("[bridge] disconnected", "error", err, "retry_in", wait.String())
+		if wait == 0 {
+			continue
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -90,11 +100,31 @@ func (c *Client) Run(ctx context.Context) error {
 			return nil
 		case <-timer.C:
 		}
-		delay *= 2
-		if delay > maxDelay {
-			delay = maxDelay
-		}
 	}
+}
+
+func bridgeReconnectDelay(current, minDelay, maxDelay, connectedFor time.Duration, immediateRetryAvailable bool) (time.Duration, time.Duration, bool) {
+	if minDelay <= 0 {
+		minDelay = 5 * time.Second
+	}
+	if maxDelay < minDelay {
+		maxDelay = minDelay
+	}
+	if current < minDelay {
+		current = minDelay
+	}
+	if connectedFor >= 30*time.Second {
+		current = minDelay
+		immediateRetryAvailable = true
+	}
+	if connectedFor > 0 && immediateRetryAvailable {
+		return 0, current, false
+	}
+	next := current * 2
+	if next < current || next > maxDelay {
+		next = maxDelay
+	}
+	return current, next, immediateRetryAvailable
 }
 
 func (c *Client) connectOnce(ctx context.Context, token string) error {

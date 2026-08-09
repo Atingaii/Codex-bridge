@@ -28,7 +28,9 @@ dead output channel while `internal/bridge/orchestration_events.go:send` buffers
 events until reconnect. `internal/hub/ws_bridge.go:bridgeReconnectGrace` holds
 the Hub-side active run through the Bridge's maximum retry delay, jitter, and a
 heartbeat window before declaring an offline machine failed. Process restart
-and explicit cancellation remain terminal. See
+and explicit cancellation remain terminal. After a registered transport drops,
+`internal/bridge/client.go:bridgeReconnectDelay` permits one immediate retry;
+failed connection attempts retain bounded exponential backoff with jitter. See
 [orchestration transport recovery](features/orchestration-transport-recovery.md).
 The event-history endpoint returns an authoritative earlier-page indicator, and
 a terminal offline error records the bounded transport close reason. See

@@ -144,6 +144,53 @@ func TestRecoverTaskGraphsMarksAmbiguousAttemptUnknown(t *testing.T) {
 	}
 }
 
+func TestRecoverTaskGraphsLetsBootSweepSettleOwningRun(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	graph := createTestTaskGraph(t, st)
+	if err := st.UpdateOrchestrationRunStatus(ctx, graph.RunID, OrchestrationRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{
+		RunID: graph.RunID, Kind: "turn.start", TurnID: "turn-recovery", Role: TaskRoleWorker, CLI: "codex",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, claimed, err := st.ClaimReadyTask(ctx, graph.Tasks[0].ID, ""); err != nil || !claimed {
+		t.Fatalf("claim: claimed=%v err=%v", claimed, err)
+	}
+	if _, err := st.RecoverTaskGraphs(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	marked, err := st.MarkUnfinishedOrchestrationRunsFailed(ctx, "hub restarted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(marked) != 1 || marked[0].ID != graph.RunID {
+		t.Fatalf("marked runs = %#v, want %s", marked, graph.RunID)
+	}
+	run, err := st.OrchestrationRunByIDAnyUser(ctx, graph.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != OrchestrationFailed || run.FinishedAt == 0 {
+		t.Fatalf("recovered run = %#v, want terminal failure", run)
+	}
+	events, err := st.ListOrchestrationEvents(ctx, graph.RunID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawTurnEnd, sawRunError := false, false
+	for _, event := range events {
+		sawTurnEnd = sawTurnEnd || event.Kind == "turn.end" && event.TurnID == "turn-recovery"
+		sawRunError = sawRunError || event.Kind == "run.error" && event.RunConclusion != nil
+	}
+	if !sawTurnEnd || !sawRunError {
+		t.Fatalf("recovery terminal events: turn.end=%v run.error=%v events=%#v", sawTurnEnd, sawRunError, events)
+	}
+}
+
 func TestOrchestrationEventTaskAttemptRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)

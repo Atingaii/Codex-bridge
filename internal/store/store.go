@@ -398,7 +398,7 @@ func (s *Store) markActiveOrchestrationRunsFailed(ctx context.Context, agentID, 
 	}
 	defer tx.Rollback()
 
-	where := `status IN (?, ?) AND NOT EXISTS (SELECT 1 FROM orchestration_task_graphs g WHERE g.run_id = orchestration_runs.id AND g.status IN ('running','unknown'))`
+	where := `status IN (?, ?) AND NOT EXISTS (SELECT 1 FROM orchestration_task_graphs g WHERE g.run_id = orchestration_runs.id AND g.status = 'running')`
 	args := []any{OrchestrationQueued, OrchestrationRunning}
 	if agentID != "" {
 		where = `agent_id = ? AND ` + where

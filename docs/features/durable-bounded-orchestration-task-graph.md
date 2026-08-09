@@ -203,7 +203,10 @@ At Hub startup:
 3. `running` is reconciled against persisted terminal orchestration evidence.
 4. A running attempt without matching terminal evidence becomes `unknown`.
 5. Dependants of `unknown`, `failed`, or `canceled` become `blocked`.
-6. Only unambiguous `ready` work may be dispatched after Bridges reconnect.
+6. The owning top-level run receives terminal `turn.end` and `run.error`
+   events after its graph becomes `unknown`; it must not remain visually
+   `running` after the execution authority was lost.
+7. Only unambiguous `ready` work may be dispatched after Bridges reconnect.
 
 An explicit retry never edits the old attempt. It creates a new attempt with a
 new id and digest plus `retry_of_attempt_id`. Retrying an unknown task is a user
@@ -257,6 +260,8 @@ decision because the previous attempt may already have changed external state.
 - A mismatched attempt id or payload digest cannot complete a node.
 - Restart recovery preserves ready work and converts ambiguous work to
   `unknown` without redispatch.
+- Restart recovery settles the owning run instead of leaving its timer and
+  command lifecycle visually `running` forever.
 - Retry preserves the original attempt and records parent lineage.
 - No graph has overlapping writable nodes in the selected project directory.
 - Worker, integration, and reviewer events report the selected project CWD.

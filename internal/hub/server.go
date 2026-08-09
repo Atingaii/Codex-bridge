@@ -638,7 +638,7 @@ func (s *Server) bridgePermissionProfile(hubURL, token, installCommand, profile 
 
 func (s *Server) bridgeInstallCommand(hubURL string) string {
 	installURL := shellQuote(strings.TrimRight(hubURL, "/") + "/install.sh")
-	return fmt.Sprintf("CB_INSTALL=$(mktemp) && trap 'rm -f \"$CB_INSTALL\"' EXIT HUP INT TERM && echo 'Downloading Codex Bridge installer...' && curl --http1.1 -fL --show-error --progress-bar --retry 8 --connect-timeout 20 --max-time 120 --speed-time 20 --speed-limit 1 -o \"$CB_INSTALL\" %s && echo 'Starting Codex Bridge update...' && sh \"$CB_INSTALL\"", installURL)
+	return fmt.Sprintf("(CB_INSTALL=$(mktemp \"${TMPDIR:-/tmp}/codex-bridge-install.XXXXXX\") || exit 1; trap 'rm -f \"$CB_INSTALL\"' 0 1 2 15; echo 'Downloading Codex Bridge installer...'; if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then echo 'curl or wget is required' >&2; exit 1; fi; CB_ATTEMPT=1; while :; do if command -v curl >/dev/null 2>&1 && curl -fL --connect-timeout 20 --max-time 120 -o \"$CB_INSTALL\" %s; then break; fi; if command -v wget >/dev/null 2>&1; then if command -v timeout >/dev/null 2>&1; then timeout 120 wget -O \"$CB_INSTALL\" %s && break; else wget -O \"$CB_INSTALL\" %s && break; fi; fi; if [ \"$CB_ATTEMPT\" -ge 4 ]; then echo 'installer download failed after 4 attempts' >&2; exit 1; fi; CB_ATTEMPT=$((CB_ATTEMPT + 1)); echo \"installer download interrupted; retrying (attempt $CB_ATTEMPT/4)\" >&2; sleep 2; done; echo 'Starting Codex Bridge update...'; sh \"$CB_INSTALL\")", installURL, installURL, installURL)
 }
 
 func bridgeSetupCommand(installCommand, connectCommand string) string {
@@ -700,10 +700,14 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 echo "Downloading Codex Bridge..."
 if command -v curl >/dev/null 2>&1; then
+  curl_http1=""
+  if curl --http1.1 --version >/dev/null 2>&1; then
+    curl_http1="--http1.1"
+  fi
   attempt=1
   while :; do
     set +e
-    curl --http1.1 -fL --show-error --progress-bar --connect-timeout 20 --max-time 900 --speed-time 30 --speed-limit 1024 -C - -o "$TMP" "$DOWNLOAD_URL"
+    curl $curl_http1 -fL --connect-timeout 20 --max-time 900 --speed-time 30 --speed-limit 1024 -C - -o "$TMP" "$DOWNLOAD_URL"
     status=$?
     set -e
     if [ "$status" -eq 0 ]; then
@@ -726,7 +730,11 @@ elif command -v wget >/dev/null 2>&1; then
   attempt=1
   while :; do
     set +e
-    wget --show-progress --timeout=30 --tries=1 -c -O "$TMP" "$DOWNLOAD_URL"
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 900 wget -c -O "$TMP" "$DOWNLOAD_URL"
+    else
+      wget -c -O "$TMP" "$DOWNLOAD_URL"
+    fi
     status=$?
     set -e
     if [ "$status" -eq 0 ]; then

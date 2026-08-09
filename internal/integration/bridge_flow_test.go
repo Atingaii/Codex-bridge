@@ -1391,10 +1391,7 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		t.Fatalf("commands = %#v", commands)
 	}
 	installCommand := commands[0].(string)
-	if !strings.Contains(installCommand, "--retry 8") {
-		t.Fatalf("install command missing compatible transport retry policy: %q", installCommand)
-	}
-	for _, want := range []string{"Downloading Codex Bridge installer...", "--progress-bar", "--max-time 120", "--speed-time 20", "Starting Codex Bridge update..."} {
+	for _, want := range []string{"Downloading Codex Bridge installer...", "command -v curl", "--max-time 120", "command -v wget", `timeout 120 wget -O "$CB_INSTALL"`, `wget -O "$CB_INSTALL"`, "installer download failed after 4 attempts", "Starting Codex Bridge update..."} {
 		if !strings.Contains(installCommand, want) {
 			t.Fatalf("install command missing visible bounded download option %q: %q", want, installCommand)
 		}
@@ -1402,7 +1399,7 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	if strings.Contains(installCommand, "--retry-all-errors") {
 		t.Fatalf("install command requires curl 7.71 or newer: %q", installCommand)
 	}
-	if !strings.Contains(installCommand, "CB_INSTALL=$(mktemp)") || !strings.Contains(installCommand, `sh "$CB_INSTALL"`) {
+	if !strings.Contains(installCommand, `CB_INSTALL=$(mktemp "${TMPDIR:-/tmp}/codex-bridge-install.XXXXXX")`) || !strings.Contains(installCommand, `sh "$CB_INSTALL"`) {
 		t.Fatalf("install command must execute only a completely downloaded script: %q", installCommand)
 	}
 	if strings.Contains(installCommand, "\n") {

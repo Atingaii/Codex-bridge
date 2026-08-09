@@ -318,8 +318,10 @@ func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
 	for _, want := range []string{
 		`TMP="${BIN}.tmp.$$"`,
 		`echo "Downloading Codex Bridge..."`,
-		`curl --http1.1 -fL --show-error --progress-bar --connect-timeout 20 --max-time 900 --speed-time 30 --speed-limit 1024 -C - -o "$TMP" "$DOWNLOAD_URL"`,
-		`wget --show-progress --timeout=30 --tries=1 -c -O "$TMP" "$DOWNLOAD_URL"`,
+		`if curl --http1.1 --version >/dev/null 2>&1; then`,
+		`curl $curl_http1 -fL --connect-timeout 20 --max-time 900 --speed-time 30 --speed-limit 1024 -C - -o "$TMP" "$DOWNLOAD_URL"`,
+		`timeout 900 wget -c -O "$TMP" "$DOWNLOAD_URL"`,
+		`wget -c -O "$TMP" "$DOWNLOAD_URL"`,
 		`Saved download is not resumable; restarting it...`,
 		`bridge download interrupted; resuming`,
 		`bridge download failed after $attempt attempts`,
@@ -348,6 +350,39 @@ func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
 	cmd.Stdin = strings.NewReader(body)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("install script shell syntax: %v: %s", err, output)
+	}
+}
+
+func TestBridgeInstallCommandFallsBackFromCurlToPortableWget(t *testing.T) {
+	t.Parallel()
+
+	s, _ := newAuthTestServer(t)
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "curl"), "#!/bin/sh\nexit 2\n")
+	writeExecutable(t, filepath.Join(binDir, "wget"), `#!/bin/sh
+out=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '-O' ]; then out=$2; shift 2; continue; fi
+  shift
+done
+printf '#!/bin/sh\nprintf installed >"$INSTALL_MARKER"\n' >"$out"
+`)
+	marker := filepath.Join(tmp, "installed")
+	cmd := exec.Command("/bin/sh", "-c", s.bridgeInstallCommand("https://sparkapi.test"))
+	cmd.Env = append(os.Environ(), "PATH="+binDir+":/usr/bin:/bin", "TMPDIR="+tmp, "INSTALL_MARKER="+marker)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("execute generated install command: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("wget fallback did not execute downloaded installer: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "Downloading Codex Bridge installer...") || !strings.Contains(string(output), "Starting Codex Bridge update...") {
+		t.Fatalf("generated command did not report visible stages: %s", output)
 	}
 }
 

@@ -117,9 +117,14 @@ to `~/.local/bin/codex-bridge` and then renames it into place. This avoids
 `Text file busy` when an older Bridge process is still executing the current
 binary. The generated outer install command prints before downloading the
 installer, shows transfer progress, and applies low-speed and total-time
-boundaries so a connected but stalled transfer cannot look idle forever.
+boundaries so a connected but stalled transfer cannot look idle forever. It
+uses POSIX shell retry control and falls back from curl to wget, avoiding curl
+options that are absent from older distributions. The wget fallback is also
+attempted when curl exists but fails, covering older TLS and proxy stacks.
 Large binary downloads use HTTP/1.1, visible progress, low-speed
-detection, and up to eight bounded, backed-off resume attempts. If a server
+detection, and up to eight bounded, backed-off resume attempts. HTTP/1.1 is
+enabled only when the installed curl recognizes it; wget uses options shared by
+GNU wget and common BusyBox builds. If a server
 rejects the saved range (`416`), the installer removes only that temporary
 download and starts a fresh attempt. A transient TLS or HTTP/2 edge failure
 therefore continues from the existing temporary file and never replaces the

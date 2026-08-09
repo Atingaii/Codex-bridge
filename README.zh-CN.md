@@ -276,6 +276,10 @@ curl -fsSL https://your-domain.example/install.sh | sh
 ~/.local/bin/codex-bridge connect --hub https://your-domain.example '<TOKEN>'
 ```
 
+用户始终只使用页面给出的这两条命令。首次接入依次执行安装和连接；以后重跑同一条安装
+命令会原子替换 Bridge，并自动重启该用户已连接的 systemd 服务或受管 nohup 进程，不需要
+手动执行 `systemctl`、查 PID 或安装额外服务。
+
 ## 旧式手动接入
 
 管理员仍可手动生成未绑定 token，用于本地开发或临时测试：

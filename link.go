@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/tencent/codex-bridge/internal/config"
@@ -45,6 +47,7 @@ type linkOptions struct {
 	CWDPath    string
 	NamePath   string
 	MIDPath    string
+	PIDPath    string
 }
 
 func runLink(cfg *config.Config, args []string) error {
@@ -140,6 +143,7 @@ func prepareLinkOptions(hubURL, token, profile, cwd, name, machineID string) (li
 	opts.CWDPath = filepath.Join(opts.ServiceDir, hash+".cwd")
 	opts.NamePath = filepath.Join(opts.ServiceDir, hash+".name")
 	opts.MIDPath = filepath.Join(opts.MachineDir, hash)
+	opts.PIDPath = filepath.Join(opts.ServiceDir, hash+".pid")
 	return opts, nil
 }
 
@@ -380,6 +384,7 @@ func startSystemdBridge(ctx context.Context, opts linkOptions) (bool, error) {
 	if err := os.WriteFile(unitPath, []byte(linkSystemdUnit(opts)), 0o600); err != nil {
 		return false, err
 	}
+	stopManagedNohupBridge(opts)
 	_ = runQuietCommand(ctx, "", "systemctl", "--user", "stop", opts.Service)
 	for _, args := range [][]string{
 		{"--user", "daemon-reload"},
@@ -410,6 +415,38 @@ func startSystemdBridge(ctx context.Context, opts linkOptions) (bool, error) {
 		printTail(opts.LogPath, 40)
 	}
 	return true, nil
+}
+
+func stopManagedNohupBridge(opts linkOptions) {
+	pidPath := opts.PIDPath
+	if pidPath == "" {
+		pidPath = filepath.Join(opts.ServiceDir, opts.Hash+".pid")
+	}
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 1 {
+		return
+	}
+	binPath := filepath.Join(opts.Home, ".local", "bin", "codex-bridge")
+	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	if err != nil || (exe != binPath && exe != binPath+" (deleted)") {
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err := syscall.Kill(pid, 0); err == nil {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+	_ = os.Remove(pidPath)
 }
 
 func linkSystemdUnit(opts linkOptions) string {
@@ -453,6 +490,16 @@ func startNohupBridge(ctx context.Context, opts linkOptions) error {
 	}
 	if err := cmd.Process.Release(); err != nil {
 		return fmt.Errorf("release background bridge process: %w", err)
+	}
+	pidPath := opts.PIDPath
+	if pidPath == "" {
+		pidPath = filepath.Join(opts.ServiceDir, opts.Hash+".pid")
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o600); err != nil {
+		if process, findErr := os.FindProcess(cmd.Process.Pid); findErr == nil {
+			_ = process.Kill()
+		}
+		return fmt.Errorf("record background bridge pid: %w", err)
 	}
 	confirmed := waitForBridgeConnected(opts.LogPath, 10*time.Second)
 	if confirmed {

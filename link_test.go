@@ -1,9 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -27,6 +30,9 @@ func TestPrepareLinkOptionsDefaults(t *testing.T) {
 	}
 	if opts.MIDPath != filepath.Join(opts.Home, ".codex-bridge", "machines", opts.Hash) {
 		t.Fatalf("machine id path = %q", opts.MIDPath)
+	}
+	if opts.PIDPath != filepath.Join(opts.Home, ".codex-bridge", "services", opts.Hash+".pid") {
+		t.Fatalf("pid path = %q", opts.PIDPath)
 	}
 }
 
@@ -107,6 +113,7 @@ func TestWriteLinkFilesWritesDetectedPathsAndProxyEnv(t *testing.T) {
 	opts.CWDPath = filepath.Join(opts.ServiceDir, opts.Hash+".cwd")
 	opts.NamePath = filepath.Join(opts.ServiceDir, opts.Hash+".name")
 	opts.MIDPath = filepath.Join(opts.MachineDir, opts.Hash)
+	opts.PIDPath = filepath.Join(opts.ServiceDir, opts.Hash+".pid")
 
 	if err := writeLinkFiles(opts); err != nil {
 		t.Fatal(err)
@@ -157,5 +164,29 @@ func TestLinkSystemdUnitKeepsBridgeAliveOnChildOOM(t *testing.T) {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("systemd unit missing %q:\n%s", want, unit)
 		}
+	}
+}
+
+func TestStopManagedNohupBridgeRejectsUnownedPID(t *testing.T) {
+	tmp := t.TempDir()
+	services := filepath.Join(tmp, ".codex-bridge", "services")
+	if err := os.MkdirAll(services, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	pidPath := filepath.Join(services, "abc123.pid")
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stopManagedNohupBridge(linkOptions{Home: tmp, ServiceDir: services, Hash: "abc123", PIDPath: pidPath})
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("unowned process was terminated: %v", err)
+	}
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Fatalf("unowned PID record should be retained for diagnosis: %v", err)
 	}
 }

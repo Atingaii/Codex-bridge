@@ -613,12 +613,10 @@ export function orchestrationTurnLabel(info: OrchestrationTurnInfo, t: UIText) {
 }
 
 export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: string, run?: OrchestrationRun | PublicOrchestrationRun | null, t?: UIText): OrchestrationVisibleEvent[] {
-  const terminalRun = terminalOrchestrationStatus(run?.status);
-  const ordered = mergeOrchestrationDeltaEvents(
+  const ordered = finalizeClosedCommandSegments(mergeOrchestrationDeltaEvents(
     mergeOrchestrationToolEvents(events.filter((event) => event.runId === runId).slice().sort(compareOrchestrationEvents))
       .filter((event) => !isEmptyPagesReadFailureEvent(event))
-      .map((event) => terminalRun ? finalizeTerminalCommandEvent(event, run?.status) : event)
-  );
+  ));
   const turnDeltaContent = orchestrationTurnDeltaContentByKey(ordered);
   const visible: OrchestrationVisibleEvent[] = [];
   let segmentVisibleStart = 0;
@@ -813,13 +811,32 @@ function numberFromRecord(data: Record<string, any> | undefined, key: string) {
   return hasNumber(value) ? value : undefined;
 }
 
-export function finalizeTerminalCommandEvent(event: OrchestrationEvent, runStatus?: string): OrchestrationEvent {
+export function finalizeClosedCommandSegments(events: OrchestrationEvent[]): OrchestrationEvent[] {
+  let terminalEvent: OrchestrationEvent | undefined;
+  const finalized = events.slice();
+  for (let index = finalized.length - 1; index >= 0; index -= 1) {
+    const event = finalized[index];
+    if (event.kind === 'user.message' || event.kind === 'run.start') {
+      terminalEvent = undefined;
+      continue;
+    }
+    if (event.kind === 'run.end' || event.kind === 'run.error' || event.kind === 'run.cancelled') {
+      terminalEvent = event;
+      continue;
+    }
+    if (terminalEvent) finalized[index] = finalizeTerminalCommandEvent(event, terminalEvent);
+  }
+  return finalized;
+}
+
+export function finalizeTerminalCommandEvent(event: OrchestrationEvent, terminalEvent: OrchestrationEvent): OrchestrationEvent {
   if (!event.kind.startsWith('command.')) return event;
   const data = commandData(event);
   const status = data.status || event.status || '';
   const active = event.kind === 'command.start' || status === 'running' || status === 'in_progress';
   if (!active || typeof data.completedAt === 'number') return event;
-  const terminalStatus = runStatus === 'canceled' ? 'canceled' : 'interrupted';
+  const terminalStatus = terminalEvent.kind === 'run.cancelled' || terminalEvent.status === 'canceled' ? 'canceled' : 'interrupted';
+  const completedAt = terminalEvent.createdAt || data.startedAt || event.createdAt || 0;
   return {
     ...event,
     kind: 'command.end',
@@ -827,7 +844,7 @@ export function finalizeTerminalCommandEvent(event: OrchestrationEvent, runStatu
     commandData: {
       ...event.commandData,
       status: terminalStatus,
-      completedAt: event.createdAt || Math.floor(Date.now() / 1000),
+      completedAt,
     },
   };
 }

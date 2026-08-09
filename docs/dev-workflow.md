@@ -92,6 +92,11 @@ command, and only prints `codex-bridge connected` after the Bridge logs
 downloads the Bridge binary into a temporary file using bounded, backed-off
 resume attempts over HTTP/1.1, so transient TLS/edge interruptions do not
 replace the existing executable or restart the transfer from zero. It
+then restarts exact existing `codex-bridge-*.service` user units; for the nohup
+fallback it validates per-link PID files against the installed executable and
+restarts only those owned links. The normal workflow therefore remains the same
+two install/connect commands, and an update needs no manual process or service
+command. It
 preserves `HOME`, `PATH`, `CODEX_HOME`, Claude config location variables,
 resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, common model credential
 variables such as `OPENAI_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and

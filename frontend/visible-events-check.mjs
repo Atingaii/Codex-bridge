@@ -31,6 +31,9 @@ assert.match(source, /const rawContent = item\.content \|\| item\.error \|\| '';
 assert.match(utilsSource, /function isInternalOrchestrationBootstrapEvent\(event: OrchestrationEvent\)/);
 assert.match(utilsSource, /const round = firstNumber\(event\.task\?\.round, event\.turnStartData\?\.round/);
 assert.match(utilsSource, /if \(meta\.turnInfo\) group\.turnInfo = meta\.turnInfo;/);
+assert.match(utilsSource, /export function finalizeClosedCommandSegments\(events: OrchestrationEvent\[\]\)/);
+assert.match(utilsSource, /const completedAt = terminalEvent\.createdAt \|\| data\.startedAt \|\| event\.createdAt \|\| 0;/);
+assert.doesNotMatch(utilsSource, /completedAt: event\.createdAt \|\| Math\.floor\(Date\.now\(\) \/ 1000\)/);
 assert.doesNotMatch(orchestrationComponentsSource, /\{item\.kind\}/);
 assert.match(orchestrationComponentsSource, /case 'candidate-a': return chinese \? '候选方案 A' : 'Candidate A';/);
 assert.match(orchestrationComponentsSource, /case 'review': return chinese \? '独立审查者' : 'Independent Reviewer';/);
@@ -234,6 +237,51 @@ assert.ok(resumedFirstTurn);
 assert.equal(resumedFirstTurn.complete, true);
 assert.equal(resumedFirstTurn.incomplete, false);
 assert.ok(!resumedRunGroups.some((group) => group.turnId && group.incomplete));
+
+function finalizeClosedCommands(events) {
+  let terminalEvent;
+  const finalized = events.map((event) => ({ ...event, commandData: event.commandData ? { ...event.commandData } : undefined }));
+  for (let index = finalized.length - 1; index >= 0; index -= 1) {
+    const event = finalized[index];
+    if (event.kind === 'user.message' || event.kind === 'run.start') {
+      terminalEvent = undefined;
+      continue;
+    }
+    if (event.kind === 'run.end' || event.kind === 'run.error' || event.kind === 'run.cancelled') {
+      terminalEvent = event;
+      continue;
+    }
+    const status = event.commandData?.status || event.status || '';
+    const active = event.kind === 'command.start' || status === 'running' || status === 'in_progress';
+    if (!terminalEvent || !event.kind.startsWith('command.') || !active || typeof event.commandData?.completedAt === 'number') continue;
+    const terminalStatus = terminalEvent.kind === 'run.cancelled' || terminalEvent.status === 'canceled' ? 'canceled' : 'interrupted';
+    finalized[index] = {
+      ...event,
+      kind: 'command.end',
+      status: terminalStatus,
+      commandData: {
+        ...event.commandData,
+        status: terminalStatus,
+        completedAt: terminalEvent.createdAt || event.commandData?.startedAt || event.createdAt || 0,
+      },
+    };
+  }
+  return finalized;
+}
+
+const continuedCommandEvents = finalizeClosedCommands([
+  { runId: 'run4', kind: 'user.message', seq: 1, createdAt: 100 },
+  { runId: 'run4', kind: 'command.start', seq: 2, createdAt: 110, commandData: { id: 'old', status: 'running', startedAt: 110 } },
+  { runId: 'run4', kind: 'run.cancelled', seq: 3, status: 'canceled', createdAt: 252 },
+  { runId: 'run4', kind: 'user.message', seq: 4, createdAt: 400 },
+  { runId: 'run4', kind: 'run.start', seq: 5, status: 'running', createdAt: 401 },
+  { runId: 'run4', kind: 'command.start', seq: 6, createdAt: 410, commandData: { id: 'new', status: 'running', startedAt: 410 } },
+]);
+assert.equal(continuedCommandEvents[1].kind, 'command.end');
+assert.equal(continuedCommandEvents[1].status, 'canceled');
+assert.equal(continuedCommandEvents[1].commandData.completedAt, 252);
+assert.equal(continuedCommandEvents[5].kind, 'command.start');
+assert.equal(continuedCommandEvents[5].commandData.completedAt, undefined);
 
 const structuredRoundMeta = { ordinal: 2, total: 4 };
 assert.deepEqual(structuredRoundMeta, { ordinal: 2, total: 4 });

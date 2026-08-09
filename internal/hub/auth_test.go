@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -322,10 +325,190 @@ func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
 		`bridge download failed after $attempt attempts`,
 		`echo "Download complete."`,
 		`mv -f "$TMP" "$BIN"`,
+		`for unit_path in "$SYSTEMD_DIR"/codex-bridge-*.service; do`,
+		`systemctl --user restart "$unit"`,
+		`for pid_path in "$SERVICES_DIR"/*.pid; do`,
+		`for proc_exe in /proc/[0-9]*/exe; do`,
+		`[ "$proc_cwd" = "$expected_cwd" ] || continue`,
+		`[ -f "$SYSTEMD_DIR/codex-bridge-$hash.service" ] && systemd_owned=true`,
+		`if [ "$systemd_owned" = true ]; then`,
+		`"$BIN"|"$BIN (deleted)"`,
+		`nohup "$start_path" >>"$log_path" 2>&1 &`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("install script missing %q: %s", want, body)
 		}
+	}
+	if strings.Contains(body, "pkill") || strings.Contains(body, "killall") {
+		t.Fatalf("install script must not terminate processes by broad name: %s", body)
+	}
+	cmd := exec.Command("sh", "-n")
+	cmd.Stdin = strings.NewReader(body)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install script shell syntax: %v: %s", err, output)
+	}
+}
+
+func TestInstallScriptReplacesBinaryAndRestartsExistingUserService(t *testing.T) {
+	t.Parallel()
+
+	s, _ := newAuthTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/install.sh", nil)
+	req.Host = "sparkapi.test"
+	rr := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("install HTTP status = %d: %s", rr.Code, rr.Body.String())
+	}
+
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "fake-bin")
+	home := filepath.Join(tmp, "home")
+	userUnitDir := filepath.Join(home, ".config", "systemd", "user")
+	installedBin := filepath.Join(home, ".local", "bin", "codex-bridge")
+	for _, dir := range []string{binDir, userUnitDir, filepath.Dir(installedBin)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(installedBin, []byte("old-binary\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unit := "codex-bridge-012345abcdef.service"
+	if err := os.WriteFile(filepath.Join(userUnitDir, unit), []byte("[Service]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	systemctlLog := filepath.Join(tmp, "systemctl.log")
+	writeExecutable(t, filepath.Join(binDir, "curl"), `#!/bin/sh
+out=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '-o' ]; then out=$2; shift 2; continue; fi
+  shift
+done
+printf '#!/bin/sh\necho new-binary\n' >"$out"
+`)
+	writeExecutable(t, filepath.Join(binDir, "systemctl"), `#!/bin/sh
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+exit 0
+`)
+	scriptPath := filepath.Join(tmp, "install.sh")
+	if err := os.WriteFile(scriptPath, rr.Body.Bytes(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", scriptPath)
+	cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+binDir+":/usr/bin:/bin", "SYSTEMCTL_LOG="+systemctlLog)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("execute install script: %v\n%s", err, output)
+	}
+	installed, err := os.ReadFile(installedBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(installed), "new-binary") {
+		t.Fatalf("installed binary was not replaced: %q", installed)
+	}
+	logBytes, err := os.ReadFile(systemctlLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logBytes)
+	if !strings.Contains(log, "--user daemon-reload") || !strings.Contains(log, "--user restart "+unit) {
+		t.Fatalf("systemctl calls = %q", log)
+	}
+}
+
+func TestInstallScriptAdoptsAndRestartsLegacyNohupBridge(t *testing.T) {
+	t.Parallel()
+
+	s, _ := newAuthTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/install.sh", nil)
+	req.Host = "sparkapi.test"
+	rr := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("install HTTP status = %d: %s", rr.Code, rr.Body.String())
+	}
+
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	binDir := filepath.Join(tmp, "fake-bin")
+	servicesDir := filepath.Join(home, ".codex-bridge", "services")
+	installedBin := filepath.Join(home, ".local", "bin", "codex-bridge")
+	for _, dir := range []string{binDir, servicesDir, filepath.Dir(installedBin)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldBinary, err := os.ReadFile("/bin/sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installedBin, oldBinary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldProcess := exec.Command(installedBin, "60")
+	oldProcess.Dir = tmp
+	if err := oldProcess.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = oldProcess.Process.Kill() })
+	oldExit := make(chan error, 1)
+	go func() { oldExit <- oldProcess.Wait() }()
+	hash := "abcdef012345"
+	pidPath := filepath.Join(servicesDir, hash+".pid")
+	if err := os.WriteFile(filepath.Join(servicesDir, hash+".cwd"), []byte(tmp+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restartedMarker := filepath.Join(tmp, "restarted")
+	writeExecutable(t, filepath.Join(servicesDir, hash+".sh"), "#!/bin/sh\nprintf 'restarted\\n' >"+shellQuote(restartedMarker)+"\n")
+	writeExecutable(t, filepath.Join(binDir, "curl"), `#!/bin/sh
+out=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '-o' ]; then out=$2; shift 2; continue; fi
+  shift
+done
+cp /bin/true "$out"
+`)
+	scriptPath := filepath.Join(tmp, "install.sh")
+	if err := os.WriteFile(scriptPath, rr.Body.Bytes(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", scriptPath)
+	cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+binDir+":/usr/bin:/bin")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("execute install script: %v\n%s", err, output)
+	}
+	select {
+	case err := <-oldExit:
+		if err == nil {
+			t.Fatal("old managed Bridge process exited successfully instead of receiving termination")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("legacy Bridge process was not terminated")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if marker, err := os.ReadFile(restartedMarker); err == nil && strings.Contains(string(marker), "restarted") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("managed nohup start script was not restarted")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	newPID, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(newPID)) == fmt.Sprint(oldProcess.Process.Pid) {
+		t.Fatalf("nohup PID was not refreshed: %s", newPID)
+	}
+}
+
+func writeExecutable(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 

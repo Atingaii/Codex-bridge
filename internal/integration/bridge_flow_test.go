@@ -1391,16 +1391,8 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		t.Fatalf("commands = %#v", commands)
 	}
 	installCommand := commands[0].(string)
-	for _, want := range []string{"Downloading Codex Bridge installer...", "command -v curl", "--max-time 120", "command -v wget", `timeout 120 wget -O "$CB_INSTALL"`, `wget -O "$CB_INSTALL"`, "installer download failed after 4 attempts", "Starting Codex Bridge update..."} {
-		if !strings.Contains(installCommand, want) {
-			t.Fatalf("install command missing visible bounded download option %q: %q", want, installCommand)
-		}
-	}
-	if strings.Contains(installCommand, "--retry-all-errors") {
-		t.Fatalf("install command requires curl 7.71 or newer: %q", installCommand)
-	}
-	if !strings.Contains(installCommand, `CB_INSTALL=$(mktemp "${TMPDIR:-/tmp}/codex-bridge-install.XXXXXX")`) || !strings.Contains(installCommand, `sh "$CB_INSTALL"`) {
-		t.Fatalf("install command must execute only a completely downloaded script: %q", installCommand)
+	if want := "curl -fsSL '" + cfg.Bridge.HubURL + "/install.sh' | sh"; installCommand != want {
+		t.Fatalf("install command = %q, want %q", installCommand, want)
 	}
 	if strings.Contains(installCommand, "\n") {
 		t.Fatalf("install command should be one line: %q", installCommand)

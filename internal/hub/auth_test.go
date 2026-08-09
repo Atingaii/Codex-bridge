@@ -405,36 +405,20 @@ cp /bin/true "$out"
 	}
 }
 
-func TestBridgeInstallCommandFallsBackFromCurlToPortableWget(t *testing.T) {
+func TestBridgeInstallCommandIsShortAndPortable(t *testing.T) {
 	t.Parallel()
 
 	s, _ := newAuthTestServer(t)
-	tmp := t.TempDir()
-	binDir := filepath.Join(tmp, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
+	command := s.bridgeInstallCommand("https://sparkapi.test")
+	if want := "curl -fsSL 'https://sparkapi.test/install.sh' | sh"; command != want {
+		t.Fatalf("install command = %q, want %q", command, want)
 	}
-	writeExecutable(t, filepath.Join(binDir, "curl"), "#!/bin/sh\nexit 2\n")
-	writeExecutable(t, filepath.Join(binDir, "wget"), `#!/bin/sh
-out=''
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = '-O' ]; then out=$2; shift 2; continue; fi
-  shift
-done
-printf '#!/bin/sh\nprintf installed >"$INSTALL_MARKER"\n' >"$out"
-`)
-	marker := filepath.Join(tmp, "installed")
-	cmd := exec.Command("/bin/sh", "-c", s.bridgeInstallCommand("https://sparkapi.test"))
-	cmd.Env = append(os.Environ(), "PATH="+binDir+":/usr/bin:/bin", "TMPDIR="+tmp, "INSTALL_MARKER="+marker)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("execute generated install command: %v\n%s", err, output)
+	if len(command) > 80 {
+		t.Fatalf("install command should remain short: %q", command)
 	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("wget fallback did not execute downloaded installer: %v\n%s", err, output)
-	}
-	if !strings.Contains(string(output), "Downloading Codex Bridge installer...") || !strings.Contains(string(output), "Starting Codex Bridge update...") {
-		t.Fatalf("generated command did not report visible stages: %s", output)
+	cmd := exec.Command("/bin/sh", "-n", "-c", command)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install command shell syntax: %v: %s", err, output)
 	}
 }
 

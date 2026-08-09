@@ -115,12 +115,10 @@ imports the current module instead of throwing during startup.
 `internal/hub/server.go:handleInstallScript` downloads to a temporary file next
 to `~/.local/bin/codex-bridge` and then renames it into place. This avoids
 `Text file busy` when an older Bridge process is still executing the current
-binary. The generated outer install command prints before downloading the
-installer, shows transfer progress, and applies low-speed and total-time
-boundaries so a connected but stalled transfer cannot look idle forever. It
-uses POSIX shell retry control and falls back from curl to wget, avoiding curl
-options that are absent from older distributions. The wget fallback is also
-attempted when curl exists but fails, covering older TLS and proxy stacks.
+binary. The generated outer command stays deliberately short:
+`curl -fsSL <hub>/install.sh | sh`. This avoids copy-time escaping failures in
+zsh and other interactive shells. Compatibility, progress, retry, and update
+logic live in the downloaded installer instead of the user-visible command.
 Large binary downloads use HTTP/1.1, visible progress, low-speed
 detection, and up to eight bounded, backed-off resume attempts. HTTP/1.1 is
 enabled only when the installed curl recognizes it; wget uses options shared by

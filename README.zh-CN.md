@@ -276,7 +276,7 @@ curl -fsSL https://your-domain.example/install.sh | sh
 ~/.local/bin/codex-bridge connect --hub https://your-domain.example '<TOKEN>'
 ```
 
-用户始终只使用页面给出的这两条命令。安装命令兼容 curl 或 wget，会立即显示下载阶段和进度，网络停滞时会
+用户始终只使用页面给出的这两条命令。安装命令保持为简短的一行，下载安装器后会立即显示进度，网络停滞时会
 限时重试。首次接入依次执行安装和连接；以后重跑同一条安装
 命令会原子替换 Bridge，并自动重启该用户已连接的 systemd 服务或受管 nohup 进程，不需要
 手动执行 `systemctl`、查 PID 或安装额外服务。

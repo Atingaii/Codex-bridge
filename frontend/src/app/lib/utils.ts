@@ -1185,8 +1185,9 @@ export function defaultAgentID(agents: Agent[]) {
 
 export function preferredAgentID(agents: Agent[], current: string) {
   const selected = agents.find((agent) => agent.id === current);
-  if (selected?.online) return selected.id;
-  return defaultAgentID(agents) || selected?.id || '';
+  // A selected endpoint remains useful for reading its persisted history while
+  // offline. Only fall back when it no longer exists (for example, deletion).
+  return selected?.id || defaultAgentID(agents);
 }
 
 export function orchestrationApprovalMode(agent?: Agent | null) {

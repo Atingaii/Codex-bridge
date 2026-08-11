@@ -31,10 +31,11 @@ import (
 const cliConfigHKDFInfo = "codex-bridge-cli-config-v1"
 
 const (
-	maxDiscoveredModels = 500
-	maxModelIDBytes     = 256
-	cliConfigProbeLimit = 15 * time.Second
-	cliConfigCallLimit  = 6 * time.Second
+	maxDiscoveredModels  = 500
+	maxModelIDBytes      = 256
+	unknownContextWindow = 200_000
+	cliConfigProbeLimit  = 15 * time.Second
+	cliConfigCallLimit   = 6 * time.Second
 )
 
 var bridgeModelsMu sync.RWMutex
@@ -147,7 +148,7 @@ func (m *cliConfigManager) handle(ctx context.Context, typ string, req protocol.
 			res.Error = "model is required"
 			return res
 		}
-		if err := m.apply(req.CLI, base, req.Model, string(key)); err != nil {
+		if err := m.apply(req.CLI, base, req.Model, string(key), models); err != nil {
 			res.OK = false
 			res.Error = "could not update native CLI configuration"
 			return res
@@ -393,7 +394,7 @@ func protocolForCLI(cli string) string {
 	return "openai-compatible"
 }
 
-func (m *cliConfigManager) apply(cli, base, model, key string) error {
+func (m *cliConfigManager) apply(cli, base, model, key string, models []string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -408,7 +409,11 @@ func (m *cliConfigManager) apply(cli, base, model, key string) error {
 		if err != nil {
 			return err
 		}
-		if err := backupAndWrite(configPath, []byte(updateCodexConfig(string(raw), base, model, false)), 0o600); err != nil {
+		catalogPath := filepath.Join(m.root, "codex-model-catalog.json")
+		if err := writeCodexModelCatalog(catalogPath, model, models); err != nil {
+			return err
+		}
+		if err := backupAndWrite(configPath, []byte(updateCodexConfig(string(raw), base, model, catalogPath, false)), 0o600); err != nil {
 			return err
 		}
 		authPath := filepath.Join(dir, "auth.json")
@@ -439,8 +444,9 @@ func (m *cliConfigManager) apply(cli, base, model, key string) error {
 		env["ANTHROPIC_BASE_URL"] = strings.TrimRight(base, "/")
 		env["ANTHROPIC_AUTH_TOKEN"] = key
 		delete(env, "ANTHROPIC_API_KEY")
-		for _, name := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_REASONING_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
-			env[name] = model
+		env["ANTHROPIC_MODEL"] = model
+		for _, name := range []string{"ANTHROPIC_REASONING_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
+			delete(env, name)
 		}
 		settings["env"] = env
 		settings["model"] = model
@@ -468,7 +474,7 @@ func (m *cliConfigManager) reset(cli string) error {
 		if err != nil {
 			return err
 		}
-		if err := backupAndWrite(configPath, []byte(updateCodexConfig(string(raw), "", "", true)), 0o600); err != nil {
+		if err := backupAndWrite(configPath, []byte(updateCodexConfig(string(raw), "", "", "", true)), 0o600); err != nil {
 			return err
 		}
 		authPath := filepath.Join(home, ".codex", "auth.json")
@@ -551,7 +557,7 @@ func setBridgeModels(cfg *config.Config, codexModel, claudeModel string) {
 	bridgeModelsMu.Unlock()
 }
 
-func updateCodexConfig(text, base, model string, official bool) string {
+func updateCodexConfig(text, base, model, catalogPath string, official bool) string {
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	out := make([]string, 0, len(lines)+8)
 	section := ""
@@ -570,7 +576,7 @@ func updateCodexConfig(text, base, model string, official bool) string {
 		}
 		if section == "" {
 			key := strings.Trim(strings.TrimSpace(strings.SplitN(trimmed, "=", 2)[0]), "\"'")
-			if key == "model" || key == "model_provider" || key == "forced_login_method" || key == "openai_base_url" || key == "chatgpt_base_url" {
+			if key == "model" || key == "model_provider" || key == "model_catalog_json" || key == "forced_login_method" || key == "openai_base_url" || key == "chatgpt_base_url" {
 				continue
 			}
 		}
@@ -582,10 +588,74 @@ func updateCodexConfig(text, base, model string, official bool) string {
 	if official {
 		out = append([]string{"model_provider = \"openai\"", "forced_login_method = \"chatgpt\""}, out...)
 	} else {
-		out = append([]string{"model = " + strconv.Quote(model), "model_provider = \"custom\""}, out...)
+		out = append([]string{"model = " + strconv.Quote(model), "model_provider = \"custom\"", "model_catalog_json = " + strconv.Quote(catalogPath)}, out...)
 		out = append(out, "", "[model_providers.custom]", "name = \"custom\"", "base_url = "+strconv.Quote(strings.TrimRight(base, "/")), "wire_api = \"responses\"", "requires_openai_auth = true")
 	}
 	return strings.Join(out, "\n") + "\n"
+}
+
+type codexModelCatalog struct {
+	Models []codexModelCatalogEntry `json:"models"`
+}
+
+type codexModelCatalogEntry struct {
+	Slug                       string                `json:"slug"`
+	DisplayName                string                `json:"display_name"`
+	Description                string                `json:"description"`
+	DefaultReasoningLevel      string                `json:"default_reasoning_level"`
+	SupportedReasoningLevels   []codexReasoningLevel `json:"supported_reasoning_levels"`
+	ShellType                  string                `json:"shell_type"`
+	Visibility                 string                `json:"visibility"`
+	SupportedInAPI             bool                  `json:"supported_in_api"`
+	Priority                   int                   `json:"priority"`
+	SupportVerbosity           bool                  `json:"support_verbosity"`
+	TruncationPolicy           map[string]any        `json:"truncation_policy"`
+	SupportsParallelToolCalls  bool                  `json:"supports_parallel_tool_calls"`
+	ExperimentalSupportedTools []string              `json:"experimental_supported_tools"`
+	ContextWindow              int                   `json:"context_window"`
+	BaseInstructions           string                `json:"base_instructions"`
+}
+
+type codexReasoningLevel struct {
+	Effort      string `json:"effort"`
+	Description string `json:"description"`
+}
+
+func writeCodexModelCatalog(path, selected string, discovered []string) error {
+	models := make([]string, 0, len(discovered)+1)
+	seen := map[string]bool{}
+	for _, model := range append([]string{selected}, discovered...) {
+		model = strings.TrimSpace(model)
+		if model == "" || len(model) > maxModelIDBytes || seen[model] {
+			continue
+		}
+		seen[model] = true
+		models = append(models, model)
+	}
+	entries := make([]codexModelCatalogEntry, 0, len(models))
+	for priority, model := range models {
+		entries = append(entries, codexModelCatalogEntry{
+			Slug: model, DisplayName: model,
+			Description:                "Custom provider model managed by Codex Bridge Hub.",
+			DefaultReasoningLevel:      "medium",
+			SupportedReasoningLevels:   []codexReasoningLevel{{Effort: "low", Description: "Faster response"}, {Effort: "medium", Description: "Balanced reasoning"}, {Effort: "high", Description: "Deeper reasoning"}},
+			ShellType:                  "shell_command",
+			Visibility:                 "list",
+			SupportedInAPI:             true,
+			Priority:                   priority + 1,
+			SupportVerbosity:           false,
+			TruncationPolicy:           map[string]any{"mode": "tokens", "limit": 10_000},
+			SupportsParallelToolCalls:  true,
+			ExperimentalSupportedTools: []string{},
+			ContextWindow:              unknownContextWindow,
+			BaseInstructions:           "You are a precise coding agent. Work directly in the user's workspace, follow repository instructions, make focused changes, and verify your work.",
+		})
+	}
+	encoded, err := json.MarshalIndent(codexModelCatalog{Models: entries}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, append(encoded, '\n'), 0o600)
 }
 
 func readOptional(path string) ([]byte, error) {

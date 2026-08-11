@@ -76,7 +76,7 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	claudeOriginal := `{"permissions":{"allow":["Read"]},"env":{"KEEP":"yes"}}`
+	claudeOriginal := `{"permissions":{"allow":["Read"]},"env":{"KEEP":"yes","ANTHROPIC_REASONING_MODEL":"old-model","ANTHROPIC_DEFAULT_OPUS_MODEL":"old-model","ANTHROPIC_DEFAULT_SONNET_MODEL":"old-model","ANTHROPIC_DEFAULT_HAIKU_MODEL":"old-model"}}`
 	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(claudeOriginal), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -86,15 +86,15 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.apply("codex", "https://provider.example/v1", "codex-model", "codex-key"); err != nil {
+	if err := m.apply("codex", "https://provider.example/v1", "codex-model", "codex-key", []string{"codex-model", "codex-model-fast"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.apply("claude", "https://claude.example/v1", "claude-model", "claude-key"); err != nil {
+	if err := m.apply("claude", "https://claude.example/v1", "claude-model", "claude-key", []string{"claude-model"}); err != nil {
 		t.Fatal(err)
 	}
 
 	codexApplied := readTestFile(t, filepath.Join(home, ".codex", "config.toml"))
-	for _, wanted := range []string{"sandbox_mode = \"workspace-write\"", "[mcp_servers.keep]", "command = \"keep-me\"", "[model_providers.custom]", "model = \"codex-model\""} {
+	for _, wanted := range []string{"sandbox_mode = \"workspace-write\"", "[mcp_servers.keep]", "command = \"keep-me\"", "[model_providers.custom]", "model = \"codex-model\"", "model_catalog_json = "} {
 		if !strings.Contains(codexApplied, wanted) {
 			t.Fatalf("Codex config missing %q:\n%s", wanted, codexApplied)
 		}
@@ -109,6 +109,13 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	if auth["refresh_token"] != "keep" || auth["OPENAI_API_KEY"] != "codex-key" {
 		t.Fatalf("unexpected Codex auth fields: %#v", auth)
 	}
+	var catalog codexModelCatalog
+	if err := json.Unmarshal([]byte(readTestFile(t, filepath.Join(m.root, "codex-model-catalog.json"))), &catalog); err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Models) != 2 || catalog.Models[0].Slug != "codex-model" || catalog.Models[1].Slug != "codex-model-fast" || catalog.Models[0].ContextWindow != unknownContextWindow {
+		t.Fatalf("unexpected Codex model catalog: %#v", catalog)
+	}
 	var claude map[string]any
 	if err := json.Unmarshal([]byte(readTestFile(t, filepath.Join(home, ".claude", "settings.json"))), &claude); err != nil {
 		t.Fatal(err)
@@ -116,7 +123,15 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	if claude["permissions"] == nil || claude["model"] != "claude-model" {
 		t.Fatalf("unexpected Claude settings: %#v", claude)
 	}
-
+	claudeEnv, _ := claude["env"].(map[string]any)
+	if claudeEnv["ANTHROPIC_MODEL"] != "claude-model" || claudeEnv["KEEP"] != "yes" {
+		t.Fatalf("unexpected Claude environment: %#v", claudeEnv)
+	}
+	for _, key := range []string{"ANTHROPIC_REASONING_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
+		if _, exists := claudeEnv[key]; exists {
+			t.Fatalf("Claude alias override %q was not removed: %#v", key, claudeEnv)
+		}
+	}
 	if err := m.reset("codex"); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +139,7 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	codexReset := readTestFile(t, filepath.Join(home, ".codex", "config.toml"))
-	if strings.Contains(codexReset, "model_providers.custom") || !strings.Contains(codexReset, "forced_login_method = \"chatgpt\"") || !strings.Contains(codexReset, "model_provider = \"openai\"") || !strings.Contains(codexReset, "[mcp_servers.keep]") {
+	if strings.Contains(codexReset, "model_providers.custom") || strings.Contains(codexReset, "model_catalog_json") || !strings.Contains(codexReset, "forced_login_method = \"chatgpt\"") || !strings.Contains(codexReset, "model_provider = \"openai\"") || !strings.Contains(codexReset, "[mcp_servers.keep]") {
 		t.Fatalf("unexpected reset Codex config:\n%s", codexReset)
 	}
 	auth = nil

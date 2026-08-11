@@ -121,31 +121,31 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	if err := json.Unmarshal([]byte(readTestFile(t, filepath.Join(home, ".claude", "settings.json"))), &claude); err != nil {
 		t.Fatal(err)
 	}
-	if claude["permissions"] == nil || claude["hooks"] == nil || claude["model"] != claudeModelSlot {
+	if claude["permissions"] == nil || claude["hooks"] == nil || claude["model"] != "claude-model" {
 		t.Fatalf("unexpected Claude settings: %#v", claude)
 	}
 	claudeEnv, _ := claude["env"].(map[string]any)
-	if _, exists := claudeEnv["ANTHROPIC_MODEL"]; exists || claudeEnv["KEEP"] != "yes" {
+	if claudeEnv["KEEP"] != "yes" || claudeEnv["ANTHROPIC_BASE_URL"] != "https://claude.example/v1" || claudeEnv["ANTHROPIC_AUTH_TOKEN"] != "claude-key" {
 		t.Fatalf("unexpected Claude environment: %#v", claudeEnv)
 	}
-	for _, key := range []string{"ANTHROPIC_REASONING_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
-		if _, exists := claudeEnv[key]; exists {
-			t.Fatalf("Claude alias override %q was not removed: %#v", key, claudeEnv)
+	for _, key := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_CUSTOM_MODEL_OPTION", "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"} {
+		if claudeEnv[key] != "claude-model" {
+			t.Fatalf("Claude model field %q = %#v, want claude-model", key, claudeEnv[key])
 		}
 	}
-	claudeOverrides, _ := claude["modelOverrides"].(map[string]any)
-	if claudeOverrides[claudeModelSlot] != "claude-model" || claudeOverrides["claude-opus-4-6"] != "keep-opus" {
-		t.Fatalf("unexpected Claude model overrides: %#v", claudeOverrides)
+	if _, exists := claudeEnv["ANTHROPIC_REASONING_MODEL"]; exists {
+		t.Fatalf("stale Claude reasoning override was not removed: %#v", claudeEnv)
 	}
-	if got := claudeBridgeLaunchModel(cfg); got != claudeModelSlot {
-		t.Fatalf("Claude launch model = %q, want managed slot %q", got, claudeModelSlot)
+	claudeOverrides, _ := claude["modelOverrides"].(map[string]any)
+	if claudeOverrides["claude-sonnet-4-6"] != "keep-sonnet" || claudeOverrides["claude-opus-4-6"] != "keep-opus" {
+		t.Fatalf("unexpected Claude model overrides: %#v", claudeOverrides)
 	}
 	restartedCfg := &config.Config{}
 	restarted, err := newCLIConfigManager(restartedCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restarted.state.ClaudeModel != "claude-model" || claudeBridgeLaunchModel(restartedCfg) != claudeModelSlot {
+	if restarted.state.ClaudeModel != "claude-model" || claudeBridgeModel(restartedCfg) != "claude-model" {
 		t.Fatalf("restarted Bridge lost Claude model mapping state: %#v", restarted.state)
 	}
 	if err := m.reset("codex"); err != nil {
@@ -173,19 +173,65 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 		t.Fatalf("unexpected reset Claude settings: %#v", claude)
 	}
 	claudeOverrides, _ = claude["modelOverrides"].(map[string]any)
-	if claudeOverrides[claudeModelSlot] != "keep-sonnet" || claudeOverrides["claude-opus-4-6"] != "keep-opus" {
+	if claudeOverrides["claude-sonnet-4-6"] != "keep-sonnet" || claudeOverrides["claude-opus-4-6"] != "keep-opus" {
 		t.Fatalf("Claude model overrides were not restored: %#v", claudeOverrides)
 	}
-	if got := claudeBridgeLaunchModel(cfg); got != "" {
-		t.Fatalf("Claude launch model after reset = %q, want empty", got)
+	if got := claudeBridgeModel(cfg); got != "" {
+		t.Fatalf("Claude model after reset = %q, want empty", got)
 	}
 	restartedCfg = &config.Config{}
 	restarted, err = newCLIConfigManager(restartedCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := claudeBridgeLaunchModel(restartedCfg); got != "" {
-		t.Fatalf("restarted Bridge launch model after reset = %q, want empty", got)
+	if got := claudeBridgeModel(restartedCfg); got != "" {
+		t.Fatalf("restarted Bridge model after reset = %q, want empty", got)
+	}
+}
+
+func TestCLIConfigApplyMigratesLegacyClaudeOverride(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"model":"claude-sonnet-4-6","modelOverrides":{"claude-sonnet-4-6":"old-provider-model","keep":"untouched"},"env":{"KEEP":"yes"}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, ".codex-bridge", "config-switcher")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"claudeModel":"old-provider-model","claudeOverrideKey":"claude-sonnet-4-6","claudeOverridePrevious":"original-sonnet","claudeOverrideHadPrevious":true,"claudeConfigManaged":true}`
+	if err := os.WriteFile(filepath.Join(root, "state.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	manager, err := newCLIConfigManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(readTestFile(t, filepath.Join(home, ".claude", "settings.json"))), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["model"] != "old-provider-model" {
+		t.Fatalf("migrated Claude model = %#v", got["model"])
+	}
+	env, _ := got["env"].(map[string]any)
+	for _, key := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_CUSTOM_MODEL_OPTION"} {
+		if env[key] != "old-provider-model" {
+			t.Fatalf("migrated Claude field %q = %#v", key, env[key])
+		}
+	}
+	overrides, _ := got["modelOverrides"].(map[string]any)
+	if overrides["claude-sonnet-4-6"] != "original-sonnet" || overrides["keep"] != "untouched" {
+		t.Fatalf("legacy override was not restored: %#v", overrides)
+	}
+	if manager.state.ClaudeOverrideKey != "" || manager.state.ClaudeModel != "old-provider-model" {
+		t.Fatalf("legacy state was not migrated: %#v", manager.state)
 	}
 }
 

@@ -36,13 +36,9 @@ const (
 	unknownContextWindow = 200_000
 	cliConfigProbeLimit  = 75 * time.Second
 	cliConfigCallLimit   = 30 * time.Second
-	claudeModelSlot      = "claude-sonnet-4-6"
 )
 
-var (
-	bridgeModelsMu          sync.RWMutex
-	bridgeClaudeLaunchModel = map[*config.Config]string{}
-)
+var bridgeModelsMu sync.RWMutex
 
 type cliConfigManager struct {
 	cfg     *config.Config
@@ -78,8 +74,10 @@ func newCLIConfigManager(cfg *config.Config) (*cliConfigManager, error) {
 	if raw, err := os.ReadFile(filepath.Join(root, "state.json")); err == nil && json.Unmarshal(raw, &state) == nil {
 		m.state = state
 		setBridgeModels(cfg, state.CodexModel, state.ClaudeModel)
-		if state.ClaudeConfigManaged || state.ClaudeOverrideKey != "" {
-			setClaudeBridgeLaunchModel(cfg, state.ClaudeOverrideKey)
+		if state.ClaudeOverrideKey != "" && state.ClaudeModel != "" {
+			if err := m.migrateLegacyClaudeConfig(home); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return m, nil
@@ -450,6 +448,12 @@ func (m *cliConfigManager) apply(cli, base, model, key string, models []string) 
 		if err != nil {
 			return fmt.Errorf("parse Claude settings: %w", err)
 		}
+		if err := m.restoreClaudeModelOverride(settings); err != nil {
+			return err
+		}
+		m.state.ClaudeOverrideKey = ""
+		m.state.ClaudeOverridePrevious = ""
+		m.state.ClaudeOverrideHadPrevious = false
 		env, _ := settings["env"].(map[string]any)
 		if env == nil {
 			env = map[string]any{}
@@ -457,14 +461,8 @@ func (m *cliConfigManager) apply(cli, base, model, key string, models []string) 
 		env["ANTHROPIC_BASE_URL"] = strings.TrimRight(base, "/")
 		env["ANTHROPIC_AUTH_TOKEN"] = key
 		delete(env, "ANTHROPIC_API_KEY")
-		for _, name := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_REASONING_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
-			delete(env, name)
-		}
 		settings["env"] = env
-		if err := m.applyClaudeModelOverride(settings, model); err != nil {
-			return err
-		}
-		settings["model"] = claudeModelSlot
+		setClaudeModelFields(settings, model)
 		encoded, err := json.MarshalIndent(settings, "", "  ")
 		if err != nil {
 			return err
@@ -475,7 +473,6 @@ func (m *cliConfigManager) apply(cli, base, model, key string, models []string) 
 		codexModel, _ := bridgeModels(m.cfg)
 		setBridgeModels(m.cfg, codexModel, model)
 		m.state.ClaudeConfigManaged = true
-		setClaudeBridgeLaunchModel(m.cfg, m.state.ClaudeOverrideKey)
 	}
 	return m.writeState()
 }
@@ -517,7 +514,22 @@ func (m *cliConfigManager) reset(cli string) error {
 		}
 		delete(settings, "model")
 		if env, ok := settings["env"].(map[string]any); ok {
-			for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_REASONING_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
+			for _, key := range []string{
+				"ANTHROPIC_BASE_URL",
+				"ANTHROPIC_AUTH_TOKEN",
+				"ANTHROPIC_API_KEY",
+				"ANTHROPIC_MODEL",
+				"ANTHROPIC_REASONING_MODEL",
+				"ANTHROPIC_DEFAULT_OPUS_MODEL",
+				"ANTHROPIC_DEFAULT_SONNET_MODEL",
+				"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+				"ANTHROPIC_DEFAULT_FABLE_MODEL",
+				"CLAUDE_CODE_SUBAGENT_MODEL",
+				"ANTHROPIC_CUSTOM_MODEL_OPTION",
+				"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+				"ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+				"ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
+			} {
 				delete(env, key)
 			}
 			if len(env) == 0 {
@@ -542,7 +554,6 @@ func (m *cliConfigManager) reset(cli string) error {
 		m.state.ClaudeConfigManaged = true
 		codexModel, _ := bridgeModels(m.cfg)
 		setBridgeModels(m.cfg, codexModel, "")
-		setClaudeBridgeLaunchModel(m.cfg, "")
 	}
 	return m.writeState()
 }
@@ -558,34 +569,51 @@ func (m *cliConfigManager) writeState() error {
 	return atomicWrite(filepath.Join(m.root, "state.json"), append(encoded, '\n'), 0o600)
 }
 
-func (m *cliConfigManager) applyClaudeModelOverride(settings map[string]any, model string) error {
-	if m.state.ClaudeOverrideKey != "" && m.state.ClaudeOverrideKey != claudeModelSlot {
-		if err := m.restoreClaudeModelOverride(settings); err != nil {
-			return err
-		}
-		m.state.ClaudeOverrideKey = ""
-		m.state.ClaudeOverridePrevious = ""
-		m.state.ClaudeOverrideHadPrevious = false
+func (m *cliConfigManager) migrateLegacyClaudeConfig(home string) error {
+	path := filepath.Join(home, ".claude", "settings.json")
+	settings, err := readJSONObject(path)
+	if err != nil {
+		return fmt.Errorf("parse Claude settings for migration: %w", err)
 	}
-	overrides, err := claudeModelOverrides(settings)
+	if err := m.restoreClaudeModelOverride(settings); err != nil {
+		return err
+	}
+	setClaudeModelFields(settings, m.state.ClaudeModel)
+	encoded, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
-	if m.state.ClaudeOverrideKey == "" {
-		previous, exists := overrides[claudeModelSlot]
-		if exists {
-			previousString, ok := previous.(string)
-			if !ok {
-				return errors.New("Claude modelOverrides entry must be a string")
-			}
-			m.state.ClaudeOverridePrevious = previousString
-			m.state.ClaudeOverrideHadPrevious = true
-		}
-		m.state.ClaudeOverrideKey = claudeModelSlot
+	if err := backupAndWrite(path, append(encoded, '\n'), 0o600); err != nil {
+		return err
 	}
-	overrides[claudeModelSlot] = model
-	settings["modelOverrides"] = overrides
-	return nil
+	m.state.ClaudeOverrideKey = ""
+	m.state.ClaudeOverridePrevious = ""
+	m.state.ClaudeOverrideHadPrevious = false
+	m.state.ClaudeConfigManaged = true
+	return m.writeState()
+}
+
+func setClaudeModelFields(settings map[string]any, model string) {
+	env, _ := settings["env"].(map[string]any)
+	if env == nil {
+		env = map[string]any{}
+	}
+	for _, name := range []string{
+		"ANTHROPIC_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_DEFAULT_FABLE_MODEL",
+		"CLAUDE_CODE_SUBAGENT_MODEL",
+		"ANTHROPIC_CUSTOM_MODEL_OPTION",
+	} {
+		env[name] = model
+	}
+	env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = model
+	env["ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"] = "Custom provider model managed by ProofBridge Hub"
+	delete(env, "ANTHROPIC_REASONING_MODEL")
+	settings["env"] = env
+	settings["model"] = model
 }
 
 func (m *cliConfigManager) restoreClaudeModelOverride(settings map[string]any) error {
@@ -638,30 +666,6 @@ func claudeBridgeModel(cfg *config.Config) string {
 		return claudeModel
 	}
 	return codexModel
-}
-
-func claudeBridgeLaunchModel(cfg *config.Config) string {
-	bridgeModelsMu.RLock()
-	defer bridgeModelsMu.RUnlock()
-	if model, managed := bridgeClaudeLaunchModel[cfg]; managed {
-		return model
-	}
-	if cfg.Bridge.ClaudeModel != "" {
-		return cfg.Bridge.ClaudeModel
-	}
-	return cfg.Bridge.Model
-}
-
-func setClaudeBridgeLaunchModel(cfg *config.Config, model string) {
-	bridgeModelsMu.Lock()
-	bridgeClaudeLaunchModel[cfg] = model
-	bridgeModelsMu.Unlock()
-}
-
-func clearClaudeBridgeLaunchModel(cfg *config.Config) {
-	bridgeModelsMu.Lock()
-	delete(bridgeClaudeLaunchModel, cfg)
-	bridgeModelsMu.Unlock()
 }
 
 func setBridgeModels(cfg *config.Config, codexModel, claudeModel string) {

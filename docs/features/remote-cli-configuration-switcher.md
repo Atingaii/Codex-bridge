@@ -37,14 +37,16 @@ supplied.
 
 Writes are locked, backed up, written to a temporary user-only file, and
 atomically renamed. Codex updates its model/provider section and native
-`~/.codex/auth.json` credential file. Claude Code parses JSON, updates only the
-managed connection fields, and maps the custom model through one recognized
-Sonnet `modelOverrides` slot so native metadata remains available. A prior value
-in that slot is remembered and restored by official reset. Hooks, MCP, skills,
-permissions, and other model mappings remain unchanged. Active processes are
-left alone. Orchestration passes the recognized slot to Claude Code while usage
-records keep the actual provider model ID; manually configured Bridge models
-continue to pass through unchanged.
+`~/.codex/auth.json` credential file. Claude Code parses JSON, updates the
+managed connection fields, registers the selected provider ID as its custom
+model option, and sets the main, Opus, Sonnet, Haiku, Fable, and subagent model
+fields to that same ID. This mirrors a native third-party-provider
+`settings.json` without depending on a versioned Anthropic model name. Hooks,
+MCP, skills, permissions, and unrelated settings remain unchanged. Active
+processes are left alone. Orchestration passes the actual provider model to
+Claude Code, and manually configured Bridge models continue to pass through
+unchanged. A Bridge upgrading from the earlier versioned `modelOverrides` slot
+restores the prior slot value and migrates the active preset at startup.
 
 Preset updates are ownership-scoped by user, agent, and preset ID. The Hub can
 reuse the existing Bridge-encrypted secret for connection testing and saving,
@@ -60,8 +62,8 @@ active marker until the user applies it again; renaming alone preserves it.
 - [x] URL normalization and model discovery are covered by tests.
 - [x] Slow inference providers have bounded end-to-end probe budgets.
 - [x] Apply/reset preserves unrelated TOML/JSON configuration.
-- [x] Claude custom models retain native metadata without remapping every model
-  picker choice.
+- [x] Claude custom models remain selectable without a versioned Anthropic
+  model dependency, including after a Claude Code model catalog update.
 - [x] Legacy Bridges retain existing chat and orchestration behavior.
 - [x] Codex + Codex UI states that both workers share one configuration.
 - [x] Embedded frontend and Go/frontend test suites pass.

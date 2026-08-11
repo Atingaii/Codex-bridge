@@ -451,7 +451,7 @@ func stopManagedNohupBridge(opts linkOptions) {
 
 func linkSystemdUnit(opts linkOptions) string {
 	return fmt.Sprintf(`[Unit]
-Description=Codex Bridge endpoint for %s
+Description=ProofBridge endpoint for %s
 After=network-online.target
 Wants=network-online.target
 

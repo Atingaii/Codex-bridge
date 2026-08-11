@@ -165,7 +165,7 @@ export function LoginScreen({
           <div className="h-12 w-12 rounded-xl bg-primary text-primary-foreground flex items-center justify-center mb-2 shadow-sm">
             <Terminal className="h-6 w-6" />
           </div>
-          <h1 className="text-xl font-medium tracking-tight">Codex Bridge</h1>
+          <h1 className="text-xl font-medium tracking-tight">ProofBridge</h1>
           <p className="text-sm text-muted-foreground">{t.secureConnection}</p>
         </div>
 

@@ -516,7 +516,7 @@ func claudeHistoryDisplay(runID string, transcript []byte) string {
 	if runID = strings.TrimSpace(runID); runID != "" {
 		return nativeSessionDisplayName(runID, "claude")
 	}
-	return "Codex Bridge Claude session"
+	return "ProofBridge Claude session"
 }
 
 func claudeTranscriptTitle(transcript []byte) string {

@@ -1,4 +1,4 @@
-# AGENTS.md - Codex Bridge Session Brief
+# AGENTS.md - ProofBridge Session Brief
 
 This is the entry brief for AI coding sessions. Read this file first, then load
 the detailed docs linked below only when the task needs them.
@@ -165,9 +165,13 @@ Only explicit New Session / New Run actions may create a new context.
 | Wire protocol | `internal/protocol/` |
 | Embedded UI output | `internal/web/static/` |
 | Frontend source | `frontend/src/app/` |
-| Android wrapper | `android/` |
+| Archived Android wrapper (unmaintained) | `android/` |
 
 Detailed "change X -> edit Y" guidance is in [docs/code-map.md](docs/code-map.md).
+
+The Android wrapper is archived and is not a release target or exit gate. Do
+not sync, build, test, or update it for Hub, Bridge, or frontend changes unless
+the user explicitly reactivates Android maintenance.
 
 ## Commands
 

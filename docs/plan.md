@@ -1,4 +1,4 @@
-# Codex Bridge Plan
+# ProofBridge Plan
 
 ## Goal
 
@@ -71,6 +71,9 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 
 ## Maintenance Log
 
+- 2026-08-11: Archived the Android wrapper and removed APK builds from the
+  automatic release path. Android is no longer maintained or considered a
+  release exit gate; existing wrapper sources remain for historical reference.
 - 2026-08-09: Coalesced high-frequency native command progress at the Bridge
   before transport and SQLite persistence, preserving full output and terminal
   ordering without adding a database service or user configuration. Durable

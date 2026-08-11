@@ -94,7 +94,7 @@ export function HelpPage({ language, setLanguage, isDarkMode, setIsDarkMode }: H
   const [activeSection, setActiveSection] = useState('start');
 
   useEffect(() => {
-    document.title = 'Codex Bridge 使用帮助';
+    document.title = 'ProofBridge 使用帮助';
     const sections = navItems
       .map(([id]) => document.getElementById(id))
       .filter(Boolean) as HTMLElement[];
@@ -122,7 +122,7 @@ export function HelpPage({ language, setLanguage, isDarkMode, setIsDarkMode }: H
           </button>
           <a href="/" className="flex items-center gap-2 font-medium">
             <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground"><Terminal className="h-4 w-4" /></span>
-            <span className="text-sm">Codex Bridge</span>
+            <span className="text-sm">ProofBridge</span>
           </a>
           <span className="hidden h-4 w-px bg-border sm:block" />
           <span className="hidden text-sm text-muted-foreground sm:block">使用帮助</span>
@@ -156,16 +156,16 @@ export function HelpPage({ language, setLanguage, isDarkMode, setIsDarkMode }: H
           <p className="mb-3 px-2 text-[11px] font-semibold uppercase text-muted-foreground">使用目录</p>
           <HelpNav activeSection={activeSection} />
           <div className="mt-6 border-t border-border px-2 pt-5 text-xs leading-relaxed text-muted-foreground">
-            <p>当前文档适用于 v0.3.27。</p>
+            <p>当前文档适用于 v0.3.28。</p>
             <a className="mt-2 inline-flex items-center gap-1 hover:text-foreground" href="/updates">更新记录 <History className="h-3 w-3" /></a>
-            <a className="mt-2 inline-flex items-center gap-1 hover:text-foreground" href="https://github.com/Atingaii/Codex-bridge" target="_blank" rel="noreferrer">GitHub <ExternalLink className="h-3 w-3" /></a>
+            <a className="mt-2 inline-flex items-center gap-1 hover:text-foreground" href="https://github.com/Atingaii/ProofBridge" target="_blank" rel="noreferrer">GitHub <ExternalLink className="h-3 w-3" /></a>
           </div>
         </aside>
 
         <main className="min-w-0 pb-24 pt-10 md:pt-14">
           <section id="start" className="scroll-mt-24 border-b border-border pb-14">
             <div className="mb-5 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />从浏览器安全连接你的私有 CLI</div>
-            <h1 className="max-w-3xl text-3xl font-semibold leading-tight sm:text-4xl">Codex Bridge 详细使用教程</h1>
+            <h1 className="max-w-3xl text-3xl font-semibold leading-tight sm:text-4xl">ProofBridge 详细使用教程</h1>
             <p className="mt-5 max-w-3xl text-base leading-7 text-muted-foreground">本页从注册开始，带你连接私有机器上的 Codex / Claude Code，完成单 CLI 对话、协作编排、证据驱动辩论与形式化验证。所有示例都以“少占上下文、可验证、可继续”为目标。</p>
             <div className="mt-8 grid gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-3">
               <QuickFact icon={ShieldCheck} title="Hub 不接入私有机" text="Bridge 主动反向连接，模型凭据与工作区保留在你的机器。" />
@@ -189,8 +189,8 @@ export function HelpPage({ language, setLanguage, isDarkMode, setIsDarkMode }: H
               ['进入工作区', '注册成功会自动登录；账户只能看到自己拥有的端点、会话和编排运行。'],
             ]} />
             <div className="mt-7 grid gap-5 md:grid-cols-2">
-              <Figure number={1} src="/help/auth-login.webp" alt="Codex Bridge 登录页面，显示用户名、密码与眼睛按钮" caption="登录：输入已有账户，眼睛按钮只改变可见性，不改变密码值。" />
-              <Figure number={2} src="/help/auth-register.webp" alt="Codex Bridge 注册页面，显示两次密码与 Cloudflare Turnstile" caption="注册：两次密码一致并通过 Cloudflare 安全验证后创建账户。" />
+              <Figure number={1} src="/help/auth-login.webp" alt="ProofBridge 登录页面，显示用户名、密码与眼睛按钮" caption="登录：输入已有账户，眼睛按钮只改变可见性，不改变密码值。" />
+              <Figure number={2} src="/help/auth-register.webp" alt="ProofBridge 注册页面，显示两次密码与 Cloudflare Turnstile" caption="注册：两次密码一致并通过 Cloudflare 安全验证后创建账户。" />
             </div>
             <Callout icon={ShieldCheck} title="安全边界">Turnstile 的 Secret 只保存在 Hub 服务端；浏览器只收到公开 Site Key。不要把注册验证码、Cookie 或密码发给任何 CLI。</Callout>
           </GuideSection>
@@ -211,7 +211,7 @@ export function HelpPage({ language, setLanguage, isDarkMode, setIsDarkMode }: H
 
           <GuideSection id="chat" eyebrow="03 · 单 CLI" title="创建会话并完成一次可继续的任务" icon={MessageSquare}>
             <p>单 CLI 对话适合明确、线性的工作：理解代码、修复一个缺陷、运行测试或解释日志。系统会复用当前会话 ID 和原生 thread，后续消息不会静默开启新上下文。</p>
-            <Figure number={5} src="/help/workspace-overview.webp" alt="Codex Bridge 工作区，左侧是会话，顶部是端点，中央是聊天区域" caption="工作区：左侧管理会话，顶部选择在线端点，底部输入任务和上传图片。" />
+            <Figure number={5} src="/help/workspace-overview.webp" alt="ProofBridge 工作区，左侧是会话，顶部是端点，中央是聊天区域" caption="工作区：左侧管理会话，顶部选择在线端点，底部输入任务和上传图片。" />
             <StepList items={[
               ['选端点', '顶部选择器决定任务在哪台私有机器、哪个工作目录运行。绿色状态表示在线。'],
               ['新建会话', '明确的新任务使用“新会话”；补充同一任务直接在当前会话继续。'],
@@ -319,7 +319,7 @@ export function HelpPage({ language, setLanguage, isDarkMode, setIsDarkMode }: H
             <p>设置页可以切换主题和语言、查看端点能力矩阵、生成修复命令或删除旧端点。移动端保留主要工作流，侧栏通过左上角菜单打开。</p>
             <div className="mt-7 grid gap-5 md:grid-cols-[1.45fr_0.75fr]">
               <Figure number={16} src="/help/endpoint-capabilities.webp" alt="CLI 端点展开后的能力矩阵和修复连接按钮" caption="能力矩阵：确认 chat、orchestration 和 browser approval 均符合所选策略。" />
-              <Figure number={17} src="/help/mobile-workspace.webp" alt="手机尺寸的 Codex Bridge 工作区" caption="移动端：菜单、端点状态、消息和输入区保持可用。" />
+              <Figure number={17} src="/help/mobile-workspace.webp" alt="手机尺寸的 ProofBridge 工作区" caption="移动端：菜单、端点状态、消息和输入区保持可用。" />
             </div>
             <Callout icon={Laptop} title="端点离线时">先确认本机 Bridge 进程和网络；若机器 ID 已存在但 token 过期，在设置中展开该端点并生成“修复连接”命令，不要重复创建多个同名端点。</Callout>
           </GuideSection>
@@ -335,7 +335,7 @@ export function HelpPage({ language, setLanguage, isDarkMode, setIsDarkMode }: H
             </div>
             <div className="mt-8 flex flex-col items-start justify-between gap-4 rounded-md border border-border bg-muted/30 p-5 sm:flex-row sm:items-center">
               <div><h3 className="text-sm font-semibold">准备开始？</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">先连接一个端点，再从小而可验证的任务开始。</p></div>
-              <a href="/" className="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90">打开 Codex Bridge <ArrowRight className="h-4 w-4" /></a>
+              <a href="/" className="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90">打开 ProofBridge <ArrowRight className="h-4 w-4" /></a>
             </div>
           </GuideSection>
         </main>

@@ -1,13 +1,13 @@
-# Codex Bridge
+# ProofBridge
 
 <p align="center">
-  <img src="docs/assets/codex-bridge-hero.webp" alt="Codex Bridge：连接 IDE 与 Codex 的桥梁" width="100%" />
+  <img src="docs/assets/codex-bridge-hero.webp" alt="ProofBridge：连接 IDE 与 Codex 的桥梁" width="100%" />
 </p>
 
 <p align="center"><strong>让浏览器安全访问私有机器上的 Codex 与 Claude Code，并进行多 CLI 编排。</strong></p>
 
 <p align="center">
-  <a href="https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push" alt="main 分支 CI 状态" /></a>
+  <a href="https://github.com/Atingaii/ProofBridge/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/Atingaii/ProofBridge/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push" alt="main 分支 CI 状态" /></a>
   <a href="go.mod"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25+" /></a>
   <a href="docs/deployment.md"><img src="https://img.shields.io/badge/platform-Linux-555" alt="Linux" /></a>
 </p>
@@ -19,7 +19,7 @@
   <a href="docs/architecture.md">架构说明</a>
 </p>
 
-Codex Bridge 将公网 Hub 与私有工作区分离：Hub 负责浏览器访问、认证和历史持久化；
+ProofBridge 将公网 Hub 与私有工作区分离：Hub 负责浏览器访问、认证和历史持久化；
 Bridge 从你的机器反向连接 Hub，并在本地工作目录中运行 Codex、Claude Code 等 CLI。
 Hub 不需要访问你的文件系统，也不需要保存模型密钥。
 
@@ -53,8 +53,8 @@ Web UI 会编译进 Go 二进制。从源码构建时先运行 `make frontend`�
 ## 快速开始
 
 ```bash
-git clone https://github.com/Atingaii/Codex-bridge.git
-cd Codex-bridge
+git clone https://github.com/Atingaii/ProofBridge.git
+cd ProofBridge
 
 cp configs/dev.yaml.example configs/dev.yaml
 # 编辑 configs/dev.yaml，设置 auth.bootstrap_password 和随机 jwt_secret

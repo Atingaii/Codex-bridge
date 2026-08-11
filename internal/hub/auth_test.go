@@ -317,7 +317,7 @@ func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
 	}
 	for _, want := range []string{
 		`TMP="${BIN}.tmp.$$"`,
-		`echo "Downloading Codex Bridge..."`,
+		`echo "Downloading ProofBridge..."`,
 		`if curl --http1.1 --version >/dev/null 2>&1; then`,
 		`curl $curl_http1 -fL --connect-timeout 20 --max-time 900 --speed-time 30 --speed-limit 1024 -C - -o "$TMP" "$DOWNLOAD_URL"`,
 		`timeout 900 wget -c -O "$TMP" "$DOWNLOAD_URL"`,
@@ -329,7 +329,7 @@ func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
 		`echo "Download complete."`,
 		`mv -f "$TMP" "$BIN"`,
 		`timeout 30s systemctl "$@"`,
-		`echo "Refreshing existing Codex Bridge services..."`,
+		`echo "Refreshing existing ProofBridge services..."`,
 		`for unit_path in "$SYSTEMD_DIR"/codex-bridge-*.service; do`,
 		`run_systemctl --user restart "$unit"`,
 		`for pid_path in "$SERVICES_DIR"/*.pid; do`,

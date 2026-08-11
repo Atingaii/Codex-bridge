@@ -26,7 +26,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Frontend source | `frontend/src/app/App.tsx`, `frontend/src/app/pages/`, `frontend/src/app/components/`, `frontend/src/app/lib/`, `frontend/src/styles/` |
 | Public help guide | `frontend/src/app/pages/HelpPage.tsx`, `frontend/public/help/`, `frontend/scripts/generate-help-screenshots.cjs`, `docs/features/public-help-guide.md` |
 | Embedded frontend output | `internal/web/static/`, `internal/web/embed.go` |
-| Android wrapper | `android/`, `frontend/capacitor.config.ts` |
+| Archived Android wrapper (unmaintained) | `android/`, `frontend/capacitor.config.ts` |
 | Deployment | `deploy/Caddyfile`, `deploy/systemd-*.service`, `deploy/portable/`, `scripts/build-portable-package.sh`, `Dockerfile`, `Makefile`, `docs/deployment.md` |
 | Formal-proof benchmarks | `benchmarks/formal-proof/`, `scripts/run-formal-proof-benchmarks.sh`, `docs/features/formal-proof-offline-benchmarks.md` |
 

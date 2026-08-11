@@ -803,7 +803,7 @@ func composeRelayPromptWithTaskScope(mode, firstCLI, profile, userPrompt, contex
 	profile = normalizeOrchestrationProfile(profile)
 	profileActive := registry.UsesSpecialRules(profile)
 	var b strings.Builder
-	b.WriteString("Codex Bridge is relaying this browser orchestration like a human handoff between local CLIs. Treat this as a real user instruction, use your normal capabilities, and do not wait for Bridge to validate strategy choices.\n\n")
+	b.WriteString("ProofBridge is relaying this browser orchestration like a human handoff between local CLIs. Treat this as a real user instruction, use your normal capabilities, and do not wait for Bridge to validate strategy choices.\n\n")
 	b.WriteString(orchestrationLanguageRule)
 	b.WriteString("\n\n")
 	if taskScope != nil {

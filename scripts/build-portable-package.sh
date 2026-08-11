@@ -23,7 +23,7 @@ ARCHIVE="$DIST_DIR/$PACKAGE_NAME.tar.gz"
 
 usage() {
   cat <<'USAGE'
-Build a portable Codex Bridge package.
+Build a portable ProofBridge package.
 
 Environment overrides:
   VERSION       Version label used in the package name and binary metadata.

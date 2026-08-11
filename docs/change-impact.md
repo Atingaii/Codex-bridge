@@ -19,7 +19,7 @@ keeps only the top frequent subset.
 | Add or change deployment unit | `deploy/`, `Dockerfile`, `Makefile`, `docs/deployment.md`, README/README.zh-CN deployment sections |
 | Add or change CI / build pipeline | `.github/workflows/ci.yml`, `Makefile` targets it calls, README CI badge |
 | Add or change install/download flow | `internal/hub/server.go`, `configs/*.yaml.example`, README/README.zh-CN, integration tests |
-| Add or change Android wrapper behavior | `android/`, `frontend/capacitor.config.ts`, README Android section, GitHub workflow if release output changes |
+| Hub, Bridge, or frontend change while Android is archived | Do not sync, build, test, or update `android/`; Android is not a release exit gate unless maintenance is explicitly reactivated |
 | Add or change embedded static assets | `frontend/` source, run `npm run build`, verify generated `internal/web/static/` |
 
 ## Conversation And Orchestration

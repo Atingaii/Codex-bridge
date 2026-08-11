@@ -1,7 +1,7 @@
 
-  # Codex Bridge SaaS Interface
+  # ProofBridge SaaS Interface
 
-  This is a code bundle for Codex Bridge SaaS Interface. The original project is available at https://www.figma.com/design/FCbbFzPMWb9jkrOV6cNYMh/Codex-Bridge-SaaS-Interface.
+  This is a code bundle for ProofBridge SaaS Interface. The original project is available at https://www.figma.com/design/FCbbFzPMWb9jkrOV6cNYMh/ProofBridge-SaaS-Interface.
 
   ## Running the code
 

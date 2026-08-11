@@ -242,7 +242,7 @@ if ! grep -q '\[bridge\] connected' "$BRIDGE_LOG"; then
 fi
 
 cat <<EOF
-Codex Bridge is running.
+ProofBridge is running.
 URL:      $PUBLIC_URL
 Username: $ADMIN_USERNAME
 Password: $ADMIN_PASSWORD

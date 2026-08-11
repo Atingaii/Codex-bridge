@@ -313,7 +313,7 @@ async function checkHelpPage(page) {
   await page.setExtraHTTPHeaders({});
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`${baseURL}/help`, { waitUntil: 'networkidle' });
-  await page.getByRole('heading', { name: 'Codex Bridge 详细使用教程' }).waitFor();
+  await page.getByRole('heading', { name: 'ProofBridge 详细使用教程' }).waitFor();
   const helpImages = page.locator('main img');
   for (let index = 0; index < await helpImages.count(); index += 1) {
     await helpImages.nth(index).scrollIntoViewIfNeeded();
@@ -338,7 +338,7 @@ async function checkHelpPage(page) {
   await page.getByRole('button', { name: '打开目录' }).click();
   await page.locator('.fixed.inset-0 aside').getByText('形式化验证', { exact: true }).waitFor();
   await page.goto(`${baseURL}/hlep`, { waitUntil: 'networkidle' });
-  await page.getByRole('heading', { name: 'Codex Bridge 详细使用教程' }).waitFor();
+  await page.getByRole('heading', { name: 'ProofBridge 详细使用教程' }).waitFor();
   await page.setViewportSize({ width: 1440, height: 900 });
 }
 

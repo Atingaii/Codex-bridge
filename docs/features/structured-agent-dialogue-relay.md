@@ -116,7 +116,7 @@ requires the designated reviewing role and evidence described above.
 
 **Q: Why not copy the reference project's mailbox runtime?**
 
-A: Codex Bridge already owns two durable native CLI sessions and a persisted
+A: ProofBridge already owns two durable native CLI sessions and a persisted
 run timeline. Adding another daemon and job store would duplicate those
 responsibilities. The useful behavior is the explicit message/completion
 contract and compact task memory, which fit inside the current relay.

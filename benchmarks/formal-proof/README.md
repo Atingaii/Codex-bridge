@@ -1,7 +1,7 @@
 # Formal-Proof Offline Benchmarks
 
 This directory contains a deterministic regression suite for proof artifacts
-produced by Codex Bridge's `formal-proof` orchestration profile. It is inspired
+produced by ProofBridge's `formal-proof` orchestration profile. It is inspired
 by the obligation-oriented organization of CoqGym and PISA/AFP, but it is not a
 sample or score from those full datasets.
 

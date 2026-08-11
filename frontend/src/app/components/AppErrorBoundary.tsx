@@ -13,7 +13,7 @@ export class AppErrorBoundary extends React.Component<React.PropsWithChildren, A
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error('Codex Bridge render failure', error, info);
+    console.error('ProofBridge render failure', error, info);
   }
 
   render() {

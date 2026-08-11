@@ -1,20 +1,20 @@
-# Codex Bridge 中文接入指南
+# ProofBridge 中文接入指南
 
 <p align="center">
-  <img src="docs/assets/codex-bridge-hero.webp" alt="Codex Bridge：连接 IDE 与 Codex 的桥梁" width="100%" />
+  <img src="docs/assets/codex-bridge-hero.webp" alt="ProofBridge：连接 IDE 与 Codex 的桥梁" width="100%" />
 </p>
 
 <p align="center"><strong>让浏览器安全访问私有机器上的 Codex 与 Claude Code，并进行多 CLI 编排。</strong></p>
 
 <p align="center">
-  <a href="https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/Atingaii/Codex-bridge/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push" alt="main 分支 CI 状态" /></a>
+  <a href="https://github.com/Atingaii/ProofBridge/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/Atingaii/ProofBridge/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push" alt="main 分支 CI 状态" /></a>
   <a href="go.mod"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25+" /></a>
   <a href="docs/deployment.md"><img src="https://img.shields.io/badge/platform-Linux-555" alt="Linux" /></a>
 </p>
 
 <p align="center"><a href="README.md">English</a> · <a href="https://sparkon.cn/help">在线图文教程</a> · <a href="docs/deployment.md">部署指南</a> · <a href="docs/architecture.md">架构</a></p>
 
-Codex Bridge 将公网 Hub 与私有工作区分离：Hub 负责浏览器访问和历史持久化，反向连接的 Bridge 在已有文件与凭据的私有机器上运行 Codex 和 Claude Code CLI。
+ProofBridge 将公网 Hub 与私有工作区分离：Hub 负责浏览器访问和历史持久化，反向连接的 Bridge 在已有文件与凭据的私有机器上运行 Codex 和 Claude Code CLI。
 
 ## Bridge / ACP / resume 简明版
 
@@ -161,8 +161,8 @@ codex
 先获取代码：
 
 ```bash
-git clone https://github.com/Atingaii/Codex-bridge.git
-cd Codex-bridge
+git clone https://github.com/Atingaii/ProofBridge.git
+cd ProofBridge
 ```
 
 构建单个 Go 二进制（前置：Go 1.25+、Node 20+）。Web UI 已编译进二进制，从源码构建时
@@ -222,7 +222,7 @@ gateway:
 hub:
   db_path: /opt/codex-bridge/data/codex-bridge.db
   cookie_secure: true
-  bridge_download_url: https://github.com/Atingaii/Codex-bridge/releases/latest/download/codex-bridge-linux-amd64
+  bridge_download_url: https://github.com/Atingaii/ProofBridge/releases/latest/download/codex-bridge-linux-amd64
 auth:
   jwt_secret: replace-with-32-byte-random-secret
   bootstrap_username: admin
@@ -251,7 +251,7 @@ release 二进制下载地址：
 
 ```yaml
 hub:
-  bridge_download_url: https://github.com/Atingaii/Codex-bridge/releases/latest/download/codex-bridge-linux-amd64
+  bridge_download_url: https://github.com/Atingaii/ProofBridge/releases/latest/download/codex-bridge-linux-amd64
 ```
 
 也可以用环境变量覆盖：

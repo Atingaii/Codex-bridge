@@ -1277,7 +1277,7 @@ func (m *OrchestrationManager) resetNativeInteractiveSessionForContinuation(cli,
 
 func composeInterruptedTurnContinuationPrompt(original string, record orchestrationTurn, attempt, max int) string {
 	var b strings.Builder
-	b.WriteString("Codex Bridge is continuing the same orchestration turn because the previous CLI invocation returned command events or partial visible output but no final conclusion or handoff summary. Do not treat this as a new user request, and do not discard completed work.\n\n")
+	b.WriteString("ProofBridge is continuing the same orchestration turn because the previous CLI invocation returned command events or partial visible output but no final conclusion or handoff summary. Do not treat this as a new user request, and do not discard completed work.\n\n")
 	b.WriteString(orchestrationLanguageRule)
 	b.WriteString("\n\n")
 	b.WriteString(fmt.Sprintf("Continuation attempt: %d of %d.\n\n", attempt, max))
@@ -1308,7 +1308,7 @@ func composeInterruptedTurnContinuationPrompt(original string, record orchestrat
 
 func composeCLITransportRecoveryPrompt(record orchestrationTurn, attempt, max int) string {
 	var b strings.Builder
-	b.WriteString("Codex Bridge is recovering this same orchestration turn after the provider stream disconnected. This is not a new user request. Resume from the current native conversation and workspace state; do not replay the original request or repeat completed commands.\n\n")
+	b.WriteString("ProofBridge is recovering this same orchestration turn after the provider stream disconnected. This is not a new user request. Resume from the current native conversation and workspace state; do not replay the original request or repeat completed commands.\n\n")
 	b.WriteString(orchestrationLanguageRule)
 	b.WriteString("\n\n")
 	b.WriteString(fmt.Sprintf("Transport recovery attempt: %d of %d.\n\n", attempt, max))
@@ -1351,9 +1351,9 @@ func nativeSessionDisplayName(runID, cli string) string {
 	}
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
-		return "Codex Bridge " + cli
+		return "ProofBridge " + cli
 	}
-	return "Codex Bridge " + cli + " " + runID
+	return "ProofBridge " + cli + " " + runID
 }
 
 func firstNonEmpty(values ...string) string {

@@ -37,6 +37,16 @@ type UpdateItem = {
 const releases: Array<{ date: string; version: string; summary: string; items: UpdateItem[] }> = [
   {
     date: '2026 年 8 月 11 日',
+    version: 'v0.3.28',
+    summary: '产品品牌统一为 ProofBridge，并补齐模型供应商预设编辑能力。',
+    items: [
+      { icon: ShieldCheck, category: '品牌', title: '正式更名为 ProofBridge', detail: '网页、帮助、CLI 提示和仓库名称已统一；原有命令、配置与任务无需迁移。' },
+      { icon: Settings2, category: '模型', title: '支持修改供应商预设', detail: '可编辑名称、Base URL、模型和 API Key；Key 留空时安全保留原有加密凭据。' },
+      { icon: History, category: '维护', title: 'Android 包装器归档', detail: 'Android 不再维护，也不再作为 Web、Hub 与 Bridge 发布的验收项。' },
+    ],
+  },
+  {
+    date: '2026 年 8 月 11 日',
     version: 'v0.3.26',
     summary: '模型配置进入 Hub，补齐升级和原生模型选择体验。',
     items: [
@@ -75,7 +85,7 @@ const highlights = [
 
 export function UpdatesPage({ language, setLanguage, isDarkMode, setIsDarkMode }: UpdatesPageProps) {
   useEffect(() => {
-    document.title = 'Codex Bridge 更新记录';
+    document.title = 'ProofBridge 更新记录';
   }, []);
 
   return (
@@ -84,7 +94,7 @@ export function UpdatesPage({ language, setLanguage, isDarkMode, setIsDarkMode }
         <div className="mx-auto flex h-14 max-w-5xl items-center gap-3 px-4 md:px-6">
           <a href="/" className="flex items-center gap-2 font-medium">
             <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground"><Terminal className="h-4 w-4" /></span>
-            <span className="text-sm">Codex Bridge</span>
+            <span className="text-sm">ProofBridge</span>
           </a>
           <span className="hidden h-4 w-px bg-border sm:block" />
           <span className="hidden text-sm text-muted-foreground sm:block">更新记录</span>
@@ -99,13 +109,13 @@ export function UpdatesPage({ language, setLanguage, isDarkMode, setIsDarkMode }
 
       <main className="mx-auto max-w-5xl px-4 pb-24 pt-12 md:px-6 md:pt-16">
         <section className="border-b border-border pb-12">
-          <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />当前版本 v0.3.27</div>
+          <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />当前版本 v0.3.28</div>
           <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
             <div>
               <h1 className="text-3xl font-semibold leading-tight sm:text-4xl">最近更新</h1>
-              <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground">模型切换、多机器稳定性和长编排体验，最近几次更新集中解决了这些高频问题。</p>
+              <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground">品牌、模型切换、多机器稳定性和长编排体验，最近几次更新集中解决了这些高频问题。</p>
             </div>
-            <a href="https://github.com/Atingaii/Codex-bridge/releases/tag/v0.3.27" target="_blank" rel="noreferrer" className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-border px-3 text-xs font-medium hover:bg-muted">查看 Release <ExternalLink className="h-3.5 w-3.5" /></a>
+            <a href="https://github.com/Atingaii/ProofBridge/releases/tag/v0.3.28" target="_blank" rel="noreferrer" className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-border px-3 text-xs font-medium hover:bg-muted">查看 Release <ExternalLink className="h-3.5 w-3.5" /></a>
           </div>
           <div className="mt-8 grid gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-3">
             {highlights.map(({ icon: Icon, label, value }) => (

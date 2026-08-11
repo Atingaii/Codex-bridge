@@ -1,4 +1,4 @@
-# Codex Bridge Portable Package
+# ProofBridge Portable Package
 
 This directory is self-contained for a simple single-server bootstrap.
 

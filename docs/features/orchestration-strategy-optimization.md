@@ -313,7 +313,7 @@ semantics, the decrease / well-founded measure, and fuel sufficiency.
 
 The same acceptance gate applies when the selected Bridge uses the local CCB
 orchestration runner. CCB can coordinate its own Codex and Claude agents, but
-Codex Bridge is still responsible for the browser-visible terminal result. The
+ProofBridge is still responsible for the browser-visible terminal result. The
 Bridge wraps the CCB prompt with the same proof guardrails, then converts the CCB
 reply, streamed agent text, and provider tool events into the same assessment
 model used by the built-in round-robin runner. A completed CCB job therefore

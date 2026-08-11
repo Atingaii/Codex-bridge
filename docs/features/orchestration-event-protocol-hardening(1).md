@@ -621,7 +621,7 @@ Implemented:
   `TurnStartData.PromptText`, severity events, and internal Bridge notes from
   public shares.
 - `bridge.long_command_observer` config was added under `internal/config/`.
-  Claude stream-input notes include the `[Codex Bridge observer note]`
+  Claude stream-input notes include the `[ProofBridge observer note]`
   sentinel and are mirrored as Bridge-note events; Codex commands without a
   stdin side-channel emit visible Bridge-note rows.
 - Claude `Read` tool starts are emitted immediately with

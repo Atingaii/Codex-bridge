@@ -4,6 +4,8 @@
 
 - Manage remembered Codex and Claude Code presets from Hub using a name, model,
   base URL, and API key.
+- Edit saved presets without exposing their encrypted API keys to the browser;
+  a blank key keeps the saved credential and a newly entered key replaces it.
 - Test from the target Bridge, normalize common `/v1` and terminal endpoint
   suffixes, and return a selectable model list when available.
 - Apply native configuration or restore official-login-compatible defaults
@@ -36,9 +38,17 @@ atomically renamed. Codex updates its model/provider section and native
 managed model and connection environment fields. Official reset removes only
 those managed fields. Active processes are left alone.
 
+Preset updates are ownership-scoped by user, agent, and preset ID. The Hub can
+reuse the existing Bridge-encrypted secret for connection testing and saving,
+but never serializes that secret to the browser. Editing does not implicitly
+apply a preset. Changing an active preset's URL, model, or credential clears its
+active marker until the user applies it again; renaming alone preserves it.
+
 ## Exit Gates
 
 - [x] Hub never receives plaintext API keys.
+- [x] Saved presets can be edited while a blank API Key retains the encrypted
+  credential without returning it to the browser.
 - [x] URL normalization and model discovery are covered by tests.
 - [x] Apply/reset preserves unrelated TOML/JSON configuration.
 - [x] Legacy Bridges retain existing chat and orchestration behavior.

@@ -108,6 +108,7 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("GET /api/agents/{agentID}/cli-config/presets", s.withAuth(s.handleListCLIConfigPresets))
 	mux.HandleFunc("POST /api/agents/{agentID}/cli-config/test", s.withAuth(s.handleTestCLIConfig))
 	mux.HandleFunc("POST /api/agents/{agentID}/cli-config/presets", s.withAuth(s.handleCreateCLIConfigPreset))
+	mux.HandleFunc("PUT /api/agents/{agentID}/cli-config/presets/{presetID}", s.withAuth(s.handleUpdateCLIConfigPreset))
 	mux.HandleFunc("POST /api/agents/{agentID}/cli-config/presets/{presetID}/apply", s.withAuth(s.handleApplyCLIConfigPreset))
 	mux.HandleFunc("DELETE /api/agents/{agentID}/cli-config/presets/{presetID}", s.withAuth(s.handleDeleteCLIConfigPreset))
 	mux.HandleFunc("POST /api/agents/{agentID}/cli-config/official-reset", s.withAuth(s.handleResetCLIConfig))
@@ -708,7 +709,7 @@ cleanup() {
   rm -f "$TMP"
 }
 trap cleanup EXIT HUP INT TERM
-echo "Downloading Codex Bridge..."
+echo "Downloading ProofBridge..."
 if command -v curl >/dev/null 2>&1; then
   curl_http1=""
   if curl --http1.1 --version >/dev/null 2>&1; then
@@ -803,22 +804,22 @@ if command -v systemctl >/dev/null 2>&1 && [ -d "$SYSTEMD_DIR" ]; then
         systemd_units="$systemd_units $unit"
         ;;
       *)
-        echo "Skipping unrecognized Codex Bridge unit: $unit" >&2
+        echo "Skipping unrecognized ProofBridge unit: $unit" >&2
         ;;
     esac
   done
 fi
 if [ -n "$systemd_units" ]; then
-  echo "Refreshing existing Codex Bridge services..."
+  echo "Refreshing existing ProofBridge services..."
   if run_systemctl --user daemon-reload; then
     for unit in $systemd_units; do
       echo "Restarting $unit..."
       if ! run_systemctl --user restart "$unit"; then
-        echo "Codex Bridge was updated, but $unit could not be restarted." >&2
+        echo "ProofBridge was updated, but $unit could not be restarted." >&2
       fi
     done
   else
-    echo "Codex Bridge was updated, but the user systemd manager is unavailable; linked services were not restarted." >&2
+    echo "ProofBridge was updated, but the user systemd manager is unavailable; linked services were not restarted." >&2
   fi
 fi
 
@@ -854,12 +855,12 @@ if [ -d "$SERVICES_DIR" ]; then
     hash=${pid_path##*/}
     hash=${hash%%.pid}
     if [ "${#hash}" -ne 12 ]; then
-      echo "Skipping unrecognized Codex Bridge PID file: $pid_path" >&2
+      echo "Skipping unrecognized ProofBridge PID file: $pid_path" >&2
       continue
     fi
     case "$hash" in
       *[!0-9a-f]*|'')
-        echo "Skipping unrecognized Codex Bridge PID file: $pid_path" >&2
+        echo "Skipping unrecognized ProofBridge PID file: $pid_path" >&2
         continue
         ;;
     esac
@@ -871,7 +872,7 @@ if [ -d "$SERVICES_DIR" ]; then
     pid=$(sed -n '1p' "$pid_path" 2>/dev/null || true)
     case "$pid" in
       *[!0-9]*|'')
-        echo "Skipping invalid Codex Bridge PID file: $pid_path" >&2
+        echo "Skipping invalid ProofBridge PID file: $pid_path" >&2
         continue
         ;;
     esac
@@ -880,7 +881,7 @@ if [ -d "$SERVICES_DIR" ]; then
       case "$exe" in
         "$BIN"|"$BIN (deleted)") ;;
         *)
-          echo "Skipping PID $pid because it is not the managed Codex Bridge binary." >&2
+          echo "Skipping PID $pid because it is not the managed ProofBridge binary." >&2
           continue
           ;;
       esac

@@ -777,6 +777,20 @@ func TestCLIConfigPresetCRUDIsScopedAndSecretIsNotSerialized(t *testing.T) {
 	if err != nil || !loaded.Active {
 		t.Fatalf("active preset = %#v, err=%v", loaded, err)
 	}
+	loaded.Name = "renamed"
+	loaded.Model = "model-b"
+	loaded.Secret = protocol.EncryptedSecret{EphemeralPublicKey: "pub-2", Salt: "salt-2", IV: "iv-2", Ciphertext: "cipher-2"}
+	updated, err := st.UpdateCLIConfigPreset(ctx, loaded, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "renamed" || updated.Model != "model-b" || updated.Active || updated.Secret.Ciphertext != "cipher-2" || updated.CreatedAt != preset.CreatedAt || updated.UpdatedAt < preset.UpdatedAt {
+		t.Fatalf("unexpected updated preset: %#v", updated)
+	}
+	loaded.UserID = "user-b"
+	if _, err := st.UpdateCLIConfigPreset(ctx, loaded, false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-user preset update error = %v", err)
+	}
 	if err := st.ClearActiveCLIConfigPreset(ctx, user.ID, agent.ID, "codex"); err != nil {
 		t.Fatal(err)
 	}

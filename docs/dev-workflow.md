@@ -3,9 +3,12 @@
 ## Requirements
 
 - Go 1.22+
-- Node.js 20+ only when rebuilding the frontend or Android wrapper
-- Android SDK + JDK 21 only when building APKs
+- Node.js 20+ only when rebuilding the frontend
 - Codex CLI on the private Bridge machine when `bridge.runner=codex`
+
+The Android wrapper is archived. Android SDK/JDK setup and APK builds are not
+part of development or release verification unless Android maintenance is
+explicitly reactivated.
 
 ## Environment Variables
 

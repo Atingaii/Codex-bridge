@@ -14,7 +14,7 @@ func TestStaticUIContracts(t *testing.T) {
 	index := string(indexBytes)
 
 	requiredIndex := []string{
-		"Codex Bridge",
+		"ProofBridge",
 		`<div id="root"></div>`,
 		`/app-recovery.js`,
 		`type="module"`,

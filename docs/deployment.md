@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Codex Bridge is a single Go binary with two modes:
+ProofBridge is a single Go binary with two modes:
 
 - **Hub** — the public server. Serves HTTPS/WSS (behind a reverse proxy),
   embeds the web UI, and stores history in SQLite.
@@ -30,8 +30,8 @@ build-all`); otherwise the embedded assets are stale.
 ## Option A — From source (development / single host)
 
 ```bash
-git clone https://github.com/Atingaii/Codex-bridge.git
-cd Codex-bridge
+git clone https://github.com/Atingaii/ProofBridge.git
+cd ProofBridge
 
 # 1. Config
 cp configs/dev.yaml.example configs/dev.yaml

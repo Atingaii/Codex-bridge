@@ -1095,7 +1095,7 @@ func longCommandObserverMessage(command string, after time.Duration) string {
 	if command == "" {
 		command = "the current long-running command"
 	}
-	return fmt.Sprintf("[Codex Bridge observer note] The command `%s` has been running for about %s. This note was injected by Bridge, not by the user. Do not discard current work and do not restart the command. Check whether it has already produced enough evidence; if it is still running too long, report the latest output/log and continue with available information.", command, after.Round(time.Second))
+	return fmt.Sprintf("[ProofBridge observer note] The command `%s` has been running for about %s. This note was injected by Bridge, not by the user. Do not discard current work and do not restart the command. Check whether it has already produced enough evidence; if it is still running too long, report the latest output/log and continue with available information.", command, after.Round(time.Second))
 }
 
 func (m *OrchestrationManager) longCommandObserverConfig() longCommandObserverConfig {

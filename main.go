@@ -323,7 +323,7 @@ func runEnroll(cfg *config.Config, args []string) error {
 }
 
 func printUsage() {
-	fmt.Println(`codex-bridge
+	fmt.Println(`ProofBridge
 Remote browser chat + multi-CLI orchestration for Codex/Claude CLIs on a private machine.
 
 Hub (public server):

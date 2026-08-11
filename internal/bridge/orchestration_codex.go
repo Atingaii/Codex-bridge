@@ -170,7 +170,7 @@ func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.C
 		return nil, err
 	}
 	if _, err := client.request(ctx, "initialize", map[string]any{
-		"clientInfo": map[string]string{"name": "codex-bridge", "title": "Codex Bridge", "version": "dev"},
+		"clientInfo": map[string]string{"name": "codex-bridge", "title": "ProofBridge", "version": "dev"},
 		"capabilities": map[string]any{
 			"experimentalApi":    true,
 			"requestAttestation": false,

@@ -26,7 +26,7 @@ function renderFallback(reason) {
   if (!root || rootHasContent()) return;
   var message = document.createElement("div");
   message.style.cssText = "box-sizing:border-box;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#111827;background:#f9fafb;";
-  message.innerHTML = "<div style=\"max-width:520px\"><h1 style=\"margin:0 0 8px;font-size:18px\">Codex Bridge UI needs a refresh</h1><p style=\"margin:0;color:#4b5563\">The browser is still loading an old application bundle. Hard refresh this page or open it with a cache-busting query parameter. Reason: " + escapeHTML(reason || "legacy bundle") + ".</p></div>";
+  message.innerHTML = "<div style=\"max-width:520px\"><h1 style=\"margin:0 0 8px;font-size:18px\">ProofBridge UI needs a refresh</h1><p style=\"margin:0;color:#4b5563\">The browser is still loading an old application bundle. Hard refresh this page or open it with a cache-busting query parameter. Reason: " + escapeHTML(reason || "legacy bundle") + ".</p></div>";
   root.appendChild(message);
 }
 

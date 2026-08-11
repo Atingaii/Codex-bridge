@@ -2025,7 +2025,7 @@ func TestLongCommandObserverWritesToSameClaudeStreamAndEmitsBridgeNote(t *testin
 
 	fmt.Fprintln(stdoutWriter, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_build","name":"Bash","input":{"command":"python -m slow_build --workspace demo"}}]}}`)
 	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && !strings.Contains(stdin.String(), "Codex Bridge observer note") {
+	for time.Now().Before(deadline) && !strings.Contains(stdin.String(), "ProofBridge observer note") {
 		time.Sleep(10 * time.Millisecond)
 	}
 	fmt.Fprintln(stdoutWriter, `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_build","content":"Finished\n"}]}}`)
@@ -2043,7 +2043,7 @@ func TestLongCommandObserverWritesToSameClaudeStreamAndEmitsBridgeNote(t *testin
 	if len(tools) != 2 {
 		t.Fatalf("tools = %#v", tools)
 	}
-	if got := stdin.String(); !strings.Contains(got, "Codex Bridge observer note") || !strings.Contains(got, "python -m slow_build --workspace demo") {
+	if got := stdin.String(); !strings.Contains(got, "ProofBridge observer note") || !strings.Contains(got, "python -m slow_build --workspace demo") {
 		t.Fatalf("nudge was not written to Claude stream: %s", got)
 	}
 	event, ok := waitForOrchestrationEventPayload(t, out, "turn.delta", "claude", "Bridge sent a long-command observer note")
@@ -2136,7 +2136,7 @@ func TestLongCommandObserverEmitsCodexBridgeNoteWithoutSideChannel(t *testing.T)
 		events = append(events, drainOrchestrationEvents(t, out)...)
 		for _, event := range events {
 			if event.Kind == "turn.delta" && event.Source == "bridge" && event.BridgeNoteData != nil && event.BridgeNoteData.Category == "long-command-observer-visible-note" {
-				if !strings.Contains(event.BridgeNoteData.InjectedText, "Codex Bridge observer note") {
+				if !strings.Contains(event.BridgeNoteData.InjectedText, "ProofBridge observer note") {
 					t.Fatalf("observer note missing sentinel: %#v", event)
 				}
 				if !strings.Contains(event.BridgeNoteData.Command, "python -m slow_build --workspace demo") {

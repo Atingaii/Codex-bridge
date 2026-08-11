@@ -357,6 +357,24 @@ func (s *Store) CreateCLIConfigPreset(ctx context.Context, preset CLIConfigPrese
 	return preset, err
 }
 
+func (s *Store) UpdateCLIConfigPreset(ctx context.Context, preset CLIConfigPreset, active bool) (CLIConfigPreset, error) {
+	raw, err := json.Marshal(preset.Secret)
+	if err != nil {
+		return CLIConfigPreset{}, err
+	}
+	now := time.Now().Unix()
+	res, err := s.db.ExecContext(ctx, `UPDATE cli_config_presets SET name=?,base_url=?,model=?,secret_json=?,key_hint=?,active=?,updated_at=?
+		WHERE id=? AND user_id=? AND agent_id=? AND cli=?`, preset.Name, preset.BaseURL, preset.Model, string(raw), preset.KeyHint,
+		boolInt(active), now, preset.ID, preset.UserID, preset.AgentID, preset.CLI)
+	if err != nil {
+		return CLIConfigPreset{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return CLIConfigPreset{}, ErrNotFound
+	}
+	return s.CLIConfigPresetByID(ctx, preset.ID, preset.UserID, preset.AgentID)
+}
+
 func (s *Store) ListCLIConfigPresets(ctx context.Context, userID, agentID string) ([]CLIConfigPreset, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,user_id,agent_id,cli,name,base_url,model,secret_json,COALESCE(key_hint,''),active,created_at,updated_at
 		FROM cli_config_presets WHERE user_id=? AND agent_id=? ORDER BY cli,name,updated_at DESC`, userID, agentID)

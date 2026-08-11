@@ -59,5 +59,5 @@ keeps historical records intact while removing the endpoint from active UI.
 If the endpoint is online and was started by the generated connect command, the
 Bridge receives `agent_shutdown`, disables its matching `systemd --user`
 service, and exits. If the endpoint was started by the `nohup` fallback, the
-Bridge exits and is not restarted by Codex Bridge. If the endpoint is offline,
+Bridge exits and is not restarted by ProofBridge. If the endpoint is offline,
 Hub still soft-deletes it and revokes consumed enroll tokens.

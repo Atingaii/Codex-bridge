@@ -79,7 +79,7 @@ func handleClaudeApprovalMCPRequest(socketPath string, req mcpRequest) (any, err
 		return map[string]any{
 			"tools": []map[string]any{{
 				"name":        "browser_approval",
-				"description": "Ask the Codex Bridge browser to approve or deny a Claude Code permission prompt.",
+				"description": "Ask the ProofBridge browser to approve or deny a Claude Code permission prompt.",
 				"inputSchema": map[string]any{
 					"type":                 "object",
 					"additionalProperties": true,

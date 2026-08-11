@@ -636,7 +636,7 @@ func writeCodexModelCatalog(path, selected string, discovered []string) error {
 	for priority, model := range models {
 		entries = append(entries, codexModelCatalogEntry{
 			Slug: model, DisplayName: model,
-			Description:                "Custom provider model managed by Codex Bridge Hub.",
+			Description:                "Custom provider model managed by ProofBridge Hub.",
 			DefaultReasoningLevel:      "medium",
 			SupportedReasoningLevels:   []codexReasoningLevel{{Effort: "low", Description: "Faster response"}, {Effort: "medium", Description: "Balanced reasoning"}, {Effort: "high", Description: "Deeper reasoning"}},
 			ShellType:                  "shell_command",

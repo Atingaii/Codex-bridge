@@ -29,12 +29,13 @@ type cliConfigPendingRequest struct {
 }
 
 type cliConfigInput struct {
-	CLI     string                   `json:"cli"`
-	Name    string                   `json:"name,omitempty"`
-	BaseURL string                   `json:"baseUrl"`
-	Model   string                   `json:"model,omitempty"`
-	Secret  protocol.EncryptedSecret `json:"secret"`
-	KeyID   string                   `json:"keyId"`
+	CLI      string                   `json:"cli"`
+	PresetID string                   `json:"presetId,omitempty"`
+	Name     string                   `json:"name,omitempty"`
+	BaseURL  string                   `json:"baseUrl"`
+	Model    string                   `json:"model,omitempty"`
+	Secret   protocol.EncryptedSecret `json:"secret"`
+	KeyID    string                   `json:"keyId"`
 }
 
 type cliConfigResetInput struct {
@@ -66,11 +67,34 @@ func (s *Server) handleTestCLIConfig(w http.ResponseWriter, r *http.Request, uid
 		return
 	}
 	capability, ok := s.requireCLIConfigAgent(w, r, uid, agentID, input.CLI)
-	if !ok || !s.validateCLIConfigInput(w, input, capability, false) {
+	if !ok || !s.validateCLIConfigInput(w, input, capability, false, input.PresetID == "") {
 		return
 	}
+	secret := input.Secret
+	if input.PresetID != "" {
+		preset, err := s.store.CLIConfigPresetByID(r.Context(), input.PresetID, uid, agentID)
+		if errors.Is(err, store.ErrNotFound) {
+			serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "model preset not found")
+			return
+		}
+		if err != nil {
+			serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load model preset")
+			return
+		}
+		if preset.CLI != input.CLI {
+			serverutil.WriteError(w, http.StatusBadRequest, "BAD_CLI", "preset does not belong to the selected CLI")
+			return
+		}
+		if !encryptedSecretPresent(secret) {
+			if preset.KeyHint == "" || preset.KeyHint != capability.KeyID {
+				serverutil.WriteError(w, http.StatusConflict, "KEY_CHANGED", "Bridge encryption key changed; enter the API Key again")
+				return
+			}
+			secret = preset.Secret
+		}
+	}
 	result, err := s.sendCLIConfigRequest(r.Context(), agentID, protocol.TypeCLIConfigTest, protocol.CLIConfigRequest{
-		CLI: input.CLI, BaseURL: strings.TrimSpace(input.BaseURL), Model: strings.TrimSpace(input.Model), Secret: input.Secret,
+		CLI: input.CLI, BaseURL: strings.TrimSpace(input.BaseURL), Model: strings.TrimSpace(input.Model), Secret: secret,
 	})
 	if err != nil {
 		s.writeCLIConfigRelayError(w, err)
@@ -91,7 +115,7 @@ func (s *Server) handleCreateCLIConfigPreset(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	capability, ok := s.requireCLIConfigAgent(w, r, uid, agentID, input.CLI)
-	if !ok || !s.validateCLIConfigInput(w, input, capability, true) {
+	if !ok || !s.validateCLIConfigInput(w, input, capability, true, true) {
 		return
 	}
 	preset, err := s.store.CreateCLIConfigPreset(r.Context(), store.CLIConfigPreset{
@@ -104,6 +128,59 @@ func (s *Server) handleCreateCLIConfigPreset(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	serverutil.WriteJSON(w, http.StatusCreated, map[string]any{"preset": preset})
+}
+
+func (s *Server) handleUpdateCLIConfigPreset(w http.ResponseWriter, r *http.Request, uid string) {
+	agentID := r.PathValue("agentID")
+	var input cliConfigInput
+	if err := serverutil.DecodeJSON(r, &input, 32<<10); err != nil {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid model preset")
+		return
+	}
+	capability, ok := s.requireCLIConfigAgent(w, r, uid, agentID, input.CLI)
+	if !ok || !s.validateCLIConfigInput(w, input, capability, true, false) {
+		return
+	}
+	existing, err := s.store.CLIConfigPresetByID(r.Context(), r.PathValue("presetID"), uid, agentID)
+	if errors.Is(err, store.ErrNotFound) {
+		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "model preset not found")
+		return
+	}
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load model preset")
+		return
+	}
+	if existing.CLI != input.CLI {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_CLI", "preset CLI cannot be changed")
+		return
+	}
+	secret, keyHint := existing.Secret, existing.KeyHint
+	credentialChanged := encryptedSecretPresent(input.Secret)
+	if credentialChanged {
+		if !validEncryptedSecret(w, input.Secret) {
+			return
+		}
+		secret, keyHint = input.Secret, input.KeyID
+	} else if keyHint == "" || keyHint != capability.KeyID {
+		serverutil.WriteError(w, http.StatusConflict, "KEY_CHANGED", "Bridge encryption key changed; enter the API Key again")
+		return
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(input.BaseURL), "/")
+	model := strings.TrimSpace(input.Model)
+	preset, err := s.store.UpdateCLIConfigPreset(r.Context(), store.CLIConfigPreset{
+		ID: existing.ID, UserID: uid, AgentID: agentID, CLI: input.CLI,
+		Name: strings.TrimSpace(input.Name), BaseURL: baseURL, Model: model,
+		Secret: secret, KeyHint: keyHint,
+	}, existing.Active && existing.BaseURL == baseURL && existing.Model == model && !credentialChanged)
+	if errors.Is(err, store.ErrNotFound) {
+		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "model preset not found")
+		return
+	}
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to update model preset")
+		return
+	}
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"preset": preset})
 }
 
 func (s *Server) handleApplyCLIConfigPreset(w http.ResponseWriter, r *http.Request, uid string) {
@@ -217,7 +294,7 @@ func (s *Server) requireCLIConfigAgent(w http.ResponseWriter, r *http.Request, u
 	return switcher, true
 }
 
-func (s *Server) validateCLIConfigInput(w http.ResponseWriter, input cliConfigInput, capability *protocol.CLIConfigSwitcherCapability, requireName bool) bool {
+func (s *Server) validateCLIConfigInput(w http.ResponseWriter, input cliConfigInput, capability *protocol.CLIConfigSwitcherCapability, requireName, requireSecret bool) bool {
 	name := strings.TrimSpace(input.Name)
 	model := strings.TrimSpace(input.Model)
 	baseURL := strings.TrimSpace(input.BaseURL)
@@ -242,7 +319,18 @@ func (s *Server) validateCLIConfigInput(w http.ResponseWriter, input cliConfigIn
 		serverutil.WriteError(w, http.StatusConflict, "KEY_CHANGED", "Bridge encryption key changed; encrypt the API Key again")
 		return false
 	}
-	fields := []string{input.Secret.EphemeralPublicKey, input.Secret.Salt, input.Secret.IV, input.Secret.Ciphertext}
+	if requireSecret || encryptedSecretPresent(input.Secret) {
+		return validEncryptedSecret(w, input.Secret)
+	}
+	return true
+}
+
+func encryptedSecretPresent(secret protocol.EncryptedSecret) bool {
+	return secret.EphemeralPublicKey != "" || secret.Salt != "" || secret.IV != "" || secret.Ciphertext != ""
+}
+
+func validEncryptedSecret(w http.ResponseWriter, secret protocol.EncryptedSecret) bool {
+	fields := []string{secret.EphemeralPublicKey, secret.Salt, secret.IV, secret.Ciphertext}
 	for _, field := range fields {
 		if field == "" || len(field) > maxEncryptedFieldBytes {
 			serverutil.WriteError(w, http.StatusBadRequest, "BAD_SECRET", "encrypted API Key payload is invalid")

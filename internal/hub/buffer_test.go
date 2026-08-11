@@ -84,7 +84,7 @@ func TestStaticHandlerSPAFallbackRoutes(t *testing.T) {
 			t.Fatalf("%s route status = %d", path, rr.Code)
 		}
 		body := rr.Body.String()
-		for _, needle := range []string{"Codex Bridge", `<div id="root"></div>`, `type="module"`} {
+		for _, needle := range []string{"ProofBridge", `<div id="root"></div>`, `type="module"`} {
 			if !strings.Contains(body, needle) {
 				t.Fatalf("%s route did not return SPA index, missing %q", path, needle)
 			}

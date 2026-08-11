@@ -97,7 +97,7 @@
     }
     var message = document.createElement("div");
     message.style.cssText = "box-sizing:border-box;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#111827;background:#f9fafb;";
-    message.innerHTML = "<div style=\"max-width:520px\"><h1 style=\"margin:0 0 8px;font-size:18px\">Codex Bridge UI needs a refresh</h1><p style=\"margin:0;color:#4b5563\">The browser still has an old application bundle cached. Reload this page once more after the Bridge service has been updated. Reason: " + escapeHTML(reason || "startup") + ".</p></div>";
+    message.innerHTML = "<div style=\"max-width:520px\"><h1 style=\"margin:0 0 8px;font-size:18px\">ProofBridge UI needs a refresh</h1><p style=\"margin:0;color:#4b5563\">The browser still has an old application bundle cached. Reload this page once more after the Bridge service has been updated. Reason: " + escapeHTML(reason || "startup") + ".</p></div>";
     root.appendChild(message);
   }
 

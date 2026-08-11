@@ -17,6 +17,7 @@ import {
   Menu,
   MessageSquare,
   Moon,
+  History,
   Network,
   Scale,
   Settings,
@@ -126,6 +127,7 @@ export function HelpPage({ language, setLanguage, isDarkMode, setIsDarkMode }: H
           <span className="hidden h-4 w-px bg-border sm:block" />
           <span className="hidden text-sm text-muted-foreground sm:block">使用帮助</span>
           <div className="ml-auto flex items-center gap-1">
+            <a href="/updates" className="hidden h-8 items-center gap-1.5 rounded-md px-2.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground sm:inline-flex"><History className="h-3.5 w-3.5" />更新记录</a>
             <button type="button" className="inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => setLanguage(language === 'zh' ? 'en' : 'zh')} aria-label="切换语言">
               <Globe className="h-3.5 w-3.5" />{language === 'zh' ? '中文' : 'EN'}
             </button>
@@ -154,7 +156,8 @@ export function HelpPage({ language, setLanguage, isDarkMode, setIsDarkMode }: H
           <p className="mb-3 px-2 text-[11px] font-semibold uppercase text-muted-foreground">使用目录</p>
           <HelpNav activeSection={activeSection} />
           <div className="mt-6 border-t border-border px-2 pt-5 text-xs leading-relaxed text-muted-foreground">
-            <p>当前文档适用于 v0.2.2。</p>
+            <p>当前文档适用于 v0.3.27。</p>
+            <a className="mt-2 inline-flex items-center gap-1 hover:text-foreground" href="/updates">更新记录 <History className="h-3 w-3" /></a>
             <a className="mt-2 inline-flex items-center gap-1 hover:text-foreground" href="https://github.com/Atingaii/Codex-bridge" target="_blank" rel="noreferrer">GitHub <ExternalLink className="h-3 w-3" /></a>
           </div>
         </aside>

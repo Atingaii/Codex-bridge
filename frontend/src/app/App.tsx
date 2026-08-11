@@ -9,6 +9,7 @@ import { LoginScreen } from './pages/LoginScreen';
 import { OrchestrationWorkspace } from './pages/OrchestrationWorkspace';
 import { OrchestrationStatsPage } from './pages/OrchestrationStatsPage';
 import { PublicSharePage } from './pages/PublicSharePage';
+import { UpdatesPage } from './pages/UpdatesPage';
 import { Workspace } from './pages/Workspace';
 import { AdminUsagePage } from './pages/AdminUsagePage';
 import { AdminUserUsagePage } from './pages/AdminUserUsagePage';
@@ -23,6 +24,7 @@ export default function App() {
   const isSnapshotRoute = path.startsWith('/conversation-snapshot');
   const isShareRoute = path.startsWith('/share/');
   const isHelpRoute = path === '/help' || path === '/help/' || path === '/hlep' || path === '/hlep/';
+  const isUpdatesRoute = path === '/updates' || path === '/updates/';
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDarkMode);
@@ -35,7 +37,7 @@ export default function App() {
   }, [language]);
 
   useEffect(() => {
-    if (isShareRoute || isHelpRoute) {
+    if (isShareRoute || isHelpRoute || isUpdatesRoute) {
       setBooting(false);
       return;
     }
@@ -43,7 +45,7 @@ export default function App() {
       .then((data) => setUser(data.user))
       .catch(() => setUser(null))
       .finally(() => setBooting(false));
-  }, [isHelpRoute, isShareRoute]);
+  }, [isHelpRoute, isShareRoute, isUpdatesRoute]);
 
   useEffect(() => {
     const handlePop = () => setPath(window.location.pathname);
@@ -83,6 +85,10 @@ export default function App() {
 
   if (isHelpRoute) {
     return <HelpPage language={language} setLanguage={setLanguage} isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} />;
+  }
+
+  if (isUpdatesRoute) {
+    return <UpdatesPage language={language} setLanguage={setLanguage} isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} />;
   }
 
   if (!user) {

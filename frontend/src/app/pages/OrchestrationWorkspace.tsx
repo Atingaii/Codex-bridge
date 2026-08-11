@@ -10,6 +10,7 @@ import {
   FileUp,
   FolderInput,
   GitBranch,
+  History,
   Plus,
   RefreshCw,
   Send,
@@ -955,6 +956,10 @@ export function OrchestrationWorkspace({
           <a href="/help" className="mb-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground">
             <BookOpen className="h-3.5 w-3.5" />
             <span>{t.help}</span>
+          </a>
+          <a href="/updates" className="mb-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground">
+            <History className="h-3.5 w-3.5" />
+            <span>{t.updates}</span>
           </a>
           <button onClick={() => openSettings()} className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm hover:bg-sidebar-accent transition-colors">
             <Settings className="h-3.5 w-3.5" />

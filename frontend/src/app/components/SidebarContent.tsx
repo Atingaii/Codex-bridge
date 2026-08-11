@@ -1,5 +1,5 @@
 import React from 'react';
-import { BookOpen, Check, Edit2, GitBranch, MessageSquare, Plus, RefreshCw, Search, Settings, Share2, Terminal, Trash2 } from 'lucide-react';
+import { BookOpen, Check, Edit2, GitBranch, History, MessageSquare, Plus, RefreshCw, Search, Settings, Share2, Terminal, Trash2 } from 'lucide-react';
 import type { Session } from '../lib/types';
 import type { UIText } from '../lib/i18n';
 import { Button } from './ui';
@@ -162,6 +162,10 @@ export function SidebarContent({
         <a href="/help" className="mb-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground">
           <BookOpen className="h-3.5 w-3.5" />
           <span>{t.help}</span>
+        </a>
+        <a href="/updates" className="mb-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground">
+          <History className="h-3.5 w-3.5" />
+          <span>{t.updates}</span>
         </a>
         <button
           onClick={openSettings}

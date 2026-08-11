@@ -91,8 +91,6 @@ export function SettingsModal({
   const alternateSetupCommand = tokenInfo ? profileConnectCommand(alternateProfile) || profileCommand(alternateProfile) : '';
   const repairProfileCommand = (info: BridgeTokenResponse | undefined, profileId: PermissionProfileId) =>
     info?.permissionProfiles?.find((profile) => profile.id === profileId)?.setupCommand || '';
-  const repairProfileConnectCommand = (info: BridgeTokenResponse | undefined, profileId: PermissionProfileId) =>
-    info?.permissionProfiles?.find((profile) => profile.id === profileId)?.connectCommand || '';
   const copyCommand = async (value: string, key: string) => {
     await copyText(value);
     setCopiedCommand(key);
@@ -230,13 +228,14 @@ export function SettingsModal({
                 const expanded = expandedAgentId === agent.id;
                 const repairInfo = repairTokens[agent.id];
                 const selectedRepairCommand =
-                  (repairInfo && repairProfileConnectCommand(repairInfo, repairInfo.permissionProfile)) ||
-                  repairInfo?.connectCommand ||
-                  repairInfo?.commands?.[1] ||
                   repairProfileCommand(repairInfo, repairInfo?.permissionProfile || 'review-required') ||
+                  repairInfo?.setupCommand ||
+                  (repairInfo?.installCommand && repairInfo?.connectCommand
+                    ? `${repairInfo.installCommand} && ${repairInfo.connectCommand}`
+                    : '') ||
                   '';
                 const alternateRepairProfile = repairInfo?.permissionProfile === 'auto-execute' ? 'review-required' : 'auto-execute';
-                const alternateRepairCommand = repairInfo ? repairProfileConnectCommand(repairInfo, alternateRepairProfile) || repairProfileCommand(repairInfo, alternateRepairProfile) : '';
+                const alternateRepairCommand = repairInfo ? repairProfileCommand(repairInfo, alternateRepairProfile) : '';
                 return (
                   <div
                     key={agent.id}

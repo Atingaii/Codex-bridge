@@ -56,6 +56,30 @@ func TestOrchestrationClaudeStreamInputArgsKeepSessionAndOmitPromptArg(t *testin
 	}
 }
 
+func TestOrchestrationClaudeArgsUseManagedModelOverrideSlot(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.ClaudeModel = "deepseek-v4-flash"
+	manager := NewOrchestrationManager(&cfg)
+
+	manualArgs := manager.claudeArgsWithStreamInput(protocol.OrchestrationStartPayload{}, "", false)
+	assertArgPair(t, manualArgs, "--model", "deepseek-v4-flash")
+
+	setClaudeBridgeLaunchModel(&cfg, claudeModelSlot)
+	t.Cleanup(func() { clearClaudeBridgeLaunchModel(&cfg) })
+	for name, args := range map[string][]string{
+		"print":  manager.claudeArgsWithSession(protocol.OrchestrationStartPayload{}, "task", "", false),
+		"stream": manager.claudeArgsWithStreamInput(protocol.OrchestrationStartPayload{}, "", false),
+	} {
+		assertArgPair(t, args, "--model", claudeModelSlot)
+		if containsArg(args, "deepseek-v4-flash") {
+			t.Fatalf("%s Claude args bypassed the managed model override: %#v", name, args)
+		}
+	}
+	if got := claudeBridgeModel(&cfg); got != "deepseek-v4-flash" {
+		t.Fatalf("usage model = %q, want provider model", got)
+	}
+}
+
 func TestOrchestrationClaudeAutoExecuteUsesBypassPermissions(t *testing.T) {
 	cfg := config.Default()
 	cfg.Bridge.Sandbox = "danger-full-access"

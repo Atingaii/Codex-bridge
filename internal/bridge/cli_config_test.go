@@ -137,6 +137,17 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	if claudeOverrides[claudeModelSlot] != "claude-model" || claudeOverrides["claude-opus-4-6"] != "keep-opus" {
 		t.Fatalf("unexpected Claude model overrides: %#v", claudeOverrides)
 	}
+	if got := claudeBridgeLaunchModel(cfg); got != claudeModelSlot {
+		t.Fatalf("Claude launch model = %q, want managed slot %q", got, claudeModelSlot)
+	}
+	restartedCfg := &config.Config{}
+	restarted, err := newCLIConfigManager(restartedCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.state.ClaudeModel != "claude-model" || claudeBridgeLaunchModel(restartedCfg) != claudeModelSlot {
+		t.Fatalf("restarted Bridge lost Claude model mapping state: %#v", restarted.state)
+	}
 	if err := m.reset("codex"); err != nil {
 		t.Fatal(err)
 	}
@@ -164,6 +175,17 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	claudeOverrides, _ = claude["modelOverrides"].(map[string]any)
 	if claudeOverrides[claudeModelSlot] != "keep-sonnet" || claudeOverrides["claude-opus-4-6"] != "keep-opus" {
 		t.Fatalf("Claude model overrides were not restored: %#v", claudeOverrides)
+	}
+	if got := claudeBridgeLaunchModel(cfg); got != "" {
+		t.Fatalf("Claude launch model after reset = %q, want empty", got)
+	}
+	restartedCfg = &config.Config{}
+	restarted, err = newCLIConfigManager(restartedCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := claudeBridgeLaunchModel(restartedCfg); got != "" {
+		t.Fatalf("restarted Bridge launch model after reset = %q, want empty", got)
 	}
 }
 

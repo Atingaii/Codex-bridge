@@ -29,7 +29,10 @@ This retains native model metadata and avoids unknown-model warnings without
 remapping every Opus, Sonnet, Haiku, or reasoning alias. Applying a preset also
 removes stale Bridge-era environment alias overrides so `/model` does not
 present every built-in choice as the same custom model. Bridge remembers and
-restores any pre-existing value for its managed override slot.
+restores any pre-existing value for its managed override slot. Bridge-launched
+Claude processes receive the recognized slot through `--model`; usage events
+still retain the actual provider model ID. A manually configured
+`bridge.claude_model` remains a direct CLI model argument for compatibility.
 
 Official reset only removes Bridge-managed custom-provider fields. It neither
 starts nor impersonates an official authorization flow.

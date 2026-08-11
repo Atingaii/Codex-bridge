@@ -149,6 +149,7 @@ export function OrchestrationWorkspace({
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const activeRunIdRef = useRef('');
+  const activeRunAgentIdRef = useRef('');
   const selectedAgentIdRef = useRef(selectedAgentId);
   const stickToBottomRef = useRef(true);
   const timelineOrderRef = useRef(0);
@@ -159,6 +160,8 @@ export function OrchestrationWorkspace({
   const collapsedTimelineRunIdRef = useRef('');
   const refreshOrchestrationInFlightRef = useRef<Promise<void> | null>(null);
   const olderEventsLoadInFlightRef = useRef(false);
+  const pendingLiveEventsRef = useRef<OrchestrationEvent[]>([]);
+  const liveEventFrameRef = useRef<number | null>(null);
   const eventMaxSeqByRunRef = useRef<Record<string, number>>({});
   const eventMinSeqByRunRef = useRef<Record<string, number>>({});
   const orchestrationBootedRef = useRef(false);
@@ -172,7 +175,7 @@ export function OrchestrationWorkspace({
     if (!selectedAgent?.id) return [];
     return runs.filter((run) => run.agentId === selectedAgent.id);
   }, [runs, selectedAgent?.id]);
-  const activeRun = runs.find((run) => run.id === activeRunId && (!selectedAgent?.id || run.agentId === selectedAgent.id)) || null;
+  const activeRun = runs.find((run) => run.id === activeRunId) || null;
   const activeRunFiles = useMemo(() => {
     return activeRun ? mergeOrchestrationFiles(activeRun.files, orchestrationRunFilesFromEvents(events, activeRun.id)) : [];
   }, [activeRun, events]);
@@ -199,7 +202,9 @@ export function OrchestrationWorkspace({
     setAgents(nextAgents);
     setAgentsLoaded(true);
     setSelectedAgentId((current) => {
-      const next = preferredAgentID(nextAgents, current);
+      const next = activeRunIdRef.current && activeRunAgentIdRef.current === current
+        ? current
+        : preferredAgentID(nextAgents, current);
       selectedAgentIdRef.current = next;
       if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
       else localStorage.removeItem('codexBridge.selectedAgentId');
@@ -214,7 +219,9 @@ export function OrchestrationWorkspace({
     setAgents(nextAgents);
     setAgentsLoaded(true);
     setSelectedAgentId((current) => {
-      const next = preferredAgentID(nextAgents, current);
+      const next = activeRunIdRef.current && activeRunAgentIdRef.current === current
+        ? current
+        : preferredAgentID(nextAgents, current);
       selectedAgentIdRef.current = next;
       if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
       else localStorage.removeItem('codexBridge.selectedAgentId');
@@ -230,7 +237,7 @@ export function OrchestrationWorkspace({
     const incoming = Array.isArray(data.runs) ? data.runs.filter(isOrchestrationRun) : [];
     setRuns((current) => {
       if (!agentId) return incoming;
-      return mergeOrchestrationRunsPreservingOtherAgents(current, incoming, agentId);
+      return mergeOrchestrationRunsPreservingOtherAgents(current, incoming, agentId, activeRunIdRef.current);
     });
     return incoming;
   }, []);
@@ -310,12 +317,7 @@ export function OrchestrationWorkspace({
   const scrollTimelineToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
     const container = scrollRef.current;
     if (!container) return;
-    const target = endRef.current;
-    if (target) {
-      target.scrollIntoView({ block: 'end', behavior });
-    } else {
-      container.scrollTo({ top: container.scrollHeight, behavior });
-    }
+    container.scrollTo({ top: container.scrollHeight, behavior });
     stickToBottomRef.current = true;
     setShowScrollBottom(false);
   }, []);
@@ -356,6 +358,7 @@ export function OrchestrationWorkspace({
       if (activeRun?.agentId) forgetActiveOrchestrationRunForAgent(activeRun.agentId, activeRun.id);
     }
     activeRunIdRef.current = '';
+    activeRunAgentIdRef.current = '';
     setActiveRunId('');
     localStorage.removeItem(activeOrchestrationRunStorageKey);
     setEvents([]);
@@ -374,15 +377,19 @@ export function OrchestrationWorkspace({
     if (typeof nextEvent.seq === 'number' && Number.isFinite(nextEvent.seq)) {
       eventMaxSeqByRunRef.current[nextEvent.runId] = Math.max(eventMaxSeqByRunRef.current[nextEvent.runId] || 0, nextEvent.seq);
     }
-    setEvents((current) => {
-      if (activeRunIdRef.current !== nextEvent.runId) return current;
-      return mergeOrchestrationEvents(current, [nextEvent]);
-    });
-    setRuns((current) => {
-      if (!current.some((run) => run.id === nextEvent.runId)) return current;
-      return current
-        .map((run) => run.id === nextEvent.runId ? applyOrchestrationEventToRun(run, nextEvent) : run)
-        .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+    pendingLiveEventsRef.current.push(nextEvent);
+    if (liveEventFrameRef.current !== null) return;
+    liveEventFrameRef.current = window.requestAnimationFrame(() => {
+      liveEventFrameRef.current = null;
+      const pending = pendingLiveEventsRef.current.splice(0);
+      if (!pending.length) return;
+      setEvents((current) => mergeOrchestrationEvents(
+        current,
+        pending.filter((item) => item.runId === activeRunIdRef.current),
+      ));
+      setRuns((current) => pending
+        .reduce((nextRuns, item) => nextRuns.map((run) => run.id === item.runId ? applyOrchestrationEventToRun(run, item) : run), current)
+        .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0)));
     });
   }, []);
 
@@ -449,6 +456,7 @@ export function OrchestrationWorkspace({
     const runAgentId = run.agentId || selectedAgentIdRef.current;
     timelineOrderRef.current = 0;
     activeRunIdRef.current = run.id;
+    activeRunAgentIdRef.current = runAgentId;
     setActiveRunId(run.id);
     setLoadingOlderEvents(false);
     setRuns((current) => upsertOrchestrationRun(current, run));
@@ -539,6 +547,7 @@ export function OrchestrationWorkspace({
     }
     if (!isCurrentSelection()) return;
     activeRunIdRef.current = nextRun.id;
+    activeRunAgentIdRef.current = nextRun.agentId || agentId;
     setActiveRunId(nextRun.id);
     const loaded = await loadRun(nextRun.id);
     if (activeRunIdRef.current !== nextRun.id || !isCurrentSelection()) return;
@@ -568,10 +577,18 @@ export function OrchestrationWorkspace({
         const loadedRuns = await loadRuns(agentId);
         if (!isCurrentRefresh() || selectedAgentIdRef.current !== agentId) return;
         if (directRun) {
+          if (activeRunIdRef.current === directRun.id) {
+            rememberActiveOrchestrationRunForAgent(directRun.agentId, directRun.id);
+            return;
+          }
           await activateRun(directRun, { syncURL: false });
           return;
         }
         if (draftingRunRef.current) return;
+        if (activeRunIdRef.current && activeRunAgentIdRef.current === agentId) {
+          rememberActiveOrchestrationRunForAgent(agentId, activeRunIdRef.current);
+          return;
+        }
         const currentRun = loadedRuns.find((run) => run.id === activeRunIdRef.current);
         if (currentRun && (!agentId || currentRun.agentId === agentId)) {
           rememberActiveOrchestrationRunForAgent(currentRun.agentId, currentRun.id);
@@ -676,6 +693,7 @@ export function OrchestrationWorkspace({
     }
     if (draftingRunRef.current) return;
     if (!selectedAgent?.id) {
+      if (activeRunIdRef.current && activeRunAgentIdRef.current === selectedAgentIdRef.current) return;
       clearActiveOrchestration();
       return;
     }
@@ -1365,10 +1383,10 @@ function minOrchestrationEventSeq(events: OrchestrationEvent[], initial = 0) {
   }, initial);
 }
 
-function mergeOrchestrationRunsPreservingOtherAgents(current: OrchestrationRun[], incoming: OrchestrationRun[], agentId: string) {
+function mergeOrchestrationRunsPreservingOtherAgents(current: OrchestrationRun[], incoming: OrchestrationRun[], agentId: string, activeRunId: string) {
   const merged = new Map<string, OrchestrationRun>();
   current.filter(isOrchestrationRun).forEach((run) => {
-    if (run.agentId !== agentId) merged.set(run.id, run);
+    if (run.agentId !== agentId || run.id === activeRunId) merged.set(run.id, run);
   });
   incoming.filter(isOrchestrationRun).forEach((run) => merged.set(run.id, run));
   return Array.from(merged.values()).sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));

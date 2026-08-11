@@ -484,7 +484,7 @@ func (m *OrchestrationManager) claudeArgsWithSession(payload protocol.Orchestrat
 	if m.bypassApprovalsAndSandbox() {
 		args = append(args, "--permission-mode", "bypassPermissions")
 	}
-	if model := claudeBridgeModel(m.cfg); model != "" {
+	if model := claudeBridgeLaunchModel(m.cfg); model != "" {
 		args = append(args, "--model", model)
 	}
 	if m.cfg.Bridge.ClaudeEffort != "" {
@@ -510,7 +510,7 @@ func (m *OrchestrationManager) claudeArgsWithStreamInput(payload protocol.Orches
 	if m.bypassApprovalsAndSandbox() {
 		args = append(args, "--permission-mode", "bypassPermissions")
 	}
-	if model := claudeBridgeModel(m.cfg); model != "" {
+	if model := claudeBridgeLaunchModel(m.cfg); model != "" {
 		args = append(args, "--model", model)
 	}
 	if m.cfg.Bridge.ClaudeEffort != "" {

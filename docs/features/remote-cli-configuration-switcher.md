@@ -42,7 +42,9 @@ managed connection fields, and maps the custom model through one recognized
 Sonnet `modelOverrides` slot so native metadata remains available. A prior value
 in that slot is remembered and restored by official reset. Hooks, MCP, skills,
 permissions, and other model mappings remain unchanged. Active processes are
-left alone.
+left alone. Orchestration passes the recognized slot to Claude Code while usage
+records keep the actual provider model ID; manually configured Bridge models
+continue to pass through unchanged.
 
 Preset updates are ownership-scoped by user, agent, and preset ID. The Hub can
 reuse the existing Bridge-encrypted secret for connection testing and saving,

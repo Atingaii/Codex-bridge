@@ -17,6 +17,12 @@ None. The frontend continues to use `GET /api/orchestrations/{runID}/events` wit
 
 ## Implementation
 
+Live WebSocket events are coalesced once per browser animation frame before
+updating the timeline and run summary. Polling remains a quiet gap-recovery
+path and does not reactivate the already selected run, replace its event list,
+or reconnect its WebSocket. Automatic follow mode scrolls only the timeline
+container so streaming output does not move the surrounding workspace.
+
 1. Trigger the existing older-event request when the timeline is within 240px of its top.
 2. Guard requests with a ref so scroll events cannot create concurrent page loads.
 3. Preserve the scroll anchor after prepending a page, preventing an automatic request chain and reducing render pressure.

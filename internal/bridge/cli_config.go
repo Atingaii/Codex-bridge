@@ -39,7 +39,10 @@ const (
 	claudeModelSlot      = "claude-sonnet-4-6"
 )
 
-var bridgeModelsMu sync.RWMutex
+var (
+	bridgeModelsMu          sync.RWMutex
+	bridgeClaudeLaunchModel = map[*config.Config]string{}
+)
 
 type cliConfigManager struct {
 	cfg     *config.Config
@@ -55,6 +58,7 @@ type cliConfigState struct {
 	ClaudeOverrideKey         string `json:"claudeOverrideKey,omitempty"`
 	ClaudeOverridePrevious    string `json:"claudeOverridePrevious,omitempty"`
 	ClaudeOverrideHadPrevious bool   `json:"claudeOverrideHadPrevious,omitempty"`
+	ClaudeConfigManaged       bool   `json:"claudeConfigManaged,omitempty"`
 }
 
 func newCLIConfigManager(cfg *config.Config) (*cliConfigManager, error) {
@@ -74,6 +78,9 @@ func newCLIConfigManager(cfg *config.Config) (*cliConfigManager, error) {
 	if raw, err := os.ReadFile(filepath.Join(root, "state.json")); err == nil && json.Unmarshal(raw, &state) == nil {
 		m.state = state
 		setBridgeModels(cfg, state.CodexModel, state.ClaudeModel)
+		if state.ClaudeConfigManaged || state.ClaudeOverrideKey != "" {
+			setClaudeBridgeLaunchModel(cfg, state.ClaudeOverrideKey)
+		}
 	}
 	return m, nil
 }
@@ -467,6 +474,8 @@ func (m *cliConfigManager) apply(cli, base, model, key string, models []string) 
 		}
 		codexModel, _ := bridgeModels(m.cfg)
 		setBridgeModels(m.cfg, codexModel, model)
+		m.state.ClaudeConfigManaged = true
+		setClaudeBridgeLaunchModel(m.cfg, m.state.ClaudeOverrideKey)
 	}
 	return m.writeState()
 }
@@ -530,8 +539,10 @@ func (m *cliConfigManager) reset(cli string) error {
 		m.state.ClaudeOverrideKey = ""
 		m.state.ClaudeOverridePrevious = ""
 		m.state.ClaudeOverrideHadPrevious = false
+		m.state.ClaudeConfigManaged = true
 		codexModel, _ := bridgeModels(m.cfg)
 		setBridgeModels(m.cfg, codexModel, "")
+		setClaudeBridgeLaunchModel(m.cfg, "")
 	}
 	return m.writeState()
 }
@@ -627,6 +638,30 @@ func claudeBridgeModel(cfg *config.Config) string {
 		return claudeModel
 	}
 	return codexModel
+}
+
+func claudeBridgeLaunchModel(cfg *config.Config) string {
+	bridgeModelsMu.RLock()
+	defer bridgeModelsMu.RUnlock()
+	if model, managed := bridgeClaudeLaunchModel[cfg]; managed {
+		return model
+	}
+	if cfg.Bridge.ClaudeModel != "" {
+		return cfg.Bridge.ClaudeModel
+	}
+	return cfg.Bridge.Model
+}
+
+func setClaudeBridgeLaunchModel(cfg *config.Config, model string) {
+	bridgeModelsMu.Lock()
+	bridgeClaudeLaunchModel[cfg] = model
+	bridgeModelsMu.Unlock()
+}
+
+func clearClaudeBridgeLaunchModel(cfg *config.Config) {
+	bridgeModelsMu.Lock()
+	delete(bridgeClaudeLaunchModel, cfg)
+	bridgeModelsMu.Unlock()
 }
 
 func setBridgeModels(cfg *config.Config, codexModel, claudeModel string) {

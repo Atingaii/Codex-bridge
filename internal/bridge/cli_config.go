@@ -34,8 +34,8 @@ const (
 	maxDiscoveredModels  = 500
 	maxModelIDBytes      = 256
 	unknownContextWindow = 200_000
-	cliConfigProbeLimit  = 15 * time.Second
-	cliConfigCallLimit   = 6 * time.Second
+	cliConfigProbeLimit  = 75 * time.Second
+	cliConfigCallLimit   = 30 * time.Second
 )
 
 var bridgeModelsMu sync.RWMutex

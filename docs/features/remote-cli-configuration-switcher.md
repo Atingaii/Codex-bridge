@@ -28,9 +28,12 @@
 
 Bridge derives a small candidate set from the submitted URL, strips known
 `/models`, `/chat/completions`, and `/responses` suffixes, and probes candidates
-serially with short timeouts. A successful models endpoint returns sorted,
-deduplicated IDs; unsupported model listing can fall back to a minimal request
-when a model was supplied.
+serially. Each upstream call has a 30-second bound, the complete Bridge probe
+has a 75-second bound, and the Hub relay allows 90 seconds. These budgets cover
+slow inference providers without adding parallel load or leaving unbounded
+requests. A successful models endpoint returns sorted, deduplicated IDs;
+unsupported model listing can fall back to a minimal request when a model was
+supplied.
 
 Writes are locked, backed up, written to a temporary user-only file, and
 atomically renamed. Codex updates its model/provider section and native
@@ -50,6 +53,7 @@ active marker until the user applies it again; renaming alone preserves it.
 - [x] Saved presets can be edited while a blank API Key retains the encrypted
   credential without returning it to the browser.
 - [x] URL normalization and model discovery are covered by tests.
+- [x] Slow inference providers have bounded end-to-end probe budgets.
 - [x] Apply/reset preserves unrelated TOML/JSON configuration.
 - [x] Legacy Bridges retain existing chat and orchestration behavior.
 - [x] Codex + Codex UI states that both workers share one configuration.

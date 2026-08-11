@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	cliConfigRequestTimeout = 20 * time.Second
+	cliConfigRequestTimeout = 90 * time.Second
 	cliConfigRateLimit      = 20
 	cliConfigRateWindow     = time.Minute
 	maxCLIConfigNameBytes   = 80

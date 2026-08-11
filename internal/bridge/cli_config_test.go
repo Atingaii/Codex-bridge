@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
@@ -209,5 +210,14 @@ func TestCLIConfigProbeRespectsCanceledContext(t *testing.T) {
 	cancel()
 	if _, _, _, _, err := probeProvider(ctx, "codex", "https://127.0.0.1:1", "model", "secret"); err == nil {
 		t.Fatal("expected canceled probe to fail")
+	}
+}
+
+func TestCLIConfigProbeBudgetsAllowSlowInference(t *testing.T) {
+	if cliConfigCallLimit < 20*time.Second {
+		t.Fatalf("per-call probe budget = %s, want at least 20s for slow providers", cliConfigCallLimit)
+	}
+	if cliConfigProbeLimit <= cliConfigCallLimit {
+		t.Fatalf("total probe budget = %s, want greater than per-call budget %s", cliConfigProbeLimit, cliConfigCallLimit)
 	}
 }

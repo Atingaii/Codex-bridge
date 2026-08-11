@@ -6,10 +6,17 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tencent/codex-bridge/internal/protocol"
 	"github.com/tencent/codex-bridge/internal/store"
 )
+
+func TestCLIConfigRelayBudgetExceedsBridgeProbeBudget(t *testing.T) {
+	if cliConfigRequestTimeout < 90*time.Second {
+		t.Fatalf("relay budget = %s, want at least 90s for slow provider probes", cliConfigRequestTimeout)
+	}
+}
 
 func TestUpdateCLIConfigPresetKeepsSecretPrivateAndTracksActiveState(t *testing.T) {
 	t.Parallel()

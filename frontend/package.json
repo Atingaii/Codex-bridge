@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "test": "node visible-events-check.mjs && node admin-access-check.mjs && node markdown-render-check.mjs && node password-visibility-check.mjs && node help-page-check.mjs && node websocket-reconnect-check.mjs && node orchestration-resilience-check.mjs",
+    "test": "node visible-events-check.mjs && node admin-access-check.mjs && node markdown-render-check.mjs && node password-visibility-check.mjs && node help-page-check.mjs && node websocket-reconnect-check.mjs && node orchestration-resilience-check.mjs && node model-config-access-check.mjs",
     "help:screenshots": "node scripts/generate-help-screenshots.cjs",
     "android:build": "vite build && cap sync android",
     "android:open": "cap open android",

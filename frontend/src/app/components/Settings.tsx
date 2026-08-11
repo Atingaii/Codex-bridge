@@ -48,6 +48,7 @@ export function SettingsModal({
   const [repairingAgentId, setRepairingAgentId] = useState('');
   const [repairTokens, setRepairTokens] = useState<Record<string, BridgeTokenResponse>>({});
   const [repairErrorByAgent, setRepairErrorByAgent] = useState<Record<string, string>>({});
+  const [modelUpgradeAgentId, setModelUpgradeAgentId] = useState('');
   const [copiedCommand, setCopiedCommand] = useState('');
   const [configAgent, setConfigAgent] = useState<Agent | null>(null);
   const cliSectionRef = useRef<HTMLDivElement | null>(null);
@@ -119,9 +120,10 @@ export function SettingsModal({
     setRepairingAgentId(agent.id);
     setRepairErrorByAgent((prev) => ({ ...prev, [agent.id]: '' }));
     try {
+      const currentProfile: PermissionProfileId = orchestrationApprovalMode(agent) === 'auto-execute' ? 'auto-execute' : 'review-required';
       const data = await api<BridgeTokenResponse>(`/api/agents/${encodeURIComponent(agent.id)}/repair-token`, {
         method: 'POST',
-        body: JSON.stringify({ permissionProfile: 'review-required' }),
+        body: JSON.stringify({ permissionProfile: currentProfile }),
       });
       setRepairTokens((prev) => ({ ...prev, [agent.id]: data }));
       await onAgentsChanged();
@@ -132,6 +134,16 @@ export function SettingsModal({
       }));
     } finally {
       setRepairingAgentId('');
+    }
+  };
+  const openModelConfiguration = (agent: Agent) => {
+    if (agent.capabilities?.configSwitcher) {
+      setConfigAgent(agent);
+      return;
+    }
+    setModelUpgradeAgentId(agent.id);
+    if (!repairTokens[agent.id] && repairingAgentId !== agent.id) {
+      generateRepairToken(agent).catch(() => undefined);
     }
   };
 
@@ -290,9 +302,9 @@ export function SettingsModal({
                               size="sm"
                               variant="secondary"
                               className="h-8 gap-1.5"
-                              onClick={() => setConfigAgent(agent)}
-                              disabled={!agent.online || !agent.capabilities?.configSwitcher}
-                              title={!agent.capabilities?.configSwitcher ? t.bridgeUpgradeForModels : t.modelConfigurationHint}
+                              onClick={() => openModelConfiguration(agent)}
+                              disabled={!agent.online}
+                              title={!agent.online ? t.modelConfigurationOffline : agent.capabilities?.configSwitcher ? t.modelConfigurationHint : t.bridgeUpgradeForModels}
                             >
                               <ServerCog className="h-3.5 w-3.5" />
                               {t.modelConfiguration}
@@ -321,6 +333,12 @@ export function SettingsModal({
                             {deletingAgentId === agent.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
                           </Button>
                         </div>
+                        {modelUpgradeAgentId === agent.id && !agent.capabilities?.configSwitcher && (
+                          <div className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span>{t.bridgeUpgradeForModels}</span>
+                          </div>
+                        )}
                         {repairErrorByAgent[agent.id] && (
                           <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                             <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />

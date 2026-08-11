@@ -474,6 +474,14 @@ func appendRoundUsage(rounds map[int]*orchestrationRoundStats, round int, input,
 	item.CallCount += calls
 }
 
+func initializeOrchestrationRounds(rounds map[int]*orchestrationRoundStats, boundaries []orchestrationRoundBoundary) {
+	for _, boundary := range boundaries {
+		if boundary.round > 0 && rounds[boundary.round] == nil {
+			rounds[boundary.round] = &orchestrationRoundStats{Round: boundary.round}
+		}
+	}
+}
+
 func finalizeOrchestrationRounds(stats *orchestrationRunStats, rounds map[int]*orchestrationRoundStats) {
 	if len(rounds) == 0 {
 		return
@@ -498,7 +506,7 @@ func (s *Server) handleOrchestrationStats(w http.ResponseWriter, r *http.Request
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration run")
 		return
 	}
-	events, err := s.store.ListOrchestrationEvents(r.Context(), run.ID, 10000)
+	events, err := s.store.ListOrchestrationUsageTimeline(r.Context(), run.ID)
 	if err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration statistics")
 		return
@@ -534,7 +542,7 @@ func (s *Server) handleUsageOverview(w http.ResponseWriter, r *http.Request, uid
 	machineSet := map[string]bool{}
 	trend := map[string]*orchestrationUsageTrendPoint{}
 	for _, run := range runs {
-		events, eventErr := s.store.ListOrchestrationEvents(r.Context(), run.ID, 10000)
+		events, eventErr := s.store.ListOrchestrationUsageTimeline(r.Context(), run.ID)
 		if eventErr != nil {
 			continue
 		}
@@ -723,6 +731,7 @@ func buildOrchestrationRunStatsWithLedger(run store.OrchestrationRun, events []s
 	byCLI := map[string]*orchestrationUsageStats{}
 	rounds := map[int]*orchestrationRoundStats{}
 	boundaries := orchestrationRoundBoundaries(events)
+	initializeOrchestrationRounds(rounds, boundaries)
 	usageCount := 0
 	for _, event := range events {
 		if event.Kind != "turn.usage" || event.Data == nil {
@@ -820,6 +829,7 @@ func buildLedgerOrchestrationRunStats(run store.OrchestrationRun, timeline []sto
 	byCLI := map[string]*orchestrationUsageStats{}
 	rounds := map[int]*orchestrationRoundStats{}
 	boundaries := orchestrationRoundBoundaries(timeline)
+	initializeOrchestrationRounds(rounds, boundaries)
 	for _, sync := range syncs {
 		if sync.ScannedAt > stats.ScannedAt {
 			stats.ScannedAt = sync.ScannedAt
@@ -885,7 +895,7 @@ func (s *Server) handleOrchestrationUsageSync(w http.ResponseWriter, r *http.Req
 		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "orchestration run not found")
 		return
 	}
-	events, err := s.store.ListOrchestrationEvents(r.Context(), run.ID, 10000)
+	events, err := s.store.ListOrchestrationUsageTimeline(r.Context(), run.ID)
 	if err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration run")
 		return

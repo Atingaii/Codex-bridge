@@ -32,3 +32,15 @@ if (!utils.includes('return selected?.id || defaultAgentID(agents);')) {
 if (utils.includes('if (selected?.online) return selected.id;')) {
   throw new Error('Endpoint selection must not replace an offline endpoint with an online one');
 }
+
+if (!source.includes('agentSelectionEpochRef')) {
+  throw new Error('Workspace endpoint switches must invalidate stale async loads');
+}
+
+const orchestration = fs.readFileSync(new URL('./src/app/pages/OrchestrationWorkspace.tsx', import.meta.url), 'utf8');
+if (!orchestration.includes('agentSelectionEpochRef')) {
+  throw new Error('Orchestration endpoint switches must invalidate stale async loads');
+}
+if (!orchestration.includes('selectedAgentIdRef.current !== agentId')) {
+  throw new Error('Orchestration refresh must verify the selected endpoint before activation');
+}

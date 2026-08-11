@@ -46,9 +46,9 @@ func (m *OrchestrationManager) recordNativeUsage(turnID, cli, model string, raw 
 }
 
 func (m *OrchestrationManager) orchestrationUsageForTurn(turnID, cli, prompt, content string) orchestrationUsage {
-	model := m.cfg.Bridge.Model
+	model := codexBridgeModel(m.cfg)
 	if cli == "claude" {
-		model = m.cfg.Bridge.ClaudeModel
+		model = claudeBridgeModel(m.cfg)
 	}
 	m.mu.Lock()
 	native, ok := m.nativeUsage[turnID]

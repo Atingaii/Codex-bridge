@@ -484,10 +484,8 @@ func (m *OrchestrationManager) claudeArgsWithSession(payload protocol.Orchestrat
 	if m.bypassApprovalsAndSandbox() {
 		args = append(args, "--permission-mode", "bypassPermissions")
 	}
-	if m.cfg.Bridge.ClaudeModel != "" {
-		args = append(args, "--model", m.cfg.Bridge.ClaudeModel)
-	} else if m.cfg.Bridge.Model != "" {
-		args = append(args, "--model", m.cfg.Bridge.Model)
+	if model := claudeBridgeModel(m.cfg); model != "" {
+		args = append(args, "--model", model)
 	}
 	if m.cfg.Bridge.ClaudeEffort != "" {
 		args = append(args, "--effort", m.cfg.Bridge.ClaudeEffort)
@@ -512,10 +510,8 @@ func (m *OrchestrationManager) claudeArgsWithStreamInput(payload protocol.Orches
 	if m.bypassApprovalsAndSandbox() {
 		args = append(args, "--permission-mode", "bypassPermissions")
 	}
-	if m.cfg.Bridge.ClaudeModel != "" {
-		args = append(args, "--model", m.cfg.Bridge.ClaudeModel)
-	} else if m.cfg.Bridge.Model != "" {
-		args = append(args, "--model", m.cfg.Bridge.Model)
+	if model := claudeBridgeModel(m.cfg); model != "" {
+		args = append(args, "--model", model)
 	}
 	if m.cfg.Bridge.ClaudeEffort != "" {
 		args = append(args, "--effort", m.cfg.Bridge.ClaudeEffort)
@@ -936,7 +932,7 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 				}
 			}
 			if raw, marshalErr := json.Marshal(usagePayload); marshalErr == nil {
-				m.recordNativeUsage(turnID, "claude", m.cfg.Bridge.ClaudeModel, raw)
+				m.recordNativeUsage(turnID, "claude", claudeBridgeModel(m.cfg), raw)
 			}
 			if isErr, _ := msg["is_error"].(bool); isErr {
 				if text := firstString(msg, "result", "error"); text != "" {

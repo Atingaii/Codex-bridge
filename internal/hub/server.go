@@ -63,6 +63,9 @@ type Server struct {
 	rateMu    sync.Mutex
 	rates     map[string]rateBucket
 	turnstile turnstileVerifier
+
+	cliConfigMu      sync.Mutex
+	cliConfigPending map[string]cliConfigPendingRequest
 }
 
 type rateBucket struct {
@@ -72,15 +75,16 @@ type rateBucket struct {
 
 func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	s := &Server{
-		cfg:       cfg,
-		store:     st,
-		signer:    auth.NewSigner(cfg.Auth.JWTSecret, cfg.Auth.AccessTokenTTL.Duration),
-		pool:      NewPool(),
-		buffers:   make(map[string]string),
-		owners:    make(map[string]string),
-		leases:    make(map[string]*browserSessionLease),
-		rates:     make(map[string]rateBucket),
-		turnstile: cloudflareTurnstileVerifier{client: &http.Client{Timeout: 8 * time.Second}, url: turnstileVerifyURL},
+		cfg:              cfg,
+		store:            st,
+		signer:           auth.NewSigner(cfg.Auth.JWTSecret, cfg.Auth.AccessTokenTTL.Duration),
+		pool:             NewPool(),
+		buffers:          make(map[string]string),
+		owners:           make(map[string]string),
+		leases:           make(map[string]*browserSessionLease),
+		rates:            make(map[string]rateBucket),
+		cliConfigPending: make(map[string]cliConfigPendingRequest),
+		turnstile:        cloudflareTurnstileVerifier{client: &http.Client{Timeout: 8 * time.Second}, url: turnstileVerifyURL},
 	}
 
 	mux := http.NewServeMux()
@@ -101,6 +105,12 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("GET /api/agents", s.withAuth(s.handleAgents))
 	mux.HandleFunc("DELETE /api/agents/{agentID}", s.withAuth(s.handleDeleteAgent))
 	mux.HandleFunc("POST /api/agents/{agentID}/repair-token", s.withAuth(s.handleCreateAgentRepairToken))
+	mux.HandleFunc("GET /api/agents/{agentID}/cli-config/presets", s.withAuth(s.handleListCLIConfigPresets))
+	mux.HandleFunc("POST /api/agents/{agentID}/cli-config/test", s.withAuth(s.handleTestCLIConfig))
+	mux.HandleFunc("POST /api/agents/{agentID}/cli-config/presets", s.withAuth(s.handleCreateCLIConfigPreset))
+	mux.HandleFunc("POST /api/agents/{agentID}/cli-config/presets/{presetID}/apply", s.withAuth(s.handleApplyCLIConfigPreset))
+	mux.HandleFunc("DELETE /api/agents/{agentID}/cli-config/presets/{presetID}", s.withAuth(s.handleDeleteCLIConfigPreset))
+	mux.HandleFunc("POST /api/agents/{agentID}/cli-config/official-reset", s.withAuth(s.handleResetCLIConfig))
 	mux.HandleFunc("POST /api/bridge-tokens", s.withAuth(s.handleCreateBridgeToken))
 	mux.HandleFunc("GET /install.sh", s.handleInstallScript)
 	mux.HandleFunc("GET /downloads/codex-bridge-linux-amd64", s.handleBridgeBinaryDownload)

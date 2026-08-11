@@ -9,6 +9,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | --- | --- |
 | CLI entry and subcommands | `main.go` |
 | Config structs/load | `internal/config/config.go`, `internal/config/load.go`, `internal/config/duration.go` |
+| Remote CLI provider switcher | `internal/hub/cli_config.go`, `internal/bridge/cli_config.go`, `frontend/src/app/components/CLIConfigSwitcher.tsx` |
 | Hub routes, auth, static serving | `internal/hub/server.go`, `internal/hub/registration.go` |
 | Public conversation shares | `internal/hub/share.go` |
 | Browser chat WebSocket | `internal/hub/ws_browser.go` |

@@ -18,11 +18,17 @@ import (
 )
 
 type CodexAppServerRunner struct {
-	cfg *config.Config
+	cfg                              *config.Config
+	nativeReconnectGracePeriod       time.Duration
+	postReconnectTerminalQuietPeriod time.Duration
 }
 
 func NewCodexAppServerRunner(cfg *config.Config) *CodexAppServerRunner {
-	return &CodexAppServerRunner{cfg: cfg}
+	return &CodexAppServerRunner{
+		cfg:                              cfg,
+		nativeReconnectGracePeriod:       appServerNativeReconnectGracePeriod,
+		postReconnectTerminalQuietPeriod: appServerPostReconnectTerminalQuietPeriod,
+	}
 }
 
 func (r *CodexAppServerRunner) Name() string { return "codex-app-server" }
@@ -117,6 +123,7 @@ const appServerPrepareCloseTimeout = 2 * time.Second
 const appServerDiagnosticTailBytes = 16 * 1024
 const appServerUnscopedErrorGracePeriod = 2 * time.Second
 const appServerNativeReconnectGracePeriod = 45 * time.Second
+const appServerPostReconnectTerminalQuietPeriod = 30 * time.Second
 
 func (r *CodexAppServerRunner) start(ctx context.Context, req RunnerRequest) (*appServerClient, error) {
 	cmd := exec.CommandContext(ctx, r.codexPath(), "app-server", "--listen", "stdio://")
@@ -163,8 +170,8 @@ func (r *CodexAppServerRunner) threadStartParams(req ...RunnerRequest) map[strin
 		"ephemeral":             false,
 		"threadSource":          "user",
 	}
-	if r.cfg.Bridge.Model != "" {
-		params["model"] = r.cfg.Bridge.Model
+	if model := codexBridgeModel(r.cfg); model != "" {
+		params["model"] = model
 	}
 	return params
 }
@@ -177,8 +184,8 @@ func (r *CodexAppServerRunner) threadResumeParams(threadID string, req ...Runner
 		"approvalsReviewer": "user",
 		"sandbox":           r.sandbox(),
 	}
-	if r.cfg.Bridge.Model != "" {
-		params["model"] = r.cfg.Bridge.Model
+	if model := codexBridgeModel(r.cfg); model != "" {
+		params["model"] = model
 	}
 	return params
 }
@@ -400,6 +407,39 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 	var nativeReconnectErr error
 	var nativeReconnectTimer *time.Timer
 	var nativeReconnectTimeout <-chan time.Time
+	var nativeReconnectObserved bool
+	var postReconnectAssistantReady bool
+	var postReconnectTerminalTimer *time.Timer
+	var postReconnectTerminalTimeout <-chan time.Time
+	activeTools := make(map[string]struct{})
+	clearPostReconnectTerminal := func() {
+		if postReconnectTerminalTimer != nil {
+			postReconnectTerminalTimer.Stop()
+		}
+		postReconnectTerminalTimer = nil
+		postReconnectTerminalTimeout = nil
+	}
+	armPostReconnectTerminal := func() {
+		if !nativeReconnectObserved || !postReconnectAssistantReady || len(activeTools) != 0 || pendingFailedTool != nil {
+			return
+		}
+		quiet := r.postReconnectTerminalQuietPeriod
+		if quiet <= 0 {
+			quiet = appServerPostReconnectTerminalQuietPeriod
+		}
+		if postReconnectTerminalTimer == nil {
+			postReconnectTerminalTimer = time.NewTimer(quiet)
+		} else {
+			if !postReconnectTerminalTimer.Stop() {
+				select {
+				case <-postReconnectTerminalTimer.C:
+				default:
+				}
+			}
+			postReconnectTerminalTimer.Reset(quiet)
+		}
+		postReconnectTerminalTimeout = postReconnectTerminalTimer.C
+	}
 	clearNativeReconnect := func() {
 		if nativeReconnectTimer != nil {
 			nativeReconnectTimer.Stop()
@@ -409,18 +449,15 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 		nativeReconnectErr = nil
 	}
 	armNativeReconnect := func(err error) {
+		nativeReconnectObserved = true
 		if nativeReconnectTimer == nil {
-			nativeReconnectTimer = time.NewTimer(appServerNativeReconnectGracePeriod)
-		} else {
-			if !nativeReconnectTimer.Stop() {
-				select {
-				case <-nativeReconnectTimer.C:
-				default:
-				}
+			grace := r.nativeReconnectGracePeriod
+			if grace <= 0 {
+				grace = appServerNativeReconnectGracePeriod
 			}
-			nativeReconnectTimer.Reset(appServerNativeReconnectGracePeriod)
+			nativeReconnectTimer = time.NewTimer(grace)
+			nativeReconnectTimeout = nativeReconnectTimer.C
 		}
-		nativeReconnectTimeout = nativeReconnectTimer.C
 		nativeReconnectErr = err
 	}
 	defer func() {
@@ -429,6 +466,9 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 		}
 		if nativeReconnectTimer != nil {
 			nativeReconnectTimer.Stop()
+		}
+		if postReconnectTerminalTimer != nil {
+			postReconnectTerminalTimer.Stop()
 		}
 	}()
 	for {
@@ -440,8 +480,21 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 			if text.Len() > 0 {
 				result.Content = text.String()
 			}
-			done <- appServerTurnResult{result: result, err: fmt.Errorf("%w (Codex native reconnect did not recover within %s)", nativeReconnectErr, appServerNativeReconnectGracePeriod)}
+			grace := r.nativeReconnectGracePeriod
+			if grace <= 0 {
+				grace = appServerNativeReconnectGracePeriod
+			}
+			done <- appServerTurnResult{result: result, err: fmt.Errorf("%w (Codex native reconnect did not recover within %s)", nativeReconnectErr, grace)}
 			return
+		case <-postReconnectTerminalTimeout:
+			if text.Len() > 0 {
+				result.Content = text.String()
+			}
+			if postReconnectAssistantReady && len(activeTools) == 0 && pendingFailedTool == nil && strings.TrimSpace(result.Content) != "" {
+				done <- appServerTurnResult{result: result}
+				return
+			}
+			clearPostReconnectTerminal()
 		case <-unscopedErrorTimeout:
 			if text.Len() > 0 {
 				result.Content = text.String()
@@ -529,9 +582,14 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 							onUpdate(RunnerUpdate{Content: delta})
 						}
 						result.Content = text.String()
+						postReconnectAssistantReady = true
+						armPostReconnectTerminal()
 					}
 				}
 				if tool := appServerToolEvent(item); tool != nil {
+					clearPostReconnectTerminal()
+					postReconnectAssistantReady = false
+					delete(activeTools, tool.ID)
 					onUpdate(RunnerUpdate{Tool: tool})
 					if runnerToolEventFailed(*tool) {
 						copy := *tool
@@ -541,10 +599,16 @@ func (r *CodexAppServerRunner) readEvents(ctx context.Context, client *appServer
 			case "item/started":
 				item, _ := appServerNestedMap(msg.Params, "item")
 				if tool := appServerToolEvent(item); tool != nil {
+					clearPostReconnectTerminal()
+					postReconnectAssistantReady = false
+					activeTools[tool.ID] = struct{}{}
 					onUpdate(RunnerUpdate{Tool: tool})
 				}
 			case "item/commandExecution/outputDelta":
 				if id := nestedString(map[string]any{"params": msg.Params}, "params", "itemId"); id != "" {
+					clearPostReconnectTerminal()
+					postReconnectAssistantReady = false
+					activeTools[id] = struct{}{}
 					onUpdate(RunnerUpdate{Tool: &RunnerToolEvent{ID: id, Output: nestedString(map[string]any{"params": msg.Params}, "params", "delta"), Status: "running", Progress: true}})
 				}
 			case "turn/completed":

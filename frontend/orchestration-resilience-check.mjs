@@ -13,5 +13,9 @@ assert.match(workspace, /Array\.isArray\(data\.runs\) \? data\.runs\.filter\(isO
 assert.match(workspace, /retryTimer = window\.setTimeout\(retry, 3000\);/);
 assert.match(workspace, /window\.addEventListener\('online', recover\);/);
 assert.match(workspace, /document\.addEventListener\('visibilitychange', recover\);/);
+assert.match(workspace, /const draftingRunRef = useRef\(false\);/);
+assert.match(workspace, /if \(draftingRunRef\.current\) return;/);
+assert.match(workspace, /draftingRunRef\.current = true;\s*clearActiveOrchestration\(true\);/);
+assert.match(workspace, /draftingRunRef\.current = false;\s*timelineOrderRef\.current = 0;/);
 assert.match(main, /<AppErrorBoundary><App \/><\/AppErrorBoundary>/);
 assert.match(boundary, /The background task is not stopped/);

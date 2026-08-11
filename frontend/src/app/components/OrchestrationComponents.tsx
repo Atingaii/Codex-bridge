@@ -102,7 +102,7 @@ export function OrchestrationEventItem({ item, t }: { item: OrchestrationVisible
           {status && <span className="ml-auto rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
         </div>
         {item.type === 'command' ? (
-          <CommandEvent event={item.command} t={t} open />
+          <CommandEvent event={item.command} t={t} open={commandEventIsActiveOrFailed(item.command)} />
         ) : content ? (
           <MessageContent content={content} stripMachineContracts={!isUser} />
         ) : item.type === 'message' && item.commands.length > 0 ? (
@@ -347,6 +347,10 @@ function commandEventHasError(event: OrchestrationEvent) {
   return Boolean(event.error) || status === 'failed' || status === 'error' || (typeof data.exitCode === 'number' && data.exitCode !== 0);
 }
 
+function commandEventIsActiveOrFailed(event: OrchestrationEvent) {
+  return commandEventIsActive(event) || commandEventHasError(event);
+}
+
 function orchestrationTimelineGroupCountLabel(group: OrchestrationTimelineGroup, t: UIText) {
   const parts: string[] = [];
   if (group.messageCount) parts.push(`${group.messageCount} ${t.messages}`);
@@ -521,7 +525,7 @@ export function CommandEvent({ event, t, open = false }: { event: OrchestrationE
   }, [isActive, startedAt]);
 
   return (
-    <details className="rounded-md border border-border bg-background/70 overflow-hidden" open={open || Boolean(output || event.error)}>
+    <details className="rounded-md border border-border bg-background/70 overflow-hidden" open={open}>
       <summary className="flex cursor-pointer items-center gap-2 border-b border-border bg-muted/30 px-3 py-2 text-[11px] marker:content-none">
         {isActive ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" /> : <Terminal className="h-3.5 w-3.5 text-muted-foreground" />}
         <code className="min-w-0 flex-1 truncate text-foreground">{command || t.commandEvent}</code>

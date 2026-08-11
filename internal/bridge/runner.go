@@ -125,7 +125,7 @@ type RunnerToolEvent struct {
 	StartedAt             time.Time
 	CompletedAt           time.Time
 	WillSuppressOnFailure bool
-	Progress bool
+	Progress              bool
 }
 
 type ApprovalRequester interface {
@@ -238,8 +238,8 @@ func (r *CodexExecRunner) args(req RunnerRequest) []string {
 
 func (r *CodexExecRunner) execArgs() []string {
 	common := []string{"--json", "--color", "never", "--skip-git-repo-check"}
-	if r.cfg.Bridge.Model != "" {
-		common = append(common, "--model", r.cfg.Bridge.Model)
+	if model := codexBridgeModel(r.cfg); model != "" {
+		common = append(common, "--model", model)
 	}
 	if r.bypassApprovalsAndSandbox() {
 		common = append(common, "--dangerously-bypass-approvals-and-sandbox")
@@ -257,8 +257,8 @@ func (r *CodexExecRunner) execArgs() []string {
 
 func (r *CodexExecRunner) resumeArgs() []string {
 	common := []string{"--json", "--skip-git-repo-check"}
-	if r.cfg.Bridge.Model != "" {
-		common = append(common, "--model", r.cfg.Bridge.Model)
+	if model := codexBridgeModel(r.cfg); model != "" {
+		common = append(common, "--model", model)
 	}
 	if r.bypassApprovalsAndSandbox() {
 		common = append(common, "--dangerously-bypass-approvals-and-sandbox")

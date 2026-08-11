@@ -292,6 +292,7 @@ while preserving public run lifecycle and structured conclusion events.
 | ADR-005 | Embedded native frontend | No Node build, smaller deployment surface |
 | ADR-006 | Orchestration continue reuses `runID` | Follow-up tasks keep context through event compaction |
 | ADR-007 | Public conversation share links | Anonymous readers can view sanitized transcripts without workspace access |
+| ADR-009 | Remote CLI configuration switcher | Hub stores encrypted presets; Bridge probes providers and updates native CLI configuration |
 
 ## Protocol
 
@@ -439,5 +440,11 @@ SQLite tables:
   `orchestration_task_dependencies`, and `orchestration_task_attempts`
   (bounded scheduling, dependency state, identity, retry lineage, and evidence)
 - `conversation_shares`
+- `cli_config_presets` (machine- and CLI-scoped preset metadata plus an API-key
+  ciphertext encrypted directly to the target Bridge public key)
 
-Hub stores browser auth and chat history. Bridge stores only its generated `machine_id` and reads Codex/OpenAI credentials from its local environment.
+Hub stores browser auth, chat history, and only Bridge-targeted API-key
+ciphertext. Bridge stores its generated `machine_id`, persistent configuration
+switcher decryption key/state, and writes native Codex/Claude credentials on the
+private machine. Configuration test/apply/reset frames are capability-gated and
+request-correlated; older Bridges continue without exposing this workflow.

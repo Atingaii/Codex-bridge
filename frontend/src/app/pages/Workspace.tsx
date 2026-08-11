@@ -118,6 +118,7 @@ export function Workspace({
   const assistantItemIdRef = useRef<string | null>(null);
   const assistantTextRef = useRef('');
   const refreshAllInFlightRef = useRef<Promise<void> | null>(null);
+  const agentSelectionEpochRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
 
@@ -469,6 +470,9 @@ export function Workspace({
   }, [connectWS, loadMessages, loadRuns]);
 
   const switchAgentSession = useCallback(async (agentId: string, availableSessions: Session[] = sessions) => {
+    const selectionEpoch = agentSelectionEpochRef.current;
+    const isCurrentSelection = () => selectionEpoch === agentSelectionEpochRef.current && selectedAgentIdRef.current === agentId;
+    if (!isCurrentSelection()) return;
     if (!agentId) {
       clearActiveChat();
       return;
@@ -476,9 +480,11 @@ export function Workspace({
     const scoped = availableSessions.filter((session) => session.agentId === agentId);
     const remembered = readActiveSessionByAgent()[agentId];
     const next = scoped.find((session) => session.id === remembered) || scoped[0];
+    if (!isCurrentSelection()) return;
     if (next) {
       await selectLoadedSession(next);
     } else {
+      if (!isCurrentSelection()) return;
       clearActiveChat();
       forgetActiveSessionForAgent(agentId);
     }
@@ -760,6 +766,7 @@ export function Workspace({
   };
 
   const selectAgent = (agentId: string) => {
+    agentSelectionEpochRef.current += 1;
     selectedAgentIdRef.current = agentId;
     setSelectedAgentId(agentId);
     if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);

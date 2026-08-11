@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertCircle, Check, ChevronDown, Edit2, LogOut, Plus, RefreshCw, Trash2, Wrench, X } from 'lucide-react';
+import { AlertCircle, Check, ChevronDown, Edit2, LogOut, Plus, RefreshCw, ServerCog, Trash2, Wrench, X } from 'lucide-react';
 import { api } from '../lib/api';
 import type { Agent, BridgeTokenResponse, PermissionProfileId, UserAccount } from '../lib/types';
 import type { Language, UIText } from '../lib/i18n';
 import { cn, copyText, initials, orchestrationApprovalMode, orchestrationCapabilityProblems } from '../lib/utils';
 import { CapabilityMatrix } from './OrchestrationComponents';
 import { CommandBlock } from './chat/CommandBlock';
+import { CLIConfigSwitcher } from './CLIConfigSwitcher';
 import { Button, Input } from './ui';
 
 export function SettingsModal({
@@ -48,6 +49,7 @@ export function SettingsModal({
   const [repairTokens, setRepairTokens] = useState<Record<string, BridgeTokenResponse>>({});
   const [repairErrorByAgent, setRepairErrorByAgent] = useState<Record<string, string>>({});
   const [copiedCommand, setCopiedCommand] = useState('');
+  const [configAgent, setConfigAgent] = useState<Agent | null>(null);
   const cliSectionRef = useRef<HTMLDivElement | null>(null);
   const generateToken = async () => {
     setGeneratingToken(true);
@@ -282,17 +284,30 @@ export function SettingsModal({
                           </div>
                         )}
                         {agent.capabilities && <CapabilityMatrix agent={agent} t={t} />}
-                        <div className="flex items-center justify-between gap-2">
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            className="h-8 gap-1.5"
-                            onClick={() => generateRepairToken(agent)}
-                            disabled={repairingAgentId === agent.id}
-                          >
-                            {repairingAgentId === agent.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Wrench className="h-3.5 w-3.5" />}
-                            {repairingAgentId === agent.id ? t.generating : t.generateRepairCommand}
-                          </Button>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="h-8 gap-1.5"
+                              onClick={() => setConfigAgent(agent)}
+                              disabled={!agent.online || !agent.capabilities?.configSwitcher}
+                              title={!agent.capabilities?.configSwitcher ? t.bridgeUpgradeForModels : t.modelConfigurationHint}
+                            >
+                              <ServerCog className="h-3.5 w-3.5" />
+                              {t.modelConfiguration}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="h-8 gap-1.5"
+                              onClick={() => generateRepairToken(agent)}
+                              disabled={repairingAgentId === agent.id}
+                            >
+                              {repairingAgentId === agent.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Wrench className="h-3.5 w-3.5" />}
+                              {repairingAgentId === agent.id ? t.generating : t.generateRepairCommand}
+                            </Button>
+                          </div>
                           <Button
                             variant="ghost"
                             size="icon"
@@ -433,6 +448,7 @@ export function SettingsModal({
           <Button size="sm" onClick={close}>{t.savePreferences}</Button>
         </div>
       </div>
+      {configAgent && <CLIConfigSwitcher agent={configAgent} t={t} close={() => setConfigAgent(null)} />}
     </div>
   );
 }

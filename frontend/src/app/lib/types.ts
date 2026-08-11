@@ -29,6 +29,46 @@ export type BridgeCapabilities = {
   acp?: ACPCapability;
   metadata?: Record<string, string | undefined>;
   durableTaskGraph?: boolean;
+	usageLedger?: boolean;
+	configSwitcher?: CLIConfigSwitcherCapability;
+};
+
+export type CLIConfigSwitcherCapability = {
+	version: number;
+	publicKey: string;
+	keyId: string;
+	clis: Array<'codex' | 'claude'>;
+};
+
+export type EncryptedSecret = {
+	ephemeralPublicKey: string;
+	salt: string;
+	iv: string;
+	ciphertext: string;
+};
+
+export type CLIConfigPreset = {
+	id: string;
+	agentId: string;
+	cli: 'codex' | 'claude';
+	name: string;
+	baseUrl: string;
+	model: string;
+	keyHint?: string;
+	active: boolean;
+	createdAt: number;
+	updatedAt: number;
+};
+
+export type CLIConfigResult = {
+	ok: boolean;
+	cli: 'codex' | 'claude';
+	baseUrl?: string;
+	protocol?: string;
+	models?: string[];
+	modelsListed?: boolean;
+	appliedModel?: string;
+	message?: string;
 };
 
 // Mirrors internal/protocol/envelope.go:ACPCapability.

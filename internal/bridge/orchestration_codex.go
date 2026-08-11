@@ -125,7 +125,7 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 			return strings.TrimSpace(result.result.Content), snapshotTools(), codex.threadID, resumeMode, timeoutErr
 		}
 		if len(result.result.Usage) > 0 {
-			m.recordNativeUsage(turnID, "codex", m.cfg.Bridge.Model, result.result.Usage)
+			m.recordNativeUsage(turnID, "codex", codexBridgeModel(m.cfg), result.result.Usage)
 		}
 		return strings.TrimSpace(result.result.Content), snapshotTools(), codex.threadID, resumeMode, result.err
 	case <-ctx.Done():
@@ -279,7 +279,7 @@ func (m *OrchestrationManager) runCodexWithThread(ctx context.Context, payload p
 	}
 	attempt := m.runCodexExecAttempt(ctx, payload, turnID, role, prompt, threadID)
 	if len(attempt.usage) > 0 {
-		m.recordNativeUsage(turnID, "codex", m.cfg.Bridge.Model, attempt.usage)
+		m.recordNativeUsage(turnID, "codex", codexBridgeModel(m.cfg), attempt.usage)
 	}
 	if threadID != "" {
 		if attempt.threadID != "" && attempt.threadID != threadID {
@@ -316,7 +316,7 @@ func (m *OrchestrationManager) runCodexWithThread(ctx context.Context, payload p
 			})
 			fresh := m.runCodexExecAttempt(ctx, payload, turnID, role, prompt, "")
 			if len(fresh.usage) > 0 {
-				m.recordNativeUsage(turnID, "codex", m.cfg.Bridge.Model, fresh.usage)
+				m.recordNativeUsage(turnID, "codex", codexBridgeModel(m.cfg), fresh.usage)
 			}
 			return fresh.content, fresh.tools, firstNonEmpty(fresh.threadID, attempt.threadID, threadID), "codex-fresh-after-resume-miss", fresh.err
 		}
@@ -434,8 +434,8 @@ func isCodexResumeMissingThreadError(err error) bool {
 func (m *OrchestrationManager) codexOrchestrationArgs(payload protocol.OrchestrationStartPayload, threadID string) []string {
 	if threadID != "" {
 		args := []string{"exec", "resume", "--json", "--skip-git-repo-check"}
-		if m.cfg.Bridge.Model != "" {
-			args = append(args, "--model", m.cfg.Bridge.Model)
+		if model := codexBridgeModel(m.cfg); model != "" {
+			args = append(args, "--model", model)
 		}
 		if strings.EqualFold(m.cfg.Bridge.ApprovalPolicy, "never") && strings.EqualFold(m.cfg.Bridge.Sandbox, "danger-full-access") {
 			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
@@ -451,8 +451,8 @@ func (m *OrchestrationManager) codexOrchestrationArgs(payload protocol.Orchestra
 	}
 
 	args := []string{"exec", "--json", "--color", "never", "--skip-git-repo-check"}
-	if m.cfg.Bridge.Model != "" {
-		args = append(args, "--model", m.cfg.Bridge.Model)
+	if model := codexBridgeModel(m.cfg); model != "" {
+		args = append(args, "--model", model)
 	}
 	if strings.EqualFold(m.cfg.Bridge.ApprovalPolicy, "never") && strings.EqualFold(m.cfg.Bridge.Sandbox, "danger-full-access") {
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
@@ -517,7 +517,7 @@ func (m *OrchestrationManager) runCodexAppServerWithThread(ctx context.Context, 
 		mode = "codex-thread-resume"
 	}
 	if len(result.Usage) > 0 {
-		m.recordNativeUsage(turnID, "codex", m.cfg.Bridge.Model, result.Usage)
+		m.recordNativeUsage(turnID, "codex", codexBridgeModel(m.cfg), result.Usage)
 	}
 	return strings.TrimSpace(result.Content), tools, firstNonEmpty(result.RemoteThreadID, threadID), mode, err
 }

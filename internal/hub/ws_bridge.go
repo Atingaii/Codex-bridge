@@ -290,6 +290,8 @@ func (s *Server) handleBridgeEnvelope(ctx context.Context, agentID string, env p
 		s.handleOrchestrationEventFromAgent(ctx, agentID, env)
 	case protocol.TypeOrchestrationUsageSyncResult:
 		s.handleOrchestrationUsageSyncResult(ctx, agentID, env)
+	case protocol.TypeCLIConfigResult:
+		s.handleCLIConfigResult(agentID, env)
 	case protocol.TypeError:
 		s.handleBridgeError(ctx, env)
 		s.pool.BroadcastToBrowsers(env.Sid, env)

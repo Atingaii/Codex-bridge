@@ -38,8 +38,17 @@
 `internal/bridge/appserver_runner.go:readEvents` treats a
 scoped `Reconnecting N/M` error as native progress. It emits an internal runner
 notice and keeps reading the same app-server process for a bounded grace
-window. A subsequent turn event clears the reconnect timer. Process exit or
+window measured from the first reconnect event. Repeated reconnect progress
+updates the visible attempt notice but cannot extend that fixed deadline. A
+subsequent non-error turn event clears the reconnect timer. Process exit or
 grace expiry returns the concrete transport reason to the orchestration layer.
+If recovery completes an assistant-message item but the app-server then omits
+`turn/completed`, a separate 30-second quiet window converges the turn from the
+accumulated output. A text delta alone is not enough to arm this fallback. It
+is armed only after native reconnect, only after a completed assistant message
+following the most recent tool, and only while no command is running or failed
+without model follow-up. Command start or progress cancels it, so it is not a
+generic idle timeout for normal long-running work.
 
 `internal/bridge/orchestration.go:runRelayTurnWithContinuations` classifies the
 returned result:
@@ -83,25 +92,34 @@ slot, workspace, and native thread ID.
 1. Recognize only explicit Codex reconnect/stream-close messages as recoverable
    transport failures.
 2. Keep reading app-server events during native reconnect progress with a
-   bounded timer and surface each progress message to orchestration.
+   fixed-deadline bounded timer and surface each progress message to
+   orchestration without resetting that deadline.
 3. Base interrupted-turn recovery on the accumulated turn record.
-4. Add a separate 5/15/30/60-second active-writer budget that preserves the
+4. Converge post-reconnect visible output after a bounded terminal-event quiet
+   window, unless a command is active or a failed command awaits follow-up.
+5. Add a separate 5/15/30/60-second active-writer budget that preserves the
    original unaccepted prompt and native thread.
-5. Join the rejected submission's event reader before retrying so it cannot
+6. Join the rejected submission's event reader before retrying so it cannot
    consume events emitted for the next accepted turn.
-6. Add a separate 5/15/30-second transport retry budget using a compact
+7. Add a separate 5/15/30-second transport retry budget using a compact
    same-thread recovery prompt.
-7. Reset only the failed native CLI process before resuming its persisted
+8. Reset only the failed native CLI process before resuming its persisted
    thread.
-8. Cover recognition, native reconnect success, active-writer recovery,
+9. Cover recognition, native reconnect success, active-writer recovery,
    exhaustion, permanent failures, and cancellation.
-9. Close durable task native sessions before terminal delivery so the next
+10. Close durable task native sessions before terminal delivery so the next
    graph node and external TUI resume cannot race a stale writer lease.
 
 ## Exit Gates
 
 - `Reconnecting 1/5` alone cannot immediately fail an orchestration.
+- Repeated `Reconnecting 1/5` events cannot keep a task attempt running past
+  the native recovery grace period.
 - Native reconnect success completes without starting another CLI invocation.
+- A completed post-reconnect assistant-message item converges when only
+  `turn/completed` is missing, while a partial text delta, active command, or
+  failed command without follow-up cannot be misreported as complete.
+- Cancellation interrupts the post-reconnect quiet window immediately.
 - A terminal stream loss visibly retries on the same run, turn, task attempt,
   workspace, and Codex thread.
 - Already observed commands are not blindly replayed.

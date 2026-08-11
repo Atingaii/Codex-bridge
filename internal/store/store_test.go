@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -487,6 +488,19 @@ func TestListOrchestrationEventsReturnsLatestWindowInAscendingOrder(t *testing.T
 	if len(events) != 2 || events[0].Seq != 4 || events[1].Seq != 5 {
 		t.Fatalf("unexpected after-seq window: %+v", events)
 	}
+	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "run.start", Data: map[string]any{"round": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "turn.usage", Data: map[string]any{"round": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	usageTimeline, err := st.ListOrchestrationUsageTimeline(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usageTimeline) != 2 || usageTimeline[0].Kind != "run.start" || usageTimeline[1].Kind != "turn.usage" {
+		t.Fatalf("unexpected usage timeline: %+v", usageTimeline)
+	}
 	events, err = st.ListOrchestrationEventsAfter(ctx, run.ID, 3, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -714,6 +728,64 @@ func openTestStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	return st
+}
+
+func TestCLIConfigPresetCRUDIsScopedAndSecretIsNotSerialized(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	user, err := st.UpsertUser(ctx, "preset-owner", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgentForUser(ctx, user.ID, "preset-agent", "preset-machine", "host", "instance", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preset, err := st.CreateCLIConfigPreset(ctx, CLIConfigPreset{
+		UserID: user.ID, AgentID: agent.ID, CLI: "codex", Name: "primary",
+		BaseURL: "https://provider.example/v1", Model: "model-a", KeyHint: "key-id",
+		Secret: protocol.EncryptedSecret{EphemeralPublicKey: "pub", Salt: "salt", IV: "iv", Ciphertext: "cipher"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized, err := json.Marshal(preset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(serialized), "cipher") || strings.Contains(string(serialized), "secret") {
+		t.Fatalf("preset response exposed encrypted secret: %s", serialized)
+	}
+
+	listed, err := st.ListCLIConfigPresets(ctx, user.ID, agent.ID)
+	if err != nil || len(listed) != 1 || listed[0].Secret.Ciphertext != "cipher" {
+		t.Fatalf("unexpected preset list: %#v, err=%v", listed, err)
+	}
+	for _, scope := range [][2]string{{"user-b", agent.ID}, {user.ID, "agent-b"}} {
+		other, err := st.ListCLIConfigPresets(ctx, scope[0], scope[1])
+		if err != nil || len(other) != 0 {
+			t.Fatalf("preset leaked into scope %#v: %#v, err=%v", scope, other, err)
+		}
+		if _, err := st.CLIConfigPresetByID(ctx, preset.ID, scope[0], scope[1]); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("cross-scope preset lookup error = %v", err)
+		}
+	}
+	if err := st.ActivateCLIConfigPreset(ctx, preset.ID, user.ID, agent.ID, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := st.CLIConfigPresetByID(ctx, preset.ID, user.ID, agent.ID)
+	if err != nil || !loaded.Active {
+		t.Fatalf("active preset = %#v, err=%v", loaded, err)
+	}
+	if err := st.ClearActiveCLIConfigPreset(ctx, user.ID, agent.ID, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteCLIConfigPreset(ctx, preset.ID, user.ID, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CLIConfigPresetByID(ctx, preset.ID, user.ID, agent.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted preset lookup error = %v", err)
+	}
 }
 
 func intPtr(value int) *int {

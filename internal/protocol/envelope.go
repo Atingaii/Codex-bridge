@@ -24,6 +24,10 @@ const (
 	TypeOrchestrationCancel           = "orchestration_cancel"
 	TypeOrchestrationUsageSyncRequest = "orchestration_usage_sync_request"
 	TypeOrchestrationUsageSyncResult  = "orchestration_usage_sync_result"
+	TypeCLIConfigTest                 = "cli_config_test"
+	TypeCLIConfigApply                = "cli_config_apply"
+	TypeCLIConfigReset                = "cli_config_reset"
+	TypeCLIConfigResult               = "cli_config_result"
 	TypeAgentShutdown                 = "agent_shutdown"
 	TypeError                         = "error"
 	TypeStatus                        = "status"
@@ -99,6 +103,44 @@ type BridgeCapabilities struct {
 	ACP              *ACPCapability                 `json:"acp,omitempty"`
 	DurableTaskGraph bool                           `json:"durableTaskGraph,omitempty"`
 	UsageLedger      bool                           `json:"usageLedger,omitempty"`
+	ConfigSwitcher   *CLIConfigSwitcherCapability   `json:"configSwitcher,omitempty"`
+}
+
+type CLIConfigSwitcherCapability struct {
+	Version   int      `json:"version"`
+	PublicKey string   `json:"publicKey"`
+	KeyID     string   `json:"keyId"`
+	CLIs      []string `json:"clis"`
+}
+
+type EncryptedSecret struct {
+	EphemeralPublicKey string `json:"ephemeralPublicKey"`
+	Salt               string `json:"salt"`
+	IV                 string `json:"iv"`
+	Ciphertext         string `json:"ciphertext"`
+}
+
+type CLIConfigRequest struct {
+	RequestID string          `json:"requestId"`
+	CLI       string          `json:"cli"`
+	Name      string          `json:"name,omitempty"`
+	BaseURL   string          `json:"baseUrl,omitempty"`
+	Model     string          `json:"model,omitempty"`
+	Secret    EncryptedSecret `json:"secret,omitempty"`
+}
+
+type CLIConfigResult struct {
+	RequestID     string   `json:"requestId"`
+	OK            bool     `json:"ok"`
+	CLI           string   `json:"cli,omitempty"`
+	BaseURL       string   `json:"baseUrl,omitempty"`
+	Protocol      string   `json:"protocol,omitempty"`
+	Models        []string `json:"models,omitempty"`
+	ModelsListed  bool     `json:"modelsListed,omitempty"`
+	AppliedModel  string   `json:"appliedModel,omitempty"`
+	Message       string   `json:"message,omitempty"`
+	Error         string   `json:"error,omitempty"`
+	ConfigChanged bool     `json:"configChanged,omitempty"`
 }
 
 // ACPCapability advertises whether the endpoint can run an Agent Client

@@ -80,6 +80,23 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE agents ADD COLUMN working_dirs_json TEXT;`,
 		`ALTER TABLE agents ADD COLUMN deleted_at INTEGER;`,
 		`CREATE INDEX IF NOT EXISTS idx_agents_user_seen ON agents(user_id, last_seen_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS cli_config_presets (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			cli TEXT NOT NULL CHECK(cli IN ('codex','claude')),
+			name TEXT NOT NULL,
+			base_url TEXT NOT NULL,
+			model TEXT NOT NULL,
+			secret_json TEXT NOT NULL,
+			key_hint TEXT,
+			active INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+			FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_cli_config_presets_agent_cli ON cli_config_presets(user_id, agent_id, cli, updated_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
 			agent_id TEXT NOT NULL,
@@ -306,6 +323,116 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 	}
 	return tx.Commit()
+}
+
+type CLIConfigPreset struct {
+	ID        string                   `json:"id"`
+	UserID    string                   `json:"-"`
+	AgentID   string                   `json:"agentId"`
+	CLI       string                   `json:"cli"`
+	Name      string                   `json:"name"`
+	BaseURL   string                   `json:"baseUrl"`
+	Model     string                   `json:"model"`
+	Secret    protocol.EncryptedSecret `json:"-"`
+	KeyHint   string                   `json:"keyHint,omitempty"`
+	Active    bool                     `json:"active"`
+	CreatedAt int64                    `json:"createdAt"`
+	UpdatedAt int64                    `json:"updatedAt"`
+}
+
+func (s *Store) CreateCLIConfigPreset(ctx context.Context, preset CLIConfigPreset) (CLIConfigPreset, error) {
+	if preset.ID == "" {
+		preset.ID = NewID("mcp")
+	}
+	now := time.Now().Unix()
+	preset.CreatedAt, preset.UpdatedAt = now, now
+	raw, err := json.Marshal(preset.Secret)
+	if err != nil {
+		return CLIConfigPreset{}, err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO cli_config_presets
+		(id,user_id,agent_id,cli,name,base_url,model,secret_json,key_hint,active,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, preset.ID, preset.UserID, preset.AgentID, preset.CLI,
+		preset.Name, preset.BaseURL, preset.Model, string(raw), preset.KeyHint, boolInt(preset.Active), now, now)
+	return preset, err
+}
+
+func (s *Store) ListCLIConfigPresets(ctx context.Context, userID, agentID string) ([]CLIConfigPreset, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,user_id,agent_id,cli,name,base_url,model,secret_json,COALESCE(key_hint,''),active,created_at,updated_at
+		FROM cli_config_presets WHERE user_id=? AND agent_id=? ORDER BY cli,name,updated_at DESC`, userID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CLIConfigPreset
+	for rows.Next() {
+		var p CLIConfigPreset
+		var raw string
+		var active int
+		if err := rows.Scan(&p.ID, &p.UserID, &p.AgentID, &p.CLI, &p.Name, &p.BaseURL, &p.Model, &raw, &p.KeyHint, &active, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(raw), &p.Secret); err != nil {
+			return nil, err
+		}
+		p.Active = active != 0
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CLIConfigPresetByID(ctx context.Context, id, userID, agentID string) (CLIConfigPreset, error) {
+	var p CLIConfigPreset
+	var raw string
+	var active int
+	err := s.db.QueryRowContext(ctx, `SELECT id,user_id,agent_id,cli,name,base_url,model,secret_json,COALESCE(key_hint,''),active,created_at,updated_at
+		FROM cli_config_presets WHERE id=? AND user_id=? AND agent_id=?`, id, userID, agentID).Scan(&p.ID, &p.UserID, &p.AgentID, &p.CLI, &p.Name, &p.BaseURL, &p.Model, &raw, &p.KeyHint, &active, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CLIConfigPreset{}, ErrNotFound
+	}
+	if err != nil {
+		return CLIConfigPreset{}, err
+	}
+	if err := json.Unmarshal([]byte(raw), &p.Secret); err != nil {
+		return CLIConfigPreset{}, err
+	}
+	p.Active = active != 0
+	return p, nil
+}
+
+func (s *Store) ActivateCLIConfigPreset(ctx context.Context, id, userID, agentID, cli string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE cli_config_presets SET active=0 WHERE user_id=? AND agent_id=? AND cli=?`, userID, agentID, cli); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE cli_config_presets SET active=1,updated_at=? WHERE id=? AND user_id=? AND agent_id=? AND cli=?`, time.Now().Unix(), id, userID, agentID, cli)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ClearActiveCLIConfigPreset(ctx context.Context, userID, agentID, cli string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE cli_config_presets SET active=0 WHERE user_id=? AND agent_id=? AND cli=?`, userID, agentID, cli)
+	return err
+}
+
+func (s *Store) DeleteCLIConfigPreset(ctx context.Context, id, userID, agentID string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM cli_config_presets WHERE id=? AND user_id=? AND agent_id=?`, id, userID, agentID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) MarkUnfinishedRunsFailed(ctx context.Context, reason string) (int64, error) {
@@ -1906,6 +2033,32 @@ func (s *Store) ListOrchestrationEvents(ctx context.Context, runID string, limit
 		)
 		ORDER BY seq ASC
 	`, runID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OrchestrationEvent
+	for rows.Next() {
+		event, err := scanOrchestrationEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
+// ListOrchestrationUsageTimeline returns the complete, compact subset needed
+// for usage aggregation and native-session discovery. It intentionally omits
+// high-volume delta and command events so long runs do not lose early rounds.
+func (s *Store) ListOrchestrationUsageTimeline(ctx context.Context, runID string) ([]OrchestrationEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, run_id, seq, kind, COALESCE(source,''), COALESCE(severity,''), COALESCE(role,''), COALESCE(cli,''), COALESCE(turn_id,''),
+			COALESCE(content,''), COALESCE(status,''), COALESCE(error,''), COALESCE(data_json,''), created_at
+		FROM orchestration_events
+		WHERE run_id = ? AND kind IN ('run.start', 'turn.start', 'turn.usage', 'run.end')
+		ORDER BY seq ASC
+	`, runID)
 	if err != nil {
 		return nil, err
 	}

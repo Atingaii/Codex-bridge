@@ -157,9 +157,12 @@ export function OrchestrationWorkspace({
   const endRef = useRef<HTMLDivElement | null>(null);
   const collapsedTimelineRunIdRef = useRef('');
   const refreshOrchestrationInFlightRef = useRef<Promise<void> | null>(null);
+  const olderEventsLoadInFlightRef = useRef(false);
   const eventMaxSeqByRunRef = useRef<Record<string, number>>({});
   const eventMinSeqByRunRef = useRef<Record<string, number>>({});
   const orchestrationBootedRef = useRef(false);
+  const agentSelectionEpochRef = useRef(0);
+  const draftingRunRef = useRef(false);
   const pathRunId = useMemo(() => orchestrationRunIdFromPath(path), [path]);
 
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
@@ -281,7 +284,8 @@ export function OrchestrationWorkspace({
 
   const loadOlderEvents = useCallback(async () => {
     const runId = activeRunIdRef.current;
-    if (!runId || loadingOlderEvents || !hasOlderEventsByRun[runId]) return;
+    if (!runId || loadingOlderEvents || olderEventsLoadInFlightRef.current || !hasOlderEventsByRun[runId]) return;
+    olderEventsLoadInFlightRef.current = true;
     const container = scrollRef.current;
     const previousScrollHeight = container?.scrollHeight || 0;
     const previousScrollTop = container?.scrollTop || 0;
@@ -289,30 +293,15 @@ export function OrchestrationWorkspace({
     stickToBottomRef.current = false;
     try {
       const incoming = await loadRunEvents(runId, false, 'before');
-      // A history page is intentionally inserted above the current viewport.
-      // Keeping the old scroll anchor makes a successful click look like a no-op,
-      // so reveal the newly loaded page and expand its turn groups.
-      if (incoming.length > 0) {
-        setCollapsedTimelineGroups((current) => {
-          const next = { ...current };
-          incoming.forEach((event) => {
-            if (event.turnId) next[`turn:${runId}:${event.turnId}`] = false;
-          });
-          return next;
-        });
-      }
+      // Keep the user's viewport anchored while the older page is inserted.
       window.requestAnimationFrame(() => {
         const nextContainer = scrollRef.current;
         if (!nextContainer || activeRunIdRef.current !== runId) return;
-        if (incoming.length > 0) {
-          nextContainer.scrollTop = 0;
-          return;
-        }
-        // Preserve the current position only when the server has no page to add.
         const delta = nextContainer.scrollHeight - previousScrollHeight;
         nextContainer.scrollTop = previousScrollTop + Math.max(0, delta);
       });
     } finally {
+      olderEventsLoadInFlightRef.current = false;
       if (activeRunIdRef.current === runId) setLoadingOlderEvents(false);
     }
   }, [hasOlderEventsByRun, loadRunEvents, loadingOlderEvents]);
@@ -339,7 +328,10 @@ export function OrchestrationWorkspace({
     const nearBottom = isNearBottom(container);
     stickToBottomRef.current = nearBottom;
     setShowScrollBottom(timelineItems.length > 0 && !nearBottom);
-  }, [timelineItems.length]);
+    if (container.scrollTop < 240 && hasOlderEventsByRun[activeRunIdRef.current] && !loadingOlderEvents) {
+      void loadOlderEvents().catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
+    }
+  }, [hasOlderEventsByRun, loadOlderEvents, loadingOlderEvents, t.failedLoadOrchestration, timelineItems.length]);
 
   const clearReconnect = useCallback(() => {
     if (reconnectTimerRef.current !== null) {
@@ -452,6 +444,7 @@ export function OrchestrationWorkspace({
   }, [applyEvent, clearReconnect, closeWS, loadRun, loadRunEvents, startWSHeartbeat, t.connected, t.connecting, t.connectionError, t.disconnected]);
 
   const activateRun = useCallback(async (run: OrchestrationRun, options: { syncURL?: boolean; replaceURL?: boolean } = {}) => {
+    draftingRunRef.current = false;
     const runAgentId = run.agentId || selectedAgentIdRef.current;
     timelineOrderRef.current = 0;
     activeRunIdRef.current = run.id;
@@ -491,6 +484,7 @@ export function OrchestrationWorkspace({
   }, [closeWS, connectRun, loadRunEvents, navigate, t.idle]);
 
   const selectRun = useCallback(async (runId: string, options: { syncURL?: boolean; replaceURL?: boolean } = {}) => {
+    draftingRunRef.current = false;
     timelineOrderRef.current = 0;
     activeRunIdRef.current = runId;
     setActiveRunId(runId);
@@ -511,6 +505,9 @@ export function OrchestrationWorkspace({
   }, []);
 
   const switchAgentRun = useCallback(async (agentId: string, availableRuns: OrchestrationRun[] = runs) => {
+    const selectionEpoch = agentSelectionEpochRef.current;
+    const isCurrentSelection = () => selectionEpoch === agentSelectionEpochRef.current && selectedAgentIdRef.current === agentId;
+    if (!isCurrentSelection()) return;
     if (!agentId) {
       clearActiveOrchestration();
       return;
@@ -534,26 +531,32 @@ export function OrchestrationWorkspace({
     }
     if (!nextRun) nextRun = scopedRuns[0];
     if (!nextRun) {
+      if (!isCurrentSelection()) return;
       clearActiveOrchestration();
       forgetActiveOrchestrationRunForAgent(agentId);
       return;
     }
+    if (!isCurrentSelection()) return;
     activeRunIdRef.current = nextRun.id;
     setActiveRunId(nextRun.id);
     const loaded = await loadRun(nextRun.id);
-    if (activeRunIdRef.current !== nextRun.id) return;
+    if (activeRunIdRef.current !== nextRun.id || !isCurrentSelection()) return;
     await activateRun(loaded);
   }, [activateRun, clearActiveOrchestration, loadRun, runs]);
 
   const refreshOrchestration = useCallback(async () => {
     if (refreshOrchestrationInFlightRef.current) return refreshOrchestrationInFlightRef.current;
     const task = (async () => {
+      const refreshEpoch = agentSelectionEpochRef.current;
+      const isCurrentRefresh = () => refreshEpoch === agentSelectionEpochRef.current;
       setRefreshingOrchestration(true);
       try {
         const loadedAgents = await loadAgents();
+        if (!isCurrentRefresh()) return;
         let directRun: OrchestrationRun | null = null;
         if (pathRunId) {
           directRun = await loadRun(pathRunId);
+          if (!isCurrentRefresh()) return;
         }
         const savedAgentId = directRun?.agentId || localStorage.getItem('codexBridge.selectedAgentId') || selectedAgentIdRef.current;
         const agentId = directRun?.agentId || preferredAgentID(loadedAgents, savedAgentId);
@@ -562,10 +565,12 @@ export function OrchestrationWorkspace({
         if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
         else localStorage.removeItem('codexBridge.selectedAgentId');
         const loadedRuns = await loadRuns(agentId);
+        if (!isCurrentRefresh() || selectedAgentIdRef.current !== agentId) return;
         if (directRun) {
           await activateRun(directRun, { syncURL: false });
           return;
         }
+        if (draftingRunRef.current) return;
         const currentRun = loadedRuns.find((run) => run.id === activeRunIdRef.current);
         if (currentRun && (!agentId || currentRun.agentId === agentId)) {
           rememberActiveOrchestrationRunForAgent(currentRun.agentId, currentRun.id);
@@ -659,6 +664,16 @@ export function OrchestrationWorkspace({
     // empty; clearing then would wipe the remembered run and strip a deep-link
     // URL on every page load.
     if (!agentsLoaded) return;
+    // A deep-linked run is an explicit selection. Agent synchronization can
+    // update endpoint metadata, but must never replace the URL-selected run
+    // with the browser's remembered run for another endpoint.
+    if (pathRunId) {
+      if (activeRunIdRef.current !== pathRunId) {
+        selectRun(pathRunId, { syncURL: false }).catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
+      }
+      return;
+    }
+    if (draftingRunRef.current) return;
     if (!selectedAgent?.id) {
       clearActiveOrchestration();
       return;
@@ -666,7 +681,7 @@ export function OrchestrationWorkspace({
     const currentRun = runs.find((run) => run.id === activeRunIdRef.current);
     if (currentRun?.agentId === selectedAgent.id) return;
     switchAgentRun(selectedAgent.id).catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
-  }, [agentsLoaded, clearActiveOrchestration, runs, selectedAgent?.id, switchAgentRun, t.failedLoadOrchestration]);
+  }, [agentsLoaded, clearActiveOrchestration, pathRunId, runs, selectRun, selectedAgent?.id, switchAgentRun, t.failedLoadOrchestration]);
 
   useEffect(() => {
     if (!activeRunId || !activeOrchestrationStatus(activeRun?.status)) return;
@@ -805,10 +820,12 @@ export function OrchestrationWorkspace({
   };
 
   const selectAgent = (agentId: string) => {
+    agentSelectionEpochRef.current += 1;
     selectedAgentIdRef.current = agentId;
     setSelectedAgentId(agentId);
     if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
     else localStorage.removeItem('codexBridge.selectedAgentId');
+    if (draftingRunRef.current) return;
     switchAgentRun(agentId).catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
   };
 
@@ -852,11 +869,16 @@ export function OrchestrationWorkspace({
             {t.workerPairCodexCodex}
           </button>
         </div>
+		{!isToolbar && workerPair === 'codex-codex' && (
+			<p className="text-xs leading-relaxed text-muted-foreground">{t.codexSharedConfiguration}</p>
+		)}
       </div>
     );
   };
 
   const startDraftRun = () => {
+    agentSelectionEpochRef.current += 1;
+    draftingRunRef.current = true;
     clearActiveOrchestration(true);
     setPrompt(t.reviewCurrentRepository);
     setFiles([]);

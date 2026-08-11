@@ -81,6 +81,29 @@ func TestBuildLedgerOrchestrationRunStatsUsesFirstRunStartAcrossRounds(t *testin
 	}
 }
 
+func TestBuildLedgerOrchestrationRunStatsIncludesEveryObservedRound(t *testing.T) {
+	run := store.OrchestrationRun{ID: "orc_ledger_all_rounds", CreatedAt: 100, FinishedAt: 170, Status: store.OrchestrationCompleted}
+	timeline := make([]store.OrchestrationEvent, 0, 6)
+	for round := 1; round <= 6; round++ {
+		timeline = append(timeline, store.OrchestrationEvent{Kind: "run.start", CreatedAt: int64(100 + round*10), RunStartData: &protocol.RunStartData{Round: round}})
+	}
+	stats := buildOrchestrationRunStatsWithLedger(run, timeline, []protocol.OrchestrationUsageEvent{
+		{CLI: "codex", Model: "gpt-5.6-sol", OccurredAt: 111, InputTokens: 10},
+		{CLI: "codex", Model: "gpt-5.6-sol", OccurredAt: 161, InputTokens: 20},
+	}, []store.OrchestrationUsageSync{{Status: "complete"}})
+	if len(stats.Rounds) != 6 {
+		t.Fatalf("rounds = %#v", stats.Rounds)
+	}
+	for i, round := range stats.Rounds {
+		if round.Round != i+1 {
+			t.Fatalf("round %d = %#v", i, round)
+		}
+	}
+	if stats.Rounds[1].TotalTokens != 0 || stats.Rounds[5].TotalTokens != 20 {
+		t.Fatalf("rounds = %#v", stats.Rounds)
+	}
+}
+
 func TestUsageOverviewRange(t *testing.T) {
 	tests := []struct {
 		name       string

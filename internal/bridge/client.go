@@ -27,6 +27,7 @@ type Client struct {
 	instance       string
 	sessions       *SessionManager
 	orchestrations *OrchestrationManager
+	cliConfig      *cliConfigManager
 	shutdown       chan struct{}
 	shutdownOnce   chan struct{}
 	connectedAt    time.Time
@@ -51,6 +52,10 @@ func (c *Client) Run(ctx context.Context) error {
 	c.instance = store.NewID("bin")
 	c.sessions = NewSessionManager(c.cfg)
 	c.orchestrations = NewOrchestrationManager(c.cfg)
+	c.cliConfig, err = newCLIConfigManager(c.cfg)
+	if err != nil {
+		return fmt.Errorf("initialize CLI configuration switcher: %w", err)
+	}
 
 	minDelay := c.cfg.Bridge.ReconnectMin.Duration
 	maxDelay := c.cfg.Bridge.ReconnectMax.Duration
@@ -129,6 +134,13 @@ func bridgeReconnectDelay(current, minDelay, maxDelay, connectedFor time.Duratio
 
 func (c *Client) connectOnce(ctx context.Context, token string) error {
 	c.connectedAt = time.Time{}
+	if c.cliConfig == nil {
+		manager, err := newCLIConfigManager(c.cfg)
+		if err != nil {
+			return fmt.Errorf("initialize CLI configuration switcher: %w", err)
+		}
+		c.cliConfig = manager
+	}
 	wsURL, err := c.bridgeURL(token)
 	if err != nil {
 		return err
@@ -144,6 +156,8 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 	}
 	defer ws.Close()
 
+	capabilities := BridgeCapabilities(c.cfg)
+	capabilities.ConfigSwitcher = c.cliConfig.capability()
 	reg := protocol.RegisterPayload{
 		Name:         c.cfg.Bridge.Name,
 		MachineID:    c.machineID,
@@ -151,7 +165,7 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 		Version:      c.version,
 		Instance:     c.instance,
 		WorkingDirs:  DiscoverWorkingDirs(c.cfg),
-		Capabilities: BridgeCapabilities(c.cfg),
+		Capabilities: capabilities,
 	}
 	if err := ws.WriteJSON(protocol.MustEnvelope(protocol.TypeRegister, "", reg)); err != nil {
 		return err
@@ -470,6 +484,15 @@ func (c *Client) handleEnvelope(ctx context.Context, env protocol.Envelope, out 
 		go func() {
 			result := scanOrchestrationUsage(payload)
 			send(out, protocol.MustEnvelope(protocol.TypeOrchestrationUsageSyncResult, "", result))
+		}()
+	case protocol.TypeCLIConfigTest, protocol.TypeCLIConfigApply, protocol.TypeCLIConfigReset:
+		payload, err := protocol.Decode[protocol.CLIConfigRequest](env)
+		if err != nil || payload.RequestID == "" {
+			return
+		}
+		go func() {
+			result := c.cliConfig.handle(ctx, env.Type, payload)
+			send(out, protocol.MustEnvelope(protocol.TypeCLIConfigResult, "", result))
 		}()
 	default:
 		send(out, protocol.MustEnvelope(protocol.TypeError, env.Sid, protocol.ErrorPayload{Code: "BAD_TYPE", Message: "unsupported bridge frame"}))

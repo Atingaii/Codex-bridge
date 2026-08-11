@@ -98,6 +98,9 @@ Keep the server API unchanged and partition in the frontend:
   without deleting other endpoints' runs.
 - Starting a run from an empty orchestration endpoint space creates the run for
   that selected endpoint.
+- An asynchronous refresh started for one endpoint must be ignored after the
+  user selects another endpoint; late session/run loads must not restore the
+  previous endpoint or overwrite `codexBridge.selectedAgentId`.
 - Full verification passes:
   `/usr/local/go/bin/go test ./...`, `cd frontend && npm run build`,
   `CGO_ENABLED=0 /usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .`,

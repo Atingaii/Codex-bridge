@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -319,6 +320,146 @@ func TestCodexAppServerRunnerWaitsForNativeReconnectCompletion(t *testing.T) {
 	}
 	if len(notices) != 1 || notices[0].Category != "codex-native-reconnect-progress" || notices[0].Data["attempt"] != 1 || notices[0].Data["max"] != 5 {
 		t.Fatalf("native reconnect notices = %#v", notices)
+	}
+}
+
+func TestCodexAppServerRunnerRepeatedNativeReconnectProgressHasFixedDeadline(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerRepeatedNativeReconnectScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	runner := NewCodexAppServerRunner(&cfg)
+	runner.nativeReconnectGracePeriod = 120 * time.Millisecond
+
+	started := time.Now()
+	_, err := runner.Prompt(context.Background(), RunnerRequest{Content: "do not remain running"}, func(RunnerUpdate) {})
+	if err == nil || !strings.Contains(err.Error(), "native reconnect did not recover") {
+		t.Fatalf("native reconnect error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("repeated reconnect progress extended fixed deadline to %s", elapsed)
+	}
+}
+
+func TestCodexAppServerRunnerConvergesAfterReconnectWhenTerminalEventIsMissing(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerReconnectWithoutTerminalScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	runner := NewCodexAppServerRunner(&cfg)
+	runner.postReconnectTerminalQuietPeriod = 80 * time.Millisecond
+
+	result, err := runner.Prompt(context.Background(), RunnerRequest{Content: "converge without terminal event"}, func(RunnerUpdate) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "recovered final answer" {
+		t.Fatalf("result content = %q", result.Content)
+	}
+}
+
+func TestCodexAppServerRunnerDoesNotConvergeWhilePostReconnectCommandRuns(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerReconnectThenLongCommandScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	runner := NewCodexAppServerRunner(&cfg)
+	runner.postReconnectTerminalQuietPeriod = 80 * time.Millisecond
+
+	started := time.Now()
+	result, err := runner.Prompt(context.Background(), RunnerRequest{Content: "wait for the command"}, func(RunnerUpdate) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed < 160*time.Millisecond {
+		t.Fatalf("runner converged while command was active after %s", elapsed)
+	}
+	if result.Content != "starting checkcheck complete" {
+		t.Fatalf("result content = %q", result.Content)
+	}
+}
+
+func TestCodexAppServerRunnerCancellationInterruptsPostReconnectQuietWindow(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerReconnectWithoutTerminalScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	runner := NewCodexAppServerRunner(&cfg)
+	runner.postReconnectTerminalQuietPeriod = time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := runner.Prompt(ctx, RunnerRequest{Content: "cancel during quiet window"}, func(RunnerUpdate) {})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancellation error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("cancellation waited for quiet window: %s", elapsed)
+	}
+}
+
+func TestCodexAppServerRunnerDoesNotCompleteFailedPostReconnectCommand(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerReconnectThenFailedCommandScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	runner := NewCodexAppServerRunner(&cfg)
+	runner.postReconnectTerminalQuietPeriod = 60 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 160*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := runner.Prompt(ctx, RunnerRequest{Content: "wait for command follow-up"}, func(RunnerUpdate) {})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("failed command result = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed < 120*time.Millisecond {
+		t.Fatalf("failed command was misreported as complete after %s", elapsed)
+	}
+}
+
+func TestCodexAppServerRunnerDoesNotConvergeFromPostReconnectDeltaAlone(t *testing.T) {
+	tmp := t.TempDir()
+	codexPath := filepath.Join(tmp, "codex")
+	if err := os.WriteFile(codexPath, []byte(fakeCodexAppServerReconnectDeltaOnlyScript()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.CodexPath = codexPath
+	cfg.Bridge.CWD = tmp
+	runner := NewCodexAppServerRunner(&cfg)
+	runner.postReconnectTerminalQuietPeriod = 60 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 160*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := runner.Prompt(ctx, RunnerRequest{Content: "do not accept partial output"}, func(RunnerUpdate) {})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("partial delta result = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed < 120*time.Millisecond {
+		t.Fatalf("partial delta was misreported as complete after %s", elapsed)
 	}
 }
 
@@ -681,6 +822,146 @@ for line in sys.stdin:
         emit({"method": "error", "params": {"threadId": "thr_reconnect", "turnId": "turn_reconnect", "message": "Reconnecting... 1/5"}})
         emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_reconnect", "turnId": "turn_reconnect", "delta": "completed after native reconnect"}})
         emit({"method": "turn/completed", "params": {"threadId": "thr_reconnect", "turn": {"id": "turn_reconnect", "status": "completed"}}})
+`
+}
+
+func fakeCodexAppServerRepeatedNativeReconnectScript() string {
+	return `#!/usr/bin/env python3
+import json
+import sys
+import threading
+import time
+
+write_lock = threading.Lock()
+
+def emit(obj):
+    with write_lock:
+        print(json.dumps(obj, separators=(",", ":")), flush=True)
+
+def emit_reconnect_progress():
+    for _ in range(20):
+        emit({"method": "error", "params": {"threadId": "thr_reconnect_loop", "turnId": "turn_reconnect_loop", "message": "Reconnecting... 1/5"}})
+        time.sleep(0.04)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": "thr_reconnect_loop"}}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "turn/start":
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_reconnect_loop", "status": "inProgress"}}})
+        threading.Thread(target=emit_reconnect_progress, daemon=True).start()
+`
+}
+
+func fakeCodexAppServerReconnectWithoutTerminalScript() string {
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+def emit(obj):
+    print(json.dumps(obj, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": "thr_reconnect_no_terminal"}}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "turn/start":
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_reconnect_no_terminal", "status": "inProgress"}}})
+        emit({"method": "error", "params": {"threadId": "thr_reconnect_no_terminal", "turnId": "turn_reconnect_no_terminal", "message": "Reconnecting... 1/5"}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_reconnect_no_terminal", "turnId": "turn_reconnect_no_terminal", "delta": "recovered final answer"}})
+        emit({"method": "item/completed", "params": {"threadId": "thr_reconnect_no_terminal", "turnId": "turn_reconnect_no_terminal", "item": {"id": "msg_final", "type": "agentMessage", "text": "recovered final answer", "status": "completed"}}})
+`
+}
+
+func fakeCodexAppServerReconnectThenLongCommandScript() string {
+	return `#!/usr/bin/env python3
+import json
+import sys
+import time
+
+def emit(obj):
+    print(json.dumps(obj, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": "thr_reconnect_command"}}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "turn/start":
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_reconnect_command", "status": "inProgress"}}})
+        emit({"method": "error", "params": {"threadId": "thr_reconnect_command", "turnId": "turn_reconnect_command", "message": "Reconnecting... 1/5"}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_reconnect_command", "turnId": "turn_reconnect_command", "delta": "starting check"}})
+        emit({"method": "item/completed", "params": {"threadId": "thr_reconnect_command", "turnId": "turn_reconnect_command", "item": {"id": "msg_progress", "type": "agentMessage", "text": "starting check", "status": "completed"}}})
+        emit({"method": "item/started", "params": {"threadId": "thr_reconnect_command", "turnId": "turn_reconnect_command", "item": {"id": "cmd_long", "type": "commandExecution", "command": "make check", "status": "running"}}})
+        time.sleep(0.2)
+        emit({"method": "item/completed", "params": {"threadId": "thr_reconnect_command", "turnId": "turn_reconnect_command", "item": {"id": "cmd_long", "type": "commandExecution", "command": "make check", "status": "completed", "exitCode": 0, "aggregatedOutput": "ok"}}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_reconnect_command", "turnId": "turn_reconnect_command", "delta": "check complete"}})
+        emit({"method": "turn/completed", "params": {"threadId": "thr_reconnect_command", "turn": {"id": "turn_reconnect_command", "status": "completed"}}})
+`
+}
+
+func fakeCodexAppServerReconnectThenFailedCommandScript() string {
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+def emit(obj):
+    print(json.dumps(obj, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": "thr_reconnect_failed"}}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "turn/start":
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_reconnect_failed", "status": "inProgress"}}})
+        emit({"method": "error", "params": {"threadId": "thr_reconnect_failed", "turnId": "turn_reconnect_failed", "message": "Reconnecting... 1/5"}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_reconnect_failed", "turnId": "turn_reconnect_failed", "delta": "running check"}})
+        emit({"method": "item/completed", "params": {"threadId": "thr_reconnect_failed", "turnId": "turn_reconnect_failed", "item": {"id": "msg_progress", "type": "agentMessage", "text": "running check", "status": "completed"}}})
+        emit({"method": "item/started", "params": {"threadId": "thr_reconnect_failed", "turnId": "turn_reconnect_failed", "item": {"id": "cmd_failed", "type": "commandExecution", "command": "make check", "status": "running"}}})
+        emit({"method": "item/completed", "params": {"threadId": "thr_reconnect_failed", "turnId": "turn_reconnect_failed", "item": {"id": "cmd_failed", "type": "commandExecution", "command": "make check", "status": "failed", "exitCode": 1, "aggregatedOutput": "failed"}}})
+`
+}
+
+func fakeCodexAppServerReconnectDeltaOnlyScript() string {
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+def emit(obj):
+    print(json.dumps(obj, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        emit({"id": msg["id"], "result": {"userAgent": "fake"}})
+    elif method == "thread/start":
+        emit({"id": msg["id"], "result": {"thread": {"id": "thr_reconnect_delta"}}})
+    elif method == "thread/unsubscribe":
+        emit({"id": msg["id"], "result": {}})
+    elif method == "turn/start":
+        emit({"id": msg["id"], "result": {"turn": {"id": "turn_reconnect_delta", "status": "inProgress"}}})
+        emit({"method": "error", "params": {"threadId": "thr_reconnect_delta", "turnId": "turn_reconnect_delta", "message": "Reconnecting... 1/5"}})
+        emit({"method": "item/agentMessage/delta", "params": {"threadId": "thr_reconnect_delta", "turnId": "turn_reconnect_delta", "delta": "partial answer"}})
 `
 }
 

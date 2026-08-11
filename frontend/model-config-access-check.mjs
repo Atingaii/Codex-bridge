@@ -17,3 +17,4 @@ assert.match(switcher, /method: editing \? 'PUT' : 'POST'/);
 assert.match(switcher, /presetId: editingPresetId \|\| undefined/);
 assert.match(switcher, /t\.keepExistingAPIKey/);
 assert.match(switcher, /aria-label=\{t\.editPreset\}/);
+assert.match(switcher, /<Pencil[^>]*\/>\{t\.editPreset\}/);

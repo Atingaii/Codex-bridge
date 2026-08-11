@@ -36,6 +36,7 @@ const (
 	unknownContextWindow = 200_000
 	cliConfigProbeLimit  = 75 * time.Second
 	cliConfigCallLimit   = 30 * time.Second
+	claudeModelSlot      = "claude-sonnet-4-6"
 )
 
 var bridgeModelsMu sync.RWMutex
@@ -45,11 +46,15 @@ type cliConfigManager struct {
 	mu      sync.Mutex
 	private *ecdh.PrivateKey
 	root    string
+	state   cliConfigState
 }
 
 type cliConfigState struct {
-	CodexModel  string `json:"codexModel,omitempty"`
-	ClaudeModel string `json:"claudeModel,omitempty"`
+	CodexModel                string `json:"codexModel,omitempty"`
+	ClaudeModel               string `json:"claudeModel,omitempty"`
+	ClaudeOverrideKey         string `json:"claudeOverrideKey,omitempty"`
+	ClaudeOverridePrevious    string `json:"claudeOverridePrevious,omitempty"`
+	ClaudeOverrideHadPrevious bool   `json:"claudeOverrideHadPrevious,omitempty"`
 }
 
 func newCLIConfigManager(cfg *config.Config) (*cliConfigManager, error) {
@@ -67,6 +72,7 @@ func newCLIConfigManager(cfg *config.Config) (*cliConfigManager, error) {
 	}
 	var state cliConfigState
 	if raw, err := os.ReadFile(filepath.Join(root, "state.json")); err == nil && json.Unmarshal(raw, &state) == nil {
+		m.state = state
 		setBridgeModels(cfg, state.CodexModel, state.ClaudeModel)
 	}
 	return m, nil
@@ -444,12 +450,14 @@ func (m *cliConfigManager) apply(cli, base, model, key string, models []string) 
 		env["ANTHROPIC_BASE_URL"] = strings.TrimRight(base, "/")
 		env["ANTHROPIC_AUTH_TOKEN"] = key
 		delete(env, "ANTHROPIC_API_KEY")
-		env["ANTHROPIC_MODEL"] = model
-		for _, name := range []string{"ANTHROPIC_REASONING_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
+		for _, name := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_REASONING_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
 			delete(env, name)
 		}
 		settings["env"] = env
-		settings["model"] = model
+		if err := m.applyClaudeModelOverride(settings, model); err != nil {
+			return err
+		}
+		settings["model"] = claudeModelSlot
 		encoded, err := json.MarshalIndent(settings, "", "  ")
 		if err != nil {
 			return err
@@ -509,6 +517,9 @@ func (m *cliConfigManager) reset(cli string) error {
 				settings["env"] = env
 			}
 		}
+		if err := m.restoreClaudeModelOverride(settings); err != nil {
+			return err
+		}
 		encoded, err := json.MarshalIndent(settings, "", "  ")
 		if err != nil {
 			return err
@@ -516,6 +527,9 @@ func (m *cliConfigManager) reset(cli string) error {
 		if err := backupAndWrite(path, append(encoded, '\n'), 0o600); err != nil {
 			return err
 		}
+		m.state.ClaudeOverrideKey = ""
+		m.state.ClaudeOverridePrevious = ""
+		m.state.ClaudeOverrideHadPrevious = false
 		codexModel, _ := bridgeModels(m.cfg)
 		setBridgeModels(m.cfg, codexModel, "")
 	}
@@ -524,11 +538,76 @@ func (m *cliConfigManager) reset(cli string) error {
 
 func (m *cliConfigManager) writeState() error {
 	codexModel, claudeModel := bridgeModels(m.cfg)
-	encoded, err := json.Marshal(cliConfigState{CodexModel: codexModel, ClaudeModel: claudeModel})
+	m.state.CodexModel = codexModel
+	m.state.ClaudeModel = claudeModel
+	encoded, err := json.Marshal(m.state)
 	if err != nil {
 		return err
 	}
 	return atomicWrite(filepath.Join(m.root, "state.json"), append(encoded, '\n'), 0o600)
+}
+
+func (m *cliConfigManager) applyClaudeModelOverride(settings map[string]any, model string) error {
+	if m.state.ClaudeOverrideKey != "" && m.state.ClaudeOverrideKey != claudeModelSlot {
+		if err := m.restoreClaudeModelOverride(settings); err != nil {
+			return err
+		}
+		m.state.ClaudeOverrideKey = ""
+		m.state.ClaudeOverridePrevious = ""
+		m.state.ClaudeOverrideHadPrevious = false
+	}
+	overrides, err := claudeModelOverrides(settings)
+	if err != nil {
+		return err
+	}
+	if m.state.ClaudeOverrideKey == "" {
+		previous, exists := overrides[claudeModelSlot]
+		if exists {
+			previousString, ok := previous.(string)
+			if !ok {
+				return errors.New("Claude modelOverrides entry must be a string")
+			}
+			m.state.ClaudeOverridePrevious = previousString
+			m.state.ClaudeOverrideHadPrevious = true
+		}
+		m.state.ClaudeOverrideKey = claudeModelSlot
+	}
+	overrides[claudeModelSlot] = model
+	settings["modelOverrides"] = overrides
+	return nil
+}
+
+func (m *cliConfigManager) restoreClaudeModelOverride(settings map[string]any) error {
+	if m.state.ClaudeOverrideKey == "" {
+		return nil
+	}
+	overrides, err := claudeModelOverrides(settings)
+	if err != nil {
+		return err
+	}
+	if m.state.ClaudeOverrideHadPrevious {
+		overrides[m.state.ClaudeOverrideKey] = m.state.ClaudeOverridePrevious
+	} else {
+		delete(overrides, m.state.ClaudeOverrideKey)
+	}
+	if len(overrides) == 0 {
+		delete(settings, "modelOverrides")
+	} else {
+		settings["modelOverrides"] = overrides
+	}
+	return nil
+}
+
+func claudeModelOverrides(settings map[string]any) (map[string]any, error) {
+	raw, exists := settings["modelOverrides"]
+	if !exists {
+		return map[string]any{}, nil
+	}
+	overrides, ok := raw.(map[string]any)
+	if !ok {
+		return nil, errors.New("Claude modelOverrides must be an object")
+	}
+	return overrides, nil
 }
 
 func bridgeModels(cfg *config.Config) (string, string) {

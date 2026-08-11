@@ -23,10 +23,13 @@ claim. Existing processes are not restarted and task-level provider pinning is
 out of scope. Codex + Codex keeps distinct threads but shares the machine's
 Codex provider/model configuration.
 
-For Claude Code, Bridge selects the requested custom model as the default but
-does not remap the built-in Opus, Sonnet, Haiku, or reasoning aliases. Applying
-a preset also removes stale Bridge-era alias overrides so `/model` does not
-present every built-in choice as the same custom model.
+For Claude Code, Bridge maps one recognized Sonnet model slot to the requested
+provider model through `modelOverrides` and selects that slot as the default.
+This retains native model metadata and avoids unknown-model warnings without
+remapping every Opus, Sonnet, Haiku, or reasoning alias. Applying a preset also
+removes stale Bridge-era environment alias overrides so `/model` does not
+present every built-in choice as the same custom model. Bridge remembers and
+restores any pre-existing value for its managed override slot.
 
 Official reset only removes Bridge-managed custom-provider fields. It neither
 starts nor impersonates an official authorization flow.

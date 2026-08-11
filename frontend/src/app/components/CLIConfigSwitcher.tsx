@@ -196,14 +196,16 @@ export function CLIConfigSwitcher({ agent, t, close }: { agent: Agent; t: UIText
 						<section className="space-y-2">
 							<div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t.providerPresets}</div>
 							{filteredPresets.length ? filteredPresets.map((preset) => (
-								<div key={preset.id} className="flex items-center gap-3 rounded-md border border-border px-3 py-2.5">
+								<div key={preset.id} className="flex flex-col gap-2 rounded-md border border-border px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3">
 									<div className="min-w-0 flex-1">
 										<div className="flex items-center gap-2"><span className="truncate text-sm font-medium">{preset.name}</span>{preset.active && <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">{t.activePreset}</span>}</div>
 										<div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">{preset.model} · {preset.baseUrl}</div>
 									</div>
-									<Button size="sm" variant="secondary" className="h-7" onClick={() => applyPreset(preset)} disabled={!!busy}>{busy === `apply:${preset.id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : t.applyPreset}</Button>
-									<Button size="icon" variant="ghost" className="h-7 w-7 rounded-md text-muted-foreground" onClick={() => editPreset(preset)} disabled={!!busy} aria-label={t.editPreset}><Pencil className="h-3.5 w-3.5" /></Button>
-									<Button size="icon" variant="ghost" className="h-7 w-7 rounded-md text-muted-foreground hover:text-destructive" onClick={() => deletePreset(preset)} disabled={!!busy} aria-label={t.deletePresetConfirm}><Trash2 className="h-3.5 w-3.5" /></Button>
+									<div className="flex shrink-0 items-center gap-1.5">
+										<Button size="sm" variant="secondary" className="h-7" onClick={() => applyPreset(preset)} disabled={!!busy}>{busy === `apply:${preset.id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : t.applyPreset}</Button>
+										<Button size="sm" variant="ghost" className="h-7 gap-1.5 text-muted-foreground" onClick={() => editPreset(preset)} disabled={!!busy} aria-label={t.editPreset}><Pencil className="h-3.5 w-3.5" />{t.editPreset}</Button>
+										<Button size="icon" variant="ghost" className="h-7 w-7 rounded-md text-muted-foreground hover:text-destructive" onClick={() => deletePreset(preset)} disabled={!!busy} aria-label={t.deletePresetConfirm}><Trash2 className="h-3.5 w-3.5" /></Button>
+									</div>
 								</div>
 							)) : <div className="rounded-md border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">{t.noProviderPresets}</div>}
 						</section>

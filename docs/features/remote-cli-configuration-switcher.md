@@ -37,9 +37,12 @@ supplied.
 
 Writes are locked, backed up, written to a temporary user-only file, and
 atomically renamed. Codex updates its model/provider section and native
-`~/.codex/auth.json` credential file. Claude Code parses JSON and updates only the
-managed model and connection environment fields. Official reset removes only
-those managed fields. Active processes are left alone.
+`~/.codex/auth.json` credential file. Claude Code parses JSON, updates only the
+managed connection fields, and maps the custom model through one recognized
+Sonnet `modelOverrides` slot so native metadata remains available. A prior value
+in that slot is remembered and restored by official reset. Hooks, MCP, skills,
+permissions, and other model mappings remain unchanged. Active processes are
+left alone.
 
 Preset updates are ownership-scoped by user, agent, and preset ID. The Hub can
 reuse the existing Bridge-encrypted secret for connection testing and saving,
@@ -55,6 +58,8 @@ active marker until the user applies it again; renaming alone preserves it.
 - [x] URL normalization and model discovery are covered by tests.
 - [x] Slow inference providers have bounded end-to-end probe budgets.
 - [x] Apply/reset preserves unrelated TOML/JSON configuration.
+- [x] Claude custom models retain native metadata without remapping every model
+  picker choice.
 - [x] Legacy Bridges retain existing chat and orchestration behavior.
 - [x] Codex + Codex UI states that both workers share one configuration.
 - [x] Embedded frontend and Go/frontend test suites pass.

@@ -77,7 +77,7 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	claudeOriginal := `{"permissions":{"allow":["Read"]},"env":{"KEEP":"yes","ANTHROPIC_REASONING_MODEL":"old-model","ANTHROPIC_DEFAULT_OPUS_MODEL":"old-model","ANTHROPIC_DEFAULT_SONNET_MODEL":"old-model","ANTHROPIC_DEFAULT_HAIKU_MODEL":"old-model"}}`
+	claudeOriginal := `{"permissions":{"allow":["Read"]},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"agentguard"}]}]},"modelOverrides":{"claude-opus-4-6":"keep-opus","claude-sonnet-4-6":"keep-sonnet"},"env":{"KEEP":"yes","ANTHROPIC_REASONING_MODEL":"old-model","ANTHROPIC_DEFAULT_OPUS_MODEL":"old-model","ANTHROPIC_DEFAULT_SONNET_MODEL":"old-model","ANTHROPIC_DEFAULT_HAIKU_MODEL":"old-model"}}`
 	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(claudeOriginal), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -121,17 +121,21 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	if err := json.Unmarshal([]byte(readTestFile(t, filepath.Join(home, ".claude", "settings.json"))), &claude); err != nil {
 		t.Fatal(err)
 	}
-	if claude["permissions"] == nil || claude["model"] != "claude-model" {
+	if claude["permissions"] == nil || claude["hooks"] == nil || claude["model"] != claudeModelSlot {
 		t.Fatalf("unexpected Claude settings: %#v", claude)
 	}
 	claudeEnv, _ := claude["env"].(map[string]any)
-	if claudeEnv["ANTHROPIC_MODEL"] != "claude-model" || claudeEnv["KEEP"] != "yes" {
+	if _, exists := claudeEnv["ANTHROPIC_MODEL"]; exists || claudeEnv["KEEP"] != "yes" {
 		t.Fatalf("unexpected Claude environment: %#v", claudeEnv)
 	}
 	for _, key := range []string{"ANTHROPIC_REASONING_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
 		if _, exists := claudeEnv[key]; exists {
 			t.Fatalf("Claude alias override %q was not removed: %#v", key, claudeEnv)
 		}
+	}
+	claudeOverrides, _ := claude["modelOverrides"].(map[string]any)
+	if claudeOverrides[claudeModelSlot] != "claude-model" || claudeOverrides["claude-opus-4-6"] != "keep-opus" {
+		t.Fatalf("unexpected Claude model overrides: %#v", claudeOverrides)
 	}
 	if err := m.reset("codex"); err != nil {
 		t.Fatal(err)
@@ -154,8 +158,12 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	if err := json.Unmarshal([]byte(readTestFile(t, filepath.Join(home, ".claude", "settings.json"))), &claude); err != nil {
 		t.Fatal(err)
 	}
-	if claude["permissions"] == nil || claude["model"] != nil || claude["env"].(map[string]any)["KEEP"] != "yes" {
+	if claude["permissions"] == nil || claude["hooks"] == nil || claude["model"] != nil || claude["env"].(map[string]any)["KEEP"] != "yes" {
 		t.Fatalf("unexpected reset Claude settings: %#v", claude)
+	}
+	claudeOverrides, _ = claude["modelOverrides"].(map[string]any)
+	if claudeOverrides[claudeModelSlot] != "keep-sonnet" || claudeOverrides["claude-opus-4-6"] != "keep-opus" {
+		t.Fatalf("Claude model overrides were not restored: %#v", claudeOverrides)
 	}
 }
 

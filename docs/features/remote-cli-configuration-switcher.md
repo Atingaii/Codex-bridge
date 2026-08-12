@@ -44,7 +44,14 @@ fields to that same ID. This mirrors a native third-party-provider
 `settings.json` without depending on a versioned Anthropic model name. Provider
 testing uses the discovered `/v1/messages` endpoint, while the persisted
 `ANTHROPIC_BASE_URL` omits a terminal `/v1` because Claude Code adds that API
-version itself. Hooks,
+version itself. Bridge also applies a reviewed context-window profile based on
+the exact selected model ID. Verified 1M models receive
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000`; known third-party models additionally
+receive `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` so Claude Code
+does not force its generic 200K fallback. Unknown IDs retain native conservative
+behavior rather than inheriting a previous model's window. The first apply
+records any user values for those two Bridge-managed variables and official
+reset restores them. Hooks,
 MCP, skills, permissions, and unrelated settings remain unchanged. Active
 processes are left alone. Orchestration passes the actual provider model to
 Claude Code, and manually configured Bridge models continue to pass through

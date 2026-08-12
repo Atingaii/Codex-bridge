@@ -49,12 +49,20 @@ type cliConfigManager struct {
 }
 
 type cliConfigState struct {
-	CodexModel                string `json:"codexModel,omitempty"`
-	ClaudeModel               string `json:"claudeModel,omitempty"`
-	ClaudeOverrideKey         string `json:"claudeOverrideKey,omitempty"`
-	ClaudeOverridePrevious    string `json:"claudeOverridePrevious,omitempty"`
-	ClaudeOverrideHadPrevious bool   `json:"claudeOverrideHadPrevious,omitempty"`
-	ClaudeConfigManaged       bool   `json:"claudeConfigManaged,omitempty"`
+	CodexModel                string                     `json:"codexModel,omitempty"`
+	ClaudeModel               string                     `json:"claudeModel,omitempty"`
+	ClaudeOverrideKey         string                     `json:"claudeOverrideKey,omitempty"`
+	ClaudeOverridePrevious    string                     `json:"claudeOverridePrevious,omitempty"`
+	ClaudeOverrideHadPrevious bool                       `json:"claudeOverrideHadPrevious,omitempty"`
+	ClaudeConfigManaged       bool                       `json:"claudeConfigManaged,omitempty"`
+	ClaudeContextManaged      bool                       `json:"claudeContextManaged,omitempty"`
+	ClaudeContextPrevious     map[string]managedEnvValue `json:"claudeContextPrevious,omitempty"`
+}
+
+// managedEnvValue preserves a user setting when the Bridge temporarily owns it.
+type managedEnvValue struct {
+	Value  string `json:"value"`
+	Exists bool   `json:"exists"`
 }
 
 func newCLIConfigManager(cfg *config.Config) (*cliConfigManager, error) {
@@ -80,6 +88,12 @@ func newCLIConfigManager(cfg *config.Config) (*cliConfigManager, error) {
 			}
 		} else if state.ClaudeConfigManaged && state.ClaudeModel != "" {
 			if err := m.normalizeManagedClaudeBaseURL(home); err != nil {
+				return nil, err
+			}
+			if err := m.reconcileManagedClaudeContext(home); err != nil {
+				return nil, err
+			}
+			if err := m.writeState(); err != nil {
 				return nil, err
 			}
 		}
@@ -467,6 +481,9 @@ func (m *cliConfigManager) apply(cli, base, model, key string, models []string) 
 		delete(env, "ANTHROPIC_API_KEY")
 		settings["env"] = env
 		setClaudeModelFields(settings, model)
+		if err := m.configureClaudeContext(settings, model); err != nil {
+			return err
+		}
 		encoded, err := json.MarshalIndent(settings, "", "  ")
 		if err != nil {
 			return err
@@ -514,6 +531,9 @@ func (m *cliConfigManager) reset(cli string) error {
 		path := filepath.Join(home, ".claude", "settings.json")
 		settings, err := readJSONObject(path)
 		if err != nil {
+			return err
+		}
+		if err := m.restoreClaudeContextSettings(settings); err != nil {
 			return err
 		}
 		delete(settings, "model")
@@ -618,6 +638,33 @@ func (m *cliConfigManager) normalizeManagedClaudeBaseURL(home string) error {
 	return backupAndWrite(path, append(encoded, '\n'), 0o600)
 }
 
+func (m *cliConfigManager) reconcileManagedClaudeContext(home string) error {
+	path := filepath.Join(home, ".claude", "settings.json")
+	settings, err := readJSONObject(path)
+	if err != nil {
+		return fmt.Errorf("parse Claude settings for context migration: %w", err)
+	}
+	before, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	if err := m.configureClaudeContext(settings, m.state.ClaudeModel); err != nil {
+		return err
+	}
+	after, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(before, after) {
+		return nil
+	}
+	encoded, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return backupAndWrite(path, append(encoded, '\n'), 0o600)
+}
+
 func claudeBaseURL(base string) string {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	return strings.TrimSuffix(base, "/v1")
@@ -644,6 +691,137 @@ func setClaudeModelFields(settings map[string]any, model string) {
 	delete(env, "ANTHROPIC_REASONING_MODEL")
 	settings["env"] = env
 	settings["model"] = model
+}
+
+type claudeContextProfile struct {
+	Window                    int
+	DisableUnknownEnforcement bool
+}
+
+// claudeContextProfileForModel uses a reviewed catalog of widely deployed
+// models. Providers' /models endpoints do not reliably expose a context-window
+// field, so an unknown provider model must retain Claude Code's conservative
+// behavior instead of inheriting an unrelated model's profile.
+func claudeContextProfileForModel(model string) (claudeContextProfile, bool) {
+	name := normalizedContextModelName(model)
+	if profile, ok := claudeContextProfiles[name]; ok {
+		return profile, true
+	}
+	return claudeContextProfile{}, false
+}
+
+var claudeContextProfiles = map[string]claudeContextProfile{
+	// Anthropic. These names are recognized by current Claude Code releases.
+	"claude-fable-5":    {Window: 1_000_000},
+	"claude-opus-5":     {Window: 1_000_000},
+	"claude-sonnet-5":   {Window: 1_000_000},
+	"claude-opus-4-6":   {Window: 1_000_000},
+	"claude-sonnet-4-6": {Window: 1_000_000},
+	"claude-opus-4-5":   {Window: 200_000},
+	"claude-sonnet-4-5": {Window: 200_000},
+	"claude-3-7-sonnet": {Window: 200_000},
+	"claude-3-5-sonnet": {Window: 200_000},
+	"claude-3-5-haiku":  {Window: 200_000},
+	"claude-haiku-4-5":  {Window: 200_000},
+	"claude-3-opus":     {Window: 200_000},
+	"claude-3-sonnet":   {Window: 200_000},
+	"claude-3-haiku":    {Window: 200_000},
+
+	// OpenAI/Codex models commonly exposed through Anthropic-compatible proxies.
+	"gpt-5.6":       {Window: 1_050_000, DisableUnknownEnforcement: true},
+	"gpt-5.6-sol":   {Window: 1_050_000, DisableUnknownEnforcement: true},
+	"gpt-5.6-terra": {Window: 1_050_000, DisableUnknownEnforcement: true},
+	"gpt-5.6-luna":  {Window: 1_050_000, DisableUnknownEnforcement: true},
+	"gpt-4.1":       {Window: 1_047_576, DisableUnknownEnforcement: true},
+	"gpt-4.1-mini":  {Window: 1_047_576, DisableUnknownEnforcement: true},
+	"gpt-4.1-nano":  {Window: 1_047_576, DisableUnknownEnforcement: true},
+	"gpt-4o":        {Window: 128_000, DisableUnknownEnforcement: true},
+	"gpt-4o-mini":   {Window: 128_000, DisableUnknownEnforcement: true},
+
+	// Frequently selected third-party models. Their exact names are intentional:
+	// an aggregator alias is not assumed to have the original model's limits.
+	"deepseek-v4-flash":      {Window: 1_000_000, DisableUnknownEnforcement: true},
+	"deepseek-chat":          {Window: 128_000, DisableUnknownEnforcement: true},
+	"deepseek-reasoner":      {Window: 128_000, DisableUnknownEnforcement: true},
+	"deepseek-v3":            {Window: 128_000, DisableUnknownEnforcement: true},
+	"deepseek-r1":            {Window: 128_000, DisableUnknownEnforcement: true},
+	"kimi-k2.5":              {Window: 262_144, DisableUnknownEnforcement: true},
+	"kimi-k3":                {Window: 1_000_000, DisableUnknownEnforcement: true},
+	"gemini-2.5-pro":         {Window: 1_048_576, DisableUnknownEnforcement: true},
+	"gemini-2.5-flash":       {Window: 1_048_576, DisableUnknownEnforcement: true},
+	"gemini-2.5-flash-lite":  {Window: 1_048_576, DisableUnknownEnforcement: true},
+	"gemini-2.0-flash":       {Window: 1_048_576, DisableUnknownEnforcement: true},
+	"llama-3.3-70b-instruct": {Window: 128_000, DisableUnknownEnforcement: true},
+	"mistral-large-latest":   {Window: 128_000, DisableUnknownEnforcement: true},
+}
+
+func normalizedContextModelName(model string) string {
+	name := strings.ToLower(strings.TrimSpace(model))
+	name = strings.TrimSuffix(name, "[1m]")
+	name = strings.TrimPrefix(name, "models/")
+	for _, prefix := range []string{"anthropic/", "openai/", "deepseek/", "moonshot/", "google/", "meta/", "mistral/"} {
+		name = strings.TrimPrefix(name, prefix)
+	}
+	return name
+}
+
+var claudeContextEnvironmentKeys = []string{
+	"CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+	"CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",
+}
+
+func (m *cliConfigManager) configureClaudeContext(settings map[string]any, model string) error {
+	env, _ := settings["env"].(map[string]any)
+	if env == nil {
+		env = map[string]any{}
+	}
+	profile, known := claudeContextProfileForModel(model)
+	if !known {
+		return m.restoreClaudeContextSettings(settings)
+	}
+	if !m.state.ClaudeContextManaged {
+		m.state.ClaudeContextPrevious = make(map[string]managedEnvValue, len(claudeContextEnvironmentKeys))
+		for _, key := range claudeContextEnvironmentKeys {
+			value, exists := env[key]
+			text, _ := value.(string)
+			m.state.ClaudeContextPrevious[key] = managedEnvValue{Value: text, Exists: exists}
+		}
+		m.state.ClaudeContextManaged = true
+	}
+	env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = strconv.Itoa(profile.Window)
+	if profile.DisableUnknownEnforcement {
+		env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] = "1"
+	} else {
+		delete(env, "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT")
+	}
+	settings["env"] = env
+	return nil
+}
+
+func (m *cliConfigManager) restoreClaudeContextSettings(settings map[string]any) error {
+	if !m.state.ClaudeContextManaged {
+		return nil
+	}
+	env, _ := settings["env"].(map[string]any)
+	if env == nil {
+		env = map[string]any{}
+	}
+	for _, key := range claudeContextEnvironmentKeys {
+		previous := m.state.ClaudeContextPrevious[key]
+		if previous.Exists {
+			env[key] = previous.Value
+		} else {
+			delete(env, key)
+		}
+	}
+	if len(env) == 0 {
+		delete(settings, "env")
+	} else {
+		settings["env"] = env
+	}
+	m.state.ClaudeContextManaged = false
+	m.state.ClaudeContextPrevious = nil
+	return nil
 }
 
 func (m *cliConfigManager) restoreClaudeModelOverride(settings map[string]any) error {

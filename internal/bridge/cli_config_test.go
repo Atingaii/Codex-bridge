@@ -146,6 +146,9 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 			t.Fatalf("Claude model field %q = %#v, want claude-model", key, claudeEnv[key])
 		}
 	}
+	if _, exists := claudeEnv["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]; exists {
+		t.Fatalf("unknown Claude model inherited a context profile: %#v", claudeEnv)
+	}
 	if _, exists := claudeEnv["ANTHROPIC_REASONING_MODEL"]; exists {
 		t.Fatalf("stale Claude reasoning override was not removed: %#v", claudeEnv)
 	}
@@ -246,6 +249,141 @@ func TestCLIConfigApplyMigratesLegacyClaudeOverride(t *testing.T) {
 	if manager.state.ClaudeOverrideKey != "" || manager.state.ClaudeModel != "old-provider-model" {
 		t.Fatalf("legacy state was not migrated: %#v", manager.state)
 	}
+}
+
+func TestClaudeContextProfileFollowsSelectedModelAndRestoresUserSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"333333","CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT":"0","KEEP":"yes"}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := newCLIConfigManager(&config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.apply("claude", "https://claude.example/v1", "claude-sonnet-5", "key", nil); err != nil {
+		t.Fatal(err)
+	}
+	claude := readClaudeSettings(t, home)
+	env := claude["env"].(map[string]any)
+	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "1000000" {
+		t.Fatalf("Sonnet 5 context = %#v, want 1000000", env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"])
+	}
+	if _, exists := env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"]; exists {
+		t.Fatalf("recognized Anthropic model should not need unknown-model override: %#v", env)
+	}
+	if err := m.apply("claude", "https://claude.example/v1", "deepseek-v4-flash", "key", nil); err != nil {
+		t.Fatal(err)
+	}
+	claude = readClaudeSettings(t, home)
+	env = claude["env"].(map[string]any)
+	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "1000000" || env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] != "1" {
+		t.Fatalf("DeepSeek context profile = %#v", env)
+	}
+	if err := m.reset("claude"); err != nil {
+		t.Fatal(err)
+	}
+	claude = readClaudeSettings(t, home)
+	env = claude["env"].(map[string]any)
+	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "333333" || env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] != "0" || env["KEEP"] != "yes" {
+		t.Fatalf("switching known models lost original user context settings: %#v", env)
+	}
+	if err := m.apply("claude", "https://claude.example/v1", "deepseek-v4-flash", "key", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.apply("claude", "https://claude.example/v1", "provider-unlisted-model", "key", nil); err != nil {
+		t.Fatal(err)
+	}
+	claude = readClaudeSettings(t, home)
+	env = claude["env"].(map[string]any)
+	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "333333" || env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] != "0" || env["KEEP"] != "yes" {
+		t.Fatalf("unknown model did not restore user context settings: %#v", env)
+	}
+	if err := m.apply("claude", "https://claude.example/v1", "claude-sonnet-5", "key", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.reset("claude"); err != nil {
+		t.Fatal(err)
+	}
+	claude = readClaudeSettings(t, home)
+	env = claude["env"].(map[string]any)
+	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "333333" || env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] != "0" || env["KEEP"] != "yes" {
+		t.Fatalf("official reset did not restore user context settings: %#v", env)
+	}
+}
+
+func TestClaudeContextProfilesCoverPopularModelAliases(t *testing.T) {
+	tests := []struct {
+		model   string
+		window  int
+		disable bool
+	}{
+		{model: "claude-sonnet-5", window: 1_000_000},
+		{model: "anthropic/claude-sonnet-5[1m]", window: 1_000_000},
+		{model: "claude-3-7-sonnet", window: 200_000},
+		{model: "gpt-5.6-sol", window: 1_050_000, disable: true},
+		{model: "models/gpt-4.1-mini", window: 1_047_576, disable: true},
+		{model: "gpt-4o", window: 128_000, disable: true},
+		{model: "deepseek-v4-flash", window: 1_000_000, disable: true},
+		{model: "deepseek/deepseek-chat", window: 128_000, disable: true},
+		{model: "kimi-k3", window: 1_000_000, disable: true},
+		{model: "gemini-2.5-pro", window: 1_048_576, disable: true},
+		{model: "gemini-2.0-flash", window: 1_048_576, disable: true},
+		{model: "llama-3.3-70b-instruct", window: 128_000, disable: true},
+		{model: "mistral-large-latest", window: 128_000, disable: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.model, func(t *testing.T) {
+			profile, ok := claudeContextProfileForModel(tc.model)
+			if !ok || profile.Window != tc.window || profile.DisableUnknownEnforcement != tc.disable {
+				t.Fatalf("profile(%q) = %#v, %v; want window=%d disable=%v", tc.model, profile, ok, tc.window, tc.disable)
+			}
+		})
+	}
+	if _, ok := claudeContextProfileForModel("provider-invented-alias"); ok {
+		t.Fatal("unverified provider alias must retain conservative native behavior")
+	}
+}
+
+func TestCLIConfigStartupAppliesContextProfileForExistingManagedPreset(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"model":"deepseek-v4-flash","env":{"ANTHROPIC_BASE_URL":"https://cpa.example","KEEP":"yes"}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, ".codex-bridge", "config-switcher")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"claudeModel":"deepseek-v4-flash","claudeConfigManaged":true}`
+	if err := os.WriteFile(filepath.Join(root, "state.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newCLIConfigManager(&config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	claude := readClaudeSettings(t, home)
+	env := claude["env"].(map[string]any)
+	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "1000000" || env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] != "1" || env["KEEP"] != "yes" {
+		t.Fatalf("existing managed profile was not migrated: %#v", env)
+	}
+}
+
+func readClaudeSettings(t *testing.T, home string) map[string]any {
+	t.Helper()
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(readTestFile(t, filepath.Join(home, ".claude", "settings.json"))), &settings); err != nil {
+		t.Fatal(err)
+	}
+	return settings
 }
 
 func TestCLIConfigStartupNormalizesManagedClaudeBaseURL(t *testing.T) {

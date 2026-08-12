@@ -1,18 +1,29 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { api } from './lib/api';
 import type { UserAccount } from './lib/types';
 import { initialLanguage, uiText, type Language } from './lib/i18n';
-import { ConversationSnapshotPage } from './pages/ConversationSnapshotPage';
-import { HelpPage } from './pages/HelpPage';
-import { LoginScreen } from './pages/LoginScreen';
-import { OrchestrationWorkspace } from './pages/OrchestrationWorkspace';
-import { OrchestrationStatsPage } from './pages/OrchestrationStatsPage';
-import { PublicSharePage } from './pages/PublicSharePage';
-import { UpdatesPage } from './pages/UpdatesPage';
-import { Workspace } from './pages/Workspace';
-import { AdminUsagePage } from './pages/AdminUsagePage';
-import { AdminUserUsagePage } from './pages/AdminUserUsagePage';
+
+// Page modules are independent interaction surfaces. Loading them on demand
+// keeps initial login and workspace navigation responsive on slower networks.
+const ConversationSnapshotPage = lazy(() => import('./pages/ConversationSnapshotPage').then(({ ConversationSnapshotPage }) => ({ default: ConversationSnapshotPage })));
+const HelpPage = lazy(() => import('./pages/HelpPage').then(({ HelpPage }) => ({ default: HelpPage })));
+const LoginScreen = lazy(() => import('./pages/LoginScreen').then(({ LoginScreen }) => ({ default: LoginScreen })));
+const OrchestrationWorkspace = lazy(() => import('./pages/OrchestrationWorkspace').then(({ OrchestrationWorkspace }) => ({ default: OrchestrationWorkspace })));
+const OrchestrationStatsPage = lazy(() => import('./pages/OrchestrationStatsPage').then(({ OrchestrationStatsPage }) => ({ default: OrchestrationStatsPage })));
+const PublicSharePage = lazy(() => import('./pages/PublicSharePage').then(({ PublicSharePage }) => ({ default: PublicSharePage })));
+const UpdatesPage = lazy(() => import('./pages/UpdatesPage').then(({ UpdatesPage }) => ({ default: UpdatesPage })));
+const Workspace = lazy(() => import('./pages/Workspace').then(({ Workspace }) => ({ default: Workspace })));
+const AdminUsagePage = lazy(() => import('./pages/AdminUsagePage').then(({ AdminUsagePage }) => ({ default: AdminUsagePage })));
+const AdminUserUsagePage = lazy(() => import('./pages/AdminUserUsagePage').then(({ AdminUserUsagePage }) => ({ default: AdminUserUsagePage })));
+
+function PageLoading() {
+  return (
+    <div className="min-h-screen w-full flex items-center justify-center bg-background text-foreground">
+      <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />
+    </div>
+  );
+}
 
 export default function App() {
   const [user, setUser] = useState<UserAccount | null>(null);
@@ -79,64 +90,32 @@ export default function App() {
     );
   }
 
+  let page: React.ReactNode;
   if (isShareRoute) {
-    return <PublicSharePage shareID={decodeURIComponent(path.replace(/^\/share\/?/, '').split('/')[0] || '')} t={t} />;
-  }
-
-  if (isHelpRoute) {
-    return <HelpPage language={language} setLanguage={setLanguage} isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} />;
-  }
-
-  if (isUpdatesRoute) {
-    return <UpdatesPage language={language} setLanguage={setLanguage} isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} />;
-  }
-
-  if (!user) {
-    return <LoginScreen onLogin={setUser} language={language} setLanguage={setLanguage} t={t} />;
-  }
-
-  if (isSnapshotRoute) {
-    return <ConversationSnapshotPage t={t} />;
-  }
-
-  if (path.startsWith('/admin')) {
+    page = <PublicSharePage shareID={decodeURIComponent(path.replace(/^\/share\/?/, '').split('/')[0] || '')} t={t} />;
+  } else if (isHelpRoute) {
+    page = <HelpPage language={language} setLanguage={setLanguage} isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} />;
+  } else if (isUpdatesRoute) {
+    page = <UpdatesPage language={language} setLanguage={setLanguage} isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} />;
+  } else if (!user) {
+    page = <LoginScreen onLogin={setUser} language={language} setLanguage={setLanguage} t={t} />;
+  } else if (isSnapshotRoute) {
+    page = <ConversationSnapshotPage t={t} />;
+  } else if (path.startsWith('/admin')) {
     if (!user.isAdmin) return null;
     const adminUserMatch = path.match(/^\/admin\/usage\/users\/([^/]+)$/);
-    if (adminUserMatch) return <AdminUserUsagePage userID={decodeURIComponent(adminUserMatch[1])} t={t} navigate={navigate} />;
-    return <AdminUsagePage t={t} navigate={navigate} />;
-  }
-
-  if (path.startsWith('/orchestrate')) {
+    page = adminUserMatch
+      ? <AdminUserUsagePage userID={decodeURIComponent(adminUserMatch[1])} t={t} navigate={navigate} />
+      : <AdminUsagePage t={t} navigate={navigate} />;
+  } else if (path.startsWith('/orchestrate')) {
     if (path.startsWith('/orchestrate/stats') || path.startsWith('/orchestrate/usage')) {
       const runId = new URLSearchParams(window.location.search).get('run') || localStorage.getItem('codexBridge.activeOrchestrationRunId') || '';
-      return <OrchestrationStatsPage t={t} navigate={navigate} runId={path.startsWith('/orchestrate/usage') ? '' : runId} />;
+      page = <OrchestrationStatsPage t={t} navigate={navigate} runId={path.startsWith('/orchestrate/usage') ? '' : runId} />;
+    } else {
+      page = <OrchestrationWorkspace user={user} onLogout={() => setUser(null)} isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} language={language} setLanguage={setLanguage} t={t} canOpenMain path={path} navigate={navigate} />;
     }
-    return (
-      <OrchestrationWorkspace
-        user={user}
-        onLogout={() => setUser(null)}
-        isDarkMode={isDarkMode}
-        setIsDarkMode={setIsDarkMode}
-        language={language}
-        setLanguage={setLanguage}
-        t={t}
-        canOpenMain
-        path={path}
-        navigate={navigate}
-      />
-    );
+  } else {
+    page = <Workspace user={user} onLogout={() => setUser(null)} isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} language={language} setLanguage={setLanguage} t={t} navigate={navigate} />;
   }
-
-  return (
-    <Workspace
-      user={user}
-      onLogout={() => setUser(null)}
-      isDarkMode={isDarkMode}
-      setIsDarkMode={setIsDarkMode}
-      language={language}
-      setLanguage={setLanguage}
-      t={t}
-      navigate={navigate}
-    />
-  );
+  return <Suspense fallback={<PageLoading />}>{page}</Suspense>;
 }

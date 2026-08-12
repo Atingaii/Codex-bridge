@@ -110,7 +110,7 @@ func TestStaticHandlerCacheHeaders(t *testing.T) {
 	}{
 		{path: "/sw.js", contentType: "application/javascript", cache: "no-store"},
 		{path: "/app-recovery.js", contentType: "application/javascript", cache: "no-store"},
-		{path: jsAssetPath, cache: "public, max-age=60, stale-while-revalidate=300"},
+		{path: jsAssetPath, cache: "public, max-age=31536000, immutable"},
 		{path: "/", cache: "no-store"},
 	} {
 		rr := httptest.NewRecorder()

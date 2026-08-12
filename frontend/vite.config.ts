@@ -21,6 +21,21 @@ function retainPreviousEntryAssets() {
   const outputDir = path.resolve(__dirname, '../internal/web/static')
   const indexPath = path.join(outputDir, 'index.html')
   const retained = new Map<string, Buffer>()
+  const manifestPath = path.join(outputDir, '.vite', 'manifest.json')
+  if (fs.existsSync(manifestPath)) {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as Record<string, {
+      file?: string
+      css?: string[]
+      assets?: string[]
+    }>
+    for (const entry of Object.values(manifest)) {
+      for (const relativePath of [entry.file, ...(entry.css || []), ...(entry.assets || [])]) {
+        if (!relativePath) continue
+        const assetPath = path.join(outputDir, relativePath)
+        if (fs.existsSync(assetPath)) retained.set(relativePath, fs.readFileSync(assetPath))
+      }
+    }
+  }
   if (fs.existsSync(indexPath)) {
     const html = fs.readFileSync(indexPath, 'utf8')
     for (const match of html.matchAll(/\/(assets\/index-[^"']+\.(?:js|css))/g)) {
@@ -65,5 +80,6 @@ export default defineConfig({
   build: {
     outDir: '../internal/web/static',
     emptyOutDir: true,
+    manifest: true,
   },
 })

@@ -237,7 +237,9 @@ func (s *Server) staticHandler() http.Handler {
 			w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 		case strings.HasSuffix(r.URL.Path, ".js"), strings.HasSuffix(r.URL.Path, ".css"):
-			w.Header().Set("Cache-Control", "public, max-age=60, stale-while-revalidate=300")
+			// Vite content-hashes every emitted bundle. Keep those immutable assets
+			// locally and at Cloudflare; HTML remains no-store and selects new names.
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		default:
 			w.Header().Set("Cache-Control", "no-store")
 		}

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, AlertTriangle, Check, ChevronDown, Command, GitBranch, RefreshCw, Terminal, User, X, Sparkles, CircleCheckBig, CircleX } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowUpToLine, Check, ChevronDown, Command, GitBranch, RefreshCw, Terminal, User, X, Sparkles, CircleCheckBig, CircleX } from 'lucide-react';
 import type { Agent, BridgeCLICapability, OrchestrationEvent, OrchestrationTimelineGroup, OrchestrationTimelineItem, OrchestrationVisibleEvent } from '../lib/types';
 import type { UIText } from '../lib/i18n';
 import { Button } from './ui';
@@ -171,12 +171,14 @@ export function OrchestrationTimelineGroupItem({
   group,
   collapsed,
   onToggle,
+  onJumpToFirstMessage,
   onApprovalDecision,
   t,
 }: {
   group: OrchestrationTimelineGroup;
   collapsed: boolean;
   onToggle: () => void;
+  onJumpToFirstMessage: (targetID: string) => void;
   onApprovalDecision: (requestId: string, decision: 'accept' | 'decline' | 'cancel') => void;
   t: UIText;
 }) {
@@ -198,46 +200,62 @@ export function OrchestrationTimelineGroupItem({
   const countLabel = orchestrationTimelineGroupCountLabel(group, t);
   const stateLabel = group.incomplete ? t.turnMissingEnd : group.active ? t.running : group.hasError ? t.error : group.complete ? t.ready : t.status;
   const durationLabel = formatDuration(group.durationMs);
+  const firstMessage = group.items.find((item) => item.type === 'event' && item.event.type === 'message');
 
   return (
     <div className="space-y-2">
-      <button
-        type="button"
-        onClick={onToggle}
-        className={cn(
-          "mx-auto flex w-full max-w-4xl items-center gap-3 rounded-lg border bg-muted/15 px-3 py-2 text-left hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-          group.incomplete || group.hasError ? "border-destructive/35" : roundTone.header,
+      <div className={cn(
+        "mx-auto flex w-full max-w-4xl items-center rounded-lg border bg-muted/15 hover:bg-muted/35 focus-within:ring-1 focus-within:ring-ring",
+        group.incomplete || group.hasError ? "border-destructive/35" : roundTone.header,
+      )}>
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2 text-left focus-visible:outline-none"
+          aria-expanded={!collapsed}
+          title={collapsed ? t.expandTurn : t.collapseTurn}
+        >
+          <div className={cn(
+            "flex h-6 w-6 shrink-0 items-center justify-center rounded-md border shadow-sm",
+            group.incomplete || group.hasError ? "border-destructive/25 bg-destructive/10 text-destructive" : avatar.className,
+          )}>
+            {group.incomplete || group.hasError ? <AlertTriangle className="h-3.5 w-3.5" /> : avatar.icon}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className={cn('shrink-0 rounded-md px-2 py-0.5 text-xs font-bold', roundTone.badge)}>{turnLabel}</span>
+              <span className={cn('truncate rounded-md px-1.5 py-0.5 text-[10px] font-semibold', roleTone.badge)}>{roleLabel}{group.cli ? ` · ${avatar.label}` : ''}</span>
+              {group.createdAt && <span className="hidden text-[10px] text-muted-foreground sm:inline">{formatTime(group.createdAt)}</span>}
+            </div>
+            <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[10px] text-muted-foreground">
+              <span className="truncate">{countLabel}</span>
+              {durationLabel && <span className="shrink-0 tabular-nums">{t.duration} {durationLabel}{group.durationLive ? '...' : ''}</span>}
+              {(group.incomplete || group.hasError || group.active) && (
+                <span className={cn(
+                  "shrink-0 rounded border px-1.5 py-0.5",
+                  group.incomplete || group.hasError ? "border-destructive/25 text-destructive" : "border-border text-muted-foreground",
+                )}>
+                  {stateLabel}
+                </span>
+              )}
+            </div>
+          </div>
+          <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", collapsed && "-rotate-90")} />
+        </button>
+        {firstMessage && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="mr-1 h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+            onClick={() => onJumpToFirstMessage(orchestrationTimelineItemAnchorID(firstMessage.key))}
+            aria-label={t.jumpToFirstTurnMessage}
+            title={t.jumpToFirstTurnMessage}
+          >
+            <ArrowUpToLine className="h-3.5 w-3.5" />
+          </Button>
         )}
-        aria-expanded={!collapsed}
-        title={collapsed ? t.expandTurn : t.collapseTurn}
-      >
-        <div className={cn(
-          "flex h-6 w-6 shrink-0 items-center justify-center rounded-md border shadow-sm",
-          group.incomplete || group.hasError ? "border-destructive/25 bg-destructive/10 text-destructive" : avatar.className,
-        )}>
-          {group.incomplete || group.hasError ? <AlertTriangle className="h-3.5 w-3.5" /> : avatar.icon}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className={cn('shrink-0 rounded-md px-2 py-0.5 text-xs font-bold', roundTone.badge)}>{turnLabel}</span>
-            <span className={cn('truncate rounded-md px-1.5 py-0.5 text-[10px] font-semibold', roleTone.badge)}>{roleLabel}{group.cli ? ` · ${avatar.label}` : ''}</span>
-            {group.createdAt && <span className="hidden text-[10px] text-muted-foreground sm:inline">{formatTime(group.createdAt)}</span>}
-          </div>
-          <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[10px] text-muted-foreground">
-            <span className="truncate">{countLabel}</span>
-            {durationLabel && <span className="shrink-0 tabular-nums">{t.duration} {durationLabel}{group.durationLive ? '...' : ''}</span>}
-            {(group.incomplete || group.hasError || group.active) && (
-              <span className={cn(
-                "shrink-0 rounded border px-1.5 py-0.5",
-                group.incomplete || group.hasError ? "border-destructive/25 text-destructive" : "border-border text-muted-foreground",
-              )}>
-                {stateLabel}
-              </span>
-            )}
-          </div>
-        </div>
-        <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", collapsed && "-rotate-90")} />
-      </button>
+      </div>
       {!collapsed && (
         <div className="space-y-3">
           {groupedOrchestrationTimelineItems(group.items).map((block) => {
@@ -245,9 +263,13 @@ export function OrchestrationTimelineGroupItem({
               return <CommandEventBatch key={block.key} items={block.items} t={t} />;
             }
             const item = block.item;
-            return item.type === 'event'
-              ? <OrchestrationEventItem key={item.key} item={item.event} t={t} />
-              : <ApprovalCard key={item.key} item={item.approval} t={t} onDecision={onApprovalDecision} />;
+            return (
+              <div key={item.key} id={orchestrationTimelineItemAnchorID(item.key)} className="scroll-mt-4">
+                {item.type === 'event'
+                  ? <OrchestrationEventItem item={item.event} t={t} />
+                  : <ApprovalCard item={item.approval} t={t} onDecision={onApprovalDecision} />}
+              </div>
+            );
           })}
           {group.incomplete && (
             <div className="mx-auto flex w-full max-w-4xl items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -259,6 +281,10 @@ export function OrchestrationTimelineGroupItem({
       )}
     </div>
   );
+}
+
+function orchestrationTimelineItemAnchorID(key: string) {
+  return `orchestration-timeline-item-${encodeURIComponent(key)}`;
 }
 
 type CommandTimelineItem = Extract<OrchestrationTimelineItem, { type: 'event' }> & {

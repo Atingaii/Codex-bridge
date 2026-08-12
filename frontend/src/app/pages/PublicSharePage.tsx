@@ -75,6 +75,15 @@ export function PublicSharePage({ shareID, t }: { shareID: string; t: UIText }) 
   const toggleTimelineGroup = (key: string) => {
     setCollapsedTimelineGroups((current) => ({ ...current, [key]: !current[key] }));
   };
+
+  const jumpToTimelineItem = (groupKey: string, targetID: string) => {
+    setCollapsedTimelineGroups((current) => ({ ...current, [groupKey]: false }));
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        document.getElementById(targetID)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+  };
   const ignoreApprovalDecision = () => undefined;
 
   return (
@@ -176,6 +185,7 @@ export function PublicSharePage({ shareID, t }: { shareID: string; t: UIText }) 
                     group={group}
                     collapsed={Boolean(collapsedTimelineGroups[group.key])}
                     onToggle={() => toggleTimelineGroup(group.key)}
+                    onJumpToFirstMessage={(targetID) => jumpToTimelineItem(group.key, targetID)}
                     onApprovalDecision={ignoreApprovalDecision}
                     t={t}
                   />

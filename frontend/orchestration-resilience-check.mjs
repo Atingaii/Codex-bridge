@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 
 const utils = readFileSync(new URL('./src/app/lib/utils.ts', import.meta.url), 'utf8');
 const workspace = readFileSync(new URL('./src/app/pages/OrchestrationWorkspace.tsx', import.meta.url), 'utf8');
+const orchestrationComponents = readFileSync(new URL('./src/app/components/OrchestrationComponents.tsx', import.meta.url), 'utf8');
+const publicShare = readFileSync(new URL('./src/app/pages/PublicSharePage.tsx', import.meta.url), 'utf8');
 const main = readFileSync(new URL('./src/main.tsx', import.meta.url), 'utf8');
 const boundary = readFileSync(new URL('./src/app/components/AppErrorBoundary.tsx', import.meta.url), 'utf8');
 
@@ -23,8 +25,17 @@ assert.match(workspace, /const loadRuns = useCallback\(async \(\) => \{/);
 assert.doesNotMatch(workspace, /params\.set\('agentId'/);
 assert.match(workspace, /const agentRuns = useMemo\(\(\) => \{[\s\S]*runs\.filter\(\(run\) => run\.agentId === selectedAgentId\)/);
 assert.match(workspace, /activeRunIdRef\.current && activeRunAgentIdRef\.current === agentId/);
-assert.match(workspace, /if \(activeRunIdRef\.current === directRun\.id\) \{\s*rememberActiveOrchestrationRunForAgent\(directRun\.agentId, directRun\.id\);\s*return;/);
+assert.match(workspace, /if \(activeRunIdRef\.current === directRun\.id\) \{\s*return;/);
 assert.match(workspace, /if \(activeRunIdRef\.current && activeRunAgentIdRef\.current === selectedAgentIdRef\.current\) return;/);
+assert.doesNotMatch(workspace, /const switchAgentRun/);
+assert.doesNotMatch(workspace, /readActiveOrchestrationRunByAgent/);
+assert.match(workspace, /const selectAgent = \(agentId: string\) => \{[\s\S]*if \(draftingRunRef\.current\) return;\s*clearActiveOrchestration\(\);/);
+assert.match(workspace, /onJumpToFirstMessage=\{\(targetID\) => jumpToTimelineItem\(group\.key, targetID\)\}/);
+assert.match(workspace, /scrollIntoView\(\{ behavior: 'smooth', block: 'start' \}\)/);
+assert.match(orchestrationComponents, /firstMessage = group\.items\.find\(\(item\) => item\.type === 'event' && item\.event\.type === 'message'\)/);
+assert.match(orchestrationComponents, /aria-label=\{t\.jumpToFirstTurnMessage\}/);
+assert.match(orchestrationComponents, /id=\{orchestrationTimelineItemAnchorID\(item\.key\)\}/);
+assert.match(publicShare, /onJumpToFirstMessage=\{\(targetID\) => jumpToTimelineItem\(group\.key, targetID\)\}/);
 assert.match(workspace, /pendingLiveEventsRef\.current\.push\(nextEvent\);/);
 assert.match(workspace, /liveEventFrameRef\.current = window\.requestAnimationFrame/);
 assert.match(workspace, /pending\.filter\(\(item\) => item\.runId === activeRunIdRef\.current\)/);

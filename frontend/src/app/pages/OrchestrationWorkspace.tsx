@@ -60,7 +60,6 @@ import {
   compareOrchestrationEvents,
   cn,
   copyText,
-  forgetActiveOrchestrationRunForAgent,
   isNearBottom,
   isOrchestrationRun,
   mergeOrchestrationEvents,
@@ -75,7 +74,6 @@ import {
   orchestrationTurnLabel,
   orchestrationWorkerLabel,
   preferredAgentID,
-  readActiveOrchestrationRunByAgent,
   readUploadAttachment,
   rememberActiveOrchestrationRunForAgent,
   sessionDateLabel,
@@ -350,12 +348,8 @@ export function OrchestrationWorkspace({
     }
   }, [clearReconnect]);
 
-  const clearActiveOrchestration = useCallback((forget = false) => {
+  const clearActiveOrchestration = useCallback(() => {
     closeWS();
-    if (forget) {
-      const activeRun = runs.find((run) => run.id === activeRunIdRef.current);
-      if (activeRun?.agentId) forgetActiveOrchestrationRunForAgent(activeRun.agentId, activeRun.id);
-    }
     activeRunIdRef.current = '';
     activeRunAgentIdRef.current = '';
     desiredRunIdRef.current = '';
@@ -370,7 +364,7 @@ export function OrchestrationWorkspace({
     if (window.location.pathname.startsWith('/orchestrate/runs/')) {
       navigate('/orchestrate', { replace: true });
     }
-  }, [closeWS, navigate, runs, t.idle]);
+  }, [closeWS, navigate, t.idle]);
 
   const applyEvent = useCallback((event: OrchestrationEvent) => {
     const nextEvent = { ...event, timelineOrder: typeof event.timelineOrder === 'number' ? event.timelineOrder : ++timelineOrderRef.current };
@@ -520,48 +514,6 @@ export function OrchestrationWorkspace({
     setApprovals((current) => updateApprovalItemStatus(current, requestId, approvalStatusFromDecision(decision)));
   }, []);
 
-  const switchAgentRun = useCallback(async (agentId: string, availableRuns: OrchestrationRun[] = runs) => {
-    const selectionEpoch = agentSelectionEpochRef.current;
-    const isCurrentSelection = () => selectionEpoch === agentSelectionEpochRef.current && selectedAgentIdRef.current === agentId;
-    if (!isCurrentSelection()) return;
-    if (!agentId) {
-      clearActiveOrchestration();
-      return;
-    }
-    const scopedRuns = availableRuns.filter((run) => run.agentId === agentId);
-    const rememberedRunId = readActiveOrchestrationRunByAgent()[agentId] || '';
-    const legacyRunId = localStorage.getItem(activeOrchestrationRunStorageKey) || '';
-    let nextRun =
-      scopedRuns.find((run) => run.id === rememberedRunId) ||
-      scopedRuns.find((run) => run.id === legacyRunId);
-    if (!nextRun) {
-      const missingRunId = rememberedRunId || legacyRunId;
-      if (missingRunId) {
-        try {
-          const loaded = await loadRun(missingRunId);
-          if (loaded.agentId === agentId) nextRun = loaded;
-        } catch {
-          // Fall back to the visible recent list below.
-        }
-      }
-    }
-    if (!nextRun) nextRun = scopedRuns[0];
-    if (!nextRun) {
-      if (!isCurrentSelection()) return;
-      clearActiveOrchestration();
-      forgetActiveOrchestrationRunForAgent(agentId);
-      return;
-    }
-    if (!isCurrentSelection()) return;
-    desiredRunIdRef.current = nextRun.id;
-    activeRunIdRef.current = nextRun.id;
-    activeRunAgentIdRef.current = nextRun.agentId || agentId;
-    setActiveRunId(nextRun.id);
-    const loaded = await loadRun(nextRun.id);
-    if (activeRunIdRef.current !== nextRun.id || !isCurrentSelection()) return;
-    await activateRun(loaded);
-  }, [activateRun, clearActiveOrchestration, loadRun, runs]);
-
   const refreshOrchestration = useCallback(async () => {
     if (refreshOrchestrationInFlightRef.current) return refreshOrchestrationInFlightRef.current;
     const task = (async () => {
@@ -585,11 +537,10 @@ export function OrchestrationWorkspace({
         setSelectedAgentId(agentId);
         if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
         else localStorage.removeItem('codexBridge.selectedAgentId');
-        const loadedRuns = await loadRuns();
+        await loadRuns();
         if (!isCurrentRefresh() || selectedAgentIdRef.current !== agentId) return;
         if (directRun) {
           if (activeRunIdRef.current === directRun.id) {
-            rememberActiveOrchestrationRunForAgent(directRun.agentId, directRun.id);
             return;
           }
           desiredRunIdRef.current = directRun.id;
@@ -598,15 +549,9 @@ export function OrchestrationWorkspace({
         }
         if (draftingRunRef.current) return;
         if (activeRunIdRef.current && activeRunAgentIdRef.current === agentId) {
-          rememberActiveOrchestrationRunForAgent(agentId, activeRunIdRef.current);
           return;
         }
-        const currentRun = loadedRuns.find((run) => run.id === activeRunIdRef.current);
-        if (currentRun && (!agentId || currentRun.agentId === agentId)) {
-          rememberActiveOrchestrationRunForAgent(currentRun.agentId, currentRun.id);
-          return;
-        }
-        await switchAgentRun(agentId, loadedRuns);
+        clearActiveOrchestration();
       } finally {
         refreshOrchestrationInFlightRef.current = null;
         setRefreshingOrchestration(false);
@@ -615,7 +560,7 @@ export function OrchestrationWorkspace({
     })();
     refreshOrchestrationInFlightRef.current = task;
     return task;
-  }, [activateRun, loadAgents, loadRun, loadRuns, pathRunId, switchAgentRun]);
+  }, [activateRun, clearActiveOrchestration, loadAgents, loadRun, loadRuns, pathRunId]);
 
   useEffect(() => {
     let stopped = false;
@@ -711,8 +656,8 @@ export function OrchestrationWorkspace({
     }
     const currentRun = runs.find((run) => run.id === activeRunIdRef.current);
     if (currentRun?.agentId === selectedAgent.id) return;
-    switchAgentRun(selectedAgent.id).catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
-  }, [agentsLoaded, clearActiveOrchestration, pathRunId, runs, selectRun, selectedAgent?.id, switchAgentRun, t.failedLoadOrchestration]);
+    clearActiveOrchestration();
+  }, [agentsLoaded, clearActiveOrchestration, pathRunId, runs, selectRun, selectedAgent?.id, t.failedLoadOrchestration]);
 
   useEffect(() => {
     if (!activeRunId || !activeOrchestrationStatus(activeRun?.status)) return;
@@ -863,7 +808,7 @@ export function OrchestrationWorkspace({
     if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
     else localStorage.removeItem('codexBridge.selectedAgentId');
     if (draftingRunRef.current) return;
-    switchAgentRun(agentId).catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration));
+    clearActiveOrchestration();
   };
 
   const openSettings = (focus: 'cli' | '' = '') => {
@@ -925,6 +870,16 @@ export function OrchestrationWorkspace({
 
   const toggleTimelineGroup = (key: string) => {
     setCollapsedTimelineGroups((current) => ({ ...current, [key]: !current[key] }));
+  };
+
+  const jumpToTimelineItem = (groupKey: string, targetID: string) => {
+    setCollapsedTimelineGroups((current) => ({ ...current, [groupKey]: false }));
+    stickToBottomRef.current = false;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        document.getElementById(targetID)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
   };
 
   return (
@@ -1142,6 +1097,7 @@ export function OrchestrationWorkspace({
                       group={group}
                       collapsed={Boolean(collapsedTimelineGroups[group.key])}
                       onToggle={() => toggleTimelineGroup(group.key)}
+                      onJumpToFirstMessage={(targetID) => jumpToTimelineItem(group.key, targetID)}
                       onApprovalDecision={respondOrchestrationApproval}
                       t={t}
                     />

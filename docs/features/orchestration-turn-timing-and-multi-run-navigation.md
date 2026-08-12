@@ -3,8 +3,10 @@
 ## Goal
 
 Show elapsed time for every orchestration turn, including turns added by a
-follow-up prompt, and make the orchestration workspace navigate between runs
-without changing or canceling any other run.
+follow-up prompt, and make the orchestration workspace navigate between
+machines and runs strictly from explicit user actions without changing or
+canceling any other run. Each turn also provides a shortcut to its first
+visible text message.
 
 ## Non-Goals
 
@@ -15,8 +17,9 @@ without changing or canceling any other run.
 ## Current State
 
 Runs and events are already persisted and scoped by `runID`. Follow-up prompts
-reuse the same run and native session. The browser currently streams only the
-selected run, but its selection state can fall back to remembered agent runs.
+reuse the same run and native session. The browser streams only the selected
+run. Previously, changing machines could implicitly restore a remembered run
+and override the page the user had selected.
 
 ## Design
 
@@ -28,8 +31,16 @@ turn header, and ticks the active turn locally until a terminal event arrives.
 
 The URL-selected run is authoritative. Creating a new run enters a draft state
 without clearing other runs from the list. Selecting a run changes only the
-detail stream and URL; all run state remains isolated by ID. Background list
-refresh remains lightweight and does not replace an explicit URL selection.
+detail stream and URL; all run state remains isolated by ID. Selecting a
+machine leaves the previous run URL and shows that machine's run list without
+automatically opening any remembered, recent, or running task. A run opens only
+after an explicit run click, new-run creation, follow-up action, browser
+back/forward navigation, or direct URL visit. Background refresh never changes
+the selected page.
+
+Each turn header exposes a shortcut when that turn contains a visible text
+message. The shortcut expands the turn when necessary and scrolls smoothly to
+its first text message. It only changes the viewport and collapsed UI state.
 
 ## Implementation Steps
 
@@ -37,7 +48,9 @@ refresh remains lightweight and does not replace an explicit URL selection.
 2. Capture and emit timing from the Bridge relay, and preserve it through Hub
    event persistence and public-share sanitization.
 3. Render per-turn and live elapsed time in the orchestration timeline.
-4. Tighten workspace navigation state and add focused tests.
+4. Make machine selection clear the detail route without auto-selecting a run.
+5. Add a first-message shortcut to each eligible turn header.
+6. Add focused navigation and timeline tests.
 
 ## Exit Gates
 
@@ -54,3 +67,10 @@ new timed turns to that run.
 **Can several runs execute concurrently?** Yes. Each run has independent Hub
 events and Bridge execution handles; the UI only limits the selected live
 stream for browser load.
+
+**Does changing machines stop or select a task?** No. It only changes the
+machine-scoped list and leaves the detail page. Running tasks continue in the
+background.
+
+**Does the first-message shortcut load or mutate events?** No. It only expands
+an already loaded turn and moves the current viewport.

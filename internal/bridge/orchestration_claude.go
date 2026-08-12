@@ -120,11 +120,35 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 	}
 	session := state.NativeSession
 	session.mu.Lock()
+	// Hub can remember that a previous Claude turn completed after this Bridge
+	// process has restarted. Only resume when the actual Claude transcript is
+	// present in this Bridge process's HOME and project directory.
+	transcriptMissing := false
+	if state.ClaudeSessionStarted && !claudeSessionAvailableForResume(session, state.ClaudeSessionID) {
+		state.ClaudeSessionStarted = false
+		state.ClaudeResumeMode = "claude-new-after-transcript-miss"
+		transcriptMissing = true
+	}
 	claude, err := m.ensureClaudeInteractiveSessionLocked(ctx, payload, state)
 	sessionCWD := session.cwd
 	session.mu.Unlock()
 	if err != nil {
 		return "", nil, "claude-interactive-error", err
+	}
+	if transcriptMissing {
+		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
+			Kind:    "turn.delta",
+			TurnID:  turnID,
+			Role:    role,
+			CLI:     "claude",
+			Status:  "warning",
+			Content: "Claude native transcript is unavailable in this Bridge environment. Bridge is starting a replacement Claude session with the same orchestration id and the persisted task context.",
+			Data: map[string]any{
+				"sessionId":  state.ClaudeSessionID,
+				"resumeMode": "claude-new-after-transcript-miss",
+				"relayOnly":  true,
+			},
+		})
 	}
 	if err := writeClaudeStreamUserMessage(claude.stdin, prompt); err != nil {
 		m.resetClaudeSessionIfDead(session, claude, payload.RunID)
@@ -164,6 +188,18 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 		m.registerClaudeNativeResume(state.NativeSession, claude, payload.RunID, sessionCWD)
 	}
 	return content, tools, claude.mode, err
+}
+
+func claudeSessionAvailableForResume(session *orchestrationNativeSession, sessionID string) bool {
+	if session != nil && session.claude != nil && !claudeSessionExited(session.claude) {
+		return true
+	}
+	cwd := ""
+	if session != nil {
+		cwd = session.cwd
+	}
+	ok, _ := verifyClaudeTranscript(claudeSessionFilePath(cwd, sessionID), sessionID)
+	return ok
 }
 
 // resetClaudeSessionIfDead drops a cached interactive session whose CLI

@@ -419,6 +419,16 @@ func TestOrchestrationResumeRestoresCLIStateAndLockedCWD(t *testing.T) {
 	cfg.Bridge.CWD = filepath.Join(tmp, "ignored")
 	cfg.Bridge.Sandbox = "danger-full-access"
 	cfg.Bridge.ApprovalPolicy = "never"
+	home := filepath.Join(tmp, "home")
+	t.Setenv("HOME", home)
+	claudeSessionID := stableOrchestrationSessionID("orc_resume", "claude")
+	transcriptPath := claudeSessionFilePath(runCWD, claudeSessionID)
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte(`{"type":"user","sessionId":"`+claudeSessionID+`","entrypoint":"cli"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	manager := NewOrchestrationManager(&cfg)
 	out := make(chan protocol.Envelope, 128)
 	manager.AttachOut(out)
@@ -1341,6 +1351,50 @@ func TestOrchestrationClaudeResumeMissingSessionRetriesSessionID(t *testing.T) {
 	events := drainOrchestrationEvents(t, out)
 	if !orchestrationEventsContain(events, "turn.delta", "claude", "retry once") {
 		t.Fatalf("missing claude resume warning event: %#v", events)
+	}
+}
+
+func TestOrchestrationClaudeInteractiveSkipsResumeWhenTranscriptIsMissing(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	argvPath := filepath.Join(tmp, "claude_argv.jsonl")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeInteractiveRelayScript(argvPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CWD = tmp
+	cfg.Bridge.Sandbox = "danger-full-access"
+	cfg.Bridge.ApprovalPolicy = "never"
+	manager := NewOrchestrationManager(&cfg)
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+	state := &orchestrationSessionState{
+		ClaudeSessionID:      "11111111-1111-5111-8111-111111111111",
+		ClaudeSessionStarted: true,
+		NativeSession:        manager.nativeSession("orc_missing_transcript", tmp),
+	}
+
+	content, _, resumeMode, err := manager.runClaudeInteractive(context.Background(), protocol.OrchestrationStartPayload{
+		RunID: "orc_missing_transcript",
+		CWD:   tmp,
+	}, "turn_1", "implementer", "continue", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "Claude native turn 1") || resumeMode != "claude-interactive-session" || state.ClaudeSessionStarted {
+		t.Fatalf("unexpected fallback result content=%q mode=%q started=%v", content, resumeMode, state.ClaudeSessionStarted)
+	}
+	raw, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "--resume") || !strings.Contains(string(raw), "--session-id") {
+		t.Fatalf("missing-transcript fallback should start a session, argv=%s", raw)
+	}
+	events := drainOrchestrationEvents(t, out)
+	if !orchestrationEventsContain(events, "turn.delta", "claude", "transcript is unavailable") {
+		t.Fatalf("missing transcript warning event: %#v", events)
 	}
 }
 

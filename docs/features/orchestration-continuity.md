@@ -54,7 +54,12 @@ context in the same `runID`.
   context in the prompt as the required continuity fallback, exposes the chosen
   resume path through `event.data.resumeMode`, retries Codex fresh when resume
   clearly misses the local thread data, and retries Claude once with
-  `--session-id` if `--resume` reports a missing session.
+  `--session-id` if `--resume` reports a missing session. Before spawning a
+  resumed Claude process after a Bridge restart, Bridge verifies the expected
+  transcript under its own `HOME` and project directory. A missing transcript
+  starts a replacement session with the same deterministic orchestration ID,
+  emits a visible warning, and uses the persisted Hub context instead of
+  failing the run.
 - While a follow-up is active, the frontend must surface `turn.start`,
   `command.start`, and run status events instead of leaving the user message as
   the only visible item.
@@ -358,6 +363,11 @@ endpoints' runs before the user switches to them.
 - If Codex resume clearly misses the local thread data or Claude `--resume`
   reports a missing session, Bridge emits a warning, keeps the compacted context
   fallback, and continues with a fresh native CLI session/thread.
+- If a persisted Claude-started marker is present but the expected native
+  Claude transcript is absent in the current Bridge environment, Bridge skips
+  `--resume`, emits a visible fallback warning, and starts a replacement
+  session with the deterministic orchestration session ID and persisted task
+  context.
 - `turn.start.content` does not contain the full relay prompt or compacted
   context; the full prompt is carried only in typed `TurnStartData.PromptText`
   for authenticated local diagnostics and is stripped from public shares.

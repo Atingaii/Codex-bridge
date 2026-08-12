@@ -172,11 +172,19 @@ func (s *Server) dispatchTaskAttempt(ctx context.Context, run store.Orchestratio
 		raw, _ := json.Marshal(evidence)
 		payload.Context = strings.TrimSpace(payload.Context + "\n\nDependency evidence (compact JSON):\n" + string(raw))
 	}
-	payload.CodexThreadID = run.CodexThreadID
-	payload.CodexThreadIDs = run.CodexThreadIDs
-	payload.ClaudeStarted = run.ClaudeStarted
-	payload.RunCWD = run.RunCWD
-	payload.Resume = payload.Resume || run.CodexThreadID != "" || len(run.CodexThreadIDs) > 0 || run.ClaudeStarted
+	// A durable graph node owns its own native CLI session. In particular, a
+	// Claude session id is derived from this attempt's execution key, while the
+	// run-level ClaudeStarted flag describes a different node (or an earlier
+	// non-graph relay). Carrying it here would make the new id look resumable
+	// before Claude has ever created its transcript.
+	//
+	// Node handoffs are carried through compact dependency evidence and the
+	// graph context above. Native ids must never cross an attempt boundary.
+	payload.CodexThreadID = ""
+	payload.CodexThreadIDs = nil
+	payload.ClaudeStarted = false
+	payload.RunCWD = ""
+	payload.Resume = false
 	maxRounds := payload.MaxRounds
 	payload.MaxTurns = 1
 	payload.TaskGraph = &protocol.TaskGraphPayload{ID: graph.ID, Generation: graph.Generation, Round: payload.Round, MaxRounds: maxRounds, ParallelLimit: graph.ParallelLimit, Tasks: []protocol.TaskPayload{{

@@ -105,7 +105,9 @@ completion barrier. Formal-proof review additionally requires a successful
 reviewing-turn checker/audit command. Hub SQLite is the task authority; node
 attempts carry stable identities and payload digests, ambiguous restart state
 becomes `unknown`, and Bridge executes each node serially in the selected
-project workspace. Older Bridges retain the serial relay behavior. See
+project workspace. Native Codex and Claude sessions are owned by an individual
+durable task attempt; compact evidence, rather than a prior attempt's native
+id, carries context into the next node. Older Bridges retain the serial relay behavior. See
 [ADR-008](adr/008-durable-orchestration-task-graph.md).
 Bridge persists the legacy
 Codex thread id, the `codex_thread_ids_json` slot map, and the stable Claude

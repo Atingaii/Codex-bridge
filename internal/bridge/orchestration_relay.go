@@ -185,6 +185,35 @@ func (m *OrchestrationManager) runRelayCLIWithCapacityRetries(ctx context.Contex
 	}
 }
 
+// releaseManagedCodexSessionAfterActiveWriter tears down only the app-server
+// process launched and retained by this OrchestrationManager. It intentionally
+// cannot terminate a user-owned Codex TUI or an unowned process merely because
+// it happens to reference the same native thread.
+func (m *OrchestrationManager) releaseManagedCodexSessionAfterActiveWriter(workerSlot string, state *orchestrationSessionState) {
+	if state == nil || state.NativeSession == nil {
+		return
+	}
+	session := state.NativeSession
+	workerSlot = normalizeCodexWorkerSlot(workerSlot)
+	session.mu.Lock()
+	codex := session.codexSessionLocked(workerSlot)
+	if codex != nil {
+		if codex.threadID != "" {
+			state.setCodexThreadID(workerSlot, codex.threadID)
+		}
+		session.setCodexSessionLocked(workerSlot, nil)
+	}
+	session.mu.Unlock()
+	if codex == nil || codex.client == nil {
+		return
+	}
+	codex.client.unsubscribeThreadWithTimeout(codex.threadID)
+	// A normal close waits up to 30 seconds. Active-writer recovery needs a
+	// bounded cleanup: after the unsubscribe grace period the managed process
+	// group is terminated, allowing the next retry to create a clean client.
+	codex.client.closeWithTimeout(appServerPrepareCloseTimeout)
+}
+
 // runRelayCLIWithSubmissionRetries handles errors raised before Codex accepts
 // turn/start. Unlike stream recovery, the original prompt is safe and required
 // here because an active writer rejection means no new turn was created.
@@ -222,6 +251,10 @@ func (m *OrchestrationManager) runRelayCLIWithSubmissionRetries(ctx context.Cont
 			return content, tools, err
 		}
 
+		// A rejected turn/start did not accept the prompt, but the current Bridge
+		// may still own an app-server subscription from an interrupted prior turn.
+		// Release only that managed client before waiting.
+		m.releaseManagedCodexSessionAfterActiveWriter(workerSlot, state)
 		wait := waits[retry]
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:     "turn.delta",

@@ -281,7 +281,10 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    each node; `internal/hub/task_graph.go:orchestrationTaskSpecs` serializes
    writable nodes and `run` applies the task role, intermediate/final reviewer
    gates, and formal checker gate.
-5. Update [docs/features/durable-bounded-orchestration-task-graph.md](features/durable-bounded-orchestration-task-graph.md).
+5. `internal/hub/task_graph.go:dispatchTaskAttempt` clears run-level native
+   Codex/Claude resume metadata: each attempt creates and owns its own native
+   session, while compact dependency evidence carries the handoff.
+6. Update [docs/features/durable-bounded-orchestration-task-graph.md](features/durable-bounded-orchestration-task-graph.md).
 
 ### Change Orchestration Strategy
 

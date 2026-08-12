@@ -127,6 +127,14 @@ An attempt contains:
 - dispatch, acknowledgement, and terminal timestamps;
 - terminal evidence JSON and error text.
 
+Native CLI ownership is also attempt-scoped. Each dispatched node starts with
+empty Codex and Claude resume metadata and uses its own execution key to create
+native sessions. A successful node may contribute compact handoff evidence to
+its dependants, but it must never make a different attempt resume its Codex
+thread or a Claude session id that has not been created for that attempt. This
+prevents a run-level `claude_started` marker from being mistaken for a
+transcript belonging to a newly dispatched node.
+
 `internal/store/task_graph.go:ClaimReadyTask` runs in one SQLite transaction. It
 verifies dependencies and concurrency limits, creates the next attempt, and
 moves the node from `ready` to `dispatching`. Bridge events must carry the graph,

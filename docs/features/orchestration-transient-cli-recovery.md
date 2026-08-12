@@ -18,6 +18,9 @@
 - Treat Codex `thread ... already has an active writer` as a temporary native
   thread lease conflict after process/Bridge restart, without losing or
   rewriting the prompt that Codex has not accepted yet.
+- Before retrying an active-writer rejection, release only the app-server
+  process and thread subscription owned by the current Bridge manager. Never
+  locate or kill an arbitrary user-owned Codex TUI by native thread id.
 - Release every durable task attempt's app-server process and thread
   subscription before publishing its terminal event, including error and
   cancellation paths, so native TUI resume is not left behind an orphaned
@@ -56,7 +59,7 @@ returned result:
 | Class | Recovery |
 | --- | --- |
 | model capacity | reset the affected CLI process, wait 10/30/60 seconds, then replay the same prompt because the provider rejected it before useful work |
-| Codex active writer | keep the same native thread and original prompt, wait 5/15/30/60 seconds for the prior turn lease to clear, then submit it again |
+| Codex active writer | release the current Bridge-owned app-server subscription/process, keep the same native thread and original prompt, wait 5/15/30/60 seconds for the prior turn lease to clear, then submit it again |
 | Codex stream transport | preserve cumulative text and command evidence, reset only the affected app-server process, wait 5/15/30 seconds, resume the same native thread with a compact current-state recovery prompt |
 | missing final conclusion | continue the same turn with the existing bounded conclusion prompt |
 | cancellation/deadline | stop immediately |
@@ -98,7 +101,8 @@ slot, workspace, and native thread ID.
 4. Converge post-reconnect visible output after a bounded terminal-event quiet
    window, unless a command is active or a failed command awaits follow-up.
 5. Add a separate 5/15/30/60-second active-writer budget that preserves the
-   original unaccepted prompt and native thread.
+   original unaccepted prompt and native thread, and tears down only the
+   Bridge-owned app-server process before every retry.
 6. Join the rejected submission's event reader before retrying so it cannot
    consume events emitted for the next accepted turn.
 7. Add a separate 5/15/30-second transport retry budget using a compact
@@ -126,6 +130,8 @@ slot, workspace, and native thread ID.
 - Capacity and transport budgets do not consume missing-final continuations.
 - Active-writer retry preserves the original prompt because `turn/start` did
   not accept it, and its budget is independent from transport recovery.
+- Active-writer cleanup never kills a user-owned Codex/TUI process; it only
+  unsubscribes and terminates a process retained by this Bridge manager.
 - Exhaustion retains the last concrete provider/transport reason.
 - Successful, failed, and canceled durable task attempts release their Codex
   app-server writer before Hub observes the terminal event.

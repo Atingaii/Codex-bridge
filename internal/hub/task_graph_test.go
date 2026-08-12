@@ -82,7 +82,7 @@ func TestDurableTaskDispatchRetainsSelectedCWD(t *testing.T) {
 	}
 }
 
-func TestDurableTaskDispatchRefreshesNativeSessionState(t *testing.T) {
+func TestDurableTaskDispatchDoesNotCrossAttemptNativeSessionState(t *testing.T) {
 	s, st, userID, agentID := newOrchestrationTestServer(t)
 	run := createOrchestrationRun(t, st, userID, agentID)
 	graph := createHubTaskGraph(t, st, run)
@@ -100,8 +100,8 @@ func TestDurableTaskDispatchRefreshesNativeSessionState(t *testing.T) {
 		t.Fatal(err)
 	}
 	dispatched := decodeTaskDispatchPayload(t, <-conn.send)
-	if !dispatched.Resume || dispatched.CodexThreadID != "thread-a" || dispatched.CodexThreadIDs["codex-a"] != "thread-a" || !dispatched.ClaudeStarted || dispatched.RunCWD != "/private/run-cwd" {
-		t.Fatalf("native session state was stale: %#v", dispatched)
+	if dispatched.Resume || dispatched.CodexThreadID != "" || len(dispatched.CodexThreadIDs) != 0 || dispatched.ClaudeStarted || dispatched.RunCWD != "" {
+		t.Fatalf("durable task inherited another attempt's native state: %#v", dispatched)
 	}
 }
 

@@ -1539,7 +1539,7 @@ func TestOrchestrationCodexActiveWriterRetriesOriginalPromptOnSameThread(t *test
 		}
 	}
 	state := readActiveWriterFakeState(t, statePath)
-	if state.Processes != 1 || state.TurnStarts != 2 || len(state.Prompts) != 2 || state.Prompts[0] != state.Prompts[1] {
+	if state.Processes != 2 || state.TurnStarts != 2 || len(state.Prompts) != 2 || state.Prompts[0] != state.Prompts[1] {
 		t.Fatalf("active-writer retry changed process or prompt: %#v", state)
 	}
 }
@@ -1569,7 +1569,7 @@ func TestOrchestrationCodexActiveWriterRetryExhaustionPreservesReason(t *testing
 		t.Fatalf("active-writer exhaustion did not preserve reason: %#v", events)
 	}
 	state := readActiveWriterFakeState(t, statePath)
-	if state.Processes != 1 || state.TurnStarts != 2 || len(state.Prompts) != 2 || state.Prompts[0] != state.Prompts[1] {
+	if state.Processes != 2 || state.TurnStarts != 2 || len(state.Prompts) != 2 || state.Prompts[0] != state.Prompts[1] {
 		t.Fatalf("active-writer exhaustion attempts = %#v", state)
 	}
 }
@@ -1632,6 +1632,60 @@ func TestDurableTaskTerminalReleasesCodexWriterBeforeDelivery(t *testing.T) {
 	manager.mu.Unlock()
 	if sessionExists {
 		t.Fatal("durable task terminal event was delivered before native session cleanup")
+	}
+}
+
+func TestDurableClaudeAttemptsCreateTheirOwnSessions(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	logPath := filepath.Join(tmp, "claude-log.jsonl")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeInteractiveRelayScript(logPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	defer manager.CloseAll()
+
+	runAttempt := func(attemptID string) {
+		t.Helper()
+		out := make(chan protocol.Envelope, 64)
+		manager.AttachOut(out)
+		manager.run(context.Background(), protocol.OrchestrationStartPayload{
+			// Start rewrites graph attempts to this execution key before calling
+			// run. Mirror that boundary directly so the test covers session identity.
+			RunID: "orc_durable_claude:" + attemptID, Mode: "collaboration", FirstCLI: "claude", Prompt: "complete node " + attemptID,
+			MaxTurns: 1, CWD: tmp,
+			TaskGraph: &protocol.TaskGraphPayload{ID: "otg_claude", Generation: 1, Round: 1, MaxRounds: 1, Tasks: []protocol.TaskPayload{{
+				ID: "otk_" + attemptID, AttemptID: attemptID, Role: store.TaskRoleWorker, WorkerSlot: "claude", PayloadDigest: "digest_" + attemptID,
+			}}},
+		})
+	}
+	runAttempt("ota_first")
+	runAttempt("ota_second")
+
+	records := waitForJSONLineEventCount(t, logPath, "process_start", 2)
+	var starts []map[string]any
+	for _, record := range records {
+		if record["event"] == "process_start" {
+			starts = append(starts, record)
+		}
+	}
+	if len(starts) != 2 {
+		t.Fatalf("Claude process records = %#v", records)
+	}
+	firstArgs, _ := starts[0]["argv"].([]any)
+	secondArgs, _ := starts[1]["argv"].([]any)
+	for _, args := range [][]any{firstArgs, secondArgs} {
+		if sliceContainsString(args, "--resume") || !sliceContainsString(args, "--session-id") {
+			t.Fatalf("durable Claude attempt did not create its own session: %#v", args)
+		}
+	}
+	firstID, _ := starts[0]["sessionId"].(string)
+	secondID, _ := starts[1]["sessionId"].(string)
+	if firstID == "" || secondID == "" || firstID == secondID {
+		t.Fatalf("durable Claude session ids = %q, %q", firstID, secondID)
 	}
 }
 

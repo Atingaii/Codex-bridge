@@ -36,6 +36,16 @@ type UpdateItem = {
 
 const releases: Array<{ date: string; version: string; summary: string; items: UpdateItem[] }> = [
   {
+    date: '2026 年 8 月 12 日',
+    version: 'v0.3.29',
+    summary: '长编排显示更完整，任务切换更稳定，并修复 Claude 自定义模型配置兼容性。',
+    items: [
+      { icon: BarChart3, category: '编排', title: '显示每个轮次的耗时', detail: '每轮会记录开始、结束和持续时间；继续同一任务时，新对话耗时会追加到原任务。' },
+      { icon: Network, category: '多任务', title: '任务之间独立切换', detail: '支持同时运行多个任务，点击哪个任务就进入哪个页面，避免刷新或响应延迟导致跳回旧任务。' },
+      { icon: Settings2, category: 'Claude', title: '修复自定义模型 Base URL', detail: '自动规范 Claude 配置地址，避免重复拼接 /v1 导致模型请求失败；Bridge 重启后自动迁移已有配置。' },
+    ],
+  },
+  {
     date: '2026 年 8 月 11 日',
     version: 'v0.3.28',
     summary: '产品品牌统一为 ProofBridge，并补齐模型供应商预设编辑能力。',
@@ -109,13 +119,13 @@ export function UpdatesPage({ language, setLanguage, isDarkMode, setIsDarkMode }
 
       <main className="mx-auto max-w-5xl px-4 pb-24 pt-12 md:px-6 md:pt-16">
         <section className="border-b border-border pb-12">
-          <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />当前版本 v0.3.28</div>
+          <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />当前版本 v0.3.29</div>
           <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
             <div>
               <h1 className="text-3xl font-semibold leading-tight sm:text-4xl">最近更新</h1>
               <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground">品牌、模型切换、多机器稳定性和长编排体验，最近几次更新集中解决了这些高频问题。</p>
             </div>
-            <a href="https://github.com/Atingaii/ProofBridge/releases/tag/v0.3.28" target="_blank" rel="noreferrer" className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-border px-3 text-xs font-medium hover:bg-muted">查看 Release <ExternalLink className="h-3.5 w-3.5" /></a>
+            <a href="https://github.com/Atingaii/ProofBridge/releases/tag/v0.3.29" target="_blank" rel="noreferrer" className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-border px-3 text-xs font-medium hover:bg-muted">查看 Release <ExternalLink className="h-3.5 w-3.5" /></a>
           </div>
           <div className="mt-8 grid gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-3">
             {highlights.map(({ icon: Icon, label, value }) => (

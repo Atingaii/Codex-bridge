@@ -173,7 +173,11 @@ export function OrchestrationWorkspace({
 
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
   const onlineAgent = selectedAgent?.online ? selectedAgent : agents.find((agent) => agent.online);
-  const agentRuns = useMemo(() => runs, [runs]);
+  // Keep the global run cache for URL selection, but isolate the sidebar by machine.
+  const agentRuns = useMemo(() => {
+    if (!selectedAgentId) return [];
+    return runs.filter((run) => run.agentId === selectedAgentId);
+  }, [runs, selectedAgentId]);
   const activeRun = runs.find((run) => run.id === activeRunId) || null;
   const activeRunFiles = useMemo(() => {
     return activeRun ? mergeOrchestrationFiles(activeRun.files, orchestrationRunFilesFromEvents(events, activeRun.id)) : [];

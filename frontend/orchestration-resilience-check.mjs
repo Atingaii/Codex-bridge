@@ -21,7 +21,7 @@ assert.match(workspace, /const activeRun = runs\.find\(\(run\) => run\.id === ac
 assert.match(workspace, /activeRunIdRef\.current && activeRunAgentIdRef\.current === current\s*\? current\s*: preferredAgentID\(nextAgents, current\)/);
 assert.match(workspace, /const loadRuns = useCallback\(async \(\) => \{/);
 assert.doesNotMatch(workspace, /params\.set\('agentId'/);
-assert.match(workspace, /const agentRuns = useMemo\(\(\) => runs, \[runs\]\);/);
+assert.match(workspace, /const agentRuns = useMemo\(\(\) => \{[\s\S]*runs\.filter\(\(run\) => run\.agentId === selectedAgentId\)/);
 assert.match(workspace, /activeRunIdRef\.current && activeRunAgentIdRef\.current === agentId/);
 assert.match(workspace, /if \(activeRunIdRef\.current === directRun\.id\) \{\s*rememberActiveOrchestrationRunForAgent\(directRun\.agentId, directRun\.id\);\s*return;/);
 assert.match(workspace, /if \(activeRunIdRef\.current && activeRunAgentIdRef\.current === selectedAgentIdRef\.current\) return;/);

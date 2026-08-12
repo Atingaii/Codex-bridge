@@ -67,6 +67,7 @@ type publicOrchestrationEventResponse struct {
 	CommandData   *protocol.CommandData   `json:"commandData,omitempty"`
 	RunStartData  *protocol.RunStartData  `json:"runStartData,omitempty"`
 	TurnStartData *protocol.TurnStartData `json:"turnStartData,omitempty"`
+	TurnEndData   *protocol.TurnEndData   `json:"turnEndData,omitempty"`
 	RunEndData    *protocol.RunEndData    `json:"runEndData,omitempty"`
 	RunConclusion *protocol.RunConclusion `json:"runConclusion,omitempty"`
 	Data          map[string]any          `json:"data,omitempty"`
@@ -265,6 +266,7 @@ func publicOrchestrationEvents(events []store.OrchestrationEvent) []publicOrches
 			CommandData:   publicCommandData(event.CommandData),
 			RunStartData:  publicRunStartData(event.RunStartData),
 			TurnStartData: publicTurnStartData(event.TurnStartData),
+			TurnEndData:   event.TurnEndData,
 			RunEndData:    publicRunEndData(event.RunEndData),
 			RunConclusion: event.RunConclusion,
 			Data:          publicOrchestrationEventData(event.Data),

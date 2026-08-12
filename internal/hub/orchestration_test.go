@@ -418,10 +418,11 @@ func TestOrchestrationEventsPersistRunSessionState(t *testing.T) {
 		RunStartData: &protocol.RunStartData{CWD: "/abs/work"},
 	}))
 	s.handleOrchestrationEvent(ctx, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
-		RunID:      run.ID,
-		Kind:       "turn.end",
-		CLI:        "codex",
-		RunEndData: &protocol.RunEndData{CodexThreadID: "thread_saved"},
+		RunID:       run.ID,
+		Kind:        "turn.end",
+		CLI:         "codex",
+		TurnEndData: &protocol.TurnEndData{StartedAt: 1000, CompletedAt: 3250, DurationMs: 2250},
+		RunEndData:  &protocol.RunEndData{CodexThreadID: "thread_saved"},
 	}))
 	s.handleOrchestrationEvent(ctx, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
 		RunID: run.ID,
@@ -435,6 +436,13 @@ func TestOrchestrationEventsPersistRunSessionState(t *testing.T) {
 	}
 	if loaded.RunCWD != "/abs/work" || loaded.CodexThreadID != "thread_saved" || !loaded.ClaudeStarted {
 		t.Fatalf("run session state = %+v", loaded)
+	}
+	events, err := st.ListOrchestrationEvents(ctx, run.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) < 2 || events[1].TurnEndData == nil || events[1].TurnEndData.DurationMs != 2250 {
+		t.Fatalf("turn timing was not persisted: %#v", events)
 	}
 }
 

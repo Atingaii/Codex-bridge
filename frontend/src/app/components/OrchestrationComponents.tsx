@@ -197,6 +197,7 @@ export function OrchestrationTimelineGroupItem({
   const roundTone = orchestrationRoundTone(group.turnInfo?.ordinal);
   const countLabel = orchestrationTimelineGroupCountLabel(group, t);
   const stateLabel = group.incomplete ? t.turnMissingEnd : group.active ? t.running : group.hasError ? t.error : group.complete ? t.ready : t.status;
+  const durationLabel = formatDuration(group.durationMs);
 
   return (
     <div className="space-y-2">
@@ -224,6 +225,7 @@ export function OrchestrationTimelineGroupItem({
           </div>
           <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[10px] text-muted-foreground">
             <span className="truncate">{countLabel}</span>
+            {durationLabel && <span className="shrink-0 tabular-nums">{t.duration} {durationLabel}{group.durationLive ? '...' : ''}</span>}
             {(group.incomplete || group.hasError || group.active) && (
               <span className={cn(
                 "shrink-0 rounded border px-1.5 py-0.5",

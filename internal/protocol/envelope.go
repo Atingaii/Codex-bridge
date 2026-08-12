@@ -365,6 +365,7 @@ type OrchestrationEventPayload struct {
 	CommandData    *CommandData    `json:"commandData,omitempty"`
 	RunStartData   *RunStartData   `json:"runStartData,omitempty"`
 	TurnStartData  *TurnStartData  `json:"turnStartData,omitempty"`
+	TurnEndData    *TurnEndData    `json:"turnEndData,omitempty"`
 	RunEndData     *RunEndData     `json:"runEndData,omitempty"`
 	BridgeNoteData *BridgeNoteData `json:"bridgeNoteData,omitempty"`
 	RunConclusion  *RunConclusion  `json:"runConclusion,omitempty"`
@@ -412,6 +413,7 @@ type RunStartData struct {
 }
 
 type TurnStartData struct {
+	StartedAt  int64  `json:"startedAt,omitempty"`
 	CLI        string `json:"cli,omitempty"`
 	WorkerSlot string `json:"workerSlot,omitempty"`
 	Turn       int    `json:"turn,omitempty"`
@@ -421,6 +423,15 @@ type TurnStartData struct {
 	PromptText string `json:"promptText,omitempty"`
 	Profile    string `json:"profile,omitempty"`
 	ResumeMode string `json:"resumeMode,omitempty"`
+}
+
+// TurnEndData records elapsed wall-clock time for one CLI turn. It is emitted
+// by Bridge so follow-up prompts append independently timed turns to the same
+// orchestration run.
+type TurnEndData struct {
+	StartedAt   int64 `json:"startedAt,omitempty"`
+	CompletedAt int64 `json:"completedAt,omitempty"`
+	DurationMs  int64 `json:"durationMs,omitempty"`
 }
 
 type RunEndData struct {

@@ -785,6 +785,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		}
 		prompt := composeRelayPromptWithTaskScope(mode, firstCLI, profile, payload.Prompt, payload.Context, payload.Resume, role, cli, workerSlot, turn, maxTurns, history, taskScope)
 		resumeMode := plannedRelayResumeMode(cli, workerSlot, sessionState)
+		turnStartedAt := time.Now()
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 			Kind:    "turn.start",
 			TurnID:  turnID,
@@ -792,6 +793,7 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			CLI:     cli,
 			Content: orchestrationTurnStartContent(cli, workerSlot, &sessionState, turn, maxTurns, role),
 			TurnStartData: &protocol.TurnStartData{
+				StartedAt:  turnStartedAt.UnixMilli(),
 				CLI:        cli,
 				WorkerSlot: workerSlot,
 				Turn:       turn,
@@ -815,20 +817,27 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			},
 		})
 		record, turnStatus, err := m.runRelayTurnWithContinuations(ctx, payload, turnID, role, cli, workerSlot, prompt, &sessionState, runCWD)
+		turnCompletedAt := time.Now()
+		turnEndData := &protocol.TurnEndData{
+			StartedAt:   turnStartedAt.UnixMilli(),
+			CompletedAt: turnCompletedAt.UnixMilli(),
+			DurationMs:  turnCompletedAt.Sub(turnStartedAt).Milliseconds(),
+		}
 		if err != nil {
 			record.Err = visibleCLIError(err)
 			history = append(history, record)
 			m.emitTurnUsage(payload.RunID, record)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-				Kind:       "turn.end",
-				TurnID:     turnID,
-				Role:       role,
-				CLI:        cli,
-				Content:    relayTerminalContent([]orchestrationTurn{record}),
-				Status:     "error",
-				Error:      record.Err,
-				RunEndData: m.relayRunEndData(cli, workerSlot, workerPair, sessionState, runCWD),
-				Data:       relayTurnEndData(cli, workerSlot, sessionState),
+				Kind:        "turn.end",
+				TurnID:      turnID,
+				Role:        role,
+				CLI:         cli,
+				Content:     relayTerminalContent([]orchestrationTurn{record}),
+				Status:      "error",
+				Error:       record.Err,
+				TurnEndData: turnEndData,
+				RunEndData:  m.relayRunEndData(cli, workerSlot, workerPair, sessionState, runCWD),
+				Data:        relayTurnEndData(cli, workerSlot, sessionState),
 			})
 			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 				m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -860,14 +869,15 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			content = relayTerminalContent([]orchestrationTurn{record})
 		}
 		m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-			Kind:       "turn.end",
-			TurnID:     turnID,
-			Role:       role,
-			CLI:        cli,
-			Content:    content,
-			Status:     turnStatus,
-			RunEndData: m.relayRunEndData(cli, workerSlot, workerPair, sessionState, runCWD),
-			Data:       relayTurnEndData(cli, workerSlot, sessionState),
+			Kind:        "turn.end",
+			TurnID:      turnID,
+			Role:        role,
+			CLI:         cli,
+			Content:     content,
+			Status:      turnStatus,
+			TurnEndData: turnEndData,
+			RunEndData:  m.relayRunEndData(cli, workerSlot, workerPair, sessionState, runCWD),
+			Data:        relayTurnEndData(cli, workerSlot, sessionState),
 		})
 		if turnStatus == "success" && relayCanConverge(mode, profile, history) {
 			break

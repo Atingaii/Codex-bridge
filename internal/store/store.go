@@ -1502,6 +1502,7 @@ type OrchestrationEvent struct {
 	CommandData    *protocol.CommandData    `json:"commandData,omitempty"`
 	RunStartData   *protocol.RunStartData   `json:"runStartData,omitempty"`
 	TurnStartData  *protocol.TurnStartData  `json:"turnStartData,omitempty"`
+	TurnEndData    *protocol.TurnEndData    `json:"turnEndData,omitempty"`
 	RunEndData     *protocol.RunEndData     `json:"runEndData,omitempty"`
 	BridgeNoteData *protocol.BridgeNoteData `json:"bridgeNoteData,omitempty"`
 	RunConclusion  *protocol.RunConclusion  `json:"runConclusion,omitempty"`
@@ -2260,18 +2261,20 @@ func scanOrchestrationEvent(row interface{ Scan(dest ...any) error }) (Orchestra
 			CommandData    *protocol.CommandData    `json:"commandData,omitempty"`
 			RunStartData   *protocol.RunStartData   `json:"runStartData,omitempty"`
 			TurnStartData  *protocol.TurnStartData  `json:"turnStartData,omitempty"`
+			TurnEndData    *protocol.TurnEndData    `json:"turnEndData,omitempty"`
 			RunEndData     *protocol.RunEndData     `json:"runEndData,omitempty"`
 			BridgeNoteData *protocol.BridgeNoteData `json:"bridgeNoteData,omitempty"`
 			RunConclusion  *protocol.RunConclusion  `json:"runConclusion,omitempty"`
 			Task           *protocol.TaskAttemptRef `json:"task,omitempty"`
 		}
 		if err := json.Unmarshal([]byte(dataJSON), &typed); err == nil && (typed.Extra != nil ||
-			typed.CommandData != nil || typed.RunStartData != nil || typed.TurnStartData != nil ||
+			typed.CommandData != nil || typed.RunStartData != nil || typed.TurnStartData != nil || typed.TurnEndData != nil ||
 			typed.RunEndData != nil || typed.BridgeNoteData != nil || typed.RunConclusion != nil || typed.Task != nil) {
 			event.Data = typed.Extra
 			event.CommandData = typed.CommandData
 			event.RunStartData = typed.RunStartData
 			event.TurnStartData = typed.TurnStartData
+			event.TurnEndData = typed.TurnEndData
 			event.RunEndData = typed.RunEndData
 			event.BridgeNoteData = typed.BridgeNoteData
 			event.RunConclusion = typed.RunConclusion
@@ -2291,7 +2294,7 @@ func scanOrchestrationEvent(row interface{ Scan(dest ...any) error }) (Orchestra
 }
 
 func orchestrationEventDataJSON(event OrchestrationEvent) (string, error) {
-	if event.CommandData == nil && event.RunStartData == nil && event.TurnStartData == nil &&
+	if event.CommandData == nil && event.RunStartData == nil && event.TurnStartData == nil && event.TurnEndData == nil &&
 		event.RunEndData == nil && event.BridgeNoteData == nil && event.RunConclusion == nil && event.Task == nil {
 		if event.Data == nil {
 			return "", nil
@@ -2304,6 +2307,7 @@ func orchestrationEventDataJSON(event OrchestrationEvent) (string, error) {
 		CommandData    *protocol.CommandData    `json:"commandData,omitempty"`
 		RunStartData   *protocol.RunStartData   `json:"runStartData,omitempty"`
 		TurnStartData  *protocol.TurnStartData  `json:"turnStartData,omitempty"`
+		TurnEndData    *protocol.TurnEndData    `json:"turnEndData,omitempty"`
 		RunEndData     *protocol.RunEndData     `json:"runEndData,omitempty"`
 		BridgeNoteData *protocol.BridgeNoteData `json:"bridgeNoteData,omitempty"`
 		RunConclusion  *protocol.RunConclusion  `json:"runConclusion,omitempty"`
@@ -2313,6 +2317,7 @@ func orchestrationEventDataJSON(event OrchestrationEvent) (string, error) {
 		CommandData:    event.CommandData,
 		RunStartData:   event.RunStartData,
 		TurnStartData:  event.TurnStartData,
+		TurnEndData:    event.TurnEndData,
 		RunEndData:     event.RunEndData,
 		BridgeNoteData: event.BridgeNoteData,
 		RunConclusion:  event.RunConclusion,

@@ -4,7 +4,7 @@ This is the single overview for runtime architecture. Detailed rationale lives
 in ADRs; implementation paths live in [docs/code-map.md](code-map.md).
 
 ```text
-Browser UI
+Browser UI (one selected run stream)
   | WSS /ws/chat?sid=<session>
 Hub (Go + embedded UI + SQLite)
   | reverse WSS /api/agents/connect?token=<enroll>
@@ -73,7 +73,7 @@ Browser UI
   | WSS /ws/orchestrations?runId=<run>
 Hub (SQLite runs/events + durable task graph/attempts)
   | reverse WSS orchestration_start / orchestration_event
-Bridge
+Bridge (independent execution handles per run)
   | run-scoped native CLI sessions
 Codex CLI / Claude CLI
 ```
@@ -176,7 +176,9 @@ in typed sub-payloads. `turn.start.content` is a one-line status; the full
 local prompt is kept in `TurnStartData.PromptText` for authenticated local
 diagnostics and is stripped from public shares. Every terminal run emits one
 structured `run.conclusion` event before `run.end`, `run.error`, or
-`run.cancelled`.
+`run.cancelled`. Each `turn.end` also carries Bridge-captured start, completion,
+and elapsed wall-clock time, so follow-up turns append independent timing to the
+same run.
 
 Legacy Bridges emit a persisted `turn.usage` snapshot after each relay turn.
 Current Bridges additionally handle `orchestration_usage_sync_request` by

@@ -190,6 +190,7 @@ export function mergeOrchestrationEvents(current: OrchestrationEvent[], incoming
       commandData: event.commandData || previous.commandData,
       runStartData: event.runStartData || previous.runStartData,
       turnStartData: event.turnStartData || previous.turnStartData,
+      turnEndData: event.turnEndData || previous.turnEndData,
       runEndData: event.runEndData || previous.runEndData,
       bridgeNoteData: event.bridgeNoteData || previous.bridgeNoteData,
       runConclusion: event.runConclusion || previous.runConclusion,
@@ -348,7 +349,9 @@ export function orchestrationTimelineGroups(
         complete: false,
         active: false,
         incomplete: false,
-        hasError: false,
+      hasError: false,
+      durationMs: undefined,
+      durationLive: false,
       };
       turnGroups.set(key, group);
       groups.push(group);
@@ -383,6 +386,20 @@ export function orchestrationTimelineGroups(
     if (closedByTerminalRun) group.hasError = true;
     group.active = activeCommand || (activeRun && Boolean(lastEvent && !group.complete && lastEvent.kind !== 'turn.end'));
     group.incomplete = terminalRun && !group.complete && group.items.length > 0;
+
+    const start = events.find((event) => event.runId === group.runId && event.turnId === group.turnId && event.kind === 'turn.start');
+    const end = events.find((event) => event.runId === group.runId && event.turnId === group.turnId && event.kind === 'turn.end');
+    const startedAt = end?.turnEndData?.startedAt || start?.turnStartData?.startedAt || (start?.createdAt ? start.createdAt * 1000 : 0);
+    if (end?.turnEndData?.durationMs !== undefined) {
+      group.durationMs = end.turnEndData.durationMs;
+      group.durationLive = false;
+    } else if (startedAt > 0 && (group.active || group.incomplete)) {
+      group.durationMs = Math.max(0, Date.now() - startedAt);
+      group.durationLive = group.active;
+    } else if (start?.createdAt && end?.createdAt && end.createdAt >= start.createdAt) {
+      group.durationMs = (end.createdAt - start.createdAt) * 1000;
+      group.durationLive = false;
+    }
     group.createdAt = group.items.reduce<number | undefined>((best, item) => {
       return minNumber(best, item.createdAt);
     }, group.createdAt);

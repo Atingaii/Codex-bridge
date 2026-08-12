@@ -45,6 +45,19 @@ func TestProviderCandidatesNormalizeCommonEndpoints(t *testing.T) {
 	}
 }
 
+func TestClaudeBaseURLRemovesSDKVersionSuffix(t *testing.T) {
+	for input, want := range map[string]string{
+		"https://cpa.example/v1":           "https://cpa.example",
+		"https://cpa.example/v1/":          "https://cpa.example",
+		"https://api.example/anthropic":    "https://api.example/anthropic",
+		"https://api.example/anthropic/v1": "https://api.example/anthropic",
+	} {
+		if got := claudeBaseURL(input); got != want {
+			t.Fatalf("claudeBaseURL(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestCLIConfigDecryptRoundTrip(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	m, err := newCLIConfigManager(&config.Config{})
@@ -125,7 +138,7 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 		t.Fatalf("unexpected Claude settings: %#v", claude)
 	}
 	claudeEnv, _ := claude["env"].(map[string]any)
-	if claudeEnv["KEEP"] != "yes" || claudeEnv["ANTHROPIC_BASE_URL"] != "https://claude.example/v1" || claudeEnv["ANTHROPIC_AUTH_TOKEN"] != "claude-key" {
+	if claudeEnv["KEEP"] != "yes" || claudeEnv["ANTHROPIC_BASE_URL"] != "https://claude.example" || claudeEnv["ANTHROPIC_AUTH_TOKEN"] != "claude-key" {
 		t.Fatalf("unexpected Claude environment: %#v", claudeEnv)
 	}
 	for _, key := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_CUSTOM_MODEL_OPTION", "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"} {
@@ -232,6 +245,37 @@ func TestCLIConfigApplyMigratesLegacyClaudeOverride(t *testing.T) {
 	}
 	if manager.state.ClaudeOverrideKey != "" || manager.state.ClaudeModel != "old-provider-model" {
 		t.Fatalf("legacy state was not migrated: %#v", manager.state)
+	}
+}
+
+func TestCLIConfigStartupNormalizesManagedClaudeBaseURL(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"model":"deepseek-v4-flash","env":{"ANTHROPIC_BASE_URL":"https://cpa.example/v1","ANTHROPIC_AUTH_TOKEN":"keep-key","KEEP":"yes"},"permissions":{"defaultMode":"bypassPermissions"}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, ".codex-bridge", "config-switcher")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"claudeModel":"deepseek-v4-flash","claudeConfigManaged":true}`
+	if err := os.WriteFile(filepath.Join(root, "state.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newCLIConfigManager(&config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(readTestFile(t, filepath.Join(home, ".claude", "settings.json"))), &got); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := got["env"].(map[string]any)
+	if env["ANTHROPIC_BASE_URL"] != "https://cpa.example" || env["ANTHROPIC_AUTH_TOKEN"] != "keep-key" || env["KEEP"] != "yes" || got["permissions"] == nil {
+		t.Fatalf("unexpected normalized Claude settings: %#v", got)
 	}
 }
 

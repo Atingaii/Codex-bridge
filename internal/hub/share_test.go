@@ -151,12 +151,13 @@ func TestPublicOrchestrationShareSanitizesRunAndEventData(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := st.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
-		RunID:  run.ID,
-		Kind:   "turn.end",
-		TurnID: "turn-1",
-		CLI:    "claude",
-		Status: "error",
-		Error:  "claude exited mid-turn",
+		RunID:       run.ID,
+		Kind:        "turn.end",
+		TurnID:      "turn-1",
+		CLI:         "claude",
+		Status:      "error",
+		Error:       "claude exited mid-turn",
+		TurnEndData: &protocol.TurnEndData{StartedAt: 1000, CompletedAt: 3250, DurationMs: 2250},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +201,7 @@ func TestPublicOrchestrationShareSanitizesRunAndEventData(t *testing.T) {
 			t.Fatalf("public orchestration share leaked %q: %s", forbidden, raw)
 		}
 	}
-	for _, want := range []string{"go test ./...", "Model.thy", `"events"`, `"turn.end"`, "claude exited mid-turn", "claude-codex"} {
+	for _, want := range []string{"go test ./...", "Model.thy", `"events"`, `"turn.end"`, "claude exited mid-turn", "claude-codex", `"durationMs":2250`} {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("public orchestration share missing %q: %s", want, raw)
 		}

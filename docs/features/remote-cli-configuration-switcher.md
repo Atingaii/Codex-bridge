@@ -41,12 +41,17 @@ atomically renamed. Codex updates its model/provider section and native
 managed connection fields, registers the selected provider ID as its custom
 model option, and sets the main, Opus, Sonnet, Haiku, Fable, and subagent model
 fields to that same ID. This mirrors a native third-party-provider
-`settings.json` without depending on a versioned Anthropic model name. Hooks,
+`settings.json` without depending on a versioned Anthropic model name. Provider
+testing uses the discovered `/v1/messages` endpoint, while the persisted
+`ANTHROPIC_BASE_URL` omits a terminal `/v1` because Claude Code adds that API
+version itself. Hooks,
 MCP, skills, permissions, and unrelated settings remain unchanged. Active
 processes are left alone. Orchestration passes the actual provider model to
 Claude Code, and manually configured Bridge models continue to pass through
 unchanged. A Bridge upgrading from the earlier versioned `modelOverrides` slot
 restores the prior slot value and migrates the active preset at startup.
+Existing Bridge-managed Claude settings with a versioned Base URL are
+normalized on the next Bridge start; active CLI processes are not interrupted.
 
 Preset updates are ownership-scoped by user, agent, and preset ID. The Hub can
 reuse the existing Bridge-encrypted secret for connection testing and saving,

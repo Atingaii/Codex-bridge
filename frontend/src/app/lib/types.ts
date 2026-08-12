@@ -363,6 +363,7 @@ export type OrchestrationEvent = {
   commandData?: CommandData;
   runStartData?: RunStartData;
   turnStartData?: TurnStartData;
+  turnEndData?: TurnEndData;
   runEndData?: RunEndData;
   bridgeNoteData?: BridgeNoteData;
   runConclusion?: RunConclusion;
@@ -414,6 +415,7 @@ export type RunStartData = {
 };
 
 export type TurnStartData = {
+  startedAt?: number;
   cli?: string;
   workerSlot?: string;
   turn?: number;
@@ -423,6 +425,12 @@ export type TurnStartData = {
   promptText?: string;
   profile?: string;
   resumeMode?: string;
+};
+
+export type TurnEndData = {
+  startedAt?: number;
+  completedAt?: number;
+  durationMs?: number;
 };
 
 export type RunEndData = {
@@ -527,6 +535,8 @@ export type OrchestrationTimelineGroup = {
   active: boolean;
   incomplete: boolean;
   hasError: boolean;
+  durationMs?: number;
+  durationLive?: boolean;
 };
 
 export type OrchestrationVisibleEvent =

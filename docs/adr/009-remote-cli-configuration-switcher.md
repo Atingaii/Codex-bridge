@@ -28,11 +28,15 @@ For Claude Code, Bridge writes the requested provider model as the native
 `ANTHROPIC_CUSTOM_MODEL_OPTION`, and maps the Opus, Sonnet, Haiku, Fable, and
 subagent defaults to that same provider model. This avoids coupling to a
 versioned Anthropic model ID that a later Claude Code release can retire.
+Because Claude Code appends `/v1/messages` itself, Bridge removes a terminal
+`/v1` from `ANTHROPIC_BASE_URL` after testing the versioned provider endpoint.
 Bridge-launched Claude processes receive the actual provider model through
 `--model`; usage events record that same ID. A manually configured
 `bridge.claude_model` remains a direct CLI model argument for compatibility.
 Bridges upgrading from the short-lived versioned-slot implementation restore
 the pre-existing override and migrate the active preset on startup.
+Managed configurations from older Bridges also normalize the Base URL on
+startup without restarting an already running Claude process.
 
 Official reset only removes Bridge-managed custom-provider fields. It neither
 starts nor impersonates an official authorization flow.

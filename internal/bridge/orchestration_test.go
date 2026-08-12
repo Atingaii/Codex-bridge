@@ -347,6 +347,14 @@ func TestOrchestrationRelayRunEmitsFrontendVisiblePromptsCommandsAndSessionState
 		t.Fatalf("run.end did not relay final Codex content: %#v", events)
 	}
 	for _, event := range events {
+		if event.Kind == "turn.start" && (event.TurnStartData == nil || event.TurnStartData.StartedAt <= 0) {
+			t.Fatalf("turn.start missing timing: %#v", event)
+		}
+		if event.Kind == "turn.end" && (event.TurnEndData == nil || event.TurnEndData.StartedAt <= 0 || event.TurnEndData.CompletedAt < event.TurnEndData.StartedAt || event.TurnEndData.DurationMs < 0) {
+			t.Fatalf("turn.end missing valid timing: %#v", event)
+		}
+	}
+	for _, event := range events {
 		if event.Kind == "turn.start" && strings.Contains(event.Content, "Formal proof task guardrails") {
 			t.Fatalf("relay prompt leaked old proof gate label: %#v", event)
 		}

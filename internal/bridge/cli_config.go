@@ -78,6 +78,10 @@ func newCLIConfigManager(cfg *config.Config) (*cliConfigManager, error) {
 			if err := m.migrateLegacyClaudeConfig(home); err != nil {
 				return nil, err
 			}
+		} else if state.ClaudeConfigManaged && state.ClaudeModel != "" {
+			if err := m.normalizeManagedClaudeBaseURL(home); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return m, nil
@@ -458,7 +462,7 @@ func (m *cliConfigManager) apply(cli, base, model, key string, models []string) 
 		if env == nil {
 			env = map[string]any{}
 		}
-		env["ANTHROPIC_BASE_URL"] = strings.TrimRight(base, "/")
+		env["ANTHROPIC_BASE_URL"] = claudeBaseURL(base)
 		env["ANTHROPIC_AUTH_TOKEN"] = key
 		delete(env, "ANTHROPIC_API_KEY")
 		settings["env"] = env
@@ -591,6 +595,32 @@ func (m *cliConfigManager) migrateLegacyClaudeConfig(home string) error {
 	m.state.ClaudeOverrideHadPrevious = false
 	m.state.ClaudeConfigManaged = true
 	return m.writeState()
+}
+
+func (m *cliConfigManager) normalizeManagedClaudeBaseURL(home string) error {
+	path := filepath.Join(home, ".claude", "settings.json")
+	settings, err := readJSONObject(path)
+	if err != nil {
+		return fmt.Errorf("parse Claude settings for Base URL migration: %w", err)
+	}
+	env, _ := settings["env"].(map[string]any)
+	base, _ := env["ANTHROPIC_BASE_URL"].(string)
+	normalized := claudeBaseURL(base)
+	if normalized == "" || normalized == base {
+		return nil
+	}
+	env["ANTHROPIC_BASE_URL"] = normalized
+	settings["env"] = env
+	encoded, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return backupAndWrite(path, append(encoded, '\n'), 0o600)
+}
+
+func claudeBaseURL(base string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	return strings.TrimSuffix(base, "/v1")
 }
 
 func setClaudeModelFields(settings map[string]any, model string) {

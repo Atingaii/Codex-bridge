@@ -145,10 +145,12 @@ export function OrchestrationWorkspace({
   const [refreshingOrchestration, setRefreshingOrchestration] = useState(false);
   const [loadingOlderEvents, setLoadingOlderEvents] = useState(false);
   const [hasOlderEventsByRun, setHasOlderEventsByRun] = useState<Record<string, boolean>>({});
+  const [elapsedTick, setElapsedTick] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const activeRunIdRef = useRef('');
+  const desiredRunIdRef = useRef('');
   const activeRunAgentIdRef = useRef('');
   const selectedAgentIdRef = useRef(selectedAgentId);
   const stickToBottomRef = useRef(true);
@@ -171,10 +173,7 @@ export function OrchestrationWorkspace({
 
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
   const onlineAgent = selectedAgent?.online ? selectedAgent : agents.find((agent) => agent.online);
-  const agentRuns = useMemo(() => {
-    if (!selectedAgent?.id) return [];
-    return runs.filter((run) => run.agentId === selectedAgent.id);
-  }, [runs, selectedAgent?.id]);
+  const agentRuns = useMemo(() => runs, [runs]);
   const activeRun = runs.find((run) => run.id === activeRunId) || null;
   const activeRunFiles = useMemo(() => {
     return activeRun ? mergeOrchestrationFiles(activeRun.files, orchestrationRunFilesFromEvents(events, activeRun.id)) : [];
@@ -186,7 +185,7 @@ export function OrchestrationWorkspace({
   const currentTurnLabel = useMemo(() => orchestrationTurnLabel(currentTurnInfo, t), [currentTurnInfo, t]);
   const visibleApprovals = useMemo(() => approvals.filter((item) => item.approval.runId === activeRunId), [approvals, activeRunId]);
   const timelineItems = useMemo(() => orchestrationTimelineItems(visibleEvents, visibleApprovals), [visibleEvents, visibleApprovals]);
-  const timelineGroups = useMemo(() => orchestrationTimelineGroups(timelineItems, activeRun, events), [timelineItems, activeRun, events]);
+  const timelineGroups = useMemo(() => orchestrationTimelineGroups(timelineItems, activeRun, events), [timelineItems, activeRun, events, elapsedTick]);
   const orchestrationStreamStatus = activeRun && isRunning ? connectionStatus : t.idle;
   const continuingRun = Boolean(activeRun && !isRunning);
   const canCancelRun = canCancelOrchestrationStatus(activeRun?.status);
@@ -229,16 +228,12 @@ export function OrchestrationWorkspace({
     });
   }, []);
 
-  const loadRuns = useCallback(async (agentId = '') => {
+  const loadRuns = useCallback(async () => {
     const params = new URLSearchParams();
     params.set('limit', '50');
-    if (agentId) params.set('agentId', agentId);
     const data = await api<{ runs: OrchestrationRun[] }>(`/api/orchestrations?${params.toString()}`);
     const incoming = Array.isArray(data.runs) ? data.runs.filter(isOrchestrationRun) : [];
-    setRuns((current) => {
-      if (!agentId) return incoming;
-      return mergeOrchestrationRunsPreservingOtherAgents(current, incoming, agentId, activeRunIdRef.current);
-    });
+    setRuns(incoming);
     return incoming;
   }, []);
 
@@ -359,6 +354,7 @@ export function OrchestrationWorkspace({
     }
     activeRunIdRef.current = '';
     activeRunAgentIdRef.current = '';
+    desiredRunIdRef.current = '';
     setActiveRunId('');
     localStorage.removeItem(activeOrchestrationRunStorageKey);
     setEvents([]);
@@ -452,6 +448,9 @@ export function OrchestrationWorkspace({
   }, [applyEvent, clearReconnect, closeWS, loadRun, loadRunEvents, startWSHeartbeat, t.connected, t.connecting, t.connectionError, t.disconnected]);
 
   const activateRun = useCallback(async (run: OrchestrationRun, options: { syncURL?: boolean; replaceURL?: boolean } = {}) => {
+    if (desiredRunIdRef.current && desiredRunIdRef.current !== run.id) return;
+    const urlRunID = orchestrationRunIdFromPath(window.location.pathname);
+    if (urlRunID && urlRunID !== run.id) return;
     draftingRunRef.current = false;
     const runAgentId = run.agentId || selectedAgentIdRef.current;
     timelineOrderRef.current = 0;
@@ -483,7 +482,7 @@ export function OrchestrationWorkspace({
       navigate(orchestrationRunPath(run.id), { replace: options.replaceURL });
     }
     await loadRunEvents(run.id, true, 'latest');
-    if (activeRunIdRef.current !== run.id) return;
+    if (activeRunIdRef.current !== run.id || desiredRunIdRef.current !== run.id) return;
     if (activeOrchestrationStatus(run.status)) {
       connectRun(run.id);
     } else {
@@ -494,15 +493,19 @@ export function OrchestrationWorkspace({
 
   const selectRun = useCallback(async (runId: string, options: { syncURL?: boolean; replaceURL?: boolean } = {}) => {
     draftingRunRef.current = false;
+    desiredRunIdRef.current = runId;
+    if (options.syncURL !== false && orchestrationRunIdFromPath(window.location.pathname) !== runId) {
+      navigate(orchestrationRunPath(runId), { replace: options.replaceURL });
+    }
     timelineOrderRef.current = 0;
     activeRunIdRef.current = runId;
     setActiveRunId(runId);
     setEvents((current) => current.filter((event) => event.runId === runId));
     setApprovals((current) => current.filter((item) => item.approval.runId === runId));
     const run = await loadRun(runId);
-    if (activeRunIdRef.current !== runId) return;
+    if (activeRunIdRef.current !== runId || desiredRunIdRef.current !== runId) return;
     await activateRun(run, options);
-  }, [activateRun, loadRun]);
+  }, [activateRun, loadRun, navigate]);
 
   const respondOrchestrationApproval = useCallback((requestId: string, decision: 'accept' | 'decline' | 'cancel') => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !activeRunIdRef.current) return;
@@ -546,6 +549,7 @@ export function OrchestrationWorkspace({
       return;
     }
     if (!isCurrentSelection()) return;
+    desiredRunIdRef.current = nextRun.id;
     activeRunIdRef.current = nextRun.id;
     activeRunAgentIdRef.current = nextRun.agentId || agentId;
     setActiveRunId(nextRun.id);
@@ -567,6 +571,9 @@ export function OrchestrationWorkspace({
         if (pathRunId) {
           directRun = await loadRun(pathRunId);
           if (!isCurrentRefresh()) return;
+          if (orchestrationRunIdFromPath(window.location.pathname) !== pathRunId) {
+            directRun = null;
+          }
         }
         const savedAgentId = directRun?.agentId || localStorage.getItem('codexBridge.selectedAgentId') || selectedAgentIdRef.current;
         const agentId = directRun?.agentId || preferredAgentID(loadedAgents, savedAgentId);
@@ -574,13 +581,14 @@ export function OrchestrationWorkspace({
         setSelectedAgentId(agentId);
         if (agentId) localStorage.setItem('codexBridge.selectedAgentId', agentId);
         else localStorage.removeItem('codexBridge.selectedAgentId');
-        const loadedRuns = await loadRuns(agentId);
+        const loadedRuns = await loadRuns();
         if (!isCurrentRefresh() || selectedAgentIdRef.current !== agentId) return;
         if (directRun) {
           if (activeRunIdRef.current === directRun.id) {
             rememberActiveOrchestrationRunForAgent(directRun.agentId, directRun.id);
             return;
           }
+          desiredRunIdRef.current = directRun.id;
           await activateRun(directRun, { syncURL: false });
           return;
         }
@@ -731,6 +739,12 @@ export function OrchestrationWorkspace({
     closeWS();
     setConnectionStatus(t.idle);
   }, [activeRunId, activeRun?.status, closeWS, t.idle]);
+
+  useEffect(() => {
+    if (!isRunning) return;
+    const interval = window.setInterval(() => setElapsedTick((current) => current + 1), 1000);
+    return () => window.clearInterval(interval);
+  }, [isRunning]);
 
   useEffect(() => {
     const id = window.requestAnimationFrame(() => {
@@ -898,7 +912,7 @@ export function OrchestrationWorkspace({
   const startDraftRun = () => {
     agentSelectionEpochRef.current += 1;
     draftingRunRef.current = true;
-    clearActiveOrchestration(true);
+    clearActiveOrchestration();
     setPrompt(t.reviewCurrentRepository);
     setFiles([]);
     setError('');
@@ -964,7 +978,7 @@ export function OrchestrationWorkspace({
                 </span>
               </div>
               <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
-                <span>{sessionDateLabel(run.updatedAt || run.createdAt, t)}</span>
+                <span className="truncate">{agents.find((agent) => agent.id === run.agentId)?.name || sessionDateLabel(run.updatedAt || run.createdAt, t)}</span>
                 <span>{run.status}</span>
               </div>
             </button>
@@ -1381,13 +1395,4 @@ function minOrchestrationEventSeq(events: OrchestrationEvent[], initial = 0) {
     if (min <= 0) return event.seq;
     return Math.min(min, event.seq);
   }, initial);
-}
-
-function mergeOrchestrationRunsPreservingOtherAgents(current: OrchestrationRun[], incoming: OrchestrationRun[], agentId: string, activeRunId: string) {
-  const merged = new Map<string, OrchestrationRun>();
-  current.filter(isOrchestrationRun).forEach((run) => {
-    if (run.agentId !== agentId || run.id === activeRunId) merged.set(run.id, run);
-  });
-  incoming.filter(isOrchestrationRun).forEach((run) => merged.set(run.id, run));
-  return Array.from(merged.values()).sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
 }

@@ -353,6 +353,7 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 		CLI:    "claude",
 		Source: "bridge",
 		TurnStartData: &protocol.TurnStartData{
+			StartedAt:  1000,
 			CLI:        "claude",
 			Turn:       1,
 			MaxTurns:   2,
@@ -377,7 +378,10 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "turn.end", Role: "proposer", CLI: "claude", Status: "success"}); err != nil {
+	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{
+		RunID: run.ID, Kind: "turn.end", Role: "proposer", CLI: "claude", Status: "success",
+		TurnEndData: &protocol.TurnEndData{StartedAt: 1000, CompletedAt: 3250, DurationMs: 2250},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	events, err := st.ListOrchestrationEvents(ctx, run.ID, 10)
@@ -392,6 +396,9 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	}
 	if events[1].CommandData == nil || events[1].CommandData.Command != "go test ./..." || events[1].CommandData.ExitCode == nil || *events[1].CommandData.ExitCode != 0 {
 		t.Fatalf("command typed data did not round-trip: %+v", events[1])
+	}
+	if events[2].TurnEndData == nil || events[2].TurnEndData.StartedAt != 1000 || events[2].TurnEndData.CompletedAt != 3250 || events[2].TurnEndData.DurationMs != 2250 {
+		t.Fatalf("turn end timing did not round-trip: %+v", events[2])
 	}
 	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, OrchestrationCompleted, ""); err != nil {
 		t.Fatal(err)

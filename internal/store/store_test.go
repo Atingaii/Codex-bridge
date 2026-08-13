@@ -72,6 +72,13 @@ func TestStoreUserAgentSessionMessageFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sessions, err := st.ListSessions(ctx, user.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != session.ID {
+		t.Fatalf("unexpected sessions: %#v", sessions)
+	}
 	if err := st.UpdateSessionRemoteThread(ctx, session.ID, user.ID, "thread-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -938,6 +945,61 @@ func TestClaimOrchestrationRunForContinue(t *testing.T) {
 	}
 	if again {
 		t.Fatal("expected second claim of an active run to fail")
+	}
+}
+
+func TestDeleteRequestedRunCannotBeRevivedAndCascades(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	user, err := st.UpsertUser(ctx, "delete-state-user", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgent(ctx, "delete-state-agent", "delete-state-machine", "host", "instance", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := createTestOrchestrationRun(t, st, user.ID, agent.ID, "delete state")
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, OrchestrationRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "run.start", Status: OrchestrationRunning}); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := st.CreateOrchestrationTaskGraph(ctx, run.ID, `{}`, "delete-state", []CreateTaskSpec{
+		{Name: "worker", Role: TaskRoleWorker, PayloadJSON: `{}`, PayloadDigest: "worker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, claimed, err := st.ClaimReadyTask(ctx, graph.Tasks[0].ID, ""); err != nil || !claimed {
+		t.Fatalf("claim task: claimed=%v err=%v", claimed, err)
+	}
+	requested, action, err := st.RequestDeleteOrchestrationRun(ctx, run.ID, user.ID)
+	if err != nil || action != DeleteOrchestrationCancelStarted || !requested.DeleteRequested {
+		t.Fatalf("delete request: run=%#v action=%q err=%v", requested, action, err)
+	}
+	if changed, err := st.UpdateOrchestrationRunStatusIfAllowed(ctx, run.ID, OrchestrationRunning, ""); err != nil || changed {
+		t.Fatalf("late start transition: changed=%v err=%v", changed, err)
+	}
+	if _, _, claimed, err := st.ClaimReadyTask(ctx, graph.Tasks[0].ID, ""); err != nil || claimed {
+		t.Fatalf("claim after delete: claimed=%v err=%v", claimed, err)
+	}
+	if _, changed, err := st.CancelOrchestrationRunIfStillCanceling(ctx, run.ID, "delete requested"); err != nil || !changed {
+		t.Fatalf("settle deletion: changed=%v err=%v", changed, err)
+	}
+	if deleted, err := st.DeleteOrchestrationRunIfRequested(ctx, run.ID); err != nil || !deleted {
+		t.Fatalf("delete settled run: deleted=%v err=%v", deleted, err)
+	}
+	if _, err := st.OrchestrationRunByIDAnyUser(ctx, run.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted run lookup error = %v", err)
+	}
+	if _, err := st.TaskGraphByRun(ctx, run.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cascaded graph lookup error = %v", err)
+	}
+	events, err := st.ListOrchestrationEvents(ctx, run.ID, 100)
+	if err != nil || len(events) != 0 {
+		t.Fatalf("cascaded events = %#v err=%v", events, err)
 	}
 }
 

@@ -68,6 +68,11 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 - The earlier serial persistent-queue proposal is deprecated. New graph-capable
   orchestration runs use the Hub SQLite durable bounded task graph described in
   [docs/features/durable-bounded-orchestration-task-graph.md](features/durable-bounded-orchestration-task-graph.md).
+- Administrators can gray-test the optional planning progress workspace: two
+  planning/review nodes precede the existing graph, while a default-closed
+  overlay presents prompt history, a React Flow node map, and checklist state
+  without resizing the live transcript. See
+  [docs/features/orchestration-plan-progress-workspace.md](features/orchestration-plan-progress-workspace.md).
 
 ## Maintenance Log
 

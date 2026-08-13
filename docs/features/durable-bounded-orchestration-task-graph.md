@@ -73,6 +73,21 @@ integration, and review in order. This deliberately trades candidate parallelism
 for direct, visible work in the user's selected checkout. The final graph cannot
 become `completed` unless the reviewer node is `succeeded`.
 
+The administrator-only `orchestration-plan-workspace` rollout prepends a
+planning barrier without replacing the ordinary topology:
+
+```text
+plan -> plan-review -> candidate-a -> candidate-b -> integrate -> review
+```
+
+The planner emits a bounded structured checklist, and the independent plan
+reviewer replaces it with a corrected checklist before implementation begins.
+Runs outside the rollout retain the four-node topology. Follow-up generations
+read the persisted graph payload, so changing rollout policy cannot silently
+change an existing run. The browser presentation and structured marker rules
+are specified in
+[docs/features/orchestration-plan-progress-workspace.md](orchestration-plan-progress-workspace.md).
+
 One complete graph generation is one user-visible collaboration round. The
 configured `max_turns` is the number of generations, not the number of internal
 nodes and not a per-node Bridge turn limit. Every node remains a single bounded
@@ -219,6 +234,14 @@ At Hub startup:
 An explicit retry never edits the old attempt. It creates a new attempt with a
 new id and digest plus `retry_of_attempt_id`. Retrying an unknown task is a user
 decision because the previous attempt may already have changed external state.
+
+A user-requested run deletion is also durable. Active runs transition through
+`queued|running -> canceling -> canceled -> deleted`; terminal runs delete
+immediately. A pending delete prevents new task claims and ignores later task
+events, while a database-level status transition guard prevents a late
+`run.start` from reviving the run. Hub restart and cancellation timeout both
+finish any persisted delete intent before removing the run and its cascaded
+events, graphs, tasks, and attempts.
 
 ## Data And Protocol Impact
 

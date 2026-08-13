@@ -14,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/tencent/codex-bridge/internal/protocol"
+	"github.com/tencent/codex-bridge/internal/rollout"
 	"github.com/tencent/codex-bridge/internal/serverutil"
 	"github.com/tencent/codex-bridge/internal/store"
 	"github.com/tencent/codex-bridge/internal/usagepricing"
@@ -46,6 +47,7 @@ type orchestrationStartRequest struct {
 	MaxTurns                int
 	MaxTurnsRequested       int
 	Files                   []protocol.AttachmentPayload
+	PlanWorkspace           bool
 }
 
 const orchestrationCancelAckTimeout = 5 * time.Second
@@ -86,6 +88,9 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		CWD:                     req.CWD,
 		MaxTurns:                req.MaxTurns,
 		Files:                   req.Files,
+	}
+	if user, err := s.store.UserByID(r.Context(), uid); err == nil {
+		startReq.PlanWorkspace = s.featureEnabled(rollout.FeatureOrchestrationPlanWorkspace, user)
 	}
 	normalized, ok := s.normalizeOrchestrationStart(w, startReq)
 	if !ok {
@@ -164,6 +169,12 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		CWD:                     req.CWD,
 		MaxTurns:                req.MaxTurns,
 		Files:                   req.Files,
+	}
+	if graph, graphErr := s.store.TaskGraphByRun(r.Context(), run.ID); graphErr == nil {
+		var previous protocol.OrchestrationStartPayload
+		if json.Unmarshal([]byte(graph.PayloadJSON), &previous) == nil {
+			startReq.PlanWorkspace = previous.PlanWorkspace
+		}
 	}
 	if startReq.AgentID == "" {
 		startReq.AgentID = run.AgentID
@@ -1049,6 +1060,7 @@ func (s *Server) startOrchestration(ctx context.Context, run store.Orchestration
 		RunCWD:                  orchestrationResumeString(resume, run.RunCWD),
 		Profile:                 req.Profile,
 		NativeContextCompaction: req.NativeContextCompaction,
+		PlanWorkspace:           req.PlanWorkspace,
 	}
 	if s.durableTaskGraphEnabled(run.AgentID) {
 		if err := s.createAndDispatchTaskGraph(ctx, run, payload); err != nil {
@@ -1223,6 +1235,31 @@ func (s *Server) handleGetOrchestration(w http.ResponseWriter, r *http.Request, 
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"run": run})
 }
 
+func (s *Server) handleDeleteOrchestration(w http.ResponseWriter, r *http.Request, uid string) {
+	runID := r.PathValue("runID")
+	run, action, err := s.store.RequestDeleteOrchestrationRun(r.Context(), runID, uid)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "orchestration run not found")
+			return
+		}
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to request orchestration deletion")
+		return
+	}
+	if action == store.DeleteOrchestrationDeleted {
+		serverutil.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "status": action})
+		return
+	}
+	s.scheduleOrchestrationCancelTimeout(run.ID, orchestrationCancelAckTimeout)
+	if action == store.DeleteOrchestrationCancelStarted {
+		if err := s.persistAndDispatchOrchestrationCancel(r.Context(), run); err != nil {
+			serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to start orchestration cancellation")
+			return
+		}
+	}
+	serverutil.WriteJSON(w, http.StatusAccepted, map[string]any{"ok": true, "status": store.OrchestrationCanceling})
+}
+
 func (s *Server) handleOrchestrationEvents(w http.ResponseWriter, r *http.Request, uid string) {
 	runID := r.PathValue("runID")
 	_, err := s.store.OrchestrationRunByID(r.Context(), runID, uid)
@@ -1302,20 +1339,27 @@ func (s *Server) handleCancelOrchestration(w http.ResponseWriter, r *http.Reques
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to update orchestration run")
 		return
 	}
-	event, err := s.store.AddOrchestrationEvent(r.Context(), store.OrchestrationEvent{
+	if err := s.persistAndDispatchOrchestrationCancel(r.Context(), run); err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to persist orchestration cancellation")
+		return
+	}
+	s.scheduleOrchestrationCancelTimeout(run.ID, orchestrationCancelAckTimeout)
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "status": store.OrchestrationCanceling})
+}
+
+func (s *Server) persistAndDispatchOrchestrationCancel(ctx context.Context, run store.OrchestrationRun) error {
+	event, err := s.store.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
 		RunID:  run.ID,
 		Kind:   "run.canceling",
 		Source: "bridge",
 		Status: store.OrchestrationCanceling,
 	})
 	if err != nil {
-		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to persist orchestration event")
-		return
+		return err
 	}
 	s.pool.BroadcastToOrchestrationBrowsers(run.ID, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", eventToPayload(event)))
 	_ = s.pool.SendToAgent(run.AgentID, protocol.MustEnvelope(protocol.TypeOrchestrationCancel, "", protocol.OrchestrationCancelPayload{RunID: run.ID}))
-	s.scheduleOrchestrationCancelTimeout(run.ID, orchestrationCancelAckTimeout)
-	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "status": store.OrchestrationCanceling})
+	return nil
 }
 
 func (s *Server) scheduleOrchestrationCancelTimeout(runID string, delay time.Duration) {
@@ -1339,6 +1383,11 @@ func (s *Server) scheduleOrchestrationCancelTimeout(runID string, delay time.Dur
 		}
 		slog.Warn("[hub] marked canceling orchestration canceled after timeout", "run_id", runID)
 		s.pool.BroadcastToOrchestrationBrowsers(runID, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", eventToPayload(event)))
+		if deleted, deleteErr := s.store.DeleteOrchestrationRunIfRequested(ctx, runID); deleteErr != nil {
+			slog.Error("[hub] delete canceled orchestration failed", "run_id", runID, "error", deleteErr)
+		} else if deleted {
+			slog.Info("[hub] deleted orchestration after cancellation timeout", "run_id", runID)
+		}
 	}()
 }
 
@@ -1725,12 +1774,20 @@ func (s *Server) handleOrchestrationEventFromAgent(ctx context.Context, agentID 
 	if err != nil || payload.RunID == "" {
 		return
 	}
+	existingRun, loadErr := s.store.OrchestrationRunByIDAnyUser(ctx, payload.RunID)
+	if loadErr != nil {
+		return
+	}
 	if agentID != "" {
-		run, err := s.store.OrchestrationRunByIDAnyUser(ctx, payload.RunID)
-		if err != nil || run.AgentID != agentID {
+		run := existingRun
+		if run.AgentID != agentID {
 			slog.Warn("[hub] rejected orchestration event from foreign bridge", "agent_id", agentID, "run_id", payload.RunID)
 			return
 		}
+	}
+	if existingRun.DeleteRequested && (payload.Task != nil || (payload.Kind != "run.end" && payload.Kind != "run.error" && payload.Kind != "run.cancelled")) {
+		slog.Info("[hub] ignored non-terminal event for orchestration pending deletion", "run_id", payload.RunID, "kind", payload.Kind)
+		return
 	}
 	if suppressEmptyPagesReadFailure(payload) {
 		return
@@ -1774,8 +1831,14 @@ func (s *Server) handleOrchestrationEventFromAgent(ctx context.Context, agentID 
 			slog.Warn("[hub] ignored late terminal orchestration status", "run_id", payload.RunID, "kind", payload.Kind, "status", runStatus)
 			return
 		}
-		if err := s.store.UpdateOrchestrationRunStatus(ctx, payload.RunID, runStatus, payload.Error); err != nil {
+		changed, err := s.store.UpdateOrchestrationRunStatusIfAllowed(ctx, payload.RunID, runStatus, payload.Error)
+		if err != nil {
 			slog.Error("[hub] update orchestration status failed", "run_id", payload.RunID, "error", err)
+			return
+		}
+		if !changed {
+			slog.Info("[hub] ignored disallowed orchestration status transition", "run_id", payload.RunID, "kind", payload.Kind, "status", runStatus)
+			return
 		}
 	}
 	s.updateOrchestrationRunSessionFromEvent(ctx, payload)
@@ -1802,12 +1865,23 @@ func (s *Server) handleOrchestrationEventFromAgent(ctx context.Context, agentID 
 	})
 	if err != nil {
 		slog.Error("[hub] persist orchestration event failed", "run_id", payload.RunID, "error", err)
+		if runStatus != "" && orchestrationTerminalStatus(runStatus) {
+			if _, deleteErr := s.store.DeleteOrchestrationRunIfRequested(ctx, payload.RunID); deleteErr != nil {
+				slog.Error("[hub] delete settled orchestration after event failure failed", "run_id", payload.RunID, "error", deleteErr)
+			}
+		}
 		return
 	}
 	s.pool.BroadcastToOrchestrationBrowsers(payload.RunID, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", eventToPayload(event)))
 	if !isTaskEvent && (payload.Kind == "run.end" || payload.Kind == "run.error" || payload.Kind == "run.cancelled") {
 		if run, loadErr := s.store.OrchestrationRunByIDAnyUser(ctx, payload.RunID); loadErr == nil {
-			if events, listErr := s.store.ListOrchestrationEvents(ctx, payload.RunID, 10000); listErr == nil {
+			if run.DeleteRequested {
+				if deleted, deleteErr := s.store.DeleteOrchestrationRunIfRequested(ctx, payload.RunID); deleteErr != nil {
+					slog.Error("[hub] delete settled orchestration failed", "run_id", payload.RunID, "error", deleteErr)
+				} else if deleted {
+					slog.Info("[hub] deleted orchestration after terminal event", "run_id", payload.RunID)
+				}
+			} else if events, listErr := s.store.ListOrchestrationEvents(ctx, payload.RunID, 10000); listErr == nil {
 				if syncErr := s.requestOrchestrationUsageSync(run, events); syncErr != nil {
 					slog.Info("[hub] deferred orchestration usage sync", "run_id", payload.RunID, "reason", syncErr)
 				}

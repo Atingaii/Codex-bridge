@@ -6,13 +6,16 @@ Show elapsed time for every orchestration turn, including turns added by a
 follow-up prompt, and make the orchestration workspace navigate between
 machines and runs strictly from explicit user actions without changing or
 canceling any other run. Each turn also provides a shortcut to its first
-visible text message.
+visible text message. Runs can be removed from their machine-scoped history,
+while active runs and their endpoint are visually marked in green. Removing an
+active run first drives it through durable cancellation before deletion.
 
 ## Non-Goals
 
 - Change orchestration execution, native CLI sessions, or run isolation.
 - Open a high-frequency WebSocket for every run in the browser.
 - Recalculate historical durations from token usage or provider billing data.
+- Change Bridge-side cancellation semantics for runs that remain visible.
 
 ## Current State
 
@@ -42,6 +45,23 @@ Each turn header exposes a shortcut when that turn contains a visible text
 message. The shortcut expands the turn when necessary and scrolls smoothly to
 its first text message. It only changes the viewport and collapsed UI state.
 
+Visibility and online-recovery refreshes are data-only operations. They update
+endpoint metadata, run summaries, and the selected run's events, but never
+clear a run route or choose another endpoint. A `/orchestrate/runs/{runID}` URL
+remains authoritative until the user explicitly chooses a machine, another
+run, or New Run.
+
+The machine-scoped run list exposes deletion for every state. The Hub rechecks
+ownership and records a durable deletion intent. Terminal runs are deleted
+immediately. Active runs transition from `queued` or `running` to `canceling`,
+dispatch one cancellation request, and remain hidden while either the Bridge
+acknowledges cancellation or the bounded timeout settles them as `canceled`.
+Only a terminal row is physically deleted, cascading its events, usage, and
+task-graph rows. Late start events and successor task claims cannot revive a
+run after deletion begins. A Hub restart settles and removes any recorded
+deletion intent. Active states receive a green task marker; any endpoint owning
+at least one active run receives the same marker in the machine selector.
+
 ## Implementation Steps
 
 1. Add protocol/store/frontend types for turn-end timing.
@@ -51,6 +71,8 @@ its first text message. It only changes the viewport and collapsed UI state.
 4. Make machine selection clear the detail route without auto-selecting a run.
 5. Add a first-message shortcut to each eligible turn header.
 6. Add focused navigation and timeline tests.
+7. Add cancel-then-delete state transitions and active task/endpoint markers.
+8. Make focus and visibility recovery refresh data without navigation.
 
 ## Exit Gates
 
@@ -74,3 +96,6 @@ background.
 
 **Does the first-message shortcut load or mutate events?** No. It only expands
 an already loaded turn and moves the current viewport.
+
+**Can an active run be deleted?** Yes. It disappears from the list immediately,
+but the Hub first cancels and settles execution before cascading its rows.

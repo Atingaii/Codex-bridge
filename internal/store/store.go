@@ -170,6 +170,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL,
 			finished_at INTEGER,
+			delete_requested INTEGER NOT NULL DEFAULT 0,
 			FOREIGN KEY (user_id) REFERENCES users(id),
 			FOREIGN KEY (agent_id) REFERENCES agents(id)
 		);`,
@@ -181,6 +182,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE orchestration_runs ADD COLUMN codex_thread_ids_json TEXT DEFAULT '{}';`,
 		`ALTER TABLE orchestration_runs ADD COLUMN claude_started INTEGER NOT NULL DEFAULT 0;`,
 		`ALTER TABLE orchestration_runs ADD COLUMN native_context_compaction TEXT NOT NULL DEFAULT 'off';`,
+		`ALTER TABLE orchestration_runs ADD COLUMN delete_requested INTEGER NOT NULL DEFAULT 0;`,
 		`CREATE INDEX IF NOT EXISTS idx_orchestration_runs_user_updated ON orchestration_runs(user_id, updated_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_orchestration_runs_user_agent_updated ON orchestration_runs(user_id, agent_id, updated_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS orchestration_events (
@@ -253,7 +255,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 				id TEXT PRIMARY KEY,
 				graph_id TEXT NOT NULL,
 				name TEXT NOT NULL,
-				role TEXT NOT NULL CHECK(role IN ('worker','integrator','reviewer')),
+				role TEXT NOT NULL CHECK(role IN ('planner','plan-reviewer','worker','integrator','reviewer')),
 				worker_slot TEXT,
 				status TEXT NOT NULL CHECK(status IN ('pending','ready','dispatching','running','unknown','succeeded','failed','blocked','canceled')),
 				position INTEGER NOT NULL,
@@ -322,7 +324,83 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.migrateOrchestrationTaskRoles(ctx)
+}
+
+func (s *Store) migrateOrchestrationTaskRoles(ctx context.Context) error {
+	var schema string
+	if err := s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'orchestration_tasks'`).Scan(&schema); err != nil {
+		return err
+	}
+	if strings.Contains(schema, `'planner'`) && strings.Contains(schema, `'plan-reviewer'`) {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() { _, _ = s.db.ExecContext(context.Background(), `PRAGMA foreign_keys = ON`) }()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`CREATE TABLE orchestration_tasks_new (
+			id TEXT PRIMARY KEY,
+			graph_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			role TEXT NOT NULL CHECK(role IN ('planner','plan-reviewer','worker','integrator','reviewer')),
+			worker_slot TEXT,
+			status TEXT NOT NULL CHECK(status IN ('pending','ready','dispatching','running','unknown','succeeded','failed','blocked','canceled')),
+			position INTEGER NOT NULL,
+			payload_json TEXT NOT NULL,
+			payload_digest TEXT NOT NULL,
+			current_attempt_id TEXT,
+			error TEXT,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			started_at INTEGER,
+			finished_at INTEGER,
+			FOREIGN KEY (graph_id) REFERENCES orchestration_task_graphs(id) ON DELETE CASCADE
+		);`,
+		`INSERT INTO orchestration_tasks_new
+			(id, graph_id, name, role, worker_slot, status, position, payload_json, payload_digest, current_attempt_id, error, created_at, updated_at, started_at, finished_at)
+		 SELECT id, graph_id, name, role, worker_slot, status, position, payload_json, payload_digest, current_attempt_id, error, created_at, updated_at, started_at, finished_at
+		 FROM orchestration_tasks;`,
+		`DROP TABLE orchestration_tasks;`,
+		`ALTER TABLE orchestration_tasks_new RENAME TO orchestration_tasks;`,
+		`CREATE INDEX idx_orchestration_tasks_graph_position ON orchestration_tasks(graph_id, position);`,
+		`CREATE INDEX idx_orchestration_tasks_graph_status ON orchestration_tasks(graph_id, status);`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migrate orchestration task roles: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		return err
+	}
+	var violations int
+	rows, err := s.db.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		violations++
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if violations != 0 {
+		return fmt.Errorf("migrate orchestration task roles: %d foreign key violations", violations)
+	}
+	return nil
 }
 
 type CLIConfigPreset struct {
@@ -552,7 +630,7 @@ func (s *Store) markActiveOrchestrationRunsFailed(ctx context.Context, agentID, 
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
 			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
-			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
 		WHERE `+where+`
 		ORDER BY updated_at ASC, created_at ASC
@@ -1485,6 +1563,7 @@ type OrchestrationRun struct {
 	CreatedAt               int64               `json:"createdAt"`
 	UpdatedAt               int64               `json:"updatedAt"`
 	FinishedAt              int64               `json:"finishedAt,omitempty"`
+	DeleteRequested         bool                `json:"-"`
 }
 
 type OrchestrationEvent struct {
@@ -1695,9 +1774,9 @@ func (s *Store) OrchestrationRunByID(ctx context.Context, id, userID string) (Or
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
 			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
-			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
-		WHERE id = ? AND user_id = ?
+		WHERE id = ? AND user_id = ? AND delete_requested = 0
 	`, id, userID)
 	return scanOrchestrationRun(row)
 }
@@ -1706,11 +1785,91 @@ func (s *Store) OrchestrationRunByIDAnyUser(ctx context.Context, id string) (Orc
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
 			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
-			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
 		WHERE id = ?
 	`, id)
 	return scanOrchestrationRun(row)
+}
+
+const (
+	DeleteOrchestrationDeleted       = "deleted"
+	DeleteOrchestrationCancelStarted = "cancel_started"
+	DeleteOrchestrationCancelPending = "cancel_pending"
+)
+
+// RequestDeleteOrchestrationRun atomically records a durable delete intent.
+// Terminal runs are deleted immediately; active runs first transition to
+// canceling and remain available only to internal convergence paths.
+func (s *Store) RequestDeleteOrchestrationRun(ctx context.Context, id, userID string) (OrchestrationRun, string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return OrchestrationRun{}, "", err
+	}
+	defer tx.Rollback()
+	row := tx.QueryRowContext(ctx, `
+		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
+		FROM orchestration_runs WHERE id = ? AND user_id = ?
+	`, id, userID)
+	run, err := scanOrchestrationRun(row)
+	if err != nil {
+		return OrchestrationRun{}, "", err
+	}
+	if run.Status == OrchestrationCompleted || run.Status == OrchestrationFailed || run.Status == OrchestrationCanceled {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM orchestration_runs WHERE id = ? AND user_id = ?`, id, userID); err != nil {
+			return OrchestrationRun{}, "", err
+		}
+		if err := tx.Commit(); err != nil {
+			return OrchestrationRun{}, "", err
+		}
+		return run, DeleteOrchestrationDeleted, nil
+	}
+	now := time.Now().Unix()
+	action := DeleteOrchestrationCancelPending
+	if run.Status == OrchestrationQueued || run.Status == OrchestrationRunning {
+		action = DeleteOrchestrationCancelStarted
+		run.Status = OrchestrationCanceling
+	}
+	if run.Status != OrchestrationCanceling {
+		return OrchestrationRun{}, "", errors.New("orchestration run is not deletable")
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_runs SET delete_requested = 1, status = ?, updated_at = ?
+		WHERE id = ? AND user_id = ?
+	`, OrchestrationCanceling, now, id, userID); err != nil {
+		return OrchestrationRun{}, "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return OrchestrationRun{}, "", err
+	}
+	run.DeleteRequested = true
+	run.UpdatedAt = now
+	return run, action, nil
+}
+
+func (s *Store) DeleteOrchestrationRunIfRequested(ctx context.Context, id string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM orchestration_runs
+		WHERE id = ? AND delete_requested = 1 AND status IN (?, ?, ?)
+	`, id, OrchestrationCompleted, OrchestrationFailed, OrchestrationCanceled)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	return affected > 0, err
+}
+
+func (s *Store) DeleteSettledRequestedOrchestrationRuns(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM orchestration_runs
+		WHERE delete_requested = 1 AND status IN (?, ?, ?)
+	`, OrchestrationCompleted, OrchestrationFailed, OrchestrationCanceled)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) ListOrchestrationRuns(ctx context.Context, userID string, limit int) ([]OrchestrationRun, error) {
@@ -1720,10 +1879,11 @@ func (s *Store) ListOrchestrationRuns(ctx context.Context, userID string, limit 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
 			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
-			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
-		WHERE user_id = ?
-		ORDER BY updated_at DESC, created_at DESC
+		WHERE user_id = ? AND delete_requested = 0
+		ORDER BY CASE WHEN status IN ('queued','running','canceling') THEN 0 ELSE 1 END,
+			updated_at DESC, created_at DESC
 		LIMIT ?
 	`, userID, limit)
 	if err != nil {
@@ -1748,9 +1908,9 @@ func (s *Store) ListOrchestrationRunsByAgent(ctx context.Context, userID, agentI
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
 			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
-			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
-		WHERE user_id = ? AND agent_id = ?
+		WHERE user_id = ? AND agent_id = ? AND delete_requested = 0
 		ORDER BY updated_at DESC, created_at DESC
 		LIMIT ?
 	`, userID, agentID, limit)
@@ -1783,6 +1943,35 @@ func (s *Store) UpdateOrchestrationRunStatus(ctx context.Context, id, status, er
 	return err
 }
 
+// UpdateOrchestrationRunStatusIfAllowed applies the run state machine in the
+// same statement that writes the new state. A recorded delete intent therefore
+// cannot race with a late start event and revive a canceling run.
+func (s *Store) UpdateOrchestrationRunStatusIfAllowed(ctx context.Context, id, status, errText string) (bool, error) {
+	now := time.Now().Unix()
+	var finishedAt any
+	if status == OrchestrationCompleted || status == OrchestrationFailed || status == OrchestrationCanceled {
+		finishedAt = now
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE orchestration_runs
+		SET status = ?, error = ?, finished_at = COALESCE(?, finished_at), updated_at = ?
+		WHERE id = ? AND (
+			(? = ? AND status IN (?, ?) AND delete_requested = 0)
+			OR (? = ? AND status IN (?, ?))
+			OR (? IN (?, ?, ?) AND status NOT IN (?, ?, ?))
+		)
+	`, status, nullString(errText), finishedAt, now, id,
+		status, OrchestrationRunning, OrchestrationQueued, OrchestrationRunning,
+		status, OrchestrationCanceling, OrchestrationQueued, OrchestrationRunning,
+		status, OrchestrationCompleted, OrchestrationFailed, OrchestrationCanceled,
+		OrchestrationCompleted, OrchestrationFailed, OrchestrationCanceled)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // ClaimOrchestrationRunForContinue atomically moves a terminal run back to
 // running. Exactly one of several concurrent follow-up prompts wins the claim,
 // so the same run cannot be double-started on the Bridge.
@@ -1794,7 +1983,7 @@ func (s *Store) ClaimOrchestrationRunForContinue(ctx context.Context, id string)
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE orchestration_runs
 		SET status = ?, error = NULL, updated_at = ?
-		WHERE id = ? AND status IN (?, ?, ?)
+		WHERE id = ? AND delete_requested = 0 AND status IN (?, ?, ?)
 	`, OrchestrationRunning, now, id, OrchestrationCompleted, OrchestrationFailed, OrchestrationCanceled)
 	if err != nil {
 		return false, err
@@ -2161,8 +2350,9 @@ func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (Orchestrati
 	var filesJSON string
 	var codexThreadIDsJSON string
 	var claudeStarted int
+	var deleteRequested int
 	if err := row.Scan(&run.ID, &run.UserID, &run.AgentID, &run.Title, &run.Mode, &run.WorkerPair, &run.FirstCLI, &run.Profile, &run.Prompt, &run.CWD,
-		&run.RunCWD, &run.CodexThreadID, &codexThreadIDsJSON, &claudeStarted, &run.NativeContextCompaction, &run.MaxTurns, &run.Status, &run.Error, &filesJSON, &run.CreatedAt, &run.UpdatedAt, &run.FinishedAt); err != nil {
+		&run.RunCWD, &run.CodexThreadID, &codexThreadIDsJSON, &claudeStarted, &run.NativeContextCompaction, &run.MaxTurns, &run.Status, &run.Error, &filesJSON, &run.CreatedAt, &run.UpdatedAt, &run.FinishedAt, &deleteRequested); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return OrchestrationRun{}, ErrNotFound
 		}
@@ -2186,6 +2376,7 @@ func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (Orchestrati
 	run.Profile = normalizeOrchestrationProfile(run.Profile)
 	run.NativeContextCompaction = protocol.NormalizeNativeContextCompaction(run.NativeContextCompaction)
 	run.ClaudeStarted = claudeStarted != 0
+	run.DeleteRequested = deleteRequested != 0
 	return run, nil
 }
 

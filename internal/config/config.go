@@ -140,7 +140,10 @@ func Default() Config {
 			MaxPromptBytes:           256 * 1024,
 			MaxAttachmentBytes:       8 * 1024 * 1024,
 			MaxAssistantMessageBytes: 4 * 1024 * 1024,
-			FeatureRollouts:          map[string]string{"strict-workspace": "admin"},
+			FeatureRollouts: map[string]string{
+				"strict-workspace":             "admin",
+				"orchestration-plan-workspace": "admin",
+			},
 		},
 		Bridge: BridgeConfig{
 			HubURL:            "https://sparkapi.tech",

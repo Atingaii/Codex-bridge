@@ -129,6 +129,8 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("GET /api/orchestrations", s.withAuth(s.handleListOrchestrations))
 	mux.HandleFunc("POST /api/orchestrations", s.withAuth(s.handleCreateOrchestration))
 	mux.HandleFunc("GET /api/orchestrations/{runID}", s.withAuth(s.handleGetOrchestration))
+	mux.HandleFunc("GET /api/orchestrations/{runID}/progress", s.withAuth(s.handleOrchestrationProgress))
+	mux.HandleFunc("DELETE /api/orchestrations/{runID}", s.withAuth(s.handleDeleteOrchestration))
 	mux.HandleFunc("GET /api/orchestrations/{runID}/stats", s.withAuth(s.handleOrchestrationStats))
 	mux.HandleFunc("GET /api/usage/overview", s.withAuth(s.handleUsageOverview))
 	mux.HandleFunc("GET /api/admin/usage", s.withAdmin(s.handleAdminUsage))
@@ -209,6 +211,11 @@ func (s *Server) recoverInterruptedRuns(ctx context.Context) {
 	}
 	if len(runs) > 0 {
 		slog.Warn("[hub] marked interrupted orchestration runs failed at startup", "count", len(runs))
+	}
+	if n, deleteErr := s.store.DeleteSettledRequestedOrchestrationRuns(sweepCtx); deleteErr != nil {
+		slog.Error("[hub] boot sweep for requested orchestration deletions failed", "error", deleteErr)
+	} else if n > 0 {
+		slog.Info("[hub] completed requested orchestration deletions at startup", "count", n)
 	}
 }
 

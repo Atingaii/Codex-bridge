@@ -21,9 +21,11 @@ const (
 	TaskBlocked     = "blocked"
 	TaskCanceled    = "canceled"
 
-	TaskRoleWorker     = "worker"
-	TaskRoleIntegrator = "integrator"
-	TaskRoleReviewer   = "reviewer"
+	TaskRolePlanner      = "planner"
+	TaskRolePlanReviewer = "plan-reviewer"
+	TaskRoleWorker       = "worker"
+	TaskRoleIntegrator   = "integrator"
+	TaskRoleReviewer     = "reviewer"
 
 	TaskGraphRunning   = "running"
 	TaskGraphCompleted = "completed"
@@ -178,7 +180,7 @@ func (s *Store) ClaimReadyTask(ctx context.Context, taskID, retryOfAttemptID str
 	defer tx.Rollback()
 	var task OrchestrationTask
 	var parallelLimit int
-	err = tx.QueryRowContext(ctx, `SELECT t.id, t.graph_id, t.name, t.role, COALESCE(t.worker_slot,''), t.status, t.position, t.payload_json, t.payload_digest, COALESCE(t.current_attempt_id,''), COALESCE(t.error,''), t.created_at, t.updated_at, COALESCE(t.started_at,0), COALESCE(t.finished_at,0), g.parallel_limit FROM orchestration_tasks t JOIN orchestration_task_graphs g ON g.id = t.graph_id WHERE t.id = ? AND g.status = 'running'`, taskID).Scan(&task.ID, &task.GraphID, &task.Name, &task.Role, &task.WorkerSlot, &task.Status, &task.Position, &task.PayloadJSON, &task.PayloadDigest, &task.CurrentAttemptID, &task.Error, &task.CreatedAt, &task.UpdatedAt, &task.StartedAt, &task.FinishedAt, &parallelLimit)
+	err = tx.QueryRowContext(ctx, `SELECT t.id, t.graph_id, t.name, t.role, COALESCE(t.worker_slot,''), t.status, t.position, t.payload_json, t.payload_digest, COALESCE(t.current_attempt_id,''), COALESCE(t.error,''), t.created_at, t.updated_at, COALESCE(t.started_at,0), COALESCE(t.finished_at,0), g.parallel_limit FROM orchestration_tasks t JOIN orchestration_task_graphs g ON g.id = t.graph_id JOIN orchestration_runs r ON r.id = g.run_id WHERE t.id = ? AND g.status = 'running' AND r.status IN ('queued','running') AND r.delete_requested = 0`, taskID).Scan(&task.ID, &task.GraphID, &task.Name, &task.Role, &task.WorkerSlot, &task.Status, &task.Position, &task.PayloadJSON, &task.PayloadDigest, &task.CurrentAttemptID, &task.Error, &task.CreatedAt, &task.UpdatedAt, &task.StartedAt, &task.FinishedAt, &parallelLimit)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return OrchestrationTask{}, OrchestrationTaskAttempt{}, false, nil
@@ -236,7 +238,7 @@ func (s *Store) ClaimReadyTask(ctx context.Context, taskID, retryOfAttemptID str
 }
 
 func validTaskRole(role string) bool {
-	return role == TaskRoleWorker || role == TaskRoleIntegrator || role == TaskRoleReviewer
+	return role == TaskRolePlanner || role == TaskRolePlanReviewer || role == TaskRoleWorker || role == TaskRoleIntegrator || role == TaskRoleReviewer
 }
 
 func (s *Store) TaskGraphByRun(ctx context.Context, runID string) (OrchestrationTaskGraph, error) {

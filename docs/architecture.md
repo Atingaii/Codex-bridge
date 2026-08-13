@@ -459,14 +459,15 @@ SQLite tables:
 - `orchestration_runs` (including persisted mode, `worker_pair`, `first_cli`,
   `profile`, cwd, max turns, status, native CLI continuity state,
   `codex_thread_ids_json`, native context compaction preference, locked runtime
-  cwd, and uploaded file metadata)
+  cwd, uploaded file metadata, and a durable cancel-before-delete intent)
 - `orchestration_events` (including `source`, `severity`, lifecycle status,
   and typed event payload JSON)
 - `orchestration_usage_syncs` and `orchestration_usage_events` (private native
   session scan state and normalized per-call counters; no transcript content)
 - `orchestration_task_graphs`, `orchestration_tasks`,
   `orchestration_task_dependencies`, and `orchestration_task_attempts`
-  (bounded scheduling, dependency state, identity, retry lineage, and evidence)
+  (bounded scheduling, dependency state, planner/plan-reviewer/worker roles,
+  identity, retry lineage, and evidence)
 - `conversation_shares`
 - `cli_config_presets` (machine- and CLI-scoped preset metadata plus an API-key
   ciphertext encrypted directly to the target Bridge public key)

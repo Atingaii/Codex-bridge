@@ -11,6 +11,7 @@ export function AgentSelector({
   t,
   className,
   disabled,
+  activeAgentIds,
 }: {
   agents: Agent[];
   selectedAgentId: string;
@@ -18,6 +19,7 @@ export function AgentSelector({
   t: UIText;
   className?: string;
   disabled?: boolean;
+  activeAgentIds?: ReadonlySet<string>;
 }) {
   const selected = agents.find((agent) => agent.id === selectedAgentId) || null;
   const value = selected ? selected.id : '';
@@ -31,7 +33,7 @@ export function AgentSelector({
     : t.noBridgeConnected;
   return (
     <label className={cn("relative inline-flex min-w-[180px] items-center", className)}>
-      <Server className="absolute left-2.5 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+      <Server className={cn("absolute left-2.5 h-3.5 w-3.5 pointer-events-none", selected && activeAgentIds?.has(selected.id) ? "text-emerald-500" : "text-muted-foreground")} />
       <select
         value={value}
         onChange={(event) => onSelect(event.target.value)}
@@ -44,7 +46,7 @@ export function AgentSelector({
         {agents.length ? (
           agents.map((agent) => (
             <option key={agent.id} value={agent.id}>
-              {agent.online ? '● ' : '○ '}{agent.name || agent.hostname || agent.machineId}{agent.online && agent.version ? ` · ${agent.version}` : ''}
+              {activeAgentIds?.has(agent.id) ? '● ' : agent.online ? '◉ ' : '○ '}{agent.name || agent.hostname || agent.machineId}{activeAgentIds?.has(agent.id) ? ` · ${t.running}` : agent.online && agent.version ? ` · ${agent.version}` : ''}
             </option>
           ))
         ) : (

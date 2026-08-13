@@ -31,6 +31,7 @@ hub:
   # User feature rollouts: off, admin, all, percent:N, or users:name1,name2.
   feature_rollouts:
     strict-workspace: admin
+    orchestration-plan-workspace: admin
 
 bridge:
   hub_url: http://127.0.0.1:8088

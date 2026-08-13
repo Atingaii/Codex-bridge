@@ -237,3 +237,36 @@ func TestCancelingRunClosesDurableTaskGraph(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteRequestedTaskGraphCannotDispatchNextTask(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	graph := createTestTaskGraph(t, st)
+	if err := st.UpdateOrchestrationRunStatus(ctx, graph.RunID, OrchestrationRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+	task, attempt, claimed, err := st.ClaimReadyTask(ctx, graph.Tasks[0].ID, "")
+	if err != nil || !claimed {
+		t.Fatalf("claim task: claimed=%v err=%v", claimed, err)
+	}
+	run, err := st.OrchestrationRunByIDAnyUser(ctx, graph.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.RequestDeleteOrchestrationRun(ctx, run.ID, run.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := st.UpdateTaskAttempt(ctx, task.ID, attempt.ID, task.PayloadDigest, TaskSucceeded, map[string]any{"content": "late success"}, ""); err != nil || !ok {
+		t.Fatalf("finish in-flight task: ok=%v err=%v", ok, err)
+	}
+	updated, err := st.TaskGraphByRun(ctx, graph.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Tasks[1].Status != TaskReady {
+		t.Fatalf("dependency propagation changed = %#v", updated.Tasks[1])
+	}
+	if _, _, claimed, err := st.ClaimReadyTask(ctx, updated.Tasks[1].ID, ""); err != nil || claimed {
+		t.Fatalf("delete-pending graph dispatched successor: claimed=%v err=%v", claimed, err)
+	}
+}

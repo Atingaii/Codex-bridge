@@ -11,6 +11,7 @@ import {
   FolderInput,
   GitBranch,
   History,
+  ListChecks,
   Plus,
   RefreshCw,
   Send,
@@ -23,7 +24,10 @@ import {
   BarChart3,
   PieChart,
   Swords,
+  Trash2,
   UsersRound,
+  Workflow,
+  X,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import type {
@@ -33,6 +37,7 @@ import type {
   Envelope,
   NativeContextCompaction,
   OrchestrationEvent,
+  OrchestrationProgress,
   OrchestrationRun,
   ShareInfo,
   UploadAttachment,
@@ -42,6 +47,7 @@ import type {
 import type { Language, UIText } from '../lib/i18n';
 import { AgentSelector } from '../components/AgentSelector';
 import { OrchestrationFileRow } from '../components/OrchestrationFiles';
+import { OrchestrationProgressMap } from '../components/OrchestrationProgressMap';
 import {
   CapabilityMatrix,
   RunConclusionCard,
@@ -75,6 +81,7 @@ import {
   orchestrationWorkerLabel,
   preferredAgentID,
   readUploadAttachment,
+  forgetActiveOrchestrationRunForAgent,
   rememberActiveOrchestrationRunForAgent,
   sessionDateLabel,
   startWSHeartbeat,
@@ -137,6 +144,10 @@ export function OrchestrationWorkspace({
   const [sharingRunId, setSharingRunId] = useState('');
   const [shareCopiedRunId, setShareCopiedRunId] = useState('');
   const [creating, setCreating] = useState(false);
+  const [deletingRunId, setDeletingRunId] = useState('');
+  const [planningWorkspaceOpen, setPlanningWorkspaceOpen] = useState(false);
+  const [orchestrationProgress, setOrchestrationProgress] = useState<OrchestrationProgress | null>(null);
+  const [selectedPromptKey, setSelectedPromptKey] = useState('initial');
   const [connectionStatus, setConnectionStatus] = useState(t.disconnected);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [collapsedTimelineGroups, setCollapsedTimelineGroups] = useState<Record<string, boolean>>({});
@@ -170,6 +181,10 @@ export function OrchestrationWorkspace({
   const pathRunId = useMemo(() => orchestrationRunIdFromPath(path), [path]);
 
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
+  const activeAgentIds = useMemo(
+    () => new Set(runs.filter((run) => activeOrchestrationStatus(run.status)).map((run) => run.agentId)),
+    [runs],
+  );
   const onlineAgent = selectedAgent?.online ? selectedAgent : agents.find((agent) => agent.online);
   // Keep the global run cache for URL selection, but isolate the sidebar by machine.
   const agentRuns = useMemo(() => {
@@ -177,6 +192,7 @@ export function OrchestrationWorkspace({
     return runs.filter((run) => run.agentId === selectedAgentId);
   }, [runs, selectedAgentId]);
   const activeRun = runs.find((run) => run.id === activeRunId) || null;
+  const planWorkspaceEnabled = Boolean(user.features?.includes('orchestration-plan-workspace'));
   const activeRunFiles = useMemo(() => {
     return activeRun ? mergeOrchestrationFiles(activeRun.files, orchestrationRunFilesFromEvents(events, activeRun.id)) : [];
   }, [activeRun, events]);
@@ -188,6 +204,26 @@ export function OrchestrationWorkspace({
   const visibleApprovals = useMemo(() => approvals.filter((item) => item.approval.runId === activeRunId), [approvals, activeRunId]);
   const timelineItems = useMemo(() => orchestrationTimelineItems(visibleEvents, visibleApprovals), [visibleEvents, visibleApprovals]);
   const timelineGroups = useMemo(() => orchestrationTimelineGroups(timelineItems, activeRun, events), [timelineItems, activeRun, events, elapsedTick]);
+  const promptViews = useMemo(() => {
+    if (!activeRun) return [];
+    const views = [{ key: 'initial', label: t.initialPrompt, content: activeRun.prompt }];
+    events.forEach((event) => {
+      const content = event.turnStartData?.promptText?.trim();
+      if (!content) return;
+      const key = `turn-${event.id || event.seq || views.length}`;
+      const round = event.task?.round || event.turnStartData?.round;
+      const node = event.task?.name || event.role || event.cli;
+      const label = [round ? `${t.turnPrefix} ${round}` : t.roundPrompt, node].filter(Boolean).join(' · ');
+      views.push({ key, label, content });
+    });
+    return views;
+  }, [activeRun, events, t.initialPrompt, t.roundPrompt, t.turnPrefix]);
+  const selectedPromptView = promptViews.find((item) => item.key === selectedPromptKey) || promptViews[0];
+  const progressRefreshKey = useMemo(() => {
+    const relevant = events.filter((event) => event.task && ['run.start', 'turn.end', 'run.end', 'run.error', 'run.cancelled'].includes(event.kind));
+    const latest = relevant[relevant.length - 1];
+    return latest ? `${latest.seq || latest.id || relevant.length}:${latest.kind}` : '';
+  }, [events]);
   const orchestrationStreamStatus = activeRun && isRunning ? connectionStatus : t.idle;
   const continuingRun = Boolean(activeRun && !isRunning);
   const canCancelRun = canCancelOrchestrationStatus(activeRun?.status);
@@ -232,7 +268,7 @@ export function OrchestrationWorkspace({
 
   const loadRuns = useCallback(async () => {
     const params = new URLSearchParams();
-    params.set('limit', '50');
+    params.set('limit', '200');
     const data = await api<{ runs: OrchestrationRun[] }>(`/api/orchestrations?${params.toString()}`);
     const incoming = Array.isArray(data.runs) ? data.runs.filter(isOrchestrationRun) : [];
     setRuns(incoming);
@@ -245,6 +281,13 @@ export function OrchestrationWorkspace({
     setRuns((current) => upsertOrchestrationRun(current, data.run));
     return data.run;
   }, [t.failedLoadOrchestration]);
+
+  const loadOrchestrationProgress = useCallback(async (runId: string) => {
+    if (!planWorkspaceEnabled || !runId) return null;
+    const data = await api<OrchestrationProgress>(`/api/orchestrations/${encodeURIComponent(runId)}/progress`);
+    if (activeRunIdRef.current === runId) setOrchestrationProgress(data);
+    return data;
+  }, [planWorkspaceEnabled]);
 
   const loadRunEvents = useCallback(async (runId: string, replace = false, mode: 'latest' | 'after' | 'before' = 'latest') => {
     const params = new URLSearchParams();
@@ -521,13 +564,14 @@ export function OrchestrationWorkspace({
       const isCurrentRefresh = () => refreshEpoch === agentSelectionEpochRef.current;
       setRefreshingOrchestration(true);
       try {
+        const requestedRunId = orchestrationRunIdFromPath(window.location.pathname);
         const loadedAgents = await loadAgents();
         if (!isCurrentRefresh()) return;
         let directRun: OrchestrationRun | null = null;
-        if (pathRunId) {
-          directRun = await loadRun(pathRunId);
+        if (requestedRunId) {
+          directRun = await loadRun(requestedRunId);
           if (!isCurrentRefresh()) return;
-          if (orchestrationRunIdFromPath(window.location.pathname) !== pathRunId) {
+          if (orchestrationRunIdFromPath(window.location.pathname) !== requestedRunId) {
             directRun = null;
           }
         }
@@ -560,7 +604,7 @@ export function OrchestrationWorkspace({
     })();
     refreshOrchestrationInFlightRef.current = task;
     return task;
-  }, [activateRun, clearActiveOrchestration, loadAgents, loadRun, loadRuns, pathRunId]);
+  }, [activateRun, clearActiveOrchestration, loadAgents, loadRun, loadRuns]);
 
   useEffect(() => {
     let stopped = false;
@@ -619,6 +663,17 @@ export function OrchestrationWorkspace({
   useEffect(() => {
     selectedAgentIdRef.current = selectedAgentId;
   }, [selectedAgentId]);
+
+  useEffect(() => {
+    setSelectedPromptKey('initial');
+    setOrchestrationProgress(null);
+    setPlanningWorkspaceOpen(false);
+  }, [activeRunId]);
+
+  useEffect(() => {
+    if (!planningWorkspaceOpen || !activeRunId || !planWorkspaceEnabled) return;
+    void loadOrchestrationProgress(activeRunId).catch(() => undefined);
+  }, [activeRunId, loadOrchestrationProgress, planWorkspaceEnabled, planningWorkspaceOpen, progressRefreshKey]);
 
   useEffect(() => {
     setCollapsedTimelineGroups((current) => {
@@ -778,6 +833,23 @@ export function OrchestrationWorkspace({
     }
   };
 
+  const deleteRun = async (run: OrchestrationRun) => {
+    const confirmMessage = activeOrchestrationStatus(run.status) ? t.deleteActiveRunConfirm : t.deleteRunConfirm;
+    if (deletingRunId || !window.confirm(confirmMessage)) return;
+    setDeletingRunId(run.id);
+    setError('');
+    try {
+      await api(`/api/orchestrations/${encodeURIComponent(run.id)}`, { method: 'DELETE' });
+      setRuns((current) => current.filter((item) => item.id !== run.id));
+      forgetActiveOrchestrationRunForAgent(run.agentId, run.id);
+      if (activeRunIdRef.current === run.id) clearActiveOrchestration();
+    } catch (err) {
+      setError(err instanceof Error ? `${t.failedDeleteRun}: ${err.message}` : t.failedDeleteRun);
+    } finally {
+      setDeletingRunId('');
+    }
+  };
+
   const shareRun = async (run: OrchestrationRun | null) => {
     if (!run || sharingRunId) return;
     setSharingRunId(run.id);
@@ -909,38 +981,54 @@ export function OrchestrationWorkspace({
           {agentRuns.length === 0 ? (
             <div className="px-2 py-1.5 text-xs text-muted-foreground">{t.noOrchestrationRuns}</div>
           ) : agentRuns.map((run) => (
-            <button
+            <div
               key={run.id}
-              onClick={() => selectRun(run.id).catch((err) => setError(err.message))}
               className={cn(
-                "w-full text-left px-2 py-2 rounded-md text-sm transition-colors",
-                activeRunId === run.id ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+                "w-full rounded-md px-2 py-2 text-sm transition-colors",
+                activeRunId === run.id ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-sidebar-foreground hover:bg-sidebar-accent/50",
+                activeOrchestrationStatus(run.status) && "ring-1 ring-inset ring-emerald-500/40",
               )}
             >
               <div className="flex items-center gap-2">
-                {run.mode === 'debate' ? <Swords className="h-3.5 w-3.5 opacity-70 shrink-0" /> : <UsersRound className="h-3.5 w-3.5 opacity-70 shrink-0" />}
-                <span className="truncate font-medium">{run.title}</span>
-                <span
+                <button
+                  type="button"
+                  className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                  onClick={() => selectRun(run.id).catch((err) => setError(err.message))}
+                >
+                  {activeOrchestrationStatus(run.status) ? <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.12)]" /> : run.mode === 'debate' ? <Swords className="h-3.5 w-3.5 shrink-0 opacity-70" /> : <UsersRound className="h-3.5 w-3.5 shrink-0 opacity-70" />}
+                  <span className="truncate font-medium">{run.title}</span>
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-sidebar-border bg-sidebar text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:opacity-60"
+                  onClick={() => void deleteRun(run)}
+                  title={deletingRunId === run.id ? t.deletingRun : t.deleteRun}
+                  disabled={Boolean(deletingRunId)}
+                >
+                  {deletingRunId === run.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                </button>
+                <button
+                  type="button"
                   className={cn(
-                    "ml-auto inline-flex h-6 shrink-0 items-center gap-1 rounded border border-sidebar-border bg-sidebar px-1.5 text-[10px] font-medium text-muted-foreground hover:bg-sidebar-border",
-                    shareCopiedRunId === run.id && "text-emerald-600 dark:text-emerald-400"
+                    "inline-flex h-6 shrink-0 items-center gap-1 rounded border border-sidebar-border bg-sidebar px-1.5 text-[10px] font-medium text-muted-foreground hover:bg-sidebar-border",
+                    shareCopiedRunId === run.id && "text-emerald-600 dark:text-emerald-400",
                   )}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    shareRun(run).catch((err) => setError(err.message));
-                  }}
+                  onClick={() => shareRun(run).catch((err) => setError(err.message))}
                   title={shareCopiedRunId === run.id ? t.copied : t.shareRun}
                 >
                   {sharingRunId === run.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : shareCopiedRunId === run.id ? <Check className="h-3 w-3" /> : <Share2 className="h-3 w-3" />}
                   <span>{shareCopiedRunId === run.id ? t.copied : t.shareRun}</span>
-                </span>
+                </button>
               </div>
-              <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
+              <button
+                type="button"
+                className="mt-1 flex w-full items-center justify-between text-[10px] text-muted-foreground"
+                onClick={() => selectRun(run.id).catch((err) => setError(err.message))}
+              >
                 <span className="truncate">{agents.find((agent) => agent.id === run.agentId)?.name || sessionDateLabel(run.updatedAt || run.createdAt, t)}</span>
                 <span>{run.status}</span>
-              </div>
-            </button>
+              </button>
+            </div>
           ))}
         </div>
         <div className="p-3 border-t border-sidebar-border shrink-0">
@@ -960,7 +1048,7 @@ export function OrchestrationWorkspace({
         </div>
       </aside>
 
-      <main className="flex-1 flex flex-col min-w-0 h-full">
+      <main className="relative flex-1 flex flex-col min-w-0 h-full">
         <header className="h-14 shrink-0 border-b border-border flex items-center justify-between px-3 md:px-4 bg-background z-10">
           <div className="flex items-center gap-2 min-w-0">
             {canOpenMain && (
@@ -979,6 +1067,7 @@ export function OrchestrationWorkspace({
               t={t}
               className="hidden sm:inline-flex"
               disabled={creating}
+              activeAgentIds={activeAgentIds}
             />
             <Button variant="secondary" size="sm" className="hidden sm:inline-flex h-8 gap-1.5 rounded-lg" onClick={() => openSettings('cli')}>
               <Plus className="h-3.5 w-3.5" />
@@ -1006,6 +1095,19 @@ export function OrchestrationWorkspace({
               <PieChart className="h-3.5 w-3.5" />
             </Button>
             {user.isAdmin && <Button variant="secondary" size="icon" className="h-8 w-8 rounded-lg" onClick={() => navigate('/admin/usage')} aria-label={t.adminDashboard} title={t.adminDashboard}><ShieldCheck className="h-3.5 w-3.5" /></Button>}
+            {planWorkspaceEnabled && (
+              <Button
+                variant={planningWorkspaceOpen ? 'default' : 'secondary'}
+                size="sm"
+                className="h-8 gap-1.5 rounded-lg"
+                onClick={() => setPlanningWorkspaceOpen((current) => !current)}
+                aria-label={planningWorkspaceOpen ? t.closePlanningWorkspace : t.openPlanningWorkspace}
+                title={planningWorkspaceOpen ? t.closePlanningWorkspace : t.openPlanningWorkspace}
+              >
+                <Workflow className="h-3.5 w-3.5" />
+                <span className="hidden xl:inline">{t.planningWorkspace}</span>
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon"
@@ -1029,6 +1131,7 @@ export function OrchestrationWorkspace({
             t={t}
             className="sm:hidden min-w-[220px] shrink-0"
             disabled={creating}
+            activeAgentIds={activeAgentIds}
           />
           <div className="flex items-center gap-1.5">
             <Server className="h-3.5 w-3.5" />
@@ -1053,6 +1156,92 @@ export function OrchestrationWorkspace({
             <span>{t.stream}: {orchestrationStreamStatus}</span>
           </div>
         </div>
+
+        {planWorkspaceEnabled && planningWorkspaceOpen && (
+          <section className="absolute inset-x-3 bottom-3 top-[7.35rem] z-30 overflow-hidden rounded-xl border border-border bg-background/98 shadow-2xl backdrop-blur md:inset-x-5">
+            <div className="flex h-12 items-center justify-between border-b border-border px-4">
+              <div className="flex min-w-0 items-center gap-2">
+                <Workflow className="h-4 w-4 text-primary" />
+                <h2 className="truncate text-sm font-semibold">{t.planningWorkspace}</h2>
+                <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">{t.rolloutPreview}</span>
+              </div>
+              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setPlanningWorkspaceOpen(false)} aria-label={t.closePlanningWorkspace}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+            <div className="grid h-[calc(100%-3rem)] min-h-0 grid-cols-1 grid-rows-[minmax(12rem,0.65fr)_minmax(0,1.35fr)] xl:grid-cols-[minmax(15rem,0.7fr)_minmax(32rem,1.8fr)] xl:grid-rows-1">
+              <aside className="min-h-0 overflow-hidden border-b border-border bg-muted/20 xl:border-b-0 xl:border-r">
+                <div className="flex h-full min-h-0 flex-col">
+                  <div className="flex items-center gap-2 border-b border-border px-4 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    <BookOpen className="h-3.5 w-3.5" />
+                    {t.promptNavigator}
+                  </div>
+                  <div className="grid max-h-32 shrink-0 grid-cols-2 gap-1 overflow-y-auto border-b border-border p-2 elegant-scrollbar xl:max-h-none xl:grid-cols-1">
+                    {promptViews.map((view) => (
+                      <button
+                        key={view.key}
+                        type="button"
+                        onClick={() => setSelectedPromptKey(view.key)}
+                        className={cn(
+                          "truncate rounded-md px-3 py-2 text-left text-xs transition-colors",
+                          selectedPromptView?.key === view.key ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                        )}
+                        title={view.label}
+                      >
+                        {view.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="min-h-[8rem] flex-1 overflow-y-auto p-4 elegant-scrollbar">
+                    <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-6 text-foreground">{selectedPromptView?.content || t.noRoundPrompts}</pre>
+                  </div>
+                </div>
+              </aside>
+              <div className="min-h-0 overflow-y-auto p-4 elegant-scrollbar md:p-5">
+                <div className="grid min-h-full gap-4 2xl:grid-cols-[minmax(30rem,1.45fr)_minmax(18rem,0.75fr)]">
+                  <section className="min-w-0 rounded-lg border border-border bg-card/50 p-3">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 text-sm font-semibold"><Workflow className="h-4 w-4 text-primary" />{t.nodeMap}</div>
+                      {orchestrationProgress?.graph && <span className="text-[11px] text-muted-foreground">{t.graphGeneration} {orchestrationProgress.graph.generation}</span>}
+                    </div>
+                    <OrchestrationProgressMap
+                      tasks={(orchestrationProgress?.graph?.tasks || []).map((task) => ({ ...task, dependencies: task.dependencies || [] }))}
+                      height={Math.max(300, Math.min(520, (orchestrationProgress?.graph?.tasks?.length || 4) * 72))}
+                      ariaLabel={t.nodeMap}
+                      emptyLabel={t.planWaiting}
+                      statusLabels={{ pending: 'pending', ready: t.ready, dispatching: t.connecting, running: t.running, succeeded: 'completed', failed: 'failed', blocked: 'blocked', canceled: 'canceled', unknown: 'unknown' }}
+                    />
+                  </section>
+                  <section className="rounded-lg border border-border bg-card/50 p-4">
+                    <div className="mb-3 flex items-center gap-2 text-sm font-semibold"><ListChecks className="h-4 w-4 text-primary" />{t.planChecklist}</div>
+                    <div className="space-y-2">
+                      {(orchestrationProgress?.planItems?.length ? orchestrationProgress.planItems : (orchestrationProgress?.graph?.tasks || []).map((task) => ({
+                        id: task.id,
+                        title: task.name,
+                        status: task.status === 'succeeded' ? 'completed' : task.status === 'running' || task.status === 'dispatching' ? 'in_progress' : task.status,
+                        evidence: task.error,
+                      }))).map((item) => (
+                        <div key={item.id} className="flex items-start gap-2 rounded-md border border-border/70 bg-background/70 px-3 py-2.5">
+                          <span className={cn(
+                            "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[10px]",
+                            item.status === 'completed' ? "border-emerald-500 bg-emerald-500 text-white" :
+                              item.status === 'in_progress' ? "border-emerald-500 text-emerald-600" :
+                                item.status === 'blocked' || item.status === 'failed' ? "border-destructive text-destructive" : "border-muted-foreground/50 text-muted-foreground",
+                          )}>{item.status === 'completed' ? <Check className="h-2.5 w-2.5" /> : ''}</span>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-medium leading-5">{item.title}</p>
+                            {item.evidence && <p className="mt-1 break-words text-[11px] leading-4 text-muted-foreground">{item.evidence}</p>}
+                          </div>
+                        </div>
+                      ))}
+                      {!orchestrationProgress?.graph && <p className="rounded-md border border-dashed border-border p-4 text-xs leading-5 text-muted-foreground">{t.planWaiting}</p>}
+                    </div>
+                  </section>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
 
         <div className="grid flex-1 min-h-0 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] lg:overflow-hidden">
           <div className="relative min-h-0">
@@ -1185,6 +1374,7 @@ export function OrchestrationWorkspace({
                     t={t}
                     className="w-full sm:hidden"
                     disabled={creating}
+                    activeAgentIds={activeAgentIds}
                   />
                 </label>
 

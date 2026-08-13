@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -235,6 +236,91 @@ func TestCancelOrchestrationStatusTransitions(t *testing.T) {
 	}
 	if len(events) != 1 {
 		t.Fatalf("duplicate canceling event appended: %#v", events)
+	}
+}
+
+func TestDeleteActiveOrchestrationCancelsThenCascades(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+	if _, err := st.AddOrchestrationEvent(ctx, store.OrchestrationEvent{RunID: run.ID, Kind: "run.start", Source: "bridge"}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := deleteOrchestration(t, s, userID, run.ID, http.StatusAccepted)
+	if body["status"] != store.OrchestrationCanceling {
+		t.Fatalf("delete status = %#v", body["status"])
+	}
+	if _, err := st.OrchestrationRunByID(ctx, run.ID, userID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("pending-delete run remains user-visible: %v", err)
+	}
+	internal, err := st.OrchestrationRunByIDAnyUser(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if internal.Status != store.OrchestrationCanceling || !internal.DeleteRequested {
+		t.Fatalf("pending-delete state = %#v", internal)
+	}
+	events, err := st.ListOrchestrationEvents(ctx, run.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[1].Kind != "run.canceling" {
+		t.Fatalf("delete cancellation events = %#v", events)
+	}
+
+	deleteOrchestration(t, s, userID, run.ID, http.StatusAccepted)
+	events, err = st.ListOrchestrationEvents(ctx, run.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("duplicate delete appended cancellation event: %#v", events)
+	}
+
+	s.handleOrchestrationEvent(ctx, protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+		RunID: run.ID,
+		Kind:  "run.cancelled",
+	}))
+	if _, err := st.OrchestrationRunByIDAnyUser(ctx, run.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("settled run lookup error = %v, want not found", err)
+	}
+	events, err = st.ListOrchestrationEvents(ctx, run.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("deleted run events remain: %#v", events)
+	}
+}
+
+func TestDeleteTerminalOrchestrationImmediatelyCascadesEvents(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+	if _, err := st.AddOrchestrationEvent(ctx, store.OrchestrationEvent{RunID: run.ID, Kind: "run.end", Source: "bridge"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+	body := deleteOrchestration(t, s, userID, run.ID, http.StatusOK)
+	if body["status"] != store.DeleteOrchestrationDeleted {
+		t.Fatalf("delete status = %#v", body["status"])
+	}
+	if _, err := st.OrchestrationRunByIDAnyUser(ctx, run.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deleted run lookup error = %v, want not found", err)
+	}
+	events, err := st.ListOrchestrationEvents(ctx, run.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("deleted run events remain: %#v", events)
 	}
 }
 
@@ -1507,6 +1593,27 @@ func cancelOrchestration(t *testing.T, s *Server, userID, runID string, wantStat
 	var body map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode cancel body: %v: %s", err, rr.Body.String())
+	}
+	return body
+}
+
+func deleteOrchestration(t *testing.T, s *Server, userID, runID string, wantStatus int) map[string]any {
+	t.Helper()
+
+	token, _, err := s.signer.Sign(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/api/orchestrations/"+runID, nil)
+	req.AddCookie(&http.Cookie{Name: accessCookieName, Value: token})
+	rr := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(rr, req)
+	if rr.Code != wantStatus {
+		t.Fatalf("delete HTTP status = %d, want %d, body = %s", rr.Code, wantStatus, rr.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode delete body: %v: %s", err, rr.Body.String())
 	}
 	return body
 }

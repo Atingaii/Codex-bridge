@@ -385,6 +385,49 @@ export type TaskAttemptRef = {
   payloadDigest: string;
 };
 
+export type OrchestrationTask = {
+  id: string;
+  graphId: string;
+  name: string;
+  role: string;
+  workerSlot?: string;
+  status: string;
+  position: number;
+  currentAttemptId?: string;
+  dependencies?: string[];
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+};
+
+export type OrchestrationTaskGraph = {
+  id: string;
+  runId: string;
+  generation: number;
+  status: string;
+  parallelLimit: number;
+  payloadDigest: string;
+  tasks?: OrchestrationTask[];
+  createdAt: number;
+  updatedAt: number;
+  finishedAt?: number;
+};
+
+export type OrchestrationPlanItem = {
+  id: string;
+  title: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'blocked' | string;
+  evidence?: string;
+};
+
+export type OrchestrationProgress = {
+  graph?: OrchestrationTaskGraph | null;
+  planItems: OrchestrationPlanItem[];
+  planWorkspace?: boolean;
+};
+
 export type CommandData = {
   id?: string;
   command?: string;

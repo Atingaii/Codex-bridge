@@ -928,6 +928,10 @@ func composeRelayPromptWithTaskScope(mode, firstCLI, profile, userPrompt, contex
 
 func durableTaskRoleContract(scope durableTaskPromptScope) string {
 	switch scope.Name {
+	case "plan":
+		return "Planning duty: decompose the original request into a bounded, dependency-aware checklist with stable ids. Inspect only enough context to make the plan executable; do not implement the user's requested changes in this node."
+	case "plan-review":
+		return "Plan Reviewer duty: independently audit and correct the proposed checklist for coverage, dependencies, verification, and formal-proof branches. Do not implement the user's requested changes in this node."
 	case "candidate-a":
 		return "Candidate A duty: choose the strongest viable route toward the user's goal, implement it deeply in the actual workspace, and validate it. Own progress rather than stopping at planning, a baseline scan, or the first proof/code fragment."
 	case "candidate-b":

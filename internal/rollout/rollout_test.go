@@ -67,3 +67,13 @@ func TestRegisteredFeaturesAreNormalizedAndUnique(t *testing.T) {
 		t.Fatal("registered feature list leaked mutable package state")
 	}
 }
+
+func TestPlanWorkspaceAdminRollout(t *testing.T) {
+	e := New(map[string]string{FeatureOrchestrationPlanWorkspace: "admin"})
+	if !e.Enabled(FeatureOrchestrationPlanWorkspace, Subject{ID: "usr_admin", Username: "admin", Admin: true}) {
+		t.Fatal("plan workspace admin rollout rejected administrator")
+	}
+	if e.Enabled(FeatureOrchestrationPlanWorkspace, Subject{ID: "usr_member", Username: "member"}) {
+		t.Fatal("plan workspace admin rollout admitted regular user")
+	}
+}

@@ -7,10 +7,14 @@ import (
 	"strings"
 )
 
-const FeatureStrictWorkspace = "strict-workspace"
+const (
+	FeatureStrictWorkspace            = "strict-workspace"
+	FeatureOrchestrationPlanWorkspace = "orchestration-plan-workspace"
+)
 
 var registeredFeatures = []string{
 	FeatureStrictWorkspace,
+	FeatureOrchestrationPlanWorkspace,
 }
 
 // RegisteredFeatures returns the user-visible capabilities that may be exposed

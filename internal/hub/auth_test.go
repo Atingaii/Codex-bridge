@@ -56,9 +56,9 @@ func TestAuthResponsesExposeEnabledFeatures(t *testing.T) {
 	}
 
 	adminLogin := login(t, s, map[string]string{"username": "admin", "password": "secret12345"}, http.StatusOK)
-	assertUserFeatures(t, adminLogin, "strict-workspace")
+	assertUserFeatures(t, adminLogin, "strict-workspace", "orchestration-plan-workspace")
 	adminCookie := loginCookie(t, s, map[string]string{"username": "admin", "password": "secret12345"})
-	assertUserFeatures(t, authRequestWithCookie(t, s, http.MethodGet, "/api/me", adminCookie, http.StatusOK), "strict-workspace")
+	assertUserFeatures(t, authRequestWithCookie(t, s, http.MethodGet, "/api/me", adminCookie, http.StatusOK), "strict-workspace", "orchestration-plan-workspace")
 
 	workerLogin := login(t, s, map[string]string{"username": "worker", "password": "abc1234567"}, http.StatusOK)
 	assertUserFeatures(t, workerLogin)
@@ -326,6 +326,7 @@ func TestOrchestrationAndShareRoutesAreUserIsolated(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/orchestrations/" + run.ID},
 		{http.MethodGet, "/api/orchestrations/" + run.ID + "/events"},
+		{http.MethodDelete, "/api/orchestrations/" + run.ID},
 		{http.MethodPost, "/api/orchestrations/" + run.ID + "/prompts"},
 		{http.MethodPost, "/api/orchestrations/" + run.ID + "/cancel"},
 		{http.MethodPost, "/api/orchestrations/" + run.ID + "/share"},

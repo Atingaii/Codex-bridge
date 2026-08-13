@@ -24,9 +24,9 @@ func (s *Store) ListAllOrchestrationRuns(ctx context.Context, userID string) ([]
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
 			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
-			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
-		WHERE user_id = ?
+		WHERE user_id = ? AND delete_requested = 0
 		ORDER BY updated_at DESC, created_at DESC`, userID)
 	if err != nil {
 		return nil, err
@@ -128,9 +128,9 @@ func (s *Store) ListTerminalOrchestrationRunsByAgent(ctx context.Context, agentI
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
 			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
-			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0)
+			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
-		WHERE agent_id = ? AND status IN ('completed','failed','canceled')
+		WHERE agent_id = ? AND status IN ('completed','failed','canceled') AND delete_requested = 0
 		ORDER BY updated_at DESC LIMIT ?`, agentID, limit)
 	if err != nil {
 		return nil, err

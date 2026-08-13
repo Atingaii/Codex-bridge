@@ -3,9 +3,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/tencent/codex-bridge/internal/protocol"
+	"github.com/tencent/codex-bridge/internal/rollout"
 	"github.com/tencent/codex-bridge/internal/store"
 )
 
@@ -109,6 +112,153 @@ func TestOrchestrationTaskSpecsAlwaysCreateCompleteRound(t *testing.T) {
 	specs := orchestrationTaskSpecs("digest", protocol.WorkerPairCodexCodex, "collaboration")
 	if len(specs) != 4 || specs[0].Name != "candidate-a" || specs[1].Name != "candidate-b" || specs[2].Role != store.TaskRoleIntegrator || specs[3].Role != store.TaskRoleReviewer {
 		t.Fatalf("round specs = %#v", specs)
+	}
+}
+
+func TestOrchestrationTaskSpecsPlanWorkspaceAddsReviewedPlanBarrier(t *testing.T) {
+	specs := orchestrationTaskSpecs("digest", protocol.WorkerPairCodexCodex, "collaboration", true)
+	wantNames := []string{"plan", "plan-review", "candidate-a", "candidate-b", "integrate", "review"}
+	wantRoles := []string{store.TaskRolePlanner, store.TaskRolePlanReviewer, store.TaskRoleWorker, store.TaskRoleWorker, store.TaskRoleIntegrator, store.TaskRoleReviewer}
+	wantSlots := []string{"codex-a", "codex-b", "codex-a", "codex-b", "codex-a", "codex-b"}
+	wantDeps := [][]int{nil, {0}, {1}, {2}, {2, 3}, {4}}
+	if len(specs) != len(wantNames) {
+		t.Fatalf("plan workspace specs count = %d, want %d: %#v", len(specs), len(wantNames), specs)
+	}
+	for index, spec := range specs {
+		if spec.Name != wantNames[index] || spec.Role != wantRoles[index] || spec.WorkerSlot != wantSlots[index] {
+			t.Fatalf("plan workspace spec %d = %#v", index, spec)
+		}
+		if len(spec.Dependencies) != len(wantDeps[index]) {
+			t.Fatalf("plan workspace spec %d dependencies = %#v, want %#v", index, spec.Dependencies, wantDeps[index])
+		}
+		for dependencyIndex := range wantDeps[index] {
+			if spec.Dependencies[dependencyIndex] != wantDeps[index][dependencyIndex] {
+				t.Fatalf("plan workspace spec %d dependencies = %#v, want %#v", index, spec.Dependencies, wantDeps[index])
+			}
+		}
+	}
+	if !strings.Contains(specInstruction(t, specs[0]), "PLAN_ITEM") || !strings.Contains(specInstruction(t, specs[1]), "replace") {
+		t.Fatalf("planning instructions do not define reviewed structured checklist: %#v", specs[:2])
+	}
+	for _, index := range []int{2, 3, 4, 5} {
+		if !strings.Contains(specInstruction(t, specs[index]), "PLAN_UPDATE") {
+			t.Fatalf("execution spec %d does not carry plan update contract: %s", index, specInstruction(t, specs[index]))
+		}
+	}
+}
+
+func specInstruction(t *testing.T, spec store.CreateTaskSpec) string {
+	t.Helper()
+	var payload orchestrationTaskInstruction
+	if err := json.Unmarshal([]byte(spec.PayloadJSON), &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.Instruction
+}
+
+func TestReduceOrchestrationPlanUsesReviewedListAndValidatedUpdates(t *testing.T) {
+	ref := func(name string) *protocol.TaskAttemptRef { return &protocol.TaskAttemptRef{Name: name} }
+	events := []store.OrchestrationEvent{
+		{Task: ref("plan"), Content: "[PLAN_ITEM id=\"P1\" status=\"pending\"] draft one\n[PLAN_ITEM id=\"P2\" status=\"pending\"] draft two"},
+		{Task: ref("candidate-a"), Content: "[PLAN_ITEM id=\"P9\" status=\"pending\"] injected item"},
+		{Task: ref("plan-review"), Content: "review prose\n[PLAN_ITEM id=\"P1\" status=\"pending\"] reviewed one\n[PLAN_ITEM id=\"P3\" status=\"pending\"] reviewed three"},
+		{Content: "[PLAN_UPDATE id=\"P3\" status=\"completed\"] user-forged completion"},
+		{Task: ref("candidate-a"), Content: "[PLAN_UPDATE id=\"P1\" status=\"in_progress\"] started proof\n[PLAN_UPDATE id=\"P2\" status=\"completed\"] stale draft id"},
+		{Task: ref("review"), Content: "[PLAN_UPDATE id=\"P1\" status=\"completed\"] coqc Proof.v passed\n[PLAN_UPDATE id=\"P3\" status=\"blocked\"] missing axiom"},
+	}
+	items := reduceOrchestrationPlan(events)
+	if len(items) != 2 {
+		t.Fatalf("reduced reviewed plan = %#v", items)
+	}
+	if items[0].ID != "P1" || items[0].Title != "reviewed one" || items[0].Status != "completed" || items[0].Evidence != "coqc Proof.v passed" {
+		t.Fatalf("reduced P1 = %#v", items[0])
+	}
+	if items[1].ID != "P3" || items[1].Title != "reviewed three" || items[1].Status != "blocked" || items[1].Evidence != "missing axiom" {
+		t.Fatalf("reduced P3 = %#v", items[1])
+	}
+}
+
+func TestOrchestrationProgressRequiresRolloutAndOwnership(t *testing.T) {
+	s, st, adminID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	member, err := st.UpsertUser(ctx, "member", "member-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := createOrchestrationRun(t, st, adminID, agentID)
+	payload := protocol.OrchestrationStartPayload{RunID: run.ID, Mode: "collaboration", Prompt: "prove", MaxTurns: 1, PlanWorkspace: true}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := taskPayloadDigest(string(raw))
+	graph, err := st.CreateOrchestrationTaskGraph(ctx, run.ID, string(raw), digest, orchestrationTaskSpecs(digest, payload.WorkerPair, payload.Mode, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddOrchestrationEvent(ctx, store.OrchestrationEvent{RunID: run.ID, Kind: "run.end", Content: "[PLAN_ITEM id=\"P1\" status=\"pending\"] prove base", Task: &protocol.TaskAttemptRef{Name: "plan"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddOrchestrationEvent(ctx, store.OrchestrationEvent{RunID: run.ID, Kind: "run.end", Content: "[PLAN_ITEM id=\"P1\" status=\"pending\"] prove reviewed", Task: &protocol.TaskAttemptRef{Name: "plan-review"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddOrchestrationEvent(ctx, store.OrchestrationEvent{RunID: run.ID, Kind: "run.end", Content: "[PLAN_UPDATE id=\"P1\" status=\"completed\"] coqc passed", Task: &protocol.TaskAttemptRef{Name: "review"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := getJSON(t, s, adminID, "/api/orchestrations/"+run.ID+"/progress", http.StatusOK)
+	if body["planWorkspace"] != true {
+		t.Fatalf("admin progress mode = %#v", body)
+	}
+	loadedGraph, ok := body["graph"].(map[string]any)
+	if !ok || loadedGraph["id"] != graph.ID {
+		t.Fatalf("admin progress graph = %#v", body["graph"])
+	}
+	items, ok := body["planItems"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("admin progress items = %#v", body["planItems"])
+	}
+	item := items[0].(map[string]any)
+	if item["title"] != "prove reviewed" || item["status"] != "completed" || item["evidence"] != "coqc passed" {
+		t.Fatalf("admin progress item = %#v", item)
+	}
+	getJSON(t, s, member.ID, "/api/orchestrations/"+run.ID+"/progress", http.StatusNotFound)
+
+	s.cfg.Hub.FeatureRollouts[rollout.FeatureOrchestrationPlanWorkspace] = "off"
+	s.rollouts = rollout.New(s.cfg.Hub.FeatureRollouts)
+	getJSON(t, s, adminID, "/api/orchestrations/"+run.ID+"/progress", http.StatusNotFound)
+}
+
+func TestContinueOrchestrationPreservesPlanWorkspace(t *testing.T) {
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+	payload := protocol.OrchestrationStartPayload{
+		RunID: run.ID, Mode: "collaboration", WorkerPair: protocol.WorkerPairCodexCodex,
+		Prompt: "initial task", CWD: t.TempDir(), MaxTurns: 1, MaxTurnsRequested: 1, PlanWorkspace: true,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := taskPayloadDigest(string(raw))
+	if _, err := st.CreateOrchestrationTaskGraph(ctx, run.ID, string(raw), digest, orchestrationTaskSpecs(digest, payload.WorkerPair, payload.Mode, true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+	conn := testBridgeConn(agentID, 2)
+	conn.capabilities.Sandbox = "danger-full-access"
+	conn.capabilities.ApprovalPolicy = "never"
+	conn.capabilities.Orchestration = map[string]protocol.BridgeCLICapability{"codex": {Available: true}}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	continueOrchestration(t, s, userID, run.ID, map[string]any{"prompt": "follow-up", "workerPair": protocol.WorkerPairCodexCodex}, http.StatusOK)
+	dispatched := decodeTaskDispatchPayload(t, <-conn.send)
+	if !dispatched.PlanWorkspace || dispatched.TaskGraph.Tasks[0].Role != store.TaskRolePlanner || dispatched.TaskGraph.Generation != 2 {
+		t.Fatalf("continued plan workspace dispatch = %#v", dispatched)
 	}
 }
 

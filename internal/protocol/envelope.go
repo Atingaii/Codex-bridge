@@ -268,6 +268,7 @@ type OrchestrationStartPayload struct {
 	RunCWD                  string              `json:"runCwd,omitempty"`
 	Profile                 string              `json:"profile,omitempty"`
 	NativeContextCompaction string              `json:"nativeContextCompaction,omitempty"`
+	PlanWorkspace           bool                `json:"planWorkspace,omitempty"`
 	TaskGraph               *TaskGraphPayload   `json:"taskGraph,omitempty"`
 }
 

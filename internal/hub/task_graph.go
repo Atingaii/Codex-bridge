@@ -8,11 +8,100 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/tencent/codex-bridge/internal/protocol"
+	"github.com/tencent/codex-bridge/internal/rollout"
+	"github.com/tencent/codex-bridge/internal/serverutil"
 	"github.com/tencent/codex-bridge/internal/store"
 )
+
+type orchestrationPlanItem struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Status   string `json:"status"`
+	Evidence string `json:"evidence,omitempty"`
+}
+
+var orchestrationPlanMarker = regexp.MustCompile(`(?m)^\[(PLAN_ITEM|PLAN_UPDATE)\s+id="([A-Za-z][A-Za-z0-9_-]{0,31})"\s+status="(pending|in_progress|completed|blocked)"\]\s*(.+?)\s*$`)
+
+func reduceOrchestrationPlan(events []store.OrchestrationEvent) []orchestrationPlanItem {
+	items := make([]orchestrationPlanItem, 0, 12)
+	indexes := make(map[string]int)
+	planReviewStarted := false
+	for _, event := range events {
+		name := ""
+		if event.Task != nil {
+			name = event.Task.Name
+		}
+		for _, match := range orchestrationPlanMarker.FindAllStringSubmatch(event.Content, -1) {
+			kind, id, status, detail := match[1], match[2], match[3], strings.TrimSpace(match[4])
+			if kind == "PLAN_ITEM" {
+				if name != "plan" && name != "plan-review" {
+					continue
+				}
+				if name == "plan-review" && !planReviewStarted {
+					items = items[:0]
+					indexes = make(map[string]int)
+					planReviewStarted = true
+				}
+				if _, exists := indexes[id]; exists || len(items) >= 12 {
+					continue
+				}
+				indexes[id] = len(items)
+				items = append(items, orchestrationPlanItem{ID: id, Title: detail, Status: status})
+				continue
+			}
+			index, exists := indexes[id]
+			if !exists || (name != "candidate-a" && name != "candidate-b" && name != "integrate" && name != "review") {
+				continue
+			}
+			items[index].Status = status
+			items[index].Evidence = detail
+		}
+	}
+	return items
+}
+
+func (s *Server) handleOrchestrationProgress(w http.ResponseWriter, r *http.Request, uid string) {
+	user, err := s.store.UserByID(r.Context(), uid)
+	if err != nil || !s.featureEnabled(rollout.FeatureOrchestrationPlanWorkspace, user) {
+		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "orchestration progress not found")
+		return
+	}
+	runID := r.PathValue("runID")
+	if _, err := s.store.OrchestrationRunByID(r.Context(), runID, uid); err != nil {
+		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "orchestration run not found")
+		return
+	}
+	graph, err := s.store.TaskGraphByRun(r.Context(), runID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			serverutil.WriteJSON(w, http.StatusOK, map[string]any{"graph": nil, "planItems": []orchestrationPlanItem{}})
+			return
+		}
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration progress")
+		return
+	}
+	var payload protocol.OrchestrationStartPayload
+	_ = json.Unmarshal([]byte(graph.PayloadJSON), &payload)
+	if !payload.PlanWorkspace {
+		serverutil.WriteJSON(w, http.StatusOK, map[string]any{"graph": graph, "planItems": []orchestrationPlanItem{}, "planWorkspace": false})
+		return
+	}
+	events, err := s.store.ListOrchestrationEvents(r.Context(), runID, 10000)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration progress events")
+		return
+	}
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{
+		"graph":         graph,
+		"planItems":     reduceOrchestrationPlan(events),
+		"planWorkspace": true,
+	})
+}
 
 type orchestrationTaskInstruction struct {
 	Instruction string `json:"instruction"`
@@ -27,7 +116,7 @@ func taskPayloadDigest(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func orchestrationTaskSpecs(baseDigest, workerPair, mode string) []store.CreateTaskSpec {
+func orchestrationTaskSpecs(baseDigest, workerPair, mode string, planWorkspace ...bool) []store.CreateTaskSpec {
 	workerA, workerB := "claude", "codex"
 	if protocol.NormalizeOrchestrationWorkerPair(workerPair) == protocol.WorkerPairCodexCodex {
 		workerA, workerB = "codex-a", "codex-b"
@@ -47,11 +136,29 @@ func orchestrationTaskSpecs(baseDigest, workerPair, mode string) []store.CreateT
 	// All nodes write to the user-selected checkout. Candidate B waits for A so
 	// durable scheduling never overlaps arbitrary filesystem side effects.
 	deps := [][]int{nil, {0}, {0, 1}, {2}}
+	names := []string{"candidate-a", "candidate-b", "integrate", "review"}
+	if len(planWorkspace) > 0 && planWorkspace[0] {
+		planInstruction := "Act as the planning agent. Inspect the user's initial request and the selected workspace only as needed to decompose the work into a bounded, dependency-aware checklist before implementation. Do not implement the requested changes. End with 2-12 stable machine-readable lines in the exact form [PLAN_ITEM id=\"P1\" status=\"pending\"] concise task, using unique P-prefixed ids."
+		planReviewInstruction := "Act as the independent plan reviewer. Check the proposed checklist against the original request, workspace constraints, formal-proof branches, verification obligations, and missing dependencies. Do not implement the requested changes. End by restating the corrected complete checklist as 2-12 exact [PLAN_ITEM id=\"P1\" status=\"pending\"] concise task lines; these replace the planner list."
+		updateSuffix := " Track the reviewed plan while working. When evidence changes an item, append exact lines [PLAN_UPDATE id=\"P1\" status=\"in_progress\"] evidence, [PLAN_UPDATE id=\"P1\" status=\"completed\"] evidence, or [PLAN_UPDATE id=\"P1\" status=\"blocked\"] evidence for ids from the reviewed plan."
+		instructions = []orchestrationTaskInstruction{
+			{Instruction: planInstruction},
+			{Instruction: planReviewInstruction},
+			{Instruction: instructions[0].Instruction + updateSuffix},
+			{Instruction: instructions[1].Instruction + updateSuffix},
+			{Instruction: instructions[2].Instruction + updateSuffix},
+			{Instruction: instructions[3].Instruction + updateSuffix},
+		}
+		roles = []string{store.TaskRolePlanner, store.TaskRolePlanReviewer, store.TaskRoleWorker, store.TaskRoleWorker, store.TaskRoleIntegrator, store.TaskRoleReviewer}
+		slots = []string{workerA, workerB, workerA, workerB, workerA, workerB}
+		deps = [][]int{nil, {0}, {1}, {2}, {2, 3}, {4}}
+		names = []string{"plan", "plan-review", "candidate-a", "candidate-b", "integrate", "review"}
+	}
 	out := make([]store.CreateTaskSpec, 0, len(instructions))
 	for i, instruction := range instructions {
 		raw, _ := json.Marshal(instruction)
 		out = append(out, store.CreateTaskSpec{
-			Name:          []string{"candidate-a", "candidate-b", "integrate", "review"}[i],
+			Name:          names[i],
 			Role:          roles[i],
 			WorkerSlot:    slots[i],
 			PayloadJSON:   string(raw),
@@ -84,7 +191,7 @@ func (s *Server) createAndDispatchTaskGraphAfter(ctx context.Context, run store.
 		return false, err
 	}
 	baseDigest := taskPayloadDigest(string(baseJSON))
-	specs := orchestrationTaskSpecs(baseDigest, payload.WorkerPair, payload.Mode)
+	specs := orchestrationTaskSpecs(baseDigest, payload.WorkerPair, payload.Mode, payload.PlanWorkspace)
 	var graph store.OrchestrationTaskGraph
 	created := true
 	if previousGraphID == "" {
@@ -302,14 +409,19 @@ func (s *Server) handleTaskGraphEvent(ctx context.Context, payload protocol.Orch
 	if !changed {
 		return true, errors.New("stale or mismatched orchestration task attempt event")
 	}
+	run, err := s.store.OrchestrationRunByIDAnyUser(ctx, payload.RunID)
+	if err != nil {
+		return true, err
+	}
+	if run.DeleteRequested || run.Status == store.OrchestrationCanceling {
+		return true, nil
+	}
 	if status == store.TaskRunning {
-		run, err := s.store.OrchestrationRunByIDAnyUser(ctx, payload.RunID)
-		if err != nil {
-			return true, err
-		}
 		if run.Status == store.OrchestrationQueued {
-			if err := s.store.UpdateOrchestrationRunStatus(ctx, payload.RunID, store.OrchestrationRunning, ""); err != nil {
+			if changed, err := s.store.UpdateOrchestrationRunStatusIfAllowed(ctx, payload.RunID, store.OrchestrationRunning, ""); err != nil {
 				return true, err
+			} else if !changed {
+				return true, nil
 			}
 		}
 	}

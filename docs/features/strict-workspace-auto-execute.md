@@ -16,6 +16,12 @@ the option is only a convenience. See
 The existing `review-required` and `auto-execute` profiles keep their current
 arguments and behavior.
 
+The profile follows an environment-capability rule instead of trying to infer
+whether arbitrary directories contain compilers. A linked endpoint records the
+executable search path from both the invoking shell and the user's default
+login shell. Paths deliberately exported there are treated as shared runtime
+components; unrelated ordinary home directories remain private.
+
 ## Non-Goals
 
 - Do not migrate or change existing endpoints automatically.
@@ -49,9 +55,11 @@ The Landlock allowlist grants:
 - read/execute access to existing top-level hidden entries in the real user
   home so provider switchers, CLI launchers, hooks, and language/tool managers
   can keep working without granting writes outside the bound workspace;
-- read/execute access to absolute `PATH` entries, standard toolchain roots
-  declared by environment variables, recognized user-level runtime managers,
-  and conventional Coq, Isabelle, Lean, Go, SDK, and Conda component roots;
+- read/execute access to absolute `PATH` entries and their component roots when
+  a `bin` or `sbin` directory was explicitly exported by the endpoint's saved
+  shell environment; an exported symlink to an otherwise private directory
+  exposes only its resolved executable file unless that target also belongs to
+  an explicitly exported `bin` or `sbin` component;
 - no filesystem access to other unrecognized ordinary directories in the user
   home.
 
@@ -77,22 +85,34 @@ Coq, Isabelle, and other proof tools can initialize normally. Shared `/tmp`
 remains unavailable; CLI children receive a private writable `TMPDIR` instead.
 
 Linux has no reliable metadata that says whether an ordinary home directory is
-a private user project or a public component. The Bridge therefore uses
-positive tool evidence instead of guessing from ownership: resolved executable
-paths, absolute `PATH` entries, standard tool environment variables, recognized
-runtime-manager layouts, and conventional component names. It recognizes nvm,
-Volta, fnm, pyenv, Conda, rbenv, SDKMAN, asdf, mise, Rustup, Elan, Linuxbrew,
-opam, Isabelle, Nix, Guix, Snap, native Claude, standalone Codex, npm, and
-common proof-tool layouts. Administrators can add uncommon component roots with
-`BRIDGE_STRICT_WORKSPACE_READ_ONLY`. Other ordinary home directories are denied
-by default.
+a private user project or a public component. The Bridge therefore does not
+scan the home directory, recognize product names, consult previous runs, or
+guess from ownership. At link time it merges the current process `PATH` with a
+clean login shell `PATH` resolved from the real home directory. At run time it
+allows those absolute search directories read-only. If such a directory is a
+`bin` or `sbin` directory directly below a component, the component is also
+read-only so executables can load adjacent libraries and data. Administrators
+can add uncommon component roots with `BRIDGE_STRICT_WORKSPACE_READ_ONLY`.
+Other ordinary home directories are denied by default.
 
-The first strict-mode run for a workspace seeds a private CLI home with the
-existing Codex/Claude configuration, credentials, skills, and session state.
-Later turns reuse that workspace-scoped state. Large skill/plugin trees can
-therefore add one-time initialization work, but are never linked back to the
-real home. `CODEX_BRIDGE_RUNTIME_DIR` can place these private homes on a
-machine-appropriate local filesystem.
+This rule covers a new machine on its first run without history: anything that
+is available in the user's normal current or login-shell executable environment
+is available to the endpoint. A tool that exists only inside another private
+project's local environment is intentionally unavailable. Automatically using
+that tool would require exposing the other project and would contradict the
+profile's confidentiality goal; install or activate it as a shared tool, or
+place the project-local environment inside the bound workspace.
+
+The first strict-mode run for a workspace seeds private Codex and Claude state
+with the existing configuration, credentials, skills, and session state. Later
+turns reuse that workspace-scoped state. The child keeps the real `HOME` and
+XDG environment for normal shell and tool-manager path resolution, while
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and temporary paths point to Bridge-owned
+state. Landlock still makes top-level hidden home entries read-only and denies
+unrecognized ordinary home directories. Large skill/plugin trees can add
+one-time initialization work, but are never linked back to the real CLI state.
+`CODEX_BRIDGE_RUNTIME_DIR` can place private state on a machine-appropriate
+local filesystem.
 
 The hidden-entry compatibility rule is deliberately read-only and only covers
 entries that already exist directly below the real home when a CLI child is
@@ -126,6 +146,29 @@ The profile is fail-closed: if Landlock is unavailable or a restriction cannot
 be installed, the CLI turn fails with an actionable error instead of running
 without isolation.
 
+## Alternatives Considered
+
+- Bubblewrap is a policy construction tool rather than a complete policy. It
+  requires user and mount namespaces and creates a replacement filesystem
+  view. Nesting it with Codex's own sandbox caused the observed `/proc` access
+  failures and varies across distributions.
+- NsJail provides broader namespace, cgroup, and seccomp isolation, but adds a
+  separately installed privileged runtime and solves a larger containerization
+  problem than this profile needs.
+- Firejail also depends on a separately installed SUID or namespace sandbox and
+  distribution-maintained profiles. Its host setup and version become part of
+  every endpoint's compatibility surface.
+- AppArmor and SELinux can express host policies, but require administrator
+  provisioning and path-specific policy installation, which is unsuitable for
+  a user-installed Bridge on arbitrary machines.
+
+Landlock is the smallest mature kernel boundary that an unprivileged Bridge can
+apply directly to itself and all descendants without changing the filesystem
+layout. The remaining ambiguity is semantic rather than technical: Linux
+cannot infer whether an ordinary home directory is a private project or a
+shared tool installation. The saved shell `PATH` is therefore the explicit,
+first-run capability declaration for user-installed tools.
+
 ## Data And Protocol Impact
 
 - No SQLite or WebSocket shape changes.
@@ -147,9 +190,11 @@ without isolation.
 7. Localize external Codex instruction and model-catalog files referenced by
    the copied configuration without widening the filesystem allowlist.
 8. Add read-only compatibility for system/runtime trees, existing top-level
-   hidden home entries, and positively identified public tool components.
+   hidden home entries, and PATH-declared tool components.
 9. Avoid nested Codex Bubblewrap under the inherited Landlock boundary while
    retaining the same outer restriction for the complete Codex process tree.
+10. Save current and login-shell executable paths when linking an endpoint,
+    and preserve real-home path resolution while isolating CLI state.
 
 ## Exit Gates
 
@@ -169,6 +214,9 @@ without isolation.
   remain inaccessible.
 - Codex exec, resume, and app-server paths do not create a nested Bubblewrap
   sandbox in strict mode; non-strict profiles keep their existing arguments.
+- A first-time endpoint can execute a tool exported by either the invoking or
+  login shell without previous Bridge runs, while an unrelated ordinary sibling
+  directory remains unreadable.
 
 ## Reviewer Q&A
 
@@ -192,6 +240,13 @@ and it requires the updated Bridge binary.
 
 No. Applying the preset updates the real CLI configuration as before. The next
 strict-mode turn refreshes its private configuration and referenced files.
+
+**Can strict mode automatically borrow a local switch from another project?**
+
+No. A project-local switch belongs inside that other ordinary directory. The
+kernel cannot expose its executable and support files while proving that no
+other project file can be read. Strict mode uses the current workspace or the
+user's explicitly exported shared executable environment instead.
 
 **Why does `.git` not open a browser approval from a filesystem denial?**
 

@@ -144,7 +144,7 @@ codex
 - 登录后在设置里可以看到自己已接入的 CLI 端。
 - 在线/离线状态会显示在 CLI 端列表里。
 - 主对话和编排页顶部都有 CLI 端选择器，可以在多个 WSL2/服务器终端之间切换。
-- “需要确认”权限策略会把 Codex 聊天、Codex 编排和 Claude Code 编排审批都展示到浏览器；其中单条 `cat`、`coqc` 和批处理 `coqtop` 仅在可执行文件、参数和文件路径通过严格工作区白名单时自动放行，命令拼接、重定向、展开和目录越界仍需人工审批。“严格工作区”是无需审批的用户目录隔离模式：绑定工作区完整读写，系统与运行时目录、Home 隐藏项、PATH 及可识别公共工具只读，Home 下其他未识别普通目录不可见，并使用私有临时目录。“自动执行”保留原有可信机器的完整权限。编排页会显示当前 CLI 端的能力矩阵。Hub 编排会在同一个选中的 Bridge 连接上轮流调用 Claude Code 和 Codex CLI，并把每轮摘要带给下一轮。
+- “需要确认”权限策略会把 Codex 聊天、Codex 编排和 Claude Code 编排审批都展示到浏览器；其中单条 `cat`、`coqc` 和批处理 `coqtop` 仅在可执行文件、参数和文件路径通过严格工作区白名单时自动放行，命令拼接、重定向、展开和目录越界仍需人工审批。“严格工作区”是无需审批的用户目录隔离模式：绑定工作区完整读写，系统与运行时目录、Home 隐藏项及链接时由当前或登录 Shell 的 PATH 明确导出的工具组件只读，Home 下其他普通目录不可见，并使用私有 CLI 状态和临时目录。真实 Home 路径语义仍保留，因此 Shell、opam、mise 等初始化无需 Bridge 猜测安装布局。“自动执行”保留原有可信机器的完整权限。编排页会显示当前 CLI 端的能力矩阵。Hub 编排会在同一个选中的 Bridge 连接上轮流调用 Claude Code 和 Codex CLI，并把每轮摘要带给下一轮。
 - 编排页有 `默认` / `形式化证明` 配置选择，也有“原生上下文”设置。形式化证明提示和每轮结束后的原生压缩维护都是显式选择后才启用，并随 run 持久化；Codex 会走 app-server 原生压缩 RPC，没有可验证控制通道的 CLI 会记录 Bridge note 并跳过，避免把 slash 命令写进真实会话。形式化证明下，协作模式采用证明作者/独立审计者契约，辩论模式采用可证伪提案者/对抗性批评者契约，要求目标陈述不变、记录证明状态和精确检查命令，并在最后审计依赖与信任边界；界面、轮数和现有会话用法不变。默认配置不会因为关键词自动注入证明提示。编排事件使用结构化字段区分 CLI、Bridge、用户来源，并用单独的最终结论事件展示收尾结果。
 - 每个 CLI 端可以展开“详情”并生成“修复连接”命令；旧版启动命令接入的端点可用该命令更新 Bridge、保留原 machine id 并重连同一个端点。
 - 删除 CLI 端会让 Hub 通知在线 Bridge 停止对应本地服务并退出，同时让已消费 token
@@ -267,10 +267,10 @@ HUB_BRIDGE_DOWNLOAD_URL='https://your-release-url/codex-bridge-linux-amd64'
 添加 CLI 端时有三种权限策略：
 
 - `需要确认`：Codex 聊天和 Codex 编排使用 `codex app-server` runner，命令/文件审批会回传到网页端确认；Claude Code 编排通过权限提示 MCP hook 把审批回传到网页端。
-- `自动执行（仅工作区）`：无需审批，使用 Bridge 外层 Linux Landlock 把 Codex、Claude、ACP 及其子进程限制在用户目录隔离边界内。工作区和隔离会话状态可写；系统、运行时、Home 隐藏项、PATH 与可识别公共工具只读；Home 下其他未识别普通目录和共享 `/tmp` 不可访问。严格模式会关闭 Codex 内层 Bubblewrap，避免嵌套沙箱初始化冲突；外层规则仍覆盖全部命令。要求 Linux Landlock ABI 3；不支持时 Bridge 会拒绝启动，不会退化成全盘权限。
+- `自动执行（仅工作区）`：无需审批，使用 Bridge 外层 Linux Landlock 把 Codex、Claude、ACP 及其子进程限制在用户目录隔离边界内。工作区和隔离会话状态可写；系统、运行时、Home 隐藏项及链接时由当前或登录 Shell PATH 明确导出的工具组件只读；Home 下其他普通目录和共享 `/tmp` 不可访问。严格模式保留真实 Home 的 Shell 初始化语义，但 Codex/Claude 状态与临时文件仍是工作区私有；同时关闭 Codex 内层 Bubblewrap，避免嵌套沙箱初始化冲突。要求 Linux Landlock ABI 3；不支持时 Bridge 会拒绝启动，不会退化成全盘权限。
 - `无需授权`：保持当前可信机器模式，使用 `danger-full-access` 和 `approval_policy=never`，不会弹权限确认。
 
-Bridge 会只读开放 Home 容器之外的系统与挂载分支，并识别完整 `/proc` 与 `/sys`、绝对 PATH、标准工具环境变量、Home 隐藏项，以及常见 nvm、Volta、fnm、pyenv、Conda、rbenv、SDKMAN、asdf、mise、Rustup、Elan、Linuxbrew、opam、Isabelle、Coq、Lean、Nix、Guix、Snap、Claude 原生安装、Codex standalone 和 npm 包布局。特殊发行版或自定义工具链可在运行安装/修复命令前设置 `BRIDGE_STRICT_WORKSPACE_READ_ONLY`，值为当前操作系统的路径列表（Linux 使用冒号分隔），只为所需工具链根增加只读访问；不要填写整个 HOME、`/tmp` 或其他私人项目目录。隔离状态磁盘较大时，可用 `CODEX_BRIDGE_RUNTIME_DIR` 指定本地运行目录；安装/修复命令会把这两个变量一并保留到后台服务。
+Bridge 会只读开放 Home 容器之外的系统与挂载分支、完整 `/proc` 与 `/sys`、Home 隐藏项，以及链接端点时由当前 Shell 或默认登录 Shell 的 PATH 明确导出的工具组件。它不扫描 Home、不读取历史任务，也不按 nvm、opam、Coq、Nix 等产品名猜测目录，因此新机器首次运行也使用同一规则。若 PATH 指向另一个项目的 `_opam/bin` 等组件，只读开放该组件，不开放其父项目源码。特殊发行版或自定义共享工具链可在运行安装/修复命令前设置 `BRIDGE_STRICT_WORKSPACE_READ_ONLY`，值为当前操作系统的路径列表（Linux 使用冒号分隔）；不要填写整个 HOME、`/tmp` 或私人项目目录。隔离状态磁盘较大时，可用 `CODEX_BRIDGE_RUNTIME_DIR` 指定本地运行目录；安装/修复命令会把这两个变量一并保留到后台服务。
 
 手动拆分时等价于：
 

@@ -141,19 +141,22 @@ unknown policies fail closed; changing a policy requires a Hub restart.
   Code, ACP adapters, and every command they start run without browser approval
   inside a Linux Landlock boundary. The bound workspace and per-workspace CLI
   state are writable. Standard system/runtime trees, including `/proc` and
-  `/sys`, non-home mount branches, hidden home entries, and positively
-  identified public tool roots are read-only. Other unrecognized ordinary home directories and shared
-  `/tmp` are invisible. Bridge recognizes absolute `PATH` entries, standard
-  tool environment variables, and common nvm, Volta, fnm, pyenv, Conda, rbenv,
-  SDKMAN, asdf, mise, Rustup, Elan, Linuxbrew, opam, Isabelle, Coq, Lean, Nix,
-  Guix, Snap, native Claude, standalone Codex, and npm layouts.
+  `/sys`, non-home mount branches, hidden home entries, and executable
+  components explicitly exported through the saved shell `PATH` are read-only.
+  Other unrecognized ordinary home directories and shared `/tmp` are
+  invisible. `link` merges the invoking shell and default login-shell PATH, so
+  this rule works on a first-time machine without product-name or directory
+  layout detection. Strict children preserve real `HOME` for shell/tool-manager
+  initialization but use private Codex/Claude state, cache, and temporary paths.
   Once the Bridge applies Landlock, strict-mode Codex exec, resume, and
   app-server requests use Codex `dangerFullAccess` only to suppress its nested
   Bubblewrap layer. This cannot widen the inherited Landlock ruleset, and it
   avoids `/proc/sys/kernel/overflowuid` and nested-container initialization
   failures. Other permission profiles keep their existing Codex sandbox policy.
+  A local environment inside another ordinary project is not borrowed unless
+  its component `bin` was deliberately exported in the linked endpoint PATH.
   Set `BRIDGE_STRICT_WORKSPACE_READ_ONLY` to an OS path-list only when a custom
-  toolchain lives elsewhere. Landlock ABI 3 or newer is required; startup fails
+  shared toolchain lives elsewhere. Landlock ABI 3 or newer is required; startup fails
   closed on unsupported kernels and non-Linux hosts.
 - `auto-execute`: starts Bridge with `--runner codex --sandbox
   danger-full-access --approval-policy never`, preserving the previous

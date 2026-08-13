@@ -53,7 +53,7 @@ func configureStrictWorkspaceCommand(cmd *exec.Cmd, cfg *config.Config, cwd stri
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		return fmt.Errorf("create strict workspace runtime: %w", err)
 	}
-	sandboxHome, err := prepareStrictWorkspaceHome(runtimeDir)
+	privateStateHome, err := prepareStrictWorkspaceHome(runtimeDir)
 	if err != nil {
 		return err
 	}
@@ -88,13 +88,10 @@ func configureStrictWorkspaceCommand(cmd *exec.Cmd, cfg *config.Config, cwd stri
 	cmd.Path = exe
 	cmd.Args = args
 	replaceCommandEnv(cmd,
-		"HOME="+sandboxHome,
-		"CODEX_HOME="+filepath.Join(sandboxHome, ".codex"),
-		"CLAUDE_CONFIG_DIR="+filepath.Join(sandboxHome, ".claude"),
-		"XDG_CONFIG_HOME="+filepath.Join(sandboxHome, ".config"),
-		"XDG_DATA_HOME="+filepath.Join(sandboxHome, ".local", "share"),
-		"XDG_STATE_HOME="+filepath.Join(sandboxHome, ".local", "state"),
-		"XDG_CACHE_HOME="+filepath.Join(sandboxHome, ".cache"),
+		"CODEX_HOME="+filepath.Join(privateStateHome, ".codex"),
+		"CLAUDE_CONFIG_DIR="+filepath.Join(privateStateHome, ".claude"),
+		"XDG_STATE_HOME="+filepath.Join(privateStateHome, ".local", "state"),
+		"XDG_CACHE_HOME="+filepath.Join(privateStateHome, ".cache"),
 		"TMPDIR="+filepath.Join(runtimeDir, "tmp"), "TMP="+filepath.Join(runtimeDir, "tmp"), "TEMP="+filepath.Join(runtimeDir, "tmp"),
 	)
 	return nil

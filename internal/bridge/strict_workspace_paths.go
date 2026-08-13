@@ -41,24 +41,8 @@ func strictWorkspaceReadOnlyPaths(cfg *config.Config, target string) []string {
 	paths := strictWorkspaceNonHomeRootPaths()
 	paths = append(paths, cfg.Bridge.StrictWorkspaceReadOnly...)
 	paths = append(paths, strictWorkspaceHiddenHomePaths()...)
-	paths = append(paths, strictWorkspaceToolEnvironmentPaths()...)
-	paths = append(paths, strictWorkspaceKnownToolHomePaths()...)
 	paths = append(paths, strictWorkspaceExecutableSearchPaths()...)
 	paths = append(paths, resolvedExecutableRoots(target)...)
-	for _, name := range []string{
-		"codex", "claude",
-		"bash", "sh", "node", "python", "python3", "java", "perl", "ruby",
-		"git", "make", "cmake", "ninja", "gcc", "g++", "clang", "clang++", "go", "rustc", "cargo",
-		"coqc", "coqtop", "dune", "opam", "isabelle", "lean", "lake",
-	} {
-		if path, err := exec.LookPath(name); err == nil {
-			paths = append(paths, resolvedExecutableRoots(path)...)
-			paths = append(paths, discoverManagedInstallRoot(path), discoverOPAMRoot(path))
-			if name == "isabelle" {
-				paths = append(paths, discoverIsabelleRoot(path))
-			}
-		}
-	}
 	return existingUniquePaths(paths)
 }
 
@@ -113,7 +97,31 @@ func strictWorkspaceExecutableSearchPaths() []string {
 		if dir == "" || !filepath.IsAbs(dir) {
 			continue
 		}
-		paths = append(paths, dir, discoverManagedInstallRoot(dir), discoverHomePathComponentRoot(dir))
+		paths = append(paths, dir, discoverHomePathComponentRoot(dir))
+		paths = append(paths, strictWorkspacePATHSymlinkComponents(dir)...)
+	}
+	return paths
+}
+
+func strictWorkspacePATHSymlinkComponents(dir string) []string {
+	home, err := os.UserHomeDir()
+	if err != nil || !strictPathWithin(home, dir) {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		target, err := filepath.EvalSymlinks(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		paths = append(paths, target, discoverHomePathComponentRoot(filepath.Dir(target)))
 	}
 	return paths
 }
@@ -140,82 +148,6 @@ func discoverHomePathComponentRoot(path string) string {
 	return root
 }
 
-// strictWorkspaceToolEnvironmentPaths covers toolchains installed in ordinary
-// home directories when their standard environment variables identify them.
-// It never derives a parent directory from an arbitrary path.
-func strictWorkspaceToolEnvironmentPaths() []string {
-	var paths []string
-	for _, name := range []string{
-		"GOROOT", "GOPATH", "JAVA_HOME", "JDK_HOME", "M2_HOME", "GRADLE_HOME",
-		"CARGO_HOME", "RUSTUP_HOME", "OPAMROOT", "COQPATH", "COQLIB",
-		"ISABELLE_HOME", "ISABELLE_HOME_USER", "LEAN_PATH", "ELAN_HOME",
-		"NVM_DIR", "VOLTA_HOME", "PYENV_ROOT", "CONDA_PREFIX", "CONDA_ROOT",
-		"SDKMAN_DIR", "ASDF_DIR", "MISE_DATA_DIR",
-	} {
-		for _, value := range filepath.SplitList(os.Getenv(name)) {
-			value = strings.TrimSpace(value)
-			if value == "" || !filepath.IsAbs(value) {
-				continue
-			}
-			paths = append(paths, value)
-		}
-	}
-	return paths
-}
-
-// strictWorkspaceKnownToolHomePaths recognizes conventional user-level
-// component roots that use non-hidden names. Only existing top-level entries
-// with well-known names are selected; unrelated ordinary directories remain
-// outside the Landlock allowlist.
-func strictWorkspaceKnownToolHomePaths() []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-	entries, err := os.ReadDir(home)
-	if err != nil {
-		return nil
-	}
-	exact := map[string]struct{}{
-		"go":        {},
-		"miniconda": {}, "miniconda3": {}, "anaconda": {}, "anaconda3": {},
-		"linuxbrew": {}, "homebrew": {},
-		"coqplatform": {}, "proofgeneral": {},
-	}
-	prefixes := []string{"isabelle", "coq", "lean"}
-	var paths []string
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		name := strings.ToLower(entry.Name())
-		_, known := exact[name]
-		if !known {
-			for _, prefix := range prefixes {
-				if strictWorkspaceVersionedToolName(name, prefix) {
-					known = true
-					break
-				}
-			}
-		}
-		if known {
-			paths = append(paths, filepath.Join(home, entry.Name()))
-		}
-	}
-	return paths
-}
-
-func strictWorkspaceVersionedToolName(name, prefix string) bool {
-	if name == prefix {
-		return true
-	}
-	if !strings.HasPrefix(name, prefix) || len(name) == len(prefix) {
-		return false
-	}
-	next := name[len(prefix)]
-	return (next >= '0' && next <= '9') || next == '-' || next == '_'
-}
-
 // strictWorkspaceHiddenHomePaths keeps user-installed CLI tooling compatible
 // without exposing ordinary sibling projects. The endpoint owner explicitly
 // opts into this read-only exception by selecting strict-workspace.
@@ -239,24 +171,6 @@ func strictWorkspaceHiddenHomePaths() []string {
 	return paths
 }
 
-func discoverOPAMRoot(path string) string {
-	real, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		real = path
-	}
-	parts := strings.Split(filepath.Clean(real), string(filepath.Separator))
-	for index, part := range parts {
-		if part != ".opam" || index+2 >= len(parts) || parts[index+2] != "bin" {
-			continue
-		}
-		root := string(filepath.Separator) + filepath.Join(parts[1:index+2]...)
-		if _, err := os.Stat(filepath.Join(root, ".opam-switch")); err == nil {
-			return root
-		}
-	}
-	return ""
-}
-
 func resolvedExecutableRoots(path string) []string {
 	if resolved, err := exec.LookPath(path); err == nil {
 		path = resolved
@@ -269,89 +183,7 @@ func resolvedExecutableRoots(path string) []string {
 	if err != nil {
 		real = abs
 	}
-	return []string{real, discoverManagedInstallRoot(abs), discoverManagedInstallRoot(real)}
-}
-
-// discoverManagedInstallRoot recognizes the version-scoped layouts used by
-// common user-level runtime managers. It deliberately returns one selected
-// version, never the manager root or the user's home directory.
-func discoverManagedInstallRoot(path string) string {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return ""
-	}
-	clean := filepath.Clean(abs)
-	parts := strings.Split(strings.TrimPrefix(clean, string(filepath.Separator)), string(filepath.Separator))
-	type layout struct {
-		marker []string
-		tail   int
-	}
-	layouts := []layout{
-		{marker: []string{".nvm", "versions", "node"}, tail: 1},
-		{marker: []string{".volta", "tools", "image"}, tail: 2},
-		{marker: []string{".fnm", "node-versions"}, tail: 2},
-		{marker: []string{".local", "share", "fnm", "node-versions"}, tail: 2},
-		{marker: []string{".pyenv", "versions"}, tail: 1},
-		{marker: []string{".conda", "envs"}, tail: 1},
-		{marker: []string{"miniconda3"}, tail: 0},
-		{marker: []string{"anaconda3"}, tail: 0},
-		{marker: []string{".rbenv", "versions"}, tail: 1},
-		{marker: []string{".sdkman", "candidates"}, tail: 2},
-		{marker: []string{".asdf", "installs"}, tail: 2},
-		{marker: []string{".local", "share", "mise", "installs"}, tail: 2},
-		{marker: []string{".local", "share", "claude", "versions"}, tail: 1},
-		{marker: []string{".codex", "packages", "standalone", "releases"}, tail: 1},
-		{marker: []string{".local", "lib", "node_modules"}, tail: 1},
-		{marker: []string{".rustup", "toolchains"}, tail: 1},
-		{marker: []string{".elan", "toolchains"}, tail: 1},
-		{marker: []string{".linuxbrew", "Cellar"}, tail: 2},
-		{marker: []string{"mise", "installs"}, tail: 2},
-	}
-	for _, candidate := range layouts {
-		for index := 0; index+len(candidate.marker)+candidate.tail <= len(parts); index++ {
-			matched := true
-			for offset, marker := range candidate.marker {
-				if parts[index+offset] != marker {
-					matched = false
-					break
-				}
-			}
-			if matched {
-				end := index + len(candidate.marker) + candidate.tail
-				return string(filepath.Separator) + filepath.Join(parts[:end]...)
-			}
-		}
-	}
-	for index, part := range parts {
-		if part != "node_modules" || index+1 >= len(parts) {
-			continue
-		}
-		tail := 1
-		if strings.HasPrefix(parts[index+1], "@") && index+2 < len(parts) {
-			tail = 2
-		}
-		return string(filepath.Separator) + filepath.Join(parts[:index+1+tail]...)
-	}
-	if len(parts) >= 3 && parts[0] == "opt" {
-		// /opt/<package> is the conventional self-contained installation root.
-		return string(filepath.Separator) + filepath.Join(parts[:2]...)
-	}
-	return ""
-}
-
-func discoverIsabelleRoot(path string) string {
-	real, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		real = path
-	}
-	dir := filepath.Dir(real)
-	for i := 0; i < 6 && dir != filepath.Dir(dir); i++ {
-		if info, err := os.Stat(filepath.Join(dir, "etc", "settings")); err == nil && !info.IsDir() {
-			return dir
-		}
-		dir = filepath.Dir(dir)
-	}
-	return ""
+	return []string{real, discoverHomePathComponentRoot(filepath.Dir(abs)), discoverHomePathComponentRoot(filepath.Dir(real))}
 }
 
 func strictWorkspaceDevicePaths() []string {

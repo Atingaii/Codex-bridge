@@ -156,8 +156,10 @@ codex-bridge bridge             # 使用配置文件连接
 只有显式点击“新运行”才会创建新的编排上下文，继续输入会沿用当前 `runID`。
 
 “需要确认”会把命令/文件审批回传到浏览器；“自动执行（仅工作区）”无需审批，并使用 Linux
-Landlock 隔离用户目录：绑定工作区可写，系统运行时、Home 隐藏项、PATH 和可识别公共工具只读，
-其他未识别普通 Home 目录不可见；严格模式关闭 Codex 内层 Bubblewrap，由不可放宽的 Bridge 外层规则覆盖所有子进程；“无需授权”保持原可信机器模式。严格模式要求支持 Landlock ABI 3 的 Linux 内核，特殊工具链可用
+Landlock 隔离用户目录：绑定工作区可写，系统运行时、Home 隐藏项及链接时由当前或登录 Shell
+PATH 明确导出的工具组件只读，其他普通 Home 目录不可见；严格模式保留真实 Home 的 Shell
+初始化语义，同时隔离 Codex/Claude 状态和临时文件，并关闭 Codex 内层 Bubblewrap，由不可放宽的
+Bridge 外层规则覆盖所有子进程；“无需授权”保持原可信机器模式。严格模式要求支持 Landlock ABI 3 的 Linux 内核，特殊工具链可用
 `BRIDGE_STRICT_WORKSPACE_READ_ONLY` 增加只读根。删除在线端点时，Hub 会先要求本地 Bridge
 停止对应服务，再撤销端点和 token。
 

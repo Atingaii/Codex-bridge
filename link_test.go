@@ -130,6 +130,27 @@ func TestStrictWorkspaceLinkPreservesRuntimeOverrides(t *testing.T) {
 	}
 }
 
+func TestMergeExecutablePathsKeepsCurrentAndLoginShellPaths(t *testing.T) {
+	separator := string(os.PathListSeparator)
+	got := mergeExecutablePaths("/home/u/.local/bin", "/current/bin"+separator+"/usr/bin", "/login/bin"+separator+"/usr/bin")
+	want := strings.Join([]string{"/home/u/.local/bin", "/current/bin", "/usr/bin", "/login/bin"}, separator)
+	if got != want {
+		t.Fatalf("merged PATH = %q, want %q", got, want)
+	}
+}
+
+func TestLoginShellExecutablePathExtractsOnlyPATH(t *testing.T) {
+	home := t.TempDir()
+	shell := filepath.Join(home, "test-shell")
+	if err := os.WriteFile(shell, []byte("#!/bin/sh\nprintf 'startup noise\\n'\nPATH=/login/tools/bin:/usr/bin\nexec /bin/sh \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SHELL", shell)
+	if got := loginShellExecutablePath(home); !strings.Contains(got, "/login/tools/bin") || strings.Contains(got, "startup noise") {
+		t.Fatalf("login shell PATH = %q", got)
+	}
+}
+
 func TestResolveLinkCLIsResolvesCodexAndClaude(t *testing.T) {
 	tmp := t.TempDir()
 	binDir := filepath.Join(tmp, "bin")

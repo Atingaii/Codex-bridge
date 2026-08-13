@@ -250,7 +250,7 @@ func writeLinkFiles(opts linkOptions) error {
 func linkEnvFile(opts linkOptions) string {
 	var b strings.Builder
 	writeEnvAssignment(&b, "HOME", opts.Home)
-	writeEnvAssignment(&b, "PATH", linkPathWithLocalBin(opts.Home))
+	writeEnvAssignment(&b, "PATH", linkExecutablePath(opts.Home))
 	writeEnvAssignment(&b, "BRIDGE_CODEX_PATH", opts.CodexPath)
 	writeEnvAssignment(&b, "BRIDGE_CLAUDE_PATH", opts.ClaudePath)
 	for _, name := range linkPreservedEnvNames() {
@@ -259,6 +259,57 @@ func linkEnvFile(opts linkOptions) string {
 		}
 	}
 	return b.String()
+}
+
+func linkExecutablePath(home string) string {
+	return mergeExecutablePaths(
+		filepath.Join(home, ".local", "bin"),
+		os.Getenv("PATH"),
+		loginShellExecutablePath(home),
+	)
+}
+
+func loginShellExecutablePath(home string) string {
+	shell := strings.TrimSpace(os.Getenv("SHELL"))
+	if shell == "" || !filepath.IsAbs(shell) {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const marker = "__CODEX_BRIDGE_LOGIN_PATH__="
+	cmd := exec.CommandContext(ctx, shell, "-lc", `printf '__CODEX_BRIDGE_LOGIN_PATH__=%s\n' "$PATH"`)
+	cmd.Dir = home
+	cmd.Env = os.Environ()
+	output, err := cmd.Output()
+	if err != nil || len(output) > 1024*1024 {
+		return ""
+	}
+	var path string
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(line, marker) {
+			path = strings.TrimPrefix(line, marker)
+		}
+	}
+	return path
+}
+
+func mergeExecutablePaths(values ...string) string {
+	seen := make(map[string]struct{})
+	var paths []string
+	for _, value := range values {
+		for _, path := range filepath.SplitList(value) {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+			if _, exists := seen[path]; exists {
+				continue
+			}
+			seen[path] = struct{}{}
+			paths = append(paths, path)
+		}
+	}
+	return strings.Join(paths, string(os.PathListSeparator))
 }
 
 func linkPreservedEnvNames() []string {
@@ -295,20 +346,6 @@ func linkPreservedEnvNames() []string {
 		"all_proxy",
 		"no_proxy",
 	}
-}
-
-func linkPathWithLocalBin(home string) string {
-	path := os.Getenv("PATH")
-	localBin := filepath.Join(home, ".local", "bin")
-	for _, part := range filepath.SplitList(path) {
-		if part == localBin {
-			return path
-		}
-	}
-	if path == "" {
-		return localBin
-	}
-	return localBin + string(os.PathListSeparator) + path
 }
 
 func writeEnvAssignment(b *strings.Builder, name, value string) {

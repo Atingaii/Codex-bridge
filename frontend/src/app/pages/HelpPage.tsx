@@ -156,7 +156,7 @@ export function HelpPage({ language, setLanguage, isDarkMode, setIsDarkMode }: H
           <p className="mb-3 px-2 text-[11px] font-semibold uppercase text-muted-foreground">使用目录</p>
           <HelpNav activeSection={activeSection} />
           <div className="mt-6 border-t border-border px-2 pt-5 text-xs leading-relaxed text-muted-foreground">
-            <p>当前文档适用于 v0.3.37。</p>
+            <p>当前文档适用于 v0.3.38。</p>
             <a className="mt-2 inline-flex items-center gap-1 hover:text-foreground" href="/updates">更新记录 <History className="h-3 w-3" /></a>
             <a className="mt-2 inline-flex items-center gap-1 hover:text-foreground" href="https://github.com/Atingaii/ProofBridge" target="_blank" rel="noreferrer">GitHub <ExternalLink className="h-3 w-3" /></a>
           </div>

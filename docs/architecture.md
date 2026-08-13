@@ -52,9 +52,12 @@ managed Codex, Claude Code, and ACP process. The binary re-execs itself through
 `internal/bridge/strict_workspace_linux.go:RunStrictWorkspaceSandbox`, installs
 a fail-closed Landlock ruleset, then execs the target. Only the canonical bound
 workspace and per-workspace private runtime are writable. Non-home system and
-mount trees, hidden home configuration, and positively identified public
-toolchain roots are read-only; unrecognized ordinary home directories remain
-inaccessible. Strict-mode Codex exec, resume, and app-server turns disable
+mount trees, hidden home configuration, and executable components explicitly
+exported through the endpoint's saved shell `PATH` are read-only; unrecognized
+ordinary home directories remain inaccessible. The real `HOME` remains in the
+child environment so login shells and tool managers keep their normal path
+resolution, while Codex/Claude state and temporary files use private runtime
+paths. Strict-mode Codex exec, resume, and app-server turns disable
 Codex's nested Bubblewrap policy after entering Landlock. The inherited outer
 ruleset still covers every command, while avoiding replacement `/proc` objects
 that cannot be reopened by an already restricted process. Existing permission

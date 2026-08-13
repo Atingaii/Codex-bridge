@@ -73,34 +73,6 @@ func TestStrictWorkspaceCommandDisabledLeavesExistingRunnersUntouched(t *testing
 	}
 }
 
-func TestDiscoverManagedInstallRootKeepsVersionBoundary(t *testing.T) {
-	tests := map[string]string{
-		"/home/u/.nvm/versions/node/v22.5.0/bin/node":                          "/home/u/.nvm/versions/node/v22.5.0",
-		"/home/u/.volta/tools/image/node/22.5.0/bin/node":                      "/home/u/.volta/tools/image/node/22.5.0",
-		"/home/u/.local/share/fnm/node-versions/v22.5.0/installation/bin/node": "/home/u/.local/share/fnm/node-versions/v22.5.0/installation",
-		"/home/u/.pyenv/versions/3.12.4/bin/python":                            "/home/u/.pyenv/versions/3.12.4",
-		"/home/u/.conda/envs/proof/bin/python":                                 "/home/u/.conda/envs/proof",
-		"/home/u/miniconda3/bin/python":                                        "/home/u/miniconda3",
-		"/home/u/.rbenv/versions/3.3.4/bin/ruby":                               "/home/u/.rbenv/versions/3.3.4",
-		"/home/u/.sdkman/candidates/java/21.0.3/bin/java":                      "/home/u/.sdkman/candidates/java/21.0.3",
-		"/home/u/.asdf/installs/nodejs/22.5.0/bin/node":                        "/home/u/.asdf/installs/nodejs/22.5.0",
-		"/home/u/.local/share/mise/installs/node/22.5.0/bin/node":              "/home/u/.local/share/mise/installs/node/22.5.0",
-		"/home/u/.local/share/claude/versions/2.1.227/claude":                  "/home/u/.local/share/claude/versions/2.1.227",
-		"/home/u/.codex/packages/standalone/releases/0.147/codex":              "/home/u/.codex/packages/standalone/releases/0.147",
-		"/home/u/.nvm/lib/node_modules/@anthropic-ai/claude-code/cli.js":       "/home/u/.nvm/lib/node_modules/@anthropic-ai/claude-code",
-		"/home/u/.rustup/toolchains/stable-x86_64/bin/rustc":                   "/home/u/.rustup/toolchains/stable-x86_64",
-		"/home/u/.elan/toolchains/leanprover--lean4---v4.19.0/bin/lean":        "/home/u/.elan/toolchains/leanprover--lean4---v4.19.0",
-		"/home/linuxbrew/.linuxbrew/Cellar/node/22.5.0/bin/node":               "/home/linuxbrew/.linuxbrew/Cellar/node/22.5.0",
-		"/opt/isabelle2025/bin/isabelle":                                       "/opt/isabelle2025",
-		"/home/u/projects/private/tool":                                        "",
-	}
-	for input, want := range tests {
-		if got := discoverManagedInstallRoot(input); got != want {
-			t.Errorf("discoverManagedInstallRoot(%q) = %q, want %q", input, got, want)
-		}
-	}
-}
-
 func TestAppendCommandEnvReplacesSensitiveRoots(t *testing.T) {
 	cmd := exec.Command("/bin/true")
 	cmd.Env = []string{"HOME=/home/real", "PATH=/bin", "TMPDIR=/tmp/shared", "HOME=/home/stale"}
@@ -111,6 +83,41 @@ func TestAppendCommandEnvReplacesSensitiveRoots(t *testing.T) {
 	}
 	if strings.Count(joined, "\nTMPDIR=") != 1 || !strings.Contains(joined, "\nTMPDIR=/private/tmp\n") {
 		t.Fatalf("TMPDIR was not replaced exactly once: %#v", cmd.Env)
+	}
+}
+
+func TestStrictWorkspaceCommandPreservesRealHomeAndXDGConfig(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	workspace := filepath.Join(root, "workspace")
+	runtimeDir := filepath.Join(root, "runtime")
+	for _, path := range []string{home, workspace, runtimeDir} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config-custom"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".data-custom"))
+	t.Setenv("CODEX_BRIDGE_RUNTIME_DIR", runtimeDir)
+	cfg := config.Default()
+	cfg.Bridge.CWD = workspace
+	cfg.Bridge.StrictWorkspace = true
+	cmd := exec.Command("/bin/true")
+	cmd.Dir = workspace
+	if err := configureStrictWorkspaceCommand(cmd, &cfg, workspace); err != nil {
+		t.Fatal(err)
+	}
+	env := "\n" + strings.Join(cmd.Env, "\n") + "\n"
+	for _, want := range []string{"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Join(home, ".config-custom"), "XDG_DATA_HOME=" + filepath.Join(home, ".data-custom")} {
+		if !strings.Contains(env, "\n"+want+"\n") {
+			t.Fatalf("strict command did not preserve %s: %#v", want, cmd.Env)
+		}
+	}
+	for _, private := range []string{"CODEX_HOME=", "CLAUDE_CONFIG_DIR=", "TMPDIR="} {
+		if !strings.Contains(env, "\n"+private) {
+			t.Fatalf("strict command did not isolate %s: %#v", private, cmd.Env)
+		}
 	}
 }
 
@@ -445,55 +452,77 @@ func TestDiscoverHomePathComponentRootRequiresExplicitBin(t *testing.T) {
 	}
 }
 
-func TestStrictWorkspaceToolEnvironmentPathsAllowConfiguredRootsOnly(t *testing.T) {
+func TestStrictWorkspaceExecutableSearchPathsResolveExportedSymlinks(t *testing.T) {
 	home := t.TempDir()
-	goRoot := filepath.Join(home, "component-store", "go")
-	privateDir := filepath.Join(home, "private-notes")
-	t.Setenv("GOROOT", goRoot)
-	t.Setenv("JAVA_HOME", "relative-java")
-	paths := strictWorkspaceToolEnvironmentPaths()
-	if !containsString(paths, goRoot) {
-		t.Fatalf("tool environment paths %#v do not contain %s", paths, goRoot)
+	t.Setenv("HOME", home)
+	exportedBin := filepath.Join(home, ".local", "bin")
+	componentBin := filepath.Join(home, "shared-component", "bin")
+	privateDir := filepath.Join(home, "private-project")
+	for _, path := range []string{exportedBin, componentBin, privateDir} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if containsString(paths, filepath.Dir(goRoot)) || containsString(paths, privateDir) {
-		t.Fatalf("tool environment paths widened beyond configured roots: %#v", paths)
+	if err := os.WriteFile(filepath.Join(componentBin, "tool"), []byte("tool"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(componentBin, "tool"), filepath.Join(exportedBin, "tool")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", exportedBin)
+	paths := strictWorkspaceExecutableSearchPaths()
+	if !containsString(paths, filepath.Dir(componentBin)) {
+		t.Fatalf("PATH symlink components %#v do not contain %s", paths, filepath.Dir(componentBin))
+	}
+	if !containsString(paths, filepath.Join(componentBin, "tool")) {
+		t.Fatalf("PATH symlink targets %#v do not contain tool target", paths)
+	}
+	if containsString(paths, privateDir) || containsString(paths, home) {
+		t.Fatalf("PATH symlink components widened to unrelated directory: %#v", paths)
 	}
 }
 
-func TestStrictWorkspaceKnownToolHomePathsSelectComponentsOnly(t *testing.T) {
+func TestStrictWorkspacePATHSymlinkAllowsOnlyOrdinaryTargetFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	for _, name := range []string{"go", "miniconda3", "Isabelle2025", "CoqPlatform", "projects", "documents"} {
+	exportedBin := filepath.Join(home, ".local", "bin")
+	privateProject := filepath.Join(home, "private-project")
+	for _, path := range []string{exportedBin, privateProject} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(privateProject, "explicit-tool")
+	if err := os.WriteFile(target, []byte("tool"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(exportedBin, "explicit-tool")); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := strictWorkspacePATHSymlinkComponents(exportedBin)
+	if !containsString(paths, target) {
+		t.Fatalf("PATH symlink paths %#v do not contain explicit target %s", paths, target)
+	}
+	if containsString(paths, privateProject) {
+		t.Fatalf("PATH symlink unexpectedly exposed target parent %s: %#v", privateProject, paths)
+	}
+}
+
+func TestStrictWorkspaceReadOnlyPathsDoNotGuessOrdinaryToolNames(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin")
+	for _, name := range []string{"CoqPlatform", "Isabelle2025", "miniconda3", "private-project"} {
 		if err := os.MkdirAll(filepath.Join(home, name), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	paths := strictWorkspaceKnownToolHomePaths()
-	for _, name := range []string{"go", "miniconda3", "Isabelle2025", "CoqPlatform"} {
-		if !containsString(paths, filepath.Join(home, name)) {
-			t.Errorf("known tool paths %#v do not contain %s", paths, name)
-		}
-	}
-	for _, name := range []string{"projects", "documents"} {
+	cfg := config.Default()
+	paths := strictWorkspaceReadOnlyPaths(&cfg, "/bin/sh")
+	for _, name := range []string{"CoqPlatform", "Isabelle2025", "miniconda3", "private-project"} {
 		if containsString(paths, filepath.Join(home, name)) {
-			t.Errorf("known tool paths unexpectedly contain %s: %#v", name, paths)
-		}
-	}
-}
-
-func TestStrictWorkspaceVersionedToolNameRejectsCoincidentalPrefixes(t *testing.T) {
-	for name, prefix := range map[string]string{
-		"isabelle": "isabelle", "isabelle2025": "isabelle", "coq-8.20": "coq", "lean_4": "lean",
-	} {
-		if !strictWorkspaceVersionedToolName(name, prefix) {
-			t.Errorf("expected %q to match %q", name, prefix)
-		}
-	}
-	for name, prefix := range map[string]string{
-		"coquette-private": "coq", "leaning-notes": "lean", "isabellesecret": "isabelle",
-	} {
-		if strictWorkspaceVersionedToolName(name, prefix) {
-			t.Errorf("unexpectedly matched private-looking name %q", name)
+			t.Fatalf("strict paths guessed ordinary directory %s: %#v", name, paths)
 		}
 	}
 }
@@ -567,16 +596,19 @@ func TestLandlockStrictWorkspaceEnforcesReadAndWriteBoundary(t *testing.T) {
 	}
 }
 
-func TestStrictWorkspaceAllowsDetectedManagedRuntimeOnly(t *testing.T) {
+func TestStrictWorkspaceAllowsPATHComponentWithoutSiblingProject(t *testing.T) {
 	if err := ValidateStrictWorkspaceSupport(); err != nil {
 		t.Skip(err)
 	}
 	root := t.TempDir()
 	workspace := filepath.Join(root, "workspace")
 	runtimeDir := filepath.Join(root, "runtime")
-	managedRoot := filepath.Join(root, "home", "u", ".volta", "tools", "image", "node", "22.5.0")
+	home := filepath.Join(root, "home", "u")
+	t.Setenv("HOME", home)
+	otherProject := filepath.Join(home, "other-project")
+	managedRoot := filepath.Join(otherProject, "_opam")
 	binDir := filepath.Join(managedRoot, "bin")
-	privateDir := filepath.Join(root, "home", "u", "private-project")
+	privateDir := filepath.Join(otherProject, "src")
 	for _, path := range []string{workspace, runtimeDir, binDir, privateDir} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			t.Fatal(err)
@@ -601,11 +633,65 @@ func TestStrictWorkspaceAllowsDetectedManagedRuntimeOnly(t *testing.T) {
 	}
 	args := []string{"-test.run=TestStrictWorkspaceSandboxHelper", "--", "--workspace", workspace, "--runtime", runtimeDir,
 		"--read-only", "/bin", "--read-only", "/usr/bin", "--read-only", "/usr/lib", "--read-only", "/lib",
-		"--read-only", discoverManagedInstallRoot(target), "--state", "/dev/null", "--", target}
+		"--read-only", discoverHomePathComponentRoot(binDir), "--state", "/dev/null", "--", "/bin/sh", target}
 	cmd := exec.Command(exe, args...)
 	cmd.Env = append(os.Environ(), "CODEX_BRIDGE_STRICT_HELPER=1")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("managed runtime command failed: %v\n%s", err, output)
+	}
+}
+
+func TestConfiguredStrictWorkspaceRunsPATHToolWithoutExposingSiblingProject(t *testing.T) {
+	if err := ValidateStrictWorkspaceSupport(); err != nil {
+		t.Skip(err)
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	workspace := filepath.Join(root, "workspace")
+	runtimeDir := filepath.Join(root, "runtime")
+	toolRoot := filepath.Join(home, "shared-tool")
+	toolBin := filepath.Join(toolRoot, "bin")
+	privateProject := filepath.Join(home, "private-project")
+	for _, path := range []string{home, workspace, runtimeDir, toolBin, privateProject} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	toolData := filepath.Join(toolRoot, "runtime.txt")
+	privateData := filepath.Join(privateProject, "secret.txt")
+	if err := os.WriteFile(toolData, []byte("runtime-ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(privateData, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tool := filepath.Join(toolBin, "first-run-tool")
+	toolScript := "#!/bin/sh\ntest \"$(cat " + shellTestQuote(toolData) + ")\" = runtime-ok && ! cat " + shellTestQuote(privateData) + "\n"
+	if err := os.WriteFile(tool, []byte(toolScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", toolBin+string(os.PathListSeparator)+"/usr/bin:/bin")
+	t.Setenv("CODEX_BRIDGE_RUNTIME_DIR", runtimeDir)
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CODEX_CONFIG_HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CLAUDE_HOME", "")
+	cfg := config.Default()
+	cfg.Bridge.CWD = workspace
+	cfg.Bridge.StrictWorkspace = true
+	cmd := exec.Command("/bin/sh", "-c", "first-run-tool")
+	cmd.Dir = workspace
+	if err := configureStrictWorkspaceCommand(cmd, &cfg, workspace); err != nil {
+		t.Fatal(err)
+	}
+	helperArgs := append([]string{"-test.run=TestStrictWorkspaceSandboxHelper", "--"}, cmd.Args[2:]...)
+	helper := exec.Command(cmd.Path, helperArgs...)
+	helper.Dir = cmd.Dir
+	helper.Env = append(cmd.Env, "CODEX_BRIDGE_STRICT_HELPER=1")
+	if output, err := helper.CombinedOutput(); err != nil {
+		t.Fatalf("configured strict PATH tool failed: %v\n%s", err, output)
 	}
 }
 

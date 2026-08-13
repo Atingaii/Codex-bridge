@@ -135,6 +135,12 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("BRIDGE_APPROVAL_POLICY"); v != "" {
 		cfg.Bridge.ApprovalPolicy = v
 	}
+	if v := os.Getenv("BRIDGE_STRICT_WORKSPACE"); v != "" {
+		cfg.Bridge.StrictWorkspace = parseBool(v, cfg.Bridge.StrictWorkspace)
+	}
+	if v := os.Getenv("BRIDGE_STRICT_WORKSPACE_READ_ONLY"); v != "" {
+		cfg.Bridge.StrictWorkspaceReadOnly = filepath.SplitList(v)
+	}
 	if v := os.Getenv("BRIDGE_DURABLE_TASK_GRAPH"); v != "" {
 		cfg.Bridge.DurableTaskGraph = parseBool(v, cfg.Bridge.DurableTaskGraph)
 	}

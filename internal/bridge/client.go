@@ -38,6 +38,11 @@ func NewClient(cfg *config.Config, version string) *Client {
 }
 
 func (c *Client) Run(ctx context.Context) error {
+	if c.cfg.Bridge.StrictWorkspace {
+		if err := ValidateStrictWorkspaceSupport(); err != nil {
+			return err
+		}
+	}
 	machineID, err := loadMachineID(c.cfg.Bridge.MachineIDFile)
 	if err != nil {
 		return err
@@ -304,7 +309,7 @@ func BridgeCapabilities(cfg *config.Config) *protocol.BridgeCapabilities {
 	if runner == "" {
 		runner = "echo"
 	}
-	reviewRequired := !bridgeBypassApprovalsAndSandbox(cfg)
+	reviewRequired := !bridgeNoApprovalExecution(cfg)
 	codexAvailable := commandAvailable(bridgeCodexPath(cfg))
 	claudeAvailable := commandAvailable(bridgeClaudePath(cfg))
 	caps := &protocol.BridgeCapabilities{
@@ -385,17 +390,24 @@ func bridgeClaudePath(cfg *config.Config) string {
 }
 
 func codexOrchestrationExecution(cfg *config.Config) string {
-	if bridgeBypassApprovalsAndSandbox(cfg) {
+	if bridgeNoApprovalExecution(cfg) {
 		return "codex exec --json"
 	}
 	return "codex app-server"
 }
 
 func approvalMode(cfg *config.Config) string {
+	if cfg.Bridge.StrictWorkspace {
+		return "strict-workspace"
+	}
 	if bridgeBypassApprovalsAndSandbox(cfg) {
 		return "auto-execute"
 	}
 	return "review-required"
+}
+
+func bridgeNoApprovalExecution(cfg *config.Config) bool {
+	return cfg.Bridge.StrictWorkspace || bridgeBypassApprovalsAndSandbox(cfg)
 }
 
 func bridgeBypassApprovalsAndSandbox(cfg *config.Config) bool {

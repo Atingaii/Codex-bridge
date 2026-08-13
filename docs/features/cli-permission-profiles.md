@@ -2,7 +2,7 @@
 
 ## Goal
 
-Users adding a CLI endpoint from the settings UI should choose between two clear
+Users adding a CLI endpoint from the settings UI should choose between three clear
 runtime profiles:
 
 - **Review required**: Codex chat uses the app-server runner so approval
@@ -11,6 +11,10 @@ runtime profiles:
   to the browser through a short-lived MCP permission tool.
 - **Auto execute**: the existing fully automated mode that bypasses local
   permission prompts for trusted machines.
+- **Auto execute (workspace only)**: no browser prompts, with the entire CLI
+  process tree restricted by Linux Landlock to the bound workspace, isolated
+  CLI state, and read-only toolchains. See
+  [strict workspace auto execute](strict-workspace-auto-execute.md).
 
 The UI must make the tradeoff visible before the user copies the setup command.
 
@@ -48,6 +52,7 @@ prompts through a local MCP tool.
 `POST /api/bridge-tokens` accepts an optional `permissionProfile`:
 
 - `review-required`
+- `strict-workspace`
 - `auto-execute`
 
 If the field is missing, the Hub returns both commands and uses
@@ -75,6 +80,13 @@ each profile:
   - Codex uses the existing dangerous bypass flag.
   - Claude Code orchestration uses bypass permissions when supported by the
     current Bridge runtime.
+- Strict workspace:
+  - `--runner codex`
+  - `--sandbox workspace-write`
+  - `--approval-policy never`
+  - `--strict-workspace`
+  - Codex, Claude Code, and ACP permission prompts execute automatically only
+    after the process tree has entered the fail-closed Landlock boundary.
 
 `handleCreateBridgeToken` returns:
 
@@ -83,9 +95,12 @@ each profile:
 - `setupCommand`, `installCommand`, `connectCommand`, and `commands`: retained
   for compatibility, based on the selected/default profile.
 
-The settings UI presents two selectable profile rows before generating the
-token. After generation it shows the chosen command first and keeps the alternate
-command available.
+The settings UI presents three selectable profile rows before generating the
+token for accounts included by the `strict-workspace` feature rollout. During
+the initial `admin` rollout, regular users continue to see only the original
+two rows, and the Hub rejects an unavailable `strict-workspace` API request
+with HTTP 403 and `FEATURE_NOT_AVAILABLE`. After generation the UI shows the
+chosen command first and keeps the other permitted profile commands available.
 
 ## Browser Approval Scope
 

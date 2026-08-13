@@ -1,6 +1,8 @@
 package bridge
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -104,6 +106,32 @@ func TestACPPermissionOptionsAndOutcome(t *testing.T) {
 		t.Fatalf("cancelled outcome should not carry optionId: %#v", cancelled)
 	}
 }
+
+func TestACPStrictWorkspacePermissionDoesNotRequireBrowserApproval(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.StrictWorkspace = true
+	var output bytes.Buffer
+	sess := &acpSession{client: &acpClient{stdin: nopWriteCloser{Buffer: &output}, pending: make(map[int64]chan acpResponse)}}
+	r := NewACPRunner(&cfg)
+	msg := acpMessage{
+		ID:     json.RawMessage(`9001`),
+		Params: json.RawMessage(`{"options":[{"optionId":"allow","kind":"allow_once"},{"optionId":"deny","kind":"reject_once"}]}`),
+	}
+	r.handlePermission(context.Background(), sess, msg, PromptSessionRequest{})
+	var response map[string]any
+	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	result, _ := response["result"].(map[string]any)
+	outcome, _ := result["outcome"].(map[string]any)
+	if outcome["outcome"] != "selected" || outcome["optionId"] != "allow" {
+		t.Fatalf("strict ACP permission response = %#v", response)
+	}
+}
+
+type nopWriteCloser struct{ *bytes.Buffer }
+
+func (nopWriteCloser) Close() error { return nil }
 
 func TestNativeResumeCommandPerCLI(t *testing.T) {
 	cfg := config.Default()

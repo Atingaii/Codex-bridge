@@ -264,10 +264,13 @@ HUB_BRIDGE_DOWNLOAD_URL='https://your-release-url/codex-bridge-linux-amd64'
 
 如果某个已添加 CLI 端没有上报能力矩阵，打开设置里的 `Agent 与运行时`，展开该端并点击 `生成修复命令`。修复命令会下载最新 Bridge，并用该端原有的 machine id、端名称和已知工作目录重启连接，避免误注册成新端点。
 
-添加 CLI 端时有两种权限策略：
+添加 CLI 端时有三种权限策略：
 
 - `需要确认`：Codex 聊天和 Codex 编排使用 `codex app-server` runner，命令/文件审批会回传到网页端确认；Claude Code 编排通过权限提示 MCP hook 把审批回传到网页端。
+- `自动执行（仅工作区）`：无需审批，使用 `workspace-write`、`approval_policy=never` 和 Linux Landlock，把 Codex、Claude、ACP 及其子进程限制在 Bridge 绑定目录。工作区和隔离会话状态可写，系统与已识别工具链只读，其他项目和共享 `/tmp` 不可访问。要求 Linux Landlock ABI 3；不支持时 Bridge 会拒绝启动，不会退化成全盘权限。
 - `无需授权`：保持当前可信机器模式，使用 `danger-full-access` 和 `approval_policy=never`，不会弹权限确认。
+
+Bridge 会识别常见系统安装、nvm、Volta、fnm、pyenv、Conda、rbenv、SDKMAN、asdf、mise、Rustup、Elan、Linuxbrew、opam、Isabelle、Nix、Guix、Snap、Claude 原生安装、Codex standalone 和 npm 包布局。特殊发行版或自定义 Coq/Isabelle 工具链可在运行安装/修复命令前设置 `BRIDGE_STRICT_WORKSPACE_READ_ONLY`，值为当前操作系统的路径列表（Linux 使用冒号分隔），只为所需工具链根增加只读访问；不要填写 HOME、`/tmp` 或其他项目目录。隔离状态磁盘较大时，可用 `CODEX_BRIDGE_RUNTIME_DIR` 指定本地运行目录；安装/修复命令会把这两个变量一并保留到后台服务。
 
 手动拆分时等价于：
 
@@ -333,6 +336,8 @@ BRIDGE_CWD='/path/to/workspace'
 BRIDGE_MODEL='gpt-5.1-codex-max'
 BRIDGE_SANDBOX=workspace-write
 BRIDGE_APPROVAL_POLICY=never
+BRIDGE_STRICT_WORKSPACE=false
+BRIDGE_STRICT_WORKSPACE_READ_ONLY='/custom/coq:/custom/isabelle'
 BRIDGE_LONG_COMMAND_OBSERVER_ENABLED=false
 BRIDGE_LONG_COMMAND_OBSERVER_AFTER=2m
 ```

@@ -182,8 +182,12 @@ func (r *CodexExecRunner) Prompt(ctx context.Context, req RunnerRequest, onUpdat
 	args := r.args(req)
 	cmd := exec.CommandContext(cmdCtx, r.codexPath(), args...)
 	configureManagedCommand(cmd)
-	if r.cfg.Bridge.CWD != "" {
-		cmd.Dir = expandHome(r.cfg.Bridge.CWD)
+	cwd := expandHome(r.cfg.Bridge.CWD)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	if err := configureStrictWorkspaceCommand(cmd, r.cfg, cwd); err != nil {
+		return RunnerResult{}, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

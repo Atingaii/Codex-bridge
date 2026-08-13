@@ -9,6 +9,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | --- | --- |
 | CLI entry and subcommands | `main.go` |
 | Config structs/load | `internal/config/config.go`, `internal/config/load.go`, `internal/config/duration.go` |
+| User feature rollouts | `internal/rollout/rollout.go:Evaluator`, `internal/hub/server.go:featureEnabled`, `internal/hub/server.go:decorateUser` |
 | Remote CLI provider switcher | `internal/hub/cli_config.go`, `internal/bridge/cli_config.go`, `frontend/src/app/components/CLIConfigSwitcher.tsx` |
 | Hub routes, auth, static serving | `internal/hub/server.go`, `internal/hub/registration.go` |
 | Public conversation shares | `internal/hub/share.go` |
@@ -21,6 +22,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Orchestration runtime/usage statistics | `internal/hub/orchestration.go:handleOrchestrationStats`, `internal/bridge/usage_ledger.go:scanOrchestrationUsage`, `internal/store/orchestration_usage.go:ReplaceOrchestrationUsage`, `internal/usagepricing/catalog.go:EstimateNormalized`, `frontend/src/app/pages/OrchestrationStatsPage.tsx` |
 | Administrator activity/usage dashboard | `internal/hub/admin.go:handleAdminUsage`, `internal/hub/admin.go:handleAdminUserUsage`, `internal/store/admin_analytics.go:AdminUsageSnapshot`, `internal/store/admin_analytics.go:AdminUserDetailSnapshot`, `frontend/src/app/pages/AdminUsagePage.tsx`, `frontend/src/app/pages/AdminUserUsagePage.tsx` |
 | Runner abstraction | `internal/bridge/runner.go`, `internal/bridge/appserver_runner.go`, `internal/bridge/acp_runner.go`, `internal/bridge/acp_client.go`, `internal/bridge/session.go` |
+| Strict workspace child isolation | `internal/bridge/command_process.go:configureStrictWorkspaceCommand`, `internal/bridge/strict_workspace_linux.go:RunStrictWorkspaceSandbox`, `internal/bridge/strict_workspace_paths.go:strictWorkspaceReadOnlyPaths` |
 | SQLite schema and CRUD | `internal/store/store.go`, `internal/store/id.go` |
 | Wire protocol | `internal/protocol/envelope.go` |
 | Frontend source | `frontend/src/app/App.tsx`, `frontend/src/app/pages/`, `frontend/src/app/components/`, `frontend/src/app/lib/`, `frontend/src/styles/` |

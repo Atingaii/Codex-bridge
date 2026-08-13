@@ -3,12 +3,16 @@ import { readFileSync } from 'node:fs';
 
 const settings = readFileSync(new URL('./src/app/components/Settings.tsx', import.meta.url), 'utf8');
 const switcher = readFileSync(new URL('./src/app/components/CLIConfigSwitcher.tsx', import.meta.url), 'utf8');
+const capabilityMatrix = readFileSync(new URL('./src/app/components/OrchestrationComponents.tsx', import.meta.url), 'utf8');
+const orchestrationWorkspace = readFileSync(new URL('./src/app/pages/OrchestrationWorkspace.tsx', import.meta.url), 'utf8');
 
 assert.match(settings, /const openModelConfiguration = \(agent: Agent\) =>/);
 assert.match(settings, /if \(agent\.capabilities\?\.configSwitcher\) \{\s*setConfigAgent\(agent\);/);
 assert.match(settings, /setModelUpgradeAgentId\(agent\.id\);/);
 assert.match(settings, /generateRepairToken\(agent\)\.catch/);
-assert.match(settings, /orchestrationApprovalMode\(agent\) === 'auto-execute' \? 'auto-execute' : 'review-required'/);
+assert.match(settings, /user\.features\?\.includes\('strict-workspace'\) \? \[\{ id: 'strict-workspace' as const, title: t\.strictWorkspace, description: t\.strictWorkspaceDescription \}\] : \[\]/);
+assert.match(settings, /mode === 'auto-execute' \|\| mode === 'strict-workspace' \? mode : 'review-required'/);
+assert.match(settings, /orchestrationApprovalMode\(agent\) === 'strict-workspace' \? t\.strictWorkspace/);
 assert.match(settings, /onClick=\{\(\) => openModelConfiguration\(agent\)\}/);
 assert.match(settings, /disabled=\{!agent\.online\}/);
 assert.doesNotMatch(settings, /disabled=\{!agent\.online \|\| !agent\.capabilities\?\.configSwitcher\}/);
@@ -18,3 +22,6 @@ assert.match(switcher, /presetId: editingPresetId \|\| undefined/);
 assert.match(switcher, /t\.keepExistingAPIKey/);
 assert.match(switcher, /aria-label=\{t\.editPreset\}/);
 assert.match(switcher, /<Pencil[^>]*\/>\{t\.editPreset\}/);
+assert.match(capabilityMatrix, /approvalMode === 'auto-execute' \|\| approvalMode === 'strict-workspace'/);
+assert.match(capabilityMatrix, /approvalMode === 'strict-workspace' \? t\.strictWorkspace/);
+assert.match(orchestrationWorkspace, /orchestrationApprovalMode\(selectedAgent\) === 'strict-workspace' \? t\.strictWorkspace/);

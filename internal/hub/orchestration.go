@@ -1100,6 +1100,9 @@ func (s *Server) validateOrchestrationCapabilities(agentID, workerPair string) e
 	if strings.EqualFold(caps.Metadata["approvalMode"], permissionProfileAutoExecute) {
 		return nil
 	}
+	if strings.EqualFold(caps.Metadata["approvalMode"], permissionProfileStrictWorkspace) {
+		return nil
+	}
 	missing := missingOrchestrationBrowserApproval(caps, required)
 	if len(missing) > 0 {
 		return fmt.Errorf("review-required orchestration needs browser approval for %s; reconnect the endpoint with a review-required bridge that supports app-server orchestration", strings.Join(missing, " and "))

@@ -128,8 +128,12 @@ const appServerPostReconnectTerminalQuietPeriod = 30 * time.Second
 func (r *CodexAppServerRunner) start(ctx context.Context, req RunnerRequest) (*appServerClient, error) {
 	cmd := exec.CommandContext(ctx, r.codexPath(), "app-server", "--listen", "stdio://")
 	configureManagedCommand(cmd)
-	if cwd := r.cwd(req); cwd != "" {
+	cwd := r.cwd(req)
+	if cwd != "" {
 		cmd.Dir = cwd
+	}
+	if err := configureStrictWorkspaceCommand(cmd, r.cfg, cwd); err != nil {
+		return nil, err
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

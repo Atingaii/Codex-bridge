@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	linkProfileReviewRequired = "review-required"
-	linkProfileAutoExecute    = "auto-execute"
+	linkProfileReviewRequired  = "review-required"
+	linkProfileAutoExecute     = "auto-execute"
+	linkProfileStrictWorkspace = "strict-workspace"
 )
 
 type linkOptions struct {
@@ -56,7 +57,7 @@ func runLink(cfg *config.Config, args []string) error {
 	name := fs.String("name", "", "CLI endpoint name")
 	cwd := fs.String("cwd", "", "workspace directory")
 	machineID := fs.String("machine-id", "", "existing machine id to write before connecting")
-	profile := fs.String("profile", linkProfileReviewRequired, "permission profile: review-required or auto-execute")
+	profile := fs.String("profile", linkProfileReviewRequired, "permission profile: review-required, strict-workspace, or auto-execute")
 
 	token, flagArgs, err := normalizeConnectArgs(args)
 	if err != nil {
@@ -113,7 +114,7 @@ func prepareLinkOptions(hubURL, token, profile, cwd, name, machineID string) (li
 	}
 	profile = normalizeLinkProfile(profile)
 	if profile == "" {
-		return linkOptions{}, errors.New("link --profile must be review-required or auto-execute")
+		return linkOptions{}, errors.New("link --profile must be review-required, strict-workspace, or auto-execute")
 	}
 
 	hash := shortLinkHash(cwd)
@@ -153,6 +154,8 @@ func normalizeLinkProfile(profile string) string {
 		return linkProfileReviewRequired
 	case linkProfileAutoExecute:
 		return linkProfileAutoExecute
+	case linkProfileStrictWorkspace:
+		return linkProfileStrictWorkspace
 	default:
 		return ""
 	}
@@ -264,6 +267,8 @@ func linkPreservedEnvNames() []string {
 		"CODEX_CONFIG_HOME",
 		"CLAUDE_CONFIG_DIR",
 		"CLAUDE_HOME",
+		"CODEX_BRIDGE_RUNTIME_DIR",
+		"BRIDGE_STRICT_WORKSPACE_READ_ONLY",
 		"XDG_CONFIG_HOME",
 		"XDG_DATA_HOME",
 		"XDG_STATE_HOME",
@@ -350,6 +355,9 @@ func linkStartScript(opts linkOptions) string {
 func linkProfileConnectArgs(profile string) []string {
 	if profile == linkProfileAutoExecute {
 		return []string{"--runner", "codex", "--sandbox", "danger-full-access", "--approval-policy", "never"}
+	}
+	if profile == linkProfileStrictWorkspace {
+		return []string{"--runner", "codex", "--sandbox", "workspace-write", "--approval-policy", "never", "--strict-workspace"}
 	}
 	return []string{"--runner", "codex-app-server", "--sandbox", "workspace-write", "--approval-policy", "untrusted"}
 }

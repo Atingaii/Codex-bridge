@@ -799,10 +799,11 @@ func trimOneLine(value string, max int) string {
 }
 
 type User struct {
-	ID        string `json:"id"`
-	Username  string `json:"username"`
-	CreatedAt int64  `json:"createdAt"`
-	IsAdmin   bool   `json:"isAdmin,omitempty"`
+	ID        string   `json:"id"`
+	Username  string   `json:"username"`
+	CreatedAt int64    `json:"createdAt"`
+	IsAdmin   bool     `json:"isAdmin,omitempty"`
+	Features  []string `json:"features,omitempty"`
 }
 
 func (s *Store) UpsertUser(ctx context.Context, username, password string) (User, error) {

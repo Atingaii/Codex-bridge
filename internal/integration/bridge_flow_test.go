@@ -1383,6 +1383,9 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	if !strings.Contains(profileCommands["auto-execute"], "codex-bridge link") || !strings.Contains(profileCommands["auto-execute"], "--profile 'auto-execute'") {
 		t.Fatalf("auto-execute command missing link profile: %s", profileCommands["auto-execute"])
 	}
+	if _, ok := profileCommands["strict-workspace"]; ok {
+		t.Fatalf("non-admin response exposed strict-workspace: %#v", profileCommands)
+	}
 	if strings.Contains(profileCommands["review-required"], "--machine-id ") {
 		t.Fatalf("new endpoint command should not pin a machine id: %s", profileCommands["review-required"])
 	}
@@ -1435,6 +1438,12 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/bridge-tokens", map[string]string{
 		"permissionProfile": "surprise-me",
 	}, http.StatusBadRequest)
+	deniedStrict := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/bridge-tokens", map[string]string{
+		"permissionProfile": "strict-workspace",
+	}, http.StatusForbidden)
+	if deniedStrict["code"] != "FEATURE_NOT_AVAILABLE" {
+		t.Fatalf("strict-workspace denial = %#v", deniedStrict)
+	}
 
 	fakeBridge := dialFakeBridgeWithOptions(t, cfg.Bridge.HubURL, token, fakeBridgeOptions{WorkingDirs: []string{tmp}})
 	defer fakeBridge.Close()
@@ -1485,6 +1494,9 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		if profile["id"] == "auto-execute" && strings.Contains(connect, "--profile 'auto-execute'") {
 			sawPinnedAuto = true
 		}
+		if profile["id"] == "strict-workspace" {
+			t.Fatalf("non-admin repair response exposed strict-workspace: %#v", repairProfiles)
+		}
 	}
 	if !sawPinnedAuto {
 		t.Fatalf("repair profiles missing auto-execute fallback: %#v", repairProfiles)
@@ -1501,6 +1513,16 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 
 	adminClient := httpClient(t)
 	postJSON(t, adminClient, cfg.Bridge.HubURL+"/api/login", map[string]string{"username": "admin", "password": "secret"}, http.StatusOK)
+	adminStrict := postJSON(t, adminClient, cfg.Bridge.HubURL+"/api/bridge-tokens", map[string]string{
+		"label":             "admin-strict",
+		"permissionProfile": "strict-workspace",
+	}, http.StatusCreated)
+	if adminStrict["permissionProfile"] != "strict-workspace" || !strings.Contains(adminStrict["connectCommand"].(string), "--profile 'strict-workspace'") {
+		t.Fatalf("admin strict profile response = %#v", adminStrict)
+	}
+	if adminProfiles := adminStrict["permissionProfiles"].([]any); len(adminProfiles) != 3 {
+		t.Fatalf("admin permission profiles = %#v", adminProfiles)
+	}
 	adminAgents := getJSON(t, adminClient, cfg.Bridge.HubURL+"/api/agents", http.StatusOK)["agents"].([]any)
 	if len(adminAgents) != 0 {
 		t.Fatalf("admin agents = %#v", adminAgents)

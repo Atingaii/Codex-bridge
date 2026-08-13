@@ -92,7 +92,7 @@ func (r *ACPRunner) OpenSession(ctx context.Context, req OpenSessionRequest) (Se
 	if err != nil {
 		return SessionHandle{}, err
 	}
-	client, err := startACPClient(ctx, command, args, cwd, nil)
+	client, err := startACPClient(ctx, command, args, cwd, nil, r.cfg)
 	if err != nil {
 		return SessionHandle{}, fmt.Errorf("start acp adapter %q: %w", command, err)
 	}
@@ -276,6 +276,15 @@ func (r *ACPRunner) handleReverseRequest(ctx context.Context, sess *acpSession, 
 
 func (r *ACPRunner) handlePermission(ctx context.Context, sess *acpSession, msg acpMessage, req PromptSessionRequest) {
 	options, allowID, rejectID := acpPermissionOptions(msg.Params)
+	if r.cfg.Bridge.StrictWorkspace {
+		// Strict mode needs no browser approval: the adapter and every command it
+		// starts already inherit the kernel-enforced workspace boundary.
+		if allowID == "" && len(options) > 0 {
+			allowID = options[0]
+		}
+		_ = sess.client.respond(msg.ID, acpPermissionOutcome("selected", allowID))
+		return
+	}
 	if req.Approvals == nil {
 		// No browser approval channel: cancel safely.
 		_ = sess.client.respond(msg.ID, acpPermissionOutcome("cancelled", ""))
@@ -540,9 +549,9 @@ type acpContentBlock struct {
 
 func acpToolEvent(raw json.RawMessage) *RunnerToolEvent {
 	var u struct {
-		ToolCallID string `json:"toolCallId"`
-		Title      string `json:"title"`
-		Status     string `json:"status"`
+		ToolCallID string          `json:"toolCallId"`
+		Title      string          `json:"title"`
+		Status     string          `json:"status"`
 		RawInput   json.RawMessage `json:"rawInput"`
 		Content    []struct {
 			Type    string `json:"type"`

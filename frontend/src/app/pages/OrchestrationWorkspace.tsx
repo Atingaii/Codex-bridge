@@ -1036,7 +1036,7 @@ export function OrchestrationWorkspace({
           </div>
           <div className="flex items-center gap-1.5">
             <ShieldQuestion className="h-3.5 w-3.5" />
-            <span>{t.browserApproval}: {orchestrationApprovalMode(selectedAgent) === 'auto-execute' ? t.autoExecute : capabilityProblems.length ? t.notAvailable : t.available}</span>
+            <span>{t.browserApproval}: {orchestrationApprovalMode(selectedAgent) === 'auto-execute' ? t.autoExecute : orchestrationApprovalMode(selectedAgent) === 'strict-workspace' ? t.strictWorkspace : capabilityProblems.length ? t.notAvailable : t.available}</span>
           </div>
           <div className="flex items-center gap-1.5">
             <Activity className="h-3.5 w-3.5" />

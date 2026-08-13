@@ -70,6 +70,7 @@ export function SettingsModal({
   };
   const permissionOptions: Array<{ id: PermissionProfileId; title: string; description: string }> = [
     { id: 'review-required', title: t.reviewRequired, description: t.reviewRequiredDescription },
+    ...(user.features?.includes('strict-workspace') ? [{ id: 'strict-workspace' as const, title: t.strictWorkspace, description: t.strictWorkspaceDescription }] : []),
     { id: 'auto-execute', title: t.autoExecute, description: t.autoExecuteDescription },
   ];
   const profileCommand = (profileId: PermissionProfileId) =>
@@ -87,8 +88,16 @@ export function SettingsModal({
     tokenInfo?.connectCommand ||
     tokenInfo?.commands?.[1] ||
     selectedSetupCommand;
-  const alternateProfile = tokenInfo?.permissionProfile === 'auto-execute' ? 'review-required' : 'auto-execute';
-  const alternateSetupCommand = tokenInfo ? profileConnectCommand(alternateProfile) || profileCommand(alternateProfile) : '';
+  const alternateSetupCommands = tokenInfo
+    ? permissionOptions
+        .filter((option) => option.id !== tokenInfo.permissionProfile)
+        .map((option) => ({
+          id: option.id,
+          title: option.title,
+          command: profileConnectCommand(option.id) || profileCommand(option.id),
+        }))
+        .filter((option) => option.command)
+    : [];
   const repairProfileCommand = (info: BridgeTokenResponse | undefined, profileId: PermissionProfileId) =>
     info?.permissionProfiles?.find((profile) => profile.id === profileId)?.setupCommand || '';
   const copyCommand = async (value: string, key: string) => {
@@ -118,7 +127,8 @@ export function SettingsModal({
     setRepairingAgentId(agent.id);
     setRepairErrorByAgent((prev) => ({ ...prev, [agent.id]: '' }));
     try {
-      const currentProfile: PermissionProfileId = orchestrationApprovalMode(agent) === 'auto-execute' ? 'auto-execute' : 'review-required';
+      const mode = orchestrationApprovalMode(agent);
+      const currentProfile: PermissionProfileId = mode === 'auto-execute' || mode === 'strict-workspace' ? mode : 'review-required';
       const data = await api<BridgeTokenResponse>(`/api/agents/${encodeURIComponent(agent.id)}/repair-token`, {
         method: 'POST',
         body: JSON.stringify({ permissionProfile: currentProfile }),
@@ -234,8 +244,12 @@ export function SettingsModal({
                     ? `${repairInfo.installCommand} && ${repairInfo.connectCommand}`
                     : '') ||
                   '';
-                const alternateRepairProfile = repairInfo?.permissionProfile === 'auto-execute' ? 'review-required' : 'auto-execute';
-                const alternateRepairCommand = repairInfo ? repairProfileCommand(repairInfo, alternateRepairProfile) : '';
+                const alternateRepairCommands = repairInfo
+                  ? permissionOptions
+                      .filter((option) => option.id !== repairInfo.permissionProfile)
+                      .map((option) => ({ id: option.id, title: option.title, command: repairProfileCommand(repairInfo, option.id) }))
+                      .filter((option) => option.command)
+                  : [];
                 return (
                   <div
                     key={agent.id}
@@ -256,7 +270,7 @@ export function SettingsModal({
                         <span className="text-sm font-medium truncate">{agent.name}</span>
                         <span className="text-xs text-muted-foreground font-mono mt-0.5 truncate">{agent.hostname || agent.machineId}</span>
                         <span className="mt-1 text-[10px] text-muted-foreground truncate">
-                          {t.browserApproval}: {orchestrationApprovalMode(agent) === 'auto-execute' ? t.autoExecute : orchestrationCapabilityProblems(agent, t).length ? t.notAvailable : t.available}
+                          {t.browserApproval}: {orchestrationApprovalMode(agent) === 'auto-execute' ? t.autoExecute : orchestrationApprovalMode(agent) === 'strict-workspace' ? t.strictWorkspace : orchestrationCapabilityProblems(agent, t).length ? t.notAvailable : t.available}
                         </span>
                       </span>
                       <div className="flex items-center gap-2 shrink-0">
@@ -356,15 +370,16 @@ export function SettingsModal({
                                 onCopy={() => copyCommand(selectedRepairCommand, `repair-${agent.id}`).catch(() => undefined)}
                                 t={t}
                               />
-                              {alternateRepairCommand && (
+                              {alternateRepairCommands.map((alternate) => (
                                 <CommandBlock
-                                  label={`${t.repairConnectionCommand} · ${t.alternateProfileCommand}`}
-                                  value={alternateRepairCommand}
-                                  copied={copiedCommand === `repair-alt-${agent.id}`}
-                                  onCopy={() => copyCommand(alternateRepairCommand, `repair-alt-${agent.id}`).catch(() => undefined)}
+                                  key={alternate.id}
+                                  label={`${t.repairConnectionCommand} · ${alternate.title}`}
+                                  value={alternate.command}
+                                  copied={copiedCommand === `repair-${agent.id}-${alternate.id}`}
+                                  onCopy={() => copyCommand(alternate.command, `repair-${agent.id}-${alternate.id}`).catch(() => undefined)}
                                   t={t}
                                 />
-                              )}
+                              ))}
                             </div>
                           </div>
                         )}
@@ -444,15 +459,16 @@ export function SettingsModal({
                       onCopy={() => copyCommand(selectedLinkCommand, 'link').catch(() => undefined)}
                       t={t}
                     />
-                    {alternateSetupCommand && (
+                    {alternateSetupCommands.map((alternate) => (
                       <CommandBlock
-                        label={`${t.linkCommand} · ${t.alternateProfileCommand}`}
-                        value={alternateSetupCommand}
-                        copied={copiedCommand === 'link-alt'}
-                        onCopy={() => copyCommand(alternateSetupCommand, 'link-alt').catch(() => undefined)}
+                        key={alternate.id}
+                        label={`${t.linkCommand} · ${alternate.title}`}
+                        value={alternate.command}
+                        copied={copiedCommand === `link-${alternate.id}`}
+                        onCopy={() => copyCommand(alternate.command, `link-${alternate.id}`).catch(() => undefined)}
                         t={t}
                       />
-                    )}
+                    ))}
                   </div>
                 </div>
               )}

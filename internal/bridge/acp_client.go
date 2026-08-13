@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/tencent/codex-bridge/internal/config"
 )
 
 // acpClient is a generic bidirectional stdio JSON-RPC 2.0 channel for an Agent
@@ -54,7 +56,7 @@ const (
 // caller owns context cancellation and must call close() when done. cwd, when
 // non-empty, is used as the process working directory; env, when non-nil,
 // replaces the process environment.
-func startACPClient(ctx context.Context, command string, args []string, cwd string, env []string) (*acpClient, error) {
+func startACPClient(ctx context.Context, command string, args []string, cwd string, env []string, cfg *config.Config) (*acpClient, error) {
 	cmd := exec.CommandContext(ctx, command, args...)
 	configureManagedCommand(cmd)
 	if cwd != "" {
@@ -62,6 +64,9 @@ func startACPClient(ctx context.Context, command string, args []string, cwd stri
 	}
 	if env != nil {
 		cmd.Env = env
+	}
+	if err := configureStrictWorkspaceCommand(cmd, cfg, cwd); err != nil {
+		return nil, err
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

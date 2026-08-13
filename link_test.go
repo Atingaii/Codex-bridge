@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -54,6 +55,61 @@ func TestLinkStartScriptUsesProfileAndPinnedMachineID(t *testing.T) {
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("start script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestStrictWorkspaceLinkProfileIsExplicitAndIsolated(t *testing.T) {
+	if got := normalizeLinkProfile(linkProfileStrictWorkspace); got != linkProfileStrictWorkspace {
+		t.Fatalf("strict profile = %q", got)
+	}
+	args := strings.Join(linkProfileConnectArgs(linkProfileStrictWorkspace), " ")
+	for _, want := range []string{"--runner codex", "--sandbox workspace-write", "--approval-policy never", "--strict-workspace"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("strict profile args missing %q: %s", want, args)
+		}
+	}
+	if strings.Contains(args, "danger-full-access") {
+		t.Fatalf("strict profile must not request danger-full-access: %s", args)
+	}
+}
+
+func TestLinkProfileConnectArgsKeepPermissionModesIsolated(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile string
+		want    []string
+	}{
+		{
+			name:    "review-required",
+			profile: linkProfileReviewRequired,
+			want:    []string{"--runner", "codex-app-server", "--sandbox", "workspace-write", "--approval-policy", "untrusted"},
+		},
+		{
+			name:    "auto-execute",
+			profile: linkProfileAutoExecute,
+			want:    []string{"--runner", "codex", "--sandbox", "danger-full-access", "--approval-policy", "never"},
+		},
+		{
+			name:    "strict-workspace",
+			profile: linkProfileStrictWorkspace,
+			want:    []string{"--runner", "codex", "--sandbox", "workspace-write", "--approval-policy", "never", "--strict-workspace"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := linkProfileConnectArgs(tt.profile); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("profile args = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStrictWorkspaceLinkPreservesRuntimeOverrides(t *testing.T) {
+	names := strings.Join(linkPreservedEnvNames(), "\n")
+	for _, want := range []string{"CODEX_BRIDGE_RUNTIME_DIR", "BRIDGE_STRICT_WORKSPACE_READ_ONLY"} {
+		if !strings.Contains("\n"+names+"\n", "\n"+want+"\n") {
+			t.Fatalf("link environment does not preserve %s", want)
 		}
 	}
 }

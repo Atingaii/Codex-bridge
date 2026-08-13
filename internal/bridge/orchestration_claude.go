@@ -254,6 +254,10 @@ func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
+	if err := configureStrictWorkspaceCommand(cmd, m.cfg, cwd); err != nil {
+		releaseApprovalServer()
+		return nil, err
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		releaseApprovalServer()
@@ -342,6 +346,9 @@ func (m *OrchestrationManager) runClaudeWithSessionAttempt(ctx context.Context, 
 	configureClaudeCommandEnv(cmd)
 	if cwd := m.cwd(payload); cwd != "" {
 		cmd.Dir = cwd
+	}
+	if err := configureStrictWorkspaceCommand(cmd, m.cfg, m.cwd(payload)); err != nil {
+		return "", nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -517,7 +524,7 @@ func (m *OrchestrationManager) claudeArgsWithSession(payload protocol.Orchestrat
 			args = append(args, "--session-id", sessionID)
 		}
 	}
-	if m.bypassApprovalsAndSandbox() {
+	if m.noApprovalExecution() {
 		args = append(args, "--permission-mode", "bypassPermissions")
 	}
 	if model := claudeBridgeModel(m.cfg); model != "" {
@@ -543,7 +550,7 @@ func (m *OrchestrationManager) claudeArgsWithStreamInput(payload protocol.Orches
 			args = append(args, "--session-id", sessionID)
 		}
 	}
-	if m.bypassApprovalsAndSandbox() {
+	if m.noApprovalExecution() {
 		args = append(args, "--permission-mode", "bypassPermissions")
 	}
 	if model := claudeBridgeModel(m.cfg); model != "" {
@@ -595,8 +602,12 @@ func (m *OrchestrationManager) bypassApprovalsAndSandbox() bool {
 		strings.EqualFold(m.cfg.Bridge.Sandbox, "danger-full-access")
 }
 
+func (m *OrchestrationManager) noApprovalExecution() bool {
+	return m.cfg.Bridge.StrictWorkspace || m.bypassApprovalsAndSandbox()
+}
+
 func (m *OrchestrationManager) shouldBridgeClaudeApproval() bool {
-	return !m.bypassApprovalsAndSandbox()
+	return !m.noApprovalExecution()
 }
 
 func configureClaudeCommandEnv(cmd *exec.Cmd) {

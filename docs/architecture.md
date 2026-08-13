@@ -3,6 +3,11 @@
 This is the single overview for runtime architecture. Detailed rationale lives
 in ADRs; implementation paths live in [docs/code-map.md](code-map.md).
 
+User-facing production rollouts are evaluated by `internal/rollout` from
+`hub.feature_rollouts`. The Hub enforces gates on protected operations and
+returns enabled keys in `user.features`; browser code never determines rollout
+membership itself. See [ADR-010](adr/010-user-feature-rollouts.md).
+
 ```text
 Browser UI (one selected run stream)
   | WSS /ws/chat?sid=<session>
@@ -40,6 +45,15 @@ CLI endpoints created with the review-required profile use
 `internal/bridge/appserver_runner.go` instead of `codex exec --json` for Codex
 chat. That runner keeps a `codex app-server --listen stdio://` JSON-RPC session
 open for the turn so Codex approval requests can be relayed to the browser.
+
+Endpoints explicitly linked with the `strict-workspace` profile use
+`internal/bridge/command_process.go:configureStrictWorkspaceCommand` for every
+managed Codex, Claude Code, and ACP process. The binary re-execs itself through
+`internal/bridge/strict_workspace_linux.go:RunStrictWorkspaceSandbox`, installs
+a fail-closed Landlock ruleset, then execs the target. Only the canonical bound
+workspace and per-workspace private runtime are writable; detected system and
+toolchain roots are read-only. Existing permission profiles do not use this
+wrapper. See [strict workspace auto execute](features/strict-workspace-auto-execute.md).
 
 When the endpoint runs with `bridge.runner: acp`, chat uses
 `internal/bridge/acp_runner.go:ACPRunner` instead of a per-turn process. It keeps
@@ -297,6 +311,7 @@ while preserving public run lifecycle and structured conclusion events.
 | ADR-006 | Orchestration continue reuses `runID` | Follow-up tasks keep context through event compaction |
 | ADR-007 | Public conversation share links | Anonymous readers can view sanitized transcripts without workspace access |
 | ADR-009 | Remote CLI configuration switcher | Hub stores encrypted presets; Bridge probes providers and updates native CLI configuration |
+| ADR-010 | User feature rollouts | Hub centrally evaluates account-level gray rollout policies and exposes enabled feature keys |
 
 ## Protocol
 

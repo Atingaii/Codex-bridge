@@ -52,6 +52,8 @@ func run(args []string) error {
 		return bridge.NewClient(cfg, Version).Run(context.Background())
 	case "claude-approval-mcp":
 		return runClaudeApprovalMCP(args)
+	case "sandbox-exec":
+		return bridge.RunStrictWorkspaceSandbox(args)
 	case "connect":
 		return runConnect(cfg, args)
 	case "link":
@@ -88,6 +90,7 @@ func runConnect(cfg *config.Config, args []string) error {
 	machineID := fs.String("machine-id", "", "existing machine id to write before connecting")
 	sandbox := fs.String("sandbox", cfg.Bridge.Sandbox, "runner sandbox")
 	approvalPolicy := fs.String("approval-policy", cfg.Bridge.ApprovalPolicy, "runner approval policy")
+	strictWorkspace := fs.Bool("strict-workspace", cfg.Bridge.StrictWorkspace, "restrict managed CLI processes to the configured workspace")
 	token, flagArgs, err := normalizeConnectArgs(args)
 	if err != nil {
 		return err
@@ -139,6 +142,12 @@ func runConnect(cfg *config.Config, args []string) error {
 	cfg.Bridge.MachineIDFile = *machineIDFile
 	cfg.Bridge.Sandbox = *sandbox
 	cfg.Bridge.ApprovalPolicy = *approvalPolicy
+	cfg.Bridge.StrictWorkspace = *strictWorkspace
+	if cfg.Bridge.StrictWorkspace {
+		if err := bridge.ValidateStrictWorkspaceSupport(); err != nil {
+			return err
+		}
+	}
 	if err := preflightRunner(cfg); err != nil {
 		return err
 	}

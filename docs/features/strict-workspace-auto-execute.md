@@ -1,0 +1,121 @@
+# Strict Workspace Auto Execute
+
+## Goal
+
+Add an opt-in CLI endpoint permission profile that runs Codex and Claude Code
+without browser approvals while preventing their process trees from reading or
+writing user projects outside the directory bound by `codex-bridge link`.
+
+The first production release uses the shared feature rollout evaluator with an
+`admin` policy. The Hub omits this profile from accounts outside the rollout
+and rejects their create or repair requests that explicitly name
+`strict-workspace`. This rollout gate is enforced server-side; the UI hiding
+the option is only a convenience. See
+[ADR-010](../adr/010-user-feature-rollouts.md).
+
+The existing `review-required` and `auto-execute` profiles keep their current
+arguments and behavior.
+
+## Non-Goals
+
+- Do not migrate or change existing endpoints automatically.
+- Do not treat Codex `workspace-write` as a filesystem confidentiality
+  boundary; it primarily controls writes and is only defense in depth here.
+- Do not block model-provider network traffic.
+- Do not sandbox the long-lived Bridge process itself. Only managed CLI child
+  processes and their descendants enter the filesystem restriction.
+- Do not promise support on non-Linux hosts or Linux kernels without Landlock.
+
+## Security Boundary
+
+`strict-workspace` combines:
+
+- Codex `sandbox_mode=workspace-write`;
+- `approval_policy=never` and Claude Code bypass permission mode;
+- a Bridge child-process wrapper that applies Linux Landlock before executing
+  Codex, Claude Code, or an ACP adapter.
+
+The Landlock allowlist grants:
+
+- read/write access to the Bridge-bound workspace and a Bridge-owned private
+  runtime directory used through `TMPDIR`;
+- read/write access to the native CLI state directories required for model
+  configuration, skills, MCP configuration, and native session continuity;
+- read/execute access to system binaries, libraries, certificates, and
+  detected CLI/proof-tool installations;
+- exact read-only Linux runtime introspection files needed by native/Bun CLI
+  builds (never the whole `/proc`, `/proc/self`, or `/sys` trees);
+- no filesystem access to other user project directories.
+
+Landlock restrictions are inherited by every command spawned by the CLI. The
+wrapper leaves networking unrestricted so model APIs and dependency downloads
+continue to work. A requested run directory must resolve inside the configured
+workspace root. Symlinks do not expand the allowlist because Landlock checks
+the resolved filesystem object.
+
+Compatibility is based on resolved executable paths rather than one fixed
+distribution layout. The Bridge recognizes system paths plus common nvm,
+Volta, fnm, pyenv, Conda, rbenv, SDKMAN, asdf, mise, Rustup, Elan, Linuxbrew,
+opam, Isabelle, Nix, Guix, Snap, native Claude, standalone Codex, and npm
+layouts, opening only the selected version/package root. Administrators can
+add custom proof-tool roots as read-only paths with
+`BRIDGE_STRICT_WORKSPACE_READ_ONLY`; broad user directories and shared `/tmp`
+must not be allowlisted.
+
+The first strict-mode run for a workspace seeds a private CLI home with the
+existing Codex/Claude configuration, credentials, skills, and session state.
+Later turns reuse that workspace-scoped state. Large skill/plugin trees can
+therefore add one-time initialization work, but are never linked back to the
+real home. `CODEX_BRIDGE_RUNTIME_DIR` can place these private homes on a
+machine-appropriate local filesystem.
+
+The profile is fail-closed: if Landlock is unavailable or a restriction cannot
+be installed, the CLI turn fails with an actionable error instead of running
+without isolation.
+
+## Data And Protocol Impact
+
+- No SQLite or WebSocket shape changes.
+- `bridge.strict_workspace` and `BRIDGE_STRICT_WORKSPACE` select the child
+  process wrapper.
+- Bridge capability metadata reports `approvalMode=strict-workspace`.
+- Bridge-token APIs include a third `permissionProfiles` entry. Existing
+  response fields remain compatible. During the gray rollout, only admin
+  responses include that entry.
+
+## Implementation Steps
+
+1. Add the `strict-workspace` link/Hub/UI permission profile.
+2. Add Bridge configuration and capability reporting for strict isolation.
+3. Re-exec managed CLI commands through an internal sandbox entry point.
+4. Apply Landlock read/write and read-only path rules before the target exec.
+5. Cover profile command generation, path containment, and kernel enforcement.
+6. Rebuild the embedded frontend and update setup documentation.
+
+## Exit Gates
+
+- `npm test`
+- `npm run build`
+- `/usr/local/go/bin/go test ./...`
+- `CGO_ENABLED=0 /usr/local/go/bin/go build -ldflags "-s -w" -o bin/codex-bridge .`
+- `make doc-lint`
+- A subprocess smoke test can read/write the workspace but cannot read an
+  outside file.
+
+## Reviewer Q&A
+
+**Why is a private temporary directory allowed?**
+
+Compilers and CLIs require temporary files. `TMPDIR` points at a Bridge-owned
+directory unique to the bound workspace, while the host `/tmp` is not exposed.
+
+**Can a user avoid all command approvals in this profile?**
+
+Yes. Commands execute automatically inside the kernel-enforced filesystem
+boundary. Out-of-bound access fails with `permission denied`; it does not open
+an approval prompt.
+
+**Does this affect an already connected endpoint?**
+
+No. The endpoint must be explicitly linked or repaired with the new profile,
+and it requires the updated Bridge binary.

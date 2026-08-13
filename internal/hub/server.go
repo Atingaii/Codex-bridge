@@ -22,6 +22,7 @@ import (
 	"github.com/tencent/codex-bridge/internal/auth"
 	"github.com/tencent/codex-bridge/internal/config"
 	"github.com/tencent/codex-bridge/internal/protocol"
+	"github.com/tencent/codex-bridge/internal/rollout"
 	"github.com/tencent/codex-bridge/internal/serverutil"
 	"github.com/tencent/codex-bridge/internal/store"
 	"github.com/tencent/codex-bridge/internal/web"
@@ -36,8 +37,9 @@ const (
 )
 
 const (
-	permissionProfileReviewRequired = "review-required"
-	permissionProfileAutoExecute    = "auto-execute"
+	permissionProfileReviewRequired  = "review-required"
+	permissionProfileAutoExecute     = "auto-execute"
+	permissionProfileStrictWorkspace = "strict-workspace"
 )
 
 type BuildInfo struct {
@@ -46,11 +48,12 @@ type BuildInfo struct {
 }
 
 type Server struct {
-	cfg     *config.Config
-	store   *store.Store
-	signer  *auth.Signer
-	pool    *Pool
-	httpSrv *http.Server
+	cfg      *config.Config
+	store    *store.Store
+	signer   *auth.Signer
+	pool     *Pool
+	httpSrv  *http.Server
+	rollouts rollout.Evaluator
 
 	buffersMu sync.Mutex
 	buffers   map[string]string
@@ -78,6 +81,7 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 		cfg:              cfg,
 		store:            st,
 		signer:           auth.NewSigner(cfg.Auth.JWTSecret, cfg.Auth.AccessTokenTTL.Duration),
+		rollouts:         rollout.New(cfg.Hub.FeatureRollouts),
 		pool:             NewPool(),
 		buffers:          make(map[string]string),
 		owners:           make(map[string]string),
@@ -326,7 +330,7 @@ func (s *Server) writeAuthSession(w http.ResponseWriter, r *http.Request, user s
 		serverutil.WriteError(w, http.StatusInternalServerError, "TOKEN_ERROR", "failed to issue token")
 		return
 	}
-	user.IsAdmin = s.isAdminUser(user)
+	user = s.decorateUser(user)
 	http.SetCookie(w, &http.Cookie{
 		Name:     accessCookieName,
 		Value:    token,
@@ -411,7 +415,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, uid string) {
 		serverutil.WriteError(w, http.StatusUnauthorized, "INVALID_TOKEN", "invalid token")
 		return
 	}
-	user.IsAdmin = s.isAdminUser(user)
+	user = s.decorateUser(user)
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"user": user})
 }
 
@@ -503,7 +507,17 @@ func (s *Server) handleCreateBridgeToken(w http.ResponseWriter, r *http.Request,
 	}
 	profile := normalizePermissionProfile(req.PermissionProfile)
 	if profile == "" {
-		serverutil.WriteError(w, http.StatusBadRequest, "BAD_PERMISSION_PROFILE", "permissionProfile must be review-required or auto-execute")
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_PERMISSION_PROFILE", "permissionProfile must be review-required, strict-workspace, or auto-execute")
+		return
+	}
+	user, err := s.store.UserByID(r.Context(), uid)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusUnauthorized, "INVALID_TOKEN", "invalid token")
+		return
+	}
+	allowStrictWorkspace := s.featureEnabled(rollout.FeatureStrictWorkspace, user)
+	if profile == permissionProfileStrictWorkspace && !allowStrictWorkspace {
+		serverutil.WriteError(w, http.StatusForbidden, "FEATURE_NOT_AVAILABLE", "strict-workspace is not available for this account")
 		return
 	}
 	value := store.NewToken("enr")
@@ -517,6 +531,7 @@ func (s *Server) handleCreateBridgeToken(w http.ResponseWriter, r *http.Request,
 		ExpiresAt:         expiresAt,
 		Label:             label,
 		PermissionProfile: profile,
+		AllowStrict:       allowStrictWorkspace,
 	}))
 }
 
@@ -549,7 +564,17 @@ func (s *Server) handleCreateAgentRepairToken(w http.ResponseWriter, r *http.Req
 	}
 	profile := normalizePermissionProfile(req.PermissionProfile)
 	if profile == "" {
-		serverutil.WriteError(w, http.StatusBadRequest, "BAD_PERMISSION_PROFILE", "permissionProfile must be review-required or auto-execute")
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_PERMISSION_PROFILE", "permissionProfile must be review-required, strict-workspace, or auto-execute")
+		return
+	}
+	user, err := s.store.UserByID(r.Context(), uid)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusUnauthorized, "INVALID_TOKEN", "invalid token")
+		return
+	}
+	allowStrictWorkspace := s.featureEnabled(rollout.FeatureStrictWorkspace, user)
+	if profile == permissionProfileStrictWorkspace && !allowStrictWorkspace {
+		serverutil.WriteError(w, http.StatusForbidden, "FEATURE_NOT_AVAILABLE", "strict-workspace is not available for this account")
 		return
 	}
 	value := store.NewToken("enr")
@@ -575,6 +600,7 @@ func (s *Server) handleCreateAgentRepairToken(w http.ResponseWriter, r *http.Req
 		Agent:             &agent,
 		CWD:               cwd,
 		MachineID:         agent.MachineID,
+		AllowStrict:       allowStrictWorkspace,
 	}))
 }
 
@@ -586,6 +612,7 @@ type bridgeTokenResponseParams struct {
 	Agent             *store.Agent
 	CWD               string
 	MachineID         string
+	AllowStrict       bool
 }
 
 func (s *Server) bridgeTokenResponse(r *http.Request, params bridgeTokenResponseParams) map[string]any {
@@ -601,7 +628,7 @@ func (s *Server) bridgeTokenResponse(r *http.Request, params bridgeTokenResponse
 		Agent:     params.Agent,
 		CWD:       params.CWD,
 		MachineID: params.MachineID,
-	})
+	}, params.AllowStrict)
 	out := map[string]any{
 		"token":              params.Token,
 		"expiresAt":          params.ExpiresAt.Unix(),
@@ -628,16 +655,21 @@ func normalizePermissionProfile(profile string) string {
 		return permissionProfileReviewRequired
 	case permissionProfileAutoExecute:
 		return permissionProfileAutoExecute
+	case permissionProfileStrictWorkspace:
+		return permissionProfileStrictWorkspace
 	default:
 		return ""
 	}
 }
 
-func (s *Server) bridgePermissionProfiles(hubURL, token, installCommand string, opts bridgeConnectOptions) []map[string]string {
-	return []map[string]string{
+func (s *Server) bridgePermissionProfiles(hubURL, token, installCommand string, opts bridgeConnectOptions, allowStrict bool) []map[string]string {
+	profiles := []map[string]string{
 		s.bridgePermissionProfile(hubURL, token, installCommand, permissionProfileReviewRequired, opts),
-		s.bridgePermissionProfile(hubURL, token, installCommand, permissionProfileAutoExecute, opts),
 	}
+	if allowStrict {
+		profiles = append(profiles, s.bridgePermissionProfile(hubURL, token, installCommand, permissionProfileStrictWorkspace, opts))
+	}
+	return append(profiles, s.bridgePermissionProfile(hubURL, token, installCommand, permissionProfileAutoExecute, opts))
 }
 
 func (s *Server) bridgePermissionProfile(hubURL, token, installCommand, profile string, opts bridgeConnectOptions) map[string]string {
@@ -1124,6 +1156,24 @@ func (s *Server) isAdminUser(user store.User) bool {
 		admin = "admin"
 	}
 	return strings.EqualFold(user.Username, admin)
+}
+
+func (s *Server) featureEnabled(feature string, user store.User) bool {
+	return s.rollouts.Enabled(feature, rollout.Subject{
+		ID:       user.ID,
+		Username: user.Username,
+		Admin:    s.isAdminUser(user),
+	})
+}
+
+func (s *Server) decorateUser(user store.User) store.User {
+	user.IsAdmin = s.isAdminUser(user)
+	user.Features = s.rollouts.EnabledFeatures(rollout.RegisteredFeatures(), rollout.Subject{
+		ID:       user.ID,
+		Username: user.Username,
+		Admin:    user.IsAdmin,
+	})
+	return user
 }
 
 func (s *Server) visibleAgents(ctx context.Context, uid string) ([]store.Agent, error) {

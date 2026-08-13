@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -30,6 +32,86 @@ func TestBridgeCapabilitiesCheckCLIPaths(t *testing.T) {
 	}
 	if caps.Orchestration["claude"].Available || caps.Orchestration["claude"].BrowserApproval {
 		t.Fatalf("orchestration claude should be unavailable: %#v", caps.Orchestration["claude"])
+	}
+}
+
+func TestBridgeCapabilitiesKeepPermissionProfilesIsolated(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name             string
+		runner           string
+		sandbox          string
+		approvalPolicy   string
+		strictWorkspace  bool
+		approvalMode     string
+		chatCodex        protocol.BridgeCLICapability
+		orchestrationCLI map[string]protocol.BridgeCLICapability
+	}{
+		{
+			name:           "review-required",
+			runner:         "codex-app-server",
+			sandbox:        "workspace-write",
+			approvalPolicy: "untrusted",
+			approvalMode:   "review-required",
+			chatCodex:      protocol.BridgeCLICapability{Available: true, Execution: "codex-app-server", BrowserApproval: true, ApprovalMode: "review-required"},
+			orchestrationCLI: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: true, Execution: "claude --print", BrowserApproval: true, ApprovalMode: "review-required"},
+				"codex":  {Available: true, Execution: "codex app-server", BrowserApproval: true, ApprovalMode: "review-required"},
+			},
+		},
+		{
+			name:           "auto-execute",
+			runner:         "codex",
+			sandbox:        "danger-full-access",
+			approvalPolicy: "never",
+			approvalMode:   "auto-execute",
+			chatCodex:      protocol.BridgeCLICapability{Available: false, Execution: "codex", BrowserApproval: false, ApprovalMode: "auto-execute"},
+			orchestrationCLI: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: true, Execution: "claude --print", BrowserApproval: false, ApprovalMode: "auto-execute"},
+				"codex":  {Available: true, Execution: "codex exec --json", BrowserApproval: false, ApprovalMode: "auto-execute"},
+			},
+		},
+		{
+			name:            "strict-workspace",
+			runner:          "codex",
+			sandbox:         "workspace-write",
+			approvalPolicy:  "never",
+			strictWorkspace: true,
+			approvalMode:    "strict-workspace",
+			chatCodex:       protocol.BridgeCLICapability{Available: false, Execution: "codex", BrowserApproval: false, ApprovalMode: "strict-workspace"},
+			orchestrationCLI: map[string]protocol.BridgeCLICapability{
+				"claude": {Available: true, Execution: "claude --print", BrowserApproval: false, ApprovalMode: "strict-workspace"},
+				"codex":  {Available: true, Execution: "codex exec --json", BrowserApproval: false, ApprovalMode: "strict-workspace"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Bridge.Runner = tt.runner
+			cfg.Bridge.Sandbox = tt.sandbox
+			cfg.Bridge.ApprovalPolicy = tt.approvalPolicy
+			cfg.Bridge.StrictWorkspace = tt.strictWorkspace
+			cfg.Bridge.CodexPath = executable
+			cfg.Bridge.ClaudePath = executable
+
+			caps := BridgeCapabilities(&cfg)
+			if caps.Runner != tt.runner || caps.Sandbox != tt.sandbox || caps.ApprovalPolicy != tt.approvalPolicy {
+				t.Fatalf("top-level capabilities = %#v", caps)
+			}
+			if got := caps.Metadata["approvalMode"]; got != tt.approvalMode {
+				t.Fatalf("approval mode = %q, want %q", got, tt.approvalMode)
+			}
+			if got := caps.Chat["codex"]; !reflect.DeepEqual(got, tt.chatCodex) {
+				t.Fatalf("chat codex = %#v, want %#v", got, tt.chatCodex)
+			}
+			if !reflect.DeepEqual(caps.Orchestration, tt.orchestrationCLI) {
+				t.Fatalf("orchestration = %#v, want %#v", caps.Orchestration, tt.orchestrationCLI)
+			}
+		})
 	}
 }
 

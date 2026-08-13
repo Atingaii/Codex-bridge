@@ -3,6 +3,7 @@ export type UserAccount = {
   username: string;
   createdAt: number;
   isAdmin?: boolean;
+  features?: string[];
 };
 
 export type Agent = {
@@ -617,7 +618,7 @@ export type BridgeTokenResponse = {
   machineId?: string;
 };
 
-export type PermissionProfileId = 'review-required' | 'auto-execute';
+export type PermissionProfileId = 'review-required' | 'strict-workspace' | 'auto-execute';
 
 export type BridgePermissionProfile = {
   id: PermissionProfileId;

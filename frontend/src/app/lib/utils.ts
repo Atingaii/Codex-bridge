@@ -1210,6 +1210,7 @@ export function preferredAgentID(agents: Agent[], current: string) {
 export function orchestrationApprovalMode(agent?: Agent | null) {
   const caps = agent?.capabilities;
   if (!caps) return agent?.online ? 'unknown' : 'offline';
+  if (caps.metadata?.approvalMode === 'strict-workspace') return 'strict-workspace';
   if (caps.approvalPolicy === 'never' && caps.sandbox === 'danger-full-access') return 'auto-execute';
   if (caps.metadata?.approvalMode === 'auto-execute') return 'auto-execute';
   return 'review-required';

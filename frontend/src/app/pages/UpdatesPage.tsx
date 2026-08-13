@@ -36,6 +36,15 @@ type UpdateItem = {
 
 const releases: Array<{ date: string; version: string; summary: string; items: UpdateItem[] }> = [
   {
+    date: '2026 年 8 月 13 日',
+    version: 'v0.3.33',
+    summary: '新增工作区隔离自动执行模式，并将灰度发布能力抽成可复用的功能开关。',
+    items: [
+      { icon: ShieldCheck, category: '安全', title: '自动执行仅限工作区', detail: '管理员可灰度使用 Linux Landlock，将 CLI 与子进程限制在绑定工作区、私有临时目录和只读工具链内。' },
+      { icon: Settings2, category: '灰度', title: '统一功能发布策略', detail: '新功能可按关闭、管理员、指定用户、稳定百分比或全量开放，Hub 同时执行服务端权限检查。' },
+    ],
+  },
+  {
     date: '2026 年 8 月 12 日',
     version: 'v0.3.29',
     summary: '长编排显示更完整，任务切换更稳定，并修复 Claude 自定义模型配置兼容性。',
@@ -119,13 +128,13 @@ export function UpdatesPage({ language, setLanguage, isDarkMode, setIsDarkMode }
 
       <main className="mx-auto max-w-5xl px-4 pb-24 pt-12 md:px-6 md:pt-16">
         <section className="border-b border-border pb-12">
-          <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />当前版本 v0.3.29</div>
+          <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />当前版本 v0.3.33</div>
           <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
             <div>
               <h1 className="text-3xl font-semibold leading-tight sm:text-4xl">最近更新</h1>
               <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground">品牌、模型切换、多机器稳定性和长编排体验，最近几次更新集中解决了这些高频问题。</p>
             </div>
-            <a href="https://github.com/Atingaii/ProofBridge/releases/tag/v0.3.29" target="_blank" rel="noreferrer" className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-border px-3 text-xs font-medium hover:bg-muted">查看 Release <ExternalLink className="h-3.5 w-3.5" /></a>
+            <a href="https://github.com/Atingaii/ProofBridge/releases/tag/v0.3.33" target="_blank" rel="noreferrer" className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-border px-3 text-xs font-medium hover:bg-muted">查看 Release <ExternalLink className="h-3.5 w-3.5" /></a>
           </div>
           <div className="mt-8 grid gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-3">
             {highlights.map(({ icon: Icon, label, value }) => (

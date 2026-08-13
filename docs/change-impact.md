@@ -13,6 +13,7 @@ keeps only the top frequent subset.
 | Add or change WebSocket frame | `internal/protocol/envelope.go`, Hub handler, Bridge handler, frontend parser, integration tests, `docs/architecture.md` |
 | Add or change SQLite table/column | `internal/store.Store.Migrate`, store structs/scanners/CRUD, store tests, `docs/code-map.md`, architecture storage table |
 | Add or change auth/cookie behavior | `internal/auth/`, `internal/hub/server.go`, frontend login/logout handling, security docs |
+| Add a user-visible feature rollout | Register the key in `internal/rollout/rollout.go:RegisteredFeatures`, add the default `hub.feature_rollouts` policy, enforce it at backend mutation boundaries, consume `user.features` in the frontend, and add allowed/denied tests |
 | Add or change runner behavior | `internal/bridge/runner.go` or `internal/bridge/orchestration.go`, protocol payload if needed, tests, runner notes in docs |
 | Add or change ACP runner behavior | `internal/bridge/acp_runner.go`, `internal/bridge/acp_client.go`, `internal/bridge/runner.go:SessionRunner`, `internal/bridge/session.go` dispatch, `internal/protocol.SessionOpenedPayload`/`PromptCompletePayload` native-resume fields, `docs/features/acp-runner.md`, tests |
 | Add or change ACP takeover UI | `frontend/src/app/components/chat/TakeoverHint.tsx`, `frontend/src/app/pages/Workspace.tsx`, `frontend/src/app/lib/types.ts`, `frontend/src/app/lib/i18n.ts`, rebuild `internal/web/static` via `npm run build`, `docs/features/acp-runner-pr2.md` |

@@ -47,6 +47,49 @@ func TestRegisterDisabledAndExistingUserLoginNormalizesUsername(t *testing.T) {
 	login(t, s, map[string]string{"username": " new-user ", "password": "abc1234567"}, http.StatusOK)
 }
 
+func TestAuthResponsesExposeEnabledFeatures(t *testing.T) {
+	t.Parallel()
+
+	s, st := newAuthTestServer(t)
+	if _, err := st.UpsertUser(context.Background(), "worker", "abc1234567"); err != nil {
+		t.Fatal(err)
+	}
+
+	adminLogin := login(t, s, map[string]string{"username": "admin", "password": "secret12345"}, http.StatusOK)
+	assertUserFeatures(t, adminLogin, "strict-workspace")
+	adminCookie := loginCookie(t, s, map[string]string{"username": "admin", "password": "secret12345"})
+	assertUserFeatures(t, authRequestWithCookie(t, s, http.MethodGet, "/api/me", adminCookie, http.StatusOK), "strict-workspace")
+
+	workerLogin := login(t, s, map[string]string{"username": "worker", "password": "abc1234567"}, http.StatusOK)
+	assertUserFeatures(t, workerLogin)
+	workerCookie := loginCookie(t, s, map[string]string{"username": "worker", "password": "abc1234567"})
+	assertUserFeatures(t, authRequestWithCookie(t, s, http.MethodGet, "/api/me", workerCookie, http.StatusOK))
+}
+
+func assertUserFeatures(t *testing.T, body map[string]any, want ...string) {
+	t.Helper()
+	user, ok := body["user"].(map[string]any)
+	if !ok {
+		t.Fatalf("response user = %#v", body["user"])
+	}
+	raw, exists := user["features"]
+	if len(want) == 0 {
+		if exists {
+			t.Fatalf("unexpected user features = %#v", raw)
+		}
+		return
+	}
+	features, ok := raw.([]any)
+	if !ok || len(features) != len(want) {
+		t.Fatalf("user features = %#v, want %#v", raw, want)
+	}
+	for i := range want {
+		if features[i] != want[i] {
+			t.Fatalf("user features = %#v, want %#v", raw, want)
+		}
+	}
+}
+
 func TestAuthRateLimit(t *testing.T) {
 	t.Parallel()
 

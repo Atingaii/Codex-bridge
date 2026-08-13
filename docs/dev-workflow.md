@@ -47,6 +47,9 @@ should list names and point here for detail.
 | `BRIDGE_MODEL` | Model argument for Codex runner | config `bridge.model` |
 | `BRIDGE_SANDBOX` | Codex sandbox policy | config `bridge.sandbox` |
 | `BRIDGE_APPROVAL_POLICY` | Codex approval policy | config `bridge.approval_policy` |
+| `BRIDGE_STRICT_WORKSPACE` | Enable fail-closed Linux Landlock isolation for managed CLI process trees | config `bridge.strict_workspace` |
+| `BRIDGE_STRICT_WORKSPACE_READ_ONLY` | OS path-list of additional non-standard toolchain roots exposed read-only in strict mode | config `bridge.strict_workspace_read_only` |
+| `CODEX_BRIDGE_RUNTIME_DIR` | Local base directory for strict-mode private homes and temporary files; defaults to `$XDG_RUNTIME_DIR/codex-bridge` or `~/.codex-bridge/runtime` | Bridge process environment |
 | `BRIDGE_DURABLE_TASK_GRAPH` | Enable the bounded persistent orchestration task graph; set `false` only for legacy Bridge compatibility | config `bridge.durable_task_graph` |
 | `BRIDGE_LONG_COMMAND_OBSERVER_ENABLED` | Enables Bridge long-command observer notes during orchestration | config `bridge.long_command_observer.enabled` |
 | `BRIDGE_LONG_COMMAND_OBSERVER_AFTER` | Duration before a matching long command is observed, for example `2m` | config `bridge.long_command_observer.after` |
@@ -114,7 +117,13 @@ settings UI intentionally do not expose sudo/root setup commands because they
 write native CLI state under a different user and break native resume
 expectations.
 
-The settings UI exposes two permission profiles:
+The settings UI exposes three permission profiles:
+
+User-facing gray rollouts are configured under `hub.feature_rollouts`. Each
+entry maps a registered feature key to `off`, `admin`, `all`, `percent:N`, or
+`users:name1,name2`. The default `strict-workspace: admin` exposes the new
+workspace-only mode only to the configured Hub administrator. Invalid or
+unknown policies fail closed; changing a policy requires a Hub restart.
 
 - `review-required`: starts Bridge with `--runner codex-app-server --sandbox
   workspace-write --approval-policy untrusted`. Codex chat and Codex
@@ -127,6 +136,18 @@ The settings UI exposes two permission profiles:
   escape still require browser review. Hub-managed orchestration requires the
   selected Bridge connection to expose both direct Claude Code and Codex CLI
   capabilities.
+- `strict-workspace`: starts Bridge with `--runner codex --sandbox
+  workspace-write --approval-policy never --strict-workspace`. Codex, Claude
+  Code, ACP adapters, and every command they start run without browser approval
+  inside a Linux Landlock boundary. The bound workspace and per-workspace CLI
+  state are writable; detected runtimes, proof tools, libraries, and
+  certificates are read-only; other projects and shared `/tmp` are invisible.
+  Bridge recognizes common system, nvm, Volta, fnm, pyenv, Conda, rbenv,
+  SDKMAN, asdf, mise, Rustup, Elan, Linuxbrew, opam, Isabelle, Nix, Guix,
+  Snap, native Claude, standalone Codex, and npm layouts.
+  Set `BRIDGE_STRICT_WORKSPACE_READ_ONLY` to an OS path-list only when a custom
+  toolchain lives elsewhere. Landlock ABI 3 or newer is required; startup fails
+  closed on unsupported kernels and non-Linux hosts.
 - `auto-execute`: starts Bridge with `--runner codex --sandbox
   danger-full-access --approval-policy never`, preserving the previous
   browser-first trusted-machine behavior. Claude Code orchestration maps this

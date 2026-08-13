@@ -42,13 +42,15 @@ export function CapabilityMatrix({ agent, t }: { agent: Agent | null; t: UIText 
     { cli: 'claude', label: 'Claude', cap: orchestrationCapability(agent, 'claude') },
     { cli: 'codex', label: 'Codex', cap: orchestrationCapability(agent, 'codex') },
   ];
-  const auto = orchestrationApprovalMode(agent) === 'auto-execute';
+  const approvalMode = orchestrationApprovalMode(agent);
+  const auto = approvalMode === 'auto-execute' || approvalMode === 'strict-workspace';
+  const modeLabel = approvalMode === 'strict-workspace' ? t.strictWorkspace : auto ? t.autoExecute : t.reviewRequired;
   return (
     <div className="rounded-md border border-border bg-muted/20 p-2.5">
       <div className="mb-2 flex items-center justify-between gap-2">
         <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.capabilityMatrix}</span>
         <span className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
-          {auto ? t.autoExecute : t.reviewRequired}
+          {modeLabel}
         </span>
       </div>
       <div className="space-y-1.5">
@@ -63,7 +65,7 @@ export function CapabilityMatrix({ agent, t }: { agent: Agent | null; t: UIText 
                 ok ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-destructive/20 bg-destructive/10 text-destructive"
               )}>
                 {ok ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
-                {ok ? (auto ? t.autoExecute : t.browserApproval) : t.notAvailable}
+                {ok ? (auto ? modeLabel : t.browserApproval) : t.notAvailable}
               </span>
             </div>
           );

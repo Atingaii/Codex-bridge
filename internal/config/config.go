@@ -23,40 +23,43 @@ type GatewayConfig struct {
 }
 
 type HubConfig struct {
-	DBPath                   string   `yaml:"db_path"`
-	CookieSecure             bool     `yaml:"cookie_secure"`
-	HeartbeatInterval        Duration `yaml:"heartbeat_interval"`
-	BridgeReadTimeout        Duration `yaml:"bridge_read_timeout"`
-	BrowserCloseSession      bool     `yaml:"browser_close_session"`
-	BrowserCloseGrace        Duration `yaml:"browser_close_grace"`
-	BrowserLeaseTTL          Duration `yaml:"browser_lease_ttl"`
-	AllowedOrigins           []string `yaml:"allowed_origins"`
-	BridgeDownloadURL        string   `yaml:"bridge_download_url"`
-	MaxBridgeSendQueue       int      `yaml:"max_bridge_send_queue"`
-	MaxBrowserSendQueue      int      `yaml:"max_browser_send_queue"`
-	MaxPromptBytes           int64    `yaml:"max_prompt_bytes"`
-	MaxAttachmentBytes       int64    `yaml:"max_attachment_bytes"`
-	MaxAssistantMessageBytes int64    `yaml:"max_assistant_message_bytes"`
+	DBPath                   string            `yaml:"db_path"`
+	CookieSecure             bool              `yaml:"cookie_secure"`
+	HeartbeatInterval        Duration          `yaml:"heartbeat_interval"`
+	BridgeReadTimeout        Duration          `yaml:"bridge_read_timeout"`
+	BrowserCloseSession      bool              `yaml:"browser_close_session"`
+	BrowserCloseGrace        Duration          `yaml:"browser_close_grace"`
+	BrowserLeaseTTL          Duration          `yaml:"browser_lease_ttl"`
+	AllowedOrigins           []string          `yaml:"allowed_origins"`
+	BridgeDownloadURL        string            `yaml:"bridge_download_url"`
+	MaxBridgeSendQueue       int               `yaml:"max_bridge_send_queue"`
+	MaxBrowserSendQueue      int               `yaml:"max_browser_send_queue"`
+	MaxPromptBytes           int64             `yaml:"max_prompt_bytes"`
+	MaxAttachmentBytes       int64             `yaml:"max_attachment_bytes"`
+	MaxAssistantMessageBytes int64             `yaml:"max_assistant_message_bytes"`
+	FeatureRollouts          map[string]string `yaml:"feature_rollouts"`
 }
 
 type BridgeConfig struct {
-	HubURL            string   `yaml:"hub_url"`
-	Token             string   `yaml:"token"`
-	TokenFile         string   `yaml:"token_file"`
-	Name              string   `yaml:"name"`
-	MachineIDFile     string   `yaml:"machine_id_file"`
-	CWD               string   `yaml:"cwd"`
-	Runner            string   `yaml:"runner"`
-	CodexPath         string   `yaml:"codex_path"`
-	ClaudePath        string   `yaml:"claude_path"`
-	ClaudeModel       string   `yaml:"claude_model"`
-	ClaudeEffort      string   `yaml:"claude_effort"`
-	Model             string   `yaml:"model"`
-	Sandbox           string   `yaml:"sandbox"`
-	ApprovalPolicy    string   `yaml:"approval_policy"`
-	ReconnectMin      Duration `yaml:"reconnect_min"`
-	ReconnectMax      Duration `yaml:"reconnect_max"`
-	HeartbeatInterval Duration `yaml:"heartbeat_interval"`
+	HubURL                  string   `yaml:"hub_url"`
+	Token                   string   `yaml:"token"`
+	TokenFile               string   `yaml:"token_file"`
+	Name                    string   `yaml:"name"`
+	MachineIDFile           string   `yaml:"machine_id_file"`
+	CWD                     string   `yaml:"cwd"`
+	Runner                  string   `yaml:"runner"`
+	CodexPath               string   `yaml:"codex_path"`
+	ClaudePath              string   `yaml:"claude_path"`
+	ClaudeModel             string   `yaml:"claude_model"`
+	ClaudeEffort            string   `yaml:"claude_effort"`
+	Model                   string   `yaml:"model"`
+	Sandbox                 string   `yaml:"sandbox"`
+	ApprovalPolicy          string   `yaml:"approval_policy"`
+	StrictWorkspace         bool     `yaml:"strict_workspace"`
+	StrictWorkspaceReadOnly []string `yaml:"strict_workspace_read_only"`
+	ReconnectMin            Duration `yaml:"reconnect_min"`
+	ReconnectMax            Duration `yaml:"reconnect_max"`
+	HeartbeatInterval       Duration `yaml:"heartbeat_interval"`
 	// DurableTaskGraph enables the bounded candidate/integrator/reviewer graph
 	// for orchestration. Keep this opt-out for staged rollouts and legacy
 	// Bridges; the default remains enabled.
@@ -137,6 +140,7 @@ func Default() Config {
 			MaxPromptBytes:           256 * 1024,
 			MaxAttachmentBytes:       8 * 1024 * 1024,
 			MaxAssistantMessageBytes: 4 * 1024 * 1024,
+			FeatureRollouts:          map[string]string{"strict-workspace": "admin"},
 		},
 		Bridge: BridgeConfig{
 			HubURL:            "https://sparkapi.tech",

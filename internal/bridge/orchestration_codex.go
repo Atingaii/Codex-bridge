@@ -352,6 +352,9 @@ func (m *OrchestrationManager) runCodexExecAttempt(ctx context.Context, payload 
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
+	if err := configureStrictWorkspaceCommand(cmd, m.cfg, cwd); err != nil {
+		return codexExecAttempt{threadID: threadID, err: err}
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return codexExecAttempt{threadID: threadID, err: err}
@@ -523,7 +526,7 @@ func (m *OrchestrationManager) runCodexAppServerWithThread(ctx context.Context, 
 }
 
 func (m *OrchestrationManager) shouldRunCodexAppServer() bool {
-	return !m.bypassApprovalsAndSandbox()
+	return !m.noApprovalExecution()
 }
 
 func (m *OrchestrationManager) scanCodexJSONLResult(stdout io.Reader, runID, turnID, role string, timeouts ...*explicitTimeoutWatchdogs) (codexScanResult, error) {

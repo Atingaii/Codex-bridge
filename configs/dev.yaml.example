@@ -28,6 +28,9 @@ hub:
   max_prompt_bytes: 262144
   max_attachment_bytes: 8388608
   max_assistant_message_bytes: 4194304
+  # User feature rollouts: off, admin, all, percent:N, or users:name1,name2.
+  feature_rollouts:
+    strict-workspace: admin
 
 bridge:
   hub_url: http://127.0.0.1:8088
@@ -44,6 +47,10 @@ bridge:
   model: ""
   sandbox: workspace-write
   approval_policy: never
+  strict_workspace: false
+  # Optional non-standard toolchain roots (for example a custom Isabelle
+  # installation). Strict mode exposes these paths read-only.
+  strict_workspace_read_only: []
   # Disable only while rolling out alongside a legacy Bridge binary.
   durable_task_graph: true
   reconnect_min: 5s

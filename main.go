@@ -246,7 +246,7 @@ func normalizeConnectArgs(args []string) (string, []string, error) {
 }
 
 func isBoolConnectFlag(arg string) bool {
-	return arg == "-h" || arg == "--help"
+	return arg == "-h" || arg == "--help" || arg == "--strict-workspace"
 }
 
 func runHub(cfg *config.Config) error {

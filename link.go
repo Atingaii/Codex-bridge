@@ -357,7 +357,7 @@ func linkProfileConnectArgs(profile string) []string {
 		return []string{"--runner", "codex", "--sandbox", "danger-full-access", "--approval-policy", "never"}
 	}
 	if profile == linkProfileStrictWorkspace {
-		return []string{"--runner", "codex", "--sandbox", "workspace-write", "--approval-policy", "never", "--strict-workspace"}
+		return []string{"--runner", "codex", "--sandbox", "workspace-write", "--approval-policy", "never", "--strict-workspace=true"}
 	}
 	return []string{"--runner", "codex-app-server", "--sandbox", "workspace-write", "--approval-policy", "untrusted"}
 }

@@ -64,7 +64,7 @@ func TestStrictWorkspaceLinkProfileIsExplicitAndIsolated(t *testing.T) {
 		t.Fatalf("strict profile = %q", got)
 	}
 	args := strings.Join(linkProfileConnectArgs(linkProfileStrictWorkspace), " ")
-	for _, want := range []string{"--runner codex", "--sandbox workspace-write", "--approval-policy never", "--strict-workspace"} {
+	for _, want := range []string{"--runner codex", "--sandbox workspace-write", "--approval-policy never", "--strict-workspace=true"} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("strict profile args missing %q: %s", want, args)
 		}
@@ -93,7 +93,7 @@ func TestLinkProfileConnectArgsKeepPermissionModesIsolated(t *testing.T) {
 		{
 			name:    "strict-workspace",
 			profile: linkProfileStrictWorkspace,
-			want:    []string{"--runner", "codex", "--sandbox", "workspace-write", "--approval-policy", "never", "--strict-workspace"},
+			want:    []string{"--runner", "codex", "--sandbox", "workspace-write", "--approval-policy", "never", "--strict-workspace=true"},
 		},
 	}
 	for _, tt := range tests {
@@ -102,6 +102,22 @@ func TestLinkProfileConnectArgsKeepPermissionModesIsolated(t *testing.T) {
 				t.Fatalf("profile args = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestStrictWorkspaceGeneratedConnectArgsPreserveEnrollToken(t *testing.T) {
+	args := append([]string{"--hub", "https://hub.example"}, linkProfileConnectArgs(linkProfileStrictWorkspace)...)
+	args = append(args, "--cwd", "/repo", "--name", "strict-agent", "enr_test")
+
+	token, flagArgs, err := normalizeConnectArgs(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "enr_test" {
+		t.Fatalf("token = %q, want enr_test", token)
+	}
+	if got := strings.Join(flagArgs, " "); !strings.Contains(got, "--strict-workspace=true --cwd /repo") {
+		t.Fatalf("generated strict arguments were not preserved: %s", got)
 	}
 }
 

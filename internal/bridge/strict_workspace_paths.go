@@ -9,11 +9,17 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/tencent/codex-bridge/internal/config"
 )
 
 var strictCodexSeedEntries = []string{"config.toml", "auth.json", "skills", "rules"}
 var strictClaudeSeedEntries = []string{"settings.json", ".credentials.json", "skills", "commands", "agents", "plugins"}
+
+var strictCodexExternalFiles = map[string]string{
+	"model_instructions_file": "model-instructions.md",
+	"model_catalog_json":      "model-catalog.json",
+}
 
 func strictWorkspaceRuntimeBase() string {
 	if value := strings.TrimSpace(os.Getenv("CODEX_BRIDGE_RUNTIME_DIR")); value != "" {
@@ -209,6 +215,12 @@ func prepareStrictWorkspaceHome(runtimeDir string) (string, error) {
 	if err := seedStrictCLIState(codexSource, filepath.Join(sandboxHome, ".codex"), strictCodexSeedEntries); err != nil {
 		return "", err
 	}
+	if err := localizeStrictCodexExternalFiles(
+		filepath.Join(codexSource, "config.toml"),
+		filepath.Join(sandboxHome, ".codex", "config.toml"),
+	); err != nil {
+		return "", err
+	}
 	if err := seedStrictCLIState(claudeSource, filepath.Join(sandboxHome, ".claude"), strictClaudeSeedEntries); err != nil {
 		return "", err
 	}
@@ -218,6 +230,89 @@ func prepareStrictWorkspaceHome(runtimeDir string) (string, error) {
 		}
 	}
 	return sandboxHome, nil
+}
+
+func localizeStrictCodexExternalFiles(sourceConfig, privateConfig string) error {
+	raw, err := os.ReadFile(sourceConfig)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read Codex configuration for strict workspace: %w", err)
+	}
+	var document map[string]any
+	if err := toml.Unmarshal(raw, &document); err != nil {
+		return fmt.Errorf("parse Codex configuration for strict workspace: %w", err)
+	}
+
+	privateExternalDir := filepath.Join(filepath.Dir(privateConfig), "external-config")
+	if err := localizeStrictCodexDocument(document, nil, filepath.Dir(sourceConfig), privateExternalDir); err != nil {
+		return err
+	}
+	if profiles, ok := document["profiles"].(map[string]any); ok {
+		for name, value := range profiles {
+			profile, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			if err := localizeStrictCodexDocument(profile, []string{"profiles", name}, filepath.Dir(sourceConfig), privateExternalDir); err != nil {
+				return err
+			}
+		}
+	}
+
+	localized, err := toml.Marshal(document)
+	if err != nil {
+		return fmt.Errorf("encode private Codex configuration for strict workspace: %w", err)
+	}
+	if err := atomicWrite(privateConfig, localized, 0o600); err != nil {
+		return fmt.Errorf("write private Codex configuration for strict workspace: %w", err)
+	}
+	return nil
+}
+
+func localizeStrictCodexDocument(document map[string]any, keyPath []string, sourceDir, privateDir string) error {
+	for key, filename := range strictCodexExternalFiles {
+		value, exists := document[key]
+		if !exists {
+			continue
+		}
+		currentPath := append(append([]string(nil), keyPath...), key)
+		reference, ok := value.(string)
+		fieldPath := strings.Join(currentPath, ".")
+		if !ok || strings.TrimSpace(reference) == "" {
+			return fmt.Errorf("Codex %s must be a non-empty file path in strict workspace mode", fieldPath)
+		}
+		sourcePath := expandHome(strings.TrimSpace(reference))
+		if !filepath.IsAbs(sourcePath) {
+			sourcePath = filepath.Join(sourceDir, sourcePath)
+		}
+		sourcePath = filepath.Clean(sourcePath)
+		info, err := os.Lstat(sourcePath)
+		if err != nil {
+			return fmt.Errorf("read Codex %s source %s for strict workspace: %w", fieldPath, sourcePath, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("Codex %s source %s is a symbolic link; strict workspace mode requires a regular file", fieldPath, sourcePath)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("Codex %s source %s is not a regular file", fieldPath, sourcePath)
+		}
+		contents, err := os.ReadFile(sourcePath)
+		if err != nil {
+			return fmt.Errorf("read Codex %s source %s for strict workspace: %w", fieldPath, sourcePath, err)
+		}
+		if len(keyPath) > 0 {
+			sum := sha256.Sum256([]byte(fieldPath))
+			filename = hex.EncodeToString(sum[:])[:12] + "-" + filename
+		}
+		privatePath := filepath.Join(privateDir, filename)
+		if err := atomicWrite(privatePath, contents, 0o600); err != nil {
+			return fmt.Errorf("copy Codex %s into strict workspace: %w", fieldPath, err)
+		}
+		document[key] = privatePath
+	}
+	return nil
 }
 
 func firstNonEmptyEnv(names ...string) string {

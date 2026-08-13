@@ -87,6 +87,24 @@ func TestAutomaticApprovalResponseIsRequestScoped(t *testing.T) {
 	}
 }
 
+func TestCodexAppServerStrictWorkspaceUsesOuterSandbox(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bridge.Sandbox = "workspace-write"
+	cfg.Bridge.StrictWorkspace = true
+
+	got := NewCodexAppServerRunner(&cfg).sandboxPolicy()
+	want := map[string]any{"type": "dangerFullAccess"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("strict app-server sandbox policy = %#v, want %#v", got, want)
+	}
+
+	cfg.Bridge.StrictWorkspace = false
+	got = NewCodexAppServerRunner(&cfg).sandboxPolicy()
+	if got["type"] != "workspaceWrite" {
+		t.Fatalf("non-strict app-server sandbox policy changed: %#v", got)
+	}
+}
+
 func TestCodexAppServerRunnerSanitizesPromptText(t *testing.T) {
 	tmp := t.TempDir()
 	codexPath := filepath.Join(tmp, "codex")

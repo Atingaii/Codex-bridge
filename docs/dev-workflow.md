@@ -147,6 +147,11 @@ unknown policies fail closed; changing a policy requires a Hub restart.
   tool environment variables, and common nvm, Volta, fnm, pyenv, Conda, rbenv,
   SDKMAN, asdf, mise, Rustup, Elan, Linuxbrew, opam, Isabelle, Coq, Lean, Nix,
   Guix, Snap, native Claude, standalone Codex, and npm layouts.
+  Once the Bridge applies Landlock, strict-mode Codex exec, resume, and
+  app-server requests use Codex `dangerFullAccess` only to suppress its nested
+  Bubblewrap layer. This cannot widen the inherited Landlock ruleset, and it
+  avoids `/proc/sys/kernel/overflowuid` and nested-container initialization
+  failures. Other permission profiles keep their existing Codex sandbox policy.
   Set `BRIDGE_STRICT_WORKSPACE_READ_ONLY` to an OS path-list only when a custom
   toolchain lives elsewhere. Landlock ABI 3 or newer is required; startup fails
   closed on unsupported kernels and non-Linux hosts.

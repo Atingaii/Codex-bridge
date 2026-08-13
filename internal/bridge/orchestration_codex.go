@@ -440,7 +440,7 @@ func (m *OrchestrationManager) codexOrchestrationArgs(payload protocol.Orchestra
 		if model := codexBridgeModel(m.cfg); model != "" {
 			args = append(args, "--model", model)
 		}
-		if strings.EqualFold(m.cfg.Bridge.ApprovalPolicy, "never") && strings.EqualFold(m.cfg.Bridge.Sandbox, "danger-full-access") {
+		if codexBypassApprovalsAndSandbox(m.cfg) {
 			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 		} else {
 			if m.cfg.Bridge.Sandbox != "" {
@@ -457,12 +457,12 @@ func (m *OrchestrationManager) codexOrchestrationArgs(payload protocol.Orchestra
 	if model := codexBridgeModel(m.cfg); model != "" {
 		args = append(args, "--model", model)
 	}
-	if strings.EqualFold(m.cfg.Bridge.ApprovalPolicy, "never") && strings.EqualFold(m.cfg.Bridge.Sandbox, "danger-full-access") {
+	if codexBypassApprovalsAndSandbox(m.cfg) {
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	} else if m.cfg.Bridge.Sandbox != "" {
 		args = append(args, "--sandbox", m.cfg.Bridge.Sandbox)
 	}
-	if m.cfg.Bridge.ApprovalPolicy != "" && !(strings.EqualFold(m.cfg.Bridge.ApprovalPolicy, "never") && strings.EqualFold(m.cfg.Bridge.Sandbox, "danger-full-access")) {
+	if m.cfg.Bridge.ApprovalPolicy != "" && !codexBypassApprovalsAndSandbox(m.cfg) {
 		args = append(args, "-c", "approval_policy="+quoteTomlString(m.cfg.Bridge.ApprovalPolicy))
 	}
 	cwd := m.cwd(payload)

@@ -278,8 +278,16 @@ func (r *CodexExecRunner) resumeArgs() []string {
 }
 
 func (r *CodexExecRunner) bypassApprovalsAndSandbox() bool {
-	return strings.EqualFold(r.cfg.Bridge.ApprovalPolicy, "never") &&
-		strings.EqualFold(r.cfg.Bridge.Sandbox, "danger-full-access")
+	return codexBypassApprovalsAndSandbox(r.cfg)
+}
+
+// Strict workspace already applies an inherited Landlock boundary to the
+// complete Codex process tree. Starting Codex's Bubblewrap sandbox inside that
+// boundary replaces /proc with objects that the outer ruleset cannot access.
+func codexBypassApprovalsAndSandbox(cfg *config.Config) bool {
+	return cfg != nil && (cfg.Bridge.StrictWorkspace ||
+		(strings.EqualFold(cfg.Bridge.ApprovalPolicy, "never") &&
+			strings.EqualFold(cfg.Bridge.Sandbox, "danger-full-access")))
 }
 
 func (r *CodexExecRunner) codexPath() string {

@@ -53,8 +53,12 @@ managed Codex, Claude Code, and ACP process. The binary re-execs itself through
 a fail-closed Landlock ruleset, then execs the target. Only the canonical bound
 workspace and per-workspace private runtime are writable. Non-home system and
 mount trees, hidden home configuration, and positively identified public
-toolchain roots are read-only; unrecognized ordinary home directories remain inaccessible. Existing
-permission profiles do not use this wrapper. See
+toolchain roots are read-only; unrecognized ordinary home directories remain
+inaccessible. Strict-mode Codex exec, resume, and app-server turns disable
+Codex's nested Bubblewrap policy after entering Landlock. The inherited outer
+ruleset still covers every command, while avoiding replacement `/proc` objects
+that cannot be reopened by an already restricted process. Existing permission
+profiles do not use this wrapper or argument override. See
 [strict workspace auto execute](features/strict-workspace-auto-execute.md).
 
 When the endpoint runs with `bridge.runner: acp`, chat uses

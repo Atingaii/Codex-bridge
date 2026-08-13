@@ -30,7 +30,8 @@ arguments and behavior.
 
 `strict-workspace` combines:
 
-- Codex `sandbox_mode=workspace-write`;
+- Codex's native command sandbox disabled for the managed child, because the
+  Bridge applies the stronger outer filesystem boundary before Codex starts;
 - `approval_policy=never` and Claude Code bypass permission mode;
 - a Bridge child-process wrapper that applies Linux Landlock before executing
   Codex, Claude Code, or an ACP adapter.
@@ -59,6 +60,15 @@ wrapper leaves networking unrestricted so model APIs and dependency downloads
 continue to work. A requested run directory must resolve inside the configured
 workspace root. Symlinks do not expand the allowlist because Landlock checks
 the resolved filesystem object.
+
+The Bridge deliberately uses one filesystem boundary in this profile. Codex is
+started with its `dangerFullAccess`/bypass sandbox setting only *inside* the
+already restricted Landlock process tree. This prevents Codex from nesting a
+Bubblewrap mount sandbox whose replacement `/proc` objects conflict with the
+inherited Landlock object allowlist. It does not grant host-wide access: every
+Codex command remains a descendant of the Bridge wrapper and cannot escape or
+relax Landlock. Existing `review-required` and `auto-execute` endpoints retain
+their native Codex sandbox arguments unchanged.
 
 This profile is user-directory isolation, not a minimal operating-system
 sandbox. Standard system trees and non-home mount branches are deliberately
@@ -138,6 +148,8 @@ without isolation.
    the copied configuration without widening the filesystem allowlist.
 8. Add read-only compatibility for system/runtime trees, existing top-level
    hidden home entries, and positively identified public tool components.
+9. Avoid nested Codex Bubblewrap under the inherited Landlock boundary while
+   retaining the same outer restriction for the complete Codex process tree.
 
 ## Exit Gates
 
@@ -155,6 +167,8 @@ without isolation.
 - Nested command sandboxes can read Linux runtime metadata such as
   `/proc/sys/kernel/overflowuid`, while unrecognized ordinary home directories
   remain inaccessible.
+- Codex exec, resume, and app-server paths do not create a nested Bubblewrap
+  sandbox in strict mode; non-strict profiles keep their existing arguments.
 
 ## Reviewer Q&A
 

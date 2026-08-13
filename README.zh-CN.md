@@ -267,7 +267,7 @@ HUB_BRIDGE_DOWNLOAD_URL='https://your-release-url/codex-bridge-linux-amd64'
 添加 CLI 端时有三种权限策略：
 
 - `需要确认`：Codex 聊天和 Codex 编排使用 `codex app-server` runner，命令/文件审批会回传到网页端确认；Claude Code 编排通过权限提示 MCP hook 把审批回传到网页端。
-- `自动执行（仅工作区）`：无需审批，使用 `workspace-write`、`approval_policy=never` 和 Linux Landlock，把 Codex、Claude、ACP 及其子进程限制在用户目录隔离边界内。工作区和隔离会话状态可写；系统、运行时、Home 隐藏项、PATH 与可识别公共工具只读；Home 下其他未识别普通目录和共享 `/tmp` 不可访问。要求 Linux Landlock ABI 3；不支持时 Bridge 会拒绝启动，不会退化成全盘权限。
+- `自动执行（仅工作区）`：无需审批，使用 Bridge 外层 Linux Landlock 把 Codex、Claude、ACP 及其子进程限制在用户目录隔离边界内。工作区和隔离会话状态可写；系统、运行时、Home 隐藏项、PATH 与可识别公共工具只读；Home 下其他未识别普通目录和共享 `/tmp` 不可访问。严格模式会关闭 Codex 内层 Bubblewrap，避免嵌套沙箱初始化冲突；外层规则仍覆盖全部命令。要求 Linux Landlock ABI 3；不支持时 Bridge 会拒绝启动，不会退化成全盘权限。
 - `无需授权`：保持当前可信机器模式，使用 `danger-full-access` 和 `approval_policy=never`，不会弹权限确认。
 
 Bridge 会只读开放 Home 容器之外的系统与挂载分支，并识别完整 `/proc` 与 `/sys`、绝对 PATH、标准工具环境变量、Home 隐藏项，以及常见 nvm、Volta、fnm、pyenv、Conda、rbenv、SDKMAN、asdf、mise、Rustup、Elan、Linuxbrew、opam、Isabelle、Coq、Lean、Nix、Guix、Snap、Claude 原生安装、Codex standalone 和 npm 包布局。特殊发行版或自定义工具链可在运行安装/修复命令前设置 `BRIDGE_STRICT_WORKSPACE_READ_ONLY`，值为当前操作系统的路径列表（Linux 使用冒号分隔），只为所需工具链根增加只读访问；不要填写整个 HOME、`/tmp` 或其他私人项目目录。隔离状态磁盘较大时，可用 `CODEX_BRIDGE_RUNTIME_DIR` 指定本地运行目录；安装/修复命令会把这两个变量一并保留到后台服务。

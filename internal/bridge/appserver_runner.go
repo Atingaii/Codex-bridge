@@ -221,6 +221,9 @@ func (r *CodexAppServerRunner) sandbox() string {
 }
 
 func (r *CodexAppServerRunner) sandboxPolicy(req ...RunnerRequest) map[string]any {
+	if r.cfg.Bridge.StrictWorkspace {
+		return map[string]any{"type": "dangerFullAccess"}
+	}
 	switch strings.ToLower(r.sandbox()) {
 	case "danger-full-access":
 		return map[string]any{"type": "dangerFullAccess"}

@@ -51,9 +51,11 @@ Endpoints explicitly linked with the `strict-workspace` profile use
 managed Codex, Claude Code, and ACP process. The binary re-execs itself through
 `internal/bridge/strict_workspace_linux.go:RunStrictWorkspaceSandbox`, installs
 a fail-closed Landlock ruleset, then execs the target. Only the canonical bound
-workspace and per-workspace private runtime are writable; detected system and
-toolchain roots are read-only. Existing permission profiles do not use this
-wrapper. See [strict workspace auto execute](features/strict-workspace-auto-execute.md).
+workspace and per-workspace private runtime are writable. Non-home system and
+mount trees, hidden home configuration, and positively identified public
+toolchain roots are read-only; unrecognized ordinary home directories remain inaccessible. Existing
+permission profiles do not use this wrapper. See
+[strict workspace auto execute](features/strict-workspace-auto-execute.md).
 
 When the endpoint runs with `bridge.runner: acp`, chat uses
 `internal/bridge/acp_runner.go:ACPRunner` instead of a per-turn process. It keeps

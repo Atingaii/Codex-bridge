@@ -38,15 +38,12 @@ func strictWorkspaceID(workspace string) string {
 }
 
 func strictWorkspaceReadOnlyPaths(cfg *config.Config, target string) []string {
-	paths := []string{
-		"/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib64",
-		"/usr/include", "/usr/libexec", "/usr/local/bin", "/usr/local/sbin", "/usr/local/include", "/usr/local/lib", "/usr/local/lib64", "/usr/local/share",
-		"/lib", "/lib64", "/nix/store", "/gnu/store", "/snap", "/var/lib/snapd",
-		"/etc/alternatives", "/etc/ssl", "/etc/pki",
-		"/etc/ca-certificates", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
-		"/usr/share", "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group",
-	}
+	paths := strictWorkspaceNonHomeRootPaths()
 	paths = append(paths, cfg.Bridge.StrictWorkspaceReadOnly...)
+	paths = append(paths, strictWorkspaceHiddenHomePaths()...)
+	paths = append(paths, strictWorkspaceToolEnvironmentPaths()...)
+	paths = append(paths, strictWorkspaceKnownToolHomePaths()...)
+	paths = append(paths, strictWorkspaceExecutableSearchPaths()...)
 	paths = append(paths, resolvedExecutableRoots(target)...)
 	for _, name := range []string{
 		"codex", "claude",
@@ -63,6 +60,183 @@ func strictWorkspaceReadOnlyPaths(cfg *config.Config, target string) []string {
 		}
 	}
 	return existingUniquePaths(paths)
+}
+
+// strictWorkspaceNonHomeRootPaths makes the policy about the endpoint owner's
+// home rather than about a hard-coded Linux distribution. Root-level branches
+// outside HOME are read-only. If HOME is below a custom prefix such as
+// /data/home/user, sibling branches below /data are also read-only, while the
+// user-home container itself stays closed.
+func strictWorkspaceNonHomeRootPaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	home, err = filepath.Abs(home)
+	if err != nil {
+		return nil
+	}
+	parts := strings.Split(strings.TrimPrefix(filepath.Clean(home), string(filepath.Separator)), string(filepath.Separator))
+	if len(parts) == 0 {
+		return nil
+	}
+	var paths []string
+	parent := string(filepath.Separator)
+	for index, homePart := range parts {
+		entries, readErr := os.ReadDir(parent)
+		if readErr != nil {
+			break
+		}
+		for _, entry := range entries {
+			reservedHomeRoot := parent == string(filepath.Separator) && (entry.Name() == "home" || entry.Name() == "root")
+			if entry.Name() == homePart || reservedHomeRoot || (parent == string(filepath.Separator) && entry.Name() == "tmp") {
+				continue
+			}
+			paths = append(paths, filepath.Join(parent, entry.Name()))
+		}
+		if index == len(parts)-2 {
+			break
+		}
+		nextParent := filepath.Join(parent, homePart)
+		if nextParent == "/home" || nextParent == "/root" || nextParent == "/tmp" {
+			break
+		}
+		parent = nextParent
+	}
+	return paths
+}
+
+func strictWorkspaceExecutableSearchPaths() []string {
+	var paths []string
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || !filepath.IsAbs(dir) {
+			continue
+		}
+		paths = append(paths, dir, discoverManagedInstallRoot(dir), discoverHomePathComponentRoot(dir))
+	}
+	return paths
+}
+
+// discoverHomePathComponentRoot treats an ordinary home directory as a public
+// component only when its bin/sbin directory was explicitly exported in PATH.
+func discoverHomePathComponentRoot(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil || !strictPathWithin(home, abs) {
+		return ""
+	}
+	base := filepath.Base(abs)
+	if base != "bin" && base != "sbin" {
+		return ""
+	}
+	root := filepath.Dir(abs)
+	if root == home {
+		return ""
+	}
+	return root
+}
+
+// strictWorkspaceToolEnvironmentPaths covers toolchains installed in ordinary
+// home directories when their standard environment variables identify them.
+// It never derives a parent directory from an arbitrary path.
+func strictWorkspaceToolEnvironmentPaths() []string {
+	var paths []string
+	for _, name := range []string{
+		"GOROOT", "GOPATH", "JAVA_HOME", "JDK_HOME", "M2_HOME", "GRADLE_HOME",
+		"CARGO_HOME", "RUSTUP_HOME", "OPAMROOT", "COQPATH", "COQLIB",
+		"ISABELLE_HOME", "ISABELLE_HOME_USER", "LEAN_PATH", "ELAN_HOME",
+		"NVM_DIR", "VOLTA_HOME", "PYENV_ROOT", "CONDA_PREFIX", "CONDA_ROOT",
+		"SDKMAN_DIR", "ASDF_DIR", "MISE_DATA_DIR",
+	} {
+		for _, value := range filepath.SplitList(os.Getenv(name)) {
+			value = strings.TrimSpace(value)
+			if value == "" || !filepath.IsAbs(value) {
+				continue
+			}
+			paths = append(paths, value)
+		}
+	}
+	return paths
+}
+
+// strictWorkspaceKnownToolHomePaths recognizes conventional user-level
+// component roots that use non-hidden names. Only existing top-level entries
+// with well-known names are selected; unrelated ordinary directories remain
+// outside the Landlock allowlist.
+func strictWorkspaceKnownToolHomePaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		return nil
+	}
+	exact := map[string]struct{}{
+		"go":        {},
+		"miniconda": {}, "miniconda3": {}, "anaconda": {}, "anaconda3": {},
+		"linuxbrew": {}, "homebrew": {},
+		"coqplatform": {}, "proofgeneral": {},
+	}
+	prefixes := []string{"isabelle", "coq", "lean"}
+	var paths []string
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		name := strings.ToLower(entry.Name())
+		_, known := exact[name]
+		if !known {
+			for _, prefix := range prefixes {
+				if strictWorkspaceVersionedToolName(name, prefix) {
+					known = true
+					break
+				}
+			}
+		}
+		if known {
+			paths = append(paths, filepath.Join(home, entry.Name()))
+		}
+	}
+	return paths
+}
+
+func strictWorkspaceVersionedToolName(name, prefix string) bool {
+	if name == prefix {
+		return true
+	}
+	if !strings.HasPrefix(name, prefix) || len(name) == len(prefix) {
+		return false
+	}
+	next := name[len(prefix)]
+	return (next >= '0' && next <= '9') || next == '-' || next == '_'
+}
+
+// strictWorkspaceHiddenHomePaths keeps user-installed CLI tooling compatible
+// without exposing ordinary sibling projects. The endpoint owner explicitly
+// opts into this read-only exception by selecting strict-workspace.
+func strictWorkspaceHiddenHomePaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		return nil
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, ".") || name == "." || name == ".." {
+			continue
+		}
+		paths = append(paths, filepath.Join(home, name))
+	}
+	return paths
 }
 
 func discoverOPAMRoot(path string) string {

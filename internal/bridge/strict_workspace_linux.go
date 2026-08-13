@@ -37,10 +37,6 @@ func RunStrictWorkspaceSandbox(args []string) error {
 	if *workspace == "" || *runtimeDir == "" || len(target) == 0 {
 		return errors.New("sandbox-exec requires --workspace, --runtime, and a target command after --")
 	}
-	// Bun-based Claude Code builds inspect these kernel files during startup.
-	// Resolve /proc/self from inside this re-exec process so the rule remains
-	// bound to the same PID after syscall.Exec replaces it with the target CLI.
-	readOnly = append(readOnly, strictRuntimeIntrospectionPaths()...)
 	if err := applyLandlockRules(*workspace, *runtimeDir, readOnly, state); err != nil {
 		return fmt.Errorf("strict workspace isolation unavailable: %w", err)
 	}
@@ -49,19 +45,6 @@ func RunStrictWorkspaceSandbox(args []string) error {
 		return err
 	}
 	return syscall.Exec(path, target, os.Environ())
-}
-
-func strictRuntimeIntrospectionPaths() []string {
-	return []string{
-		"/proc/self/maps",
-		"/proc/self/cgroup",
-		"/proc/self/statm",
-		"/proc/sys/vm/overcommit_memory",
-		"/proc/sys/vm/mmap_min_addr",
-		"/proc/stat",
-		"/sys/kernel/mm/transparent_hugepage/enabled",
-		"/sys/devices/system/cpu/online",
-	}
 }
 
 func ValidateStrictWorkspaceSupport() error {

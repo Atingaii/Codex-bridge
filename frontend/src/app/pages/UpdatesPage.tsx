@@ -37,6 +37,16 @@ type UpdateItem = {
 const releases: Array<{ date: string; version: string; summary: string; items: UpdateItem[] }> = [
   {
     date: '2026 年 8 月 13 日',
+    version: 'v0.3.36',
+    summary: '将严格工作区收敛为用户目录隔离，恢复 Codex、Claude Code 与嵌套命令沙箱兼容性。',
+    items: [
+      { icon: ShieldCheck, category: '兼容', title: '隐藏工具目录只读可用', detail: '严格模式允许 CLI 只读访问 Home 下已有的点号开头条目，使模型切换器、Hook、状态栏与语言工具链可继续工作；普通外部项目仍不可见。' },
+      { icon: Wrench, category: '运行时', title: '系统与命令沙箱正常工作', detail: '系统目录、运行时、编译器、证明工具链、/proc 与 /sys 完整只读开放，修复 bwrap 启动前因内核信息不可读而失败。' },
+      { icon: ShieldCheck, category: '边界', title: '只隔离其他用户目录', detail: '绑定工作区（含 .git）完整读写；隐藏配置、PATH 与可识别公共工具只读，其他未识别普通用户目录不可见。' },
+    ],
+  },
+  {
+    date: '2026 年 8 月 13 日',
     version: 'v0.3.35',
     summary: '修复严格工作区与本机模型切换器的 Codex 配置兼容问题。',
     items: [
@@ -144,13 +154,13 @@ export function UpdatesPage({ language, setLanguage, isDarkMode, setIsDarkMode }
 
       <main className="mx-auto max-w-5xl px-4 pb-24 pt-12 md:px-6 md:pt-16">
         <section className="border-b border-border pb-12">
-          <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />当前版本 v0.3.35</div>
+          <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />当前版本 v0.3.36</div>
           <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
             <div>
               <h1 className="text-3xl font-semibold leading-tight sm:text-4xl">最近更新</h1>
               <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground">品牌、模型切换、多机器稳定性和长编排体验，最近几次更新集中解决了这些高频问题。</p>
             </div>
-            <a href="https://github.com/Atingaii/ProofBridge/releases/tag/v0.3.35" target="_blank" rel="noreferrer" className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-border px-3 text-xs font-medium hover:bg-muted">查看 Release <ExternalLink className="h-3.5 w-3.5" /></a>
+            <a href="https://github.com/Atingaii/ProofBridge/releases/tag/v0.3.36" target="_blank" rel="noreferrer" className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-border px-3 text-xs font-medium hover:bg-muted">查看 Release <ExternalLink className="h-3.5 w-3.5" /></a>
           </div>
           <div className="mt-8 grid gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-3">
             {highlights.map(({ icon: Icon, label, value }) => (

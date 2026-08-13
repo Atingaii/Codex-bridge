@@ -16,6 +16,13 @@ import (
 
 func TestStrictWorkspaceCommandUsesCanonicalBoundRoot(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("CODEX_BRIDGE_RUNTIME_DIR", filepath.Join(root, "runtime"))
+	for _, name := range []string{"HOME", "CODEX_BRIDGE_RUNTIME_DIR"} {
+		if err := os.MkdirAll(os.Getenv(name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	workspace := filepath.Join(root, "workspace")
 	outside := filepath.Join(root, "outside")
 	if err := os.MkdirAll(workspace, 0o700); err != nil {
@@ -104,6 +111,41 @@ func TestAppendCommandEnvReplacesSensitiveRoots(t *testing.T) {
 	}
 	if strings.Count(joined, "\nTMPDIR=") != 1 || !strings.Contains(joined, "\nTMPDIR=/private/tmp\n") {
 		t.Fatalf("TMPDIR was not replaced exactly once: %#v", cmd.Env)
+	}
+}
+
+func TestStrictWorkspaceHiddenHomePathsSelectTopLevelHiddenEntries(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, path := range []string{
+		filepath.Join(home, ".provider-switcher"),
+		filepath.Join(home, ".ssh"),
+		filepath.Join(home, ".git"),
+		filepath.Join(home, "projects"),
+	} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, ".toolrc"), []byte("config"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := strictWorkspaceHiddenHomePaths()
+	for _, want := range []string{
+		filepath.Join(home, ".provider-switcher"),
+		filepath.Join(home, ".ssh"),
+		filepath.Join(home, ".git"),
+		filepath.Join(home, ".toolrc"),
+	} {
+		if !containsString(got, want) {
+			t.Errorf("hidden home paths %#v do not contain %s", got, want)
+		}
+	}
+	for _, disallowed := range []string{filepath.Join(home, "projects")} {
+		if containsString(got, disallowed) {
+			t.Errorf("hidden home paths unexpectedly contain %s: %#v", disallowed, got)
+		}
 	}
 }
 
@@ -252,7 +294,7 @@ func TestStrictCodexExternalFilesFailClosed(t *testing.T) {
 	})
 }
 
-func TestLandlockStrictWorkspaceReadsLocalizedCodexFilesOnly(t *testing.T) {
+func TestLandlockStrictWorkspaceReadsHiddenHomeEntriesReadOnly(t *testing.T) {
 	if err := ValidateStrictWorkspaceSupport(); err != nil {
 		t.Skip(err)
 	}
@@ -265,17 +307,22 @@ func TestLandlockStrictWorkspaceReadsLocalizedCodexFilesOnly(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	switcherDir := filepath.Join(home, ".provider-switcher")
-	for _, path := range []string{workspace, filepath.Join(home, ".codex"), switcherDir} {
+	normalProject := filepath.Join(home, "other-project")
+	for _, path := range []string{workspace, filepath.Join(home, ".codex"), switcherDir, normalProject} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	instructions := filepath.Join(switcherDir, "instructions.md")
 	siblingSecret := filepath.Join(switcherDir, "credentials.json")
+	normalProjectFile := filepath.Join(normalProject, "private.txt")
 	if err := os.WriteFile(instructions, []byte("localized-ok"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(siblingSecret, []byte("must-not-be-readable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(normalProjectFile, []byte("outside-project"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(home, ".codex", "config.toml")
@@ -294,10 +341,14 @@ func TestLandlockStrictWorkspaceReadsLocalizedCodexFilesOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := "test \"$(cat " + shellTestQuote(privateInstructions) + ")\" = localized-ok" +
-		"; ! cat " + shellTestQuote(instructions) +
-		"; ! cat " + shellTestQuote(siblingSecret)
+		"; test \"$(cat " + shellTestQuote(instructions) + ")\" = localized-ok" +
+		"; test \"$(cat " + shellTestQuote(siblingSecret) + ")\" = must-not-be-readable" +
+		"; ! printf changed > " + shellTestQuote(siblingSecret) +
+		"; test \"$(cat " + shellTestQuote(siblingSecret) + ")\" = must-not-be-readable" +
+		"; ! cat " + shellTestQuote(normalProjectFile)
 	args := []string{"-test.run=TestStrictWorkspaceSandboxHelper", "--", "--workspace", workspace, "--runtime", runtimeDir,
 		"--read-only", "/bin", "--read-only", "/usr/bin", "--read-only", "/usr/lib", "--read-only", "/lib",
+		"--read-only", switcherDir,
 		"--state", "/dev/null", "--", "/bin/sh", "-c", script}
 	cmd := exec.Command(exe, args...)
 	cmd.Env = append(os.Environ(), "CODEX_BRIDGE_STRICT_HELPER=1")
@@ -306,18 +357,175 @@ func TestLandlockStrictWorkspaceReadsLocalizedCodexFilesOnly(t *testing.T) {
 	}
 }
 
-func TestStrictRuntimeIntrospectionPathsAreFilesNotBroadTrees(t *testing.T) {
-	for _, path := range strictRuntimeIntrospectionPaths() {
-		if path == "/proc" || path == "/proc/self" || path == "/sys" || path == "/sys/kernel" {
-			t.Fatalf("strict runtime introspection path is too broad: %s", path)
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
 		}
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
+	}
+	return false
+}
+
+func TestStrictWorkspaceReadOnlyPathsIncludeBroadSystemRoots(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.Default()
+	paths := strictWorkspaceReadOnlyPaths(&cfg, "/bin/sh")
+	for _, want := range []string{"/dev", "/etc", "/opt", "/proc", "/run", "/sys", "/usr", "/var"} {
+		if _, err := os.Stat(want); err == nil && !containsString(paths, want) {
+			t.Errorf("strict read-only paths do not contain system root %s: %#v", want, paths)
 		}
-		if info.IsDir() {
-			t.Fatalf("strict runtime introspection path must be a file: %s", path)
+	}
+}
+
+func TestStrictWorkspaceNonHomeRootPathsExcludeHomeContainerAndSharedTmp(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	paths := strictWorkspaceNonHomeRootPaths()
+	for _, denied := range []string{"/tmp", "/home", "/root"} {
+		if containsString(paths, denied) {
+			t.Fatalf("non-home root paths unexpectedly expose private root %s: %#v", denied, paths)
 		}
+	}
+	if containsString(paths, filepath.Dir(home)) || containsString(paths, home) {
+		t.Fatalf("non-home root paths unexpectedly expose home container: %#v", paths)
+	}
+	if _, err := os.Stat("/usr"); err == nil && !containsString(paths, "/usr") {
+		t.Fatalf("non-home root paths do not contain /usr: %#v", paths)
+	}
+}
+
+func TestStrictWorkspaceNonHomeRootPathsDoNotScanMultiUserContainers(t *testing.T) {
+	for _, home := range []string{"/home/users/endpoint", "/root/nested", "/tmp/runtime-home/endpoint"} {
+		t.Run(home, func(t *testing.T) {
+			t.Setenv("HOME", home)
+			for _, path := range strictWorkspaceNonHomeRootPaths() {
+				if strictPathWithin("/home", path) || strictPathWithin("/root", path) || strictPathWithin("/tmp", path) {
+					t.Fatalf("home %s unexpectedly exposed private container path %s", home, path)
+				}
+			}
+		})
+	}
+}
+
+func TestStrictWorkspaceExecutableSearchPathsAllowOnlyConfiguredBins(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	toolBin := filepath.Join(home, "public-tools", "bin")
+	privateDir := filepath.Join(home, "private-notes")
+	for _, path := range []string{toolBin, privateDir} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", toolBin+string(os.PathListSeparator)+"relative-bin")
+	paths := strictWorkspaceExecutableSearchPaths()
+	if !containsString(paths, toolBin) {
+		t.Fatalf("executable search paths %#v do not contain %s", paths, toolBin)
+	}
+	if !containsString(paths, filepath.Dir(toolBin)) {
+		t.Fatalf("executable search paths %#v do not contain PATH component root %s", paths, filepath.Dir(toolBin))
+	}
+	if containsString(paths, home) || containsString(paths, privateDir) {
+		t.Fatalf("executable search paths widened outside configured bin: %#v", paths)
+	}
+}
+
+func TestDiscoverHomePathComponentRootRequiresExplicitBin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	component := filepath.Join(home, "component", "bin")
+	if got := discoverHomePathComponentRoot(component); got != filepath.Dir(component) {
+		t.Fatalf("component root = %q, want %q", got, filepath.Dir(component))
+	}
+	for _, path := range []string{filepath.Join(home, "private"), filepath.Join(home, "bin"), "/usr/bin"} {
+		if got := discoverHomePathComponentRoot(path); got != "" {
+			t.Errorf("component root for %q = %q, want empty", path, got)
+		}
+	}
+}
+
+func TestStrictWorkspaceToolEnvironmentPathsAllowConfiguredRootsOnly(t *testing.T) {
+	home := t.TempDir()
+	goRoot := filepath.Join(home, "component-store", "go")
+	privateDir := filepath.Join(home, "private-notes")
+	t.Setenv("GOROOT", goRoot)
+	t.Setenv("JAVA_HOME", "relative-java")
+	paths := strictWorkspaceToolEnvironmentPaths()
+	if !containsString(paths, goRoot) {
+		t.Fatalf("tool environment paths %#v do not contain %s", paths, goRoot)
+	}
+	if containsString(paths, filepath.Dir(goRoot)) || containsString(paths, privateDir) {
+		t.Fatalf("tool environment paths widened beyond configured roots: %#v", paths)
+	}
+}
+
+func TestStrictWorkspaceKnownToolHomePathsSelectComponentsOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{"go", "miniconda3", "Isabelle2025", "CoqPlatform", "projects", "documents"} {
+		if err := os.MkdirAll(filepath.Join(home, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths := strictWorkspaceKnownToolHomePaths()
+	for _, name := range []string{"go", "miniconda3", "Isabelle2025", "CoqPlatform"} {
+		if !containsString(paths, filepath.Join(home, name)) {
+			t.Errorf("known tool paths %#v do not contain %s", paths, name)
+		}
+	}
+	for _, name := range []string{"projects", "documents"} {
+		if containsString(paths, filepath.Join(home, name)) {
+			t.Errorf("known tool paths unexpectedly contain %s: %#v", name, paths)
+		}
+	}
+}
+
+func TestStrictWorkspaceVersionedToolNameRejectsCoincidentalPrefixes(t *testing.T) {
+	for name, prefix := range map[string]string{
+		"isabelle": "isabelle", "isabelle2025": "isabelle", "coq-8.20": "coq", "lean_4": "lean",
+	} {
+		if !strictWorkspaceVersionedToolName(name, prefix) {
+			t.Errorf("expected %q to match %q", name, prefix)
+		}
+	}
+	for name, prefix := range map[string]string{
+		"coquette-private": "coq", "leaning-notes": "lean", "isabellesecret": "isabelle",
+	} {
+		if strictWorkspaceVersionedToolName(name, prefix) {
+			t.Errorf("unexpectedly matched private-looking name %q", name)
+		}
+	}
+}
+
+func TestLandlockStrictWorkspaceAllowsSystemRuntimeTrees(t *testing.T) {
+	if err := ValidateStrictWorkspaceSupport(); err != nil {
+		t.Skip(err)
+	}
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	runtimeDir := filepath.Join(root, "runtime")
+	for _, path := range []string{workspace, runtimeDir} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "cat /proc/sys/kernel/overflowuid >/dev/null" +
+		"; cat /proc/sys/kernel/overflowgid >/dev/null" +
+		"; cat /sys/devices/system/cpu/online >/dev/null" +
+		"; test -r /etc/os-release"
+	args := []string{"-test.run=TestStrictWorkspaceSandboxHelper", "--", "--workspace", workspace, "--runtime", runtimeDir,
+		"--read-only", "/bin", "--read-only", "/dev", "--read-only", "/etc", "--read-only", "/proc",
+		"--read-only", "/sys", "--read-only", "/usr", "--read-only", "/lib", "--state", "/dev/null",
+		"--", "/bin/sh", "-c", script}
+	cmd := exec.Command(exe, args...)
+	cmd.Env = append(os.Environ(), "CODEX_BRIDGE_STRICT_HELPER=1")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("strict system runtime helper failed: %v\n%s", err, output)
 	}
 }
 

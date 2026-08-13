@@ -140,11 +140,13 @@ unknown policies fail closed; changing a policy requires a Hub restart.
   workspace-write --approval-policy never --strict-workspace`. Codex, Claude
   Code, ACP adapters, and every command they start run without browser approval
   inside a Linux Landlock boundary. The bound workspace and per-workspace CLI
-  state are writable; detected runtimes, proof tools, libraries, and
-  certificates are read-only; other projects and shared `/tmp` are invisible.
-  Bridge recognizes common system, nvm, Volta, fnm, pyenv, Conda, rbenv,
-  SDKMAN, asdf, mise, Rustup, Elan, Linuxbrew, opam, Isabelle, Nix, Guix,
-  Snap, native Claude, standalone Codex, and npm layouts.
+  state are writable. Standard system/runtime trees, including `/proc` and
+  `/sys`, non-home mount branches, hidden home entries, and positively
+  identified public tool roots are read-only. Other unrecognized ordinary home directories and shared
+  `/tmp` are invisible. Bridge recognizes absolute `PATH` entries, standard
+  tool environment variables, and common nvm, Volta, fnm, pyenv, Conda, rbenv,
+  SDKMAN, asdf, mise, Rustup, Elan, Linuxbrew, opam, Isabelle, Coq, Lean, Nix,
+  Guix, Snap, native Claude, standalone Codex, and npm layouts.
   Set `BRIDGE_STRICT_WORKSPACE_READ_ONLY` to an OS path-list only when a custom
   toolchain lives elsewhere. Landlock ABI 3 or newer is required; startup fails
   closed on unsupported kernels and non-Linux hosts.

@@ -141,8 +141,8 @@ func Default() Config {
 			MaxAttachmentBytes:       8 * 1024 * 1024,
 			MaxAssistantMessageBytes: 4 * 1024 * 1024,
 			FeatureRollouts: map[string]string{
-				"strict-workspace":             "admin",
-				"orchestration-plan-workspace": "admin",
+				"strict-workspace":             "all",
+				"orchestration-plan-workspace": "all",
 			},
 		},
 		Bridge: BridgeConfig{

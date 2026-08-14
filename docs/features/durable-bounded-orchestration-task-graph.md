@@ -73,8 +73,8 @@ integration, and review in order. This deliberately trades candidate parallelism
 for direct, visible work in the user's selected checkout. The final graph cannot
 become `completed` unless the reviewer node is `succeeded`.
 
-The administrator-only `orchestration-plan-workspace` rollout prepends a
-planning barrier without replacing the ordinary topology:
+The `orchestration-plan-workspace` rollout prepends a planning barrier without
+replacing the ordinary topology. Its stable default is `all`:
 
 ```text
 plan -> plan-review -> candidate-a -> candidate-b -> integrate -> review

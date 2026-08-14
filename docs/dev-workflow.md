@@ -121,13 +121,14 @@ The settings UI exposes three permission profiles:
 
 User-facing gray rollouts are configured under `hub.feature_rollouts`. Each
 entry maps a registered feature key to `off`, `admin`, `all`, `percent:N`, or
-`users:name1,name2`. The default `strict-workspace: admin` exposes the new
-workspace-only mode only to the configured Hub administrator. Invalid or
-unknown policies fail closed; changing a policy requires a Hub restart.
-`orchestration-plan-workspace: admin` similarly prepends the bounded planner
-and independent plan-review nodes and exposes the overlay progress workspace
-only to the administrator. Existing runs preserve the topology stored in their
-latest task graph, even if rollout policy later changes.
+`users:name1,name2`. The default `strict-workspace: all` makes the
+workspace-only mode available to every account as an explicit opt-in. Existing
+endpoints retain their selected profile. Invalid or unknown policies fail
+closed; changing a policy requires a Hub restart.
+`orchestration-plan-workspace: all` similarly prepends the bounded planner and
+independent plan-review nodes and exposes the progress workspace to every
+account. Existing runs preserve the topology stored in their latest task graph,
+even if rollout policy later changes.
 
 - `review-required`: starts Bridge with `--runner codex-app-server --sandbox
   workspace-write --approval-policy untrusted`. Codex chat and Codex

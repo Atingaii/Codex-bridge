@@ -1357,7 +1357,7 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		t.Fatalf("default permission profile = %#v", tokenBody["permissionProfile"])
 	}
 	profiles := tokenBody["permissionProfiles"].([]any)
-	if len(profiles) != 2 {
+	if len(profiles) != 3 {
 		t.Fatalf("permissionProfiles = %#v", profiles)
 	}
 	profileCommands := map[string]string{}
@@ -1383,8 +1383,8 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	if !strings.Contains(profileCommands["auto-execute"], "codex-bridge link") || !strings.Contains(profileCommands["auto-execute"], "--profile 'auto-execute'") {
 		t.Fatalf("auto-execute command missing link profile: %s", profileCommands["auto-execute"])
 	}
-	if _, ok := profileCommands["strict-workspace"]; ok {
-		t.Fatalf("non-admin response exposed strict-workspace: %#v", profileCommands)
+	if !strings.Contains(profileCommands["strict-workspace"], "codex-bridge link") || !strings.Contains(profileCommands["strict-workspace"], "--profile 'strict-workspace'") {
+		t.Fatalf("strict-workspace command missing link profile: %s", profileCommands["strict-workspace"])
 	}
 	if strings.Contains(profileCommands["review-required"], "--machine-id ") {
 		t.Fatalf("new endpoint command should not pin a machine id: %s", profileCommands["review-required"])
@@ -1438,11 +1438,11 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/bridge-tokens", map[string]string{
 		"permissionProfile": "surprise-me",
 	}, http.StatusBadRequest)
-	deniedStrict := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/bridge-tokens", map[string]string{
+	strictBody := postJSON(t, workerClient, cfg.Bridge.HubURL+"/api/bridge-tokens", map[string]string{
 		"permissionProfile": "strict-workspace",
-	}, http.StatusForbidden)
-	if deniedStrict["code"] != "FEATURE_NOT_AVAILABLE" {
-		t.Fatalf("strict-workspace denial = %#v", deniedStrict)
+	}, http.StatusCreated)
+	if strictBody["permissionProfile"] != "strict-workspace" || !strings.Contains(strictBody["connectCommand"].(string), "--profile 'strict-workspace'") {
+		t.Fatalf("strict-workspace response = %#v", strictBody)
 	}
 
 	fakeBridge := dialFakeBridgeWithOptions(t, cfg.Bridge.HubURL, token, fakeBridgeOptions{WorkingDirs: []string{tmp}})
@@ -1480,7 +1480,7 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 	}
 	assertNoSudoCommandFields(t, repairBody)
 	repairProfiles := repairBody["permissionProfiles"].([]any)
-	if len(repairProfiles) != 2 {
+	if len(repairProfiles) != 3 {
 		t.Fatalf("repair profiles = %#v", repairProfiles)
 	}
 	var sawPinnedAuto bool
@@ -1494,8 +1494,8 @@ func TestExistingUserBridgeTokenBindsAgentToUser(t *testing.T) {
 		if profile["id"] == "auto-execute" && strings.Contains(connect, "--profile 'auto-execute'") {
 			sawPinnedAuto = true
 		}
-		if profile["id"] == "strict-workspace" {
-			t.Fatalf("non-admin repair response exposed strict-workspace: %#v", repairProfiles)
+		if profile["id"] == "strict-workspace" && !strings.Contains(connect, "--profile 'strict-workspace'") {
+			t.Fatalf("repair profile missing strict-workspace command: %#v", profile)
 		}
 	}
 	if !sawPinnedAuto {

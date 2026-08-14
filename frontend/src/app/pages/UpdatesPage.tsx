@@ -37,6 +37,15 @@ type UpdateItem = {
 const releases: Array<{ date: string; version: string; summary: string; items: UpdateItem[] }> = [
   {
     date: '2026 年 8 月 14 日',
+    version: 'v0.3.44',
+    summary: '工作区隔离和编排规划工作台结束灰度，现已向所有用户开放。',
+    items: [
+      { icon: ShieldCheck, category: '权限模式', title: '工作区隔离全量可选', detail: '所有账号均可在连接机器时选择自动执行（仅工作区）；原有机器继续保持当前权限模式，不会被自动切换。' },
+      { icon: Network, category: '编排', title: '规划与进度全量启用', detail: '新建编排默认包含规划与审核节点，并向所有用户提供中文任务清单、进度地图和任务级别切换。' },
+    ],
+  },
+  {
+    date: '2026 年 8 月 14 日',
     version: 'v0.3.43',
     summary: '同一编排对话支持按用户任务查看计划、执行图和 Token 用量，并收敛重复的超宽屏规划面板。',
     items: [
@@ -48,7 +57,7 @@ const releases: Array<{ date: string; version: string; summary: string; items: U
   {
     date: '2026 年 8 月 14 日',
     version: 'v0.3.40',
-    summary: '管理员规划工作台补齐证明任务地图，并强化活跃任务删除的并发收敛。',
+    summary: '规划工作台补齐证明任务地图，并强化活跃任务删除的并发收敛。',
     items: [
       { icon: Network, category: '证明进度', title: '证明路线与运行节点分层展示', detail: '证明任务地图按分支、依赖、难度、优先级和局部进度展示整体路线；Agent 节点作为次级运行视图，不再混同为证明完成度。' },
       { icon: Bot, category: '规划', title: '计划与审核输出完整证明义务', detail: '规划 Agent 先拆解总体目标和证明分支，审核 Agent 修正依赖与顺序；后续候选、整合和复核节点用结构化标志持续更新证据。' },
@@ -59,11 +68,11 @@ const releases: Array<{ date: string; version: string; summary: string; items: U
   {
     date: '2026 年 8 月 13 日',
     version: 'v0.3.39',
-    summary: '多机器编排选择保持稳定，并为管理员灰度加入不挤压对话区的规划进度工作台。',
+    summary: '多机器编排选择保持稳定，并加入不挤压对话区的规划进度工作台。',
     items: [
       { icon: Network, category: '导航', title: '用户选择不再被后台刷新覆盖', detail: '切换标签页、恢复可见或实时刷新时，以当前 URL 和用户点击的机器为准；左侧任务继续按机器隔离，并以绿色标记活跃任务及其机器。' },
       { icon: Wrench, category: '状态机', title: '运行记录支持安全删除', detail: '历史任务直接删除；活跃任务先进入取消中，等待 Bridge 终态或超时收敛后再级联删除，迟到事件不会复活任务或继续派发节点。' },
-      { icon: Bot, category: '规划', title: '新增双 Agent 规划与审核', detail: '管理员灰度运行会先由规划 Agent 拆分清单，再由独立 Agent 审核，随后保持原候选、整合与复核流程。' },
+      { icon: Bot, category: '规划', title: '新增双 Agent 规划与审核', detail: '规划 Agent 先拆分清单，再由独立 Agent 审核，随后保持原候选、整合与复核流程。' },
       { icon: BarChart3, category: '进度', title: '覆盖式规划进度工作台', detail: '可切换初始与每轮提示词，通过 React Flow 查看节点进度并跟踪完成清单；工作台默认关闭且覆盖显示，不会压缩原有实时对话区。' },
     ],
   },
@@ -205,13 +214,13 @@ export function UpdatesPage({ language, setLanguage, isDarkMode, setIsDarkMode }
 
       <main className="mx-auto max-w-5xl px-4 pb-24 pt-12 md:px-6 md:pt-16">
         <section className="border-b border-border pb-12">
-          <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />当前版本 v0.3.43</div>
+          <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />当前版本 v0.3.44</div>
           <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
             <div>
               <h1 className="text-3xl font-semibold leading-tight sm:text-4xl">最近更新</h1>
               <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground">品牌、模型切换、多机器稳定性和长编排体验，最近几次更新集中解决了这些高频问题。</p>
             </div>
-            <a href="https://github.com/Atingaii/ProofBridge/releases/tag/v0.3.43" target="_blank" rel="noreferrer" className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-border px-3 text-xs font-medium hover:bg-muted">查看 Release <ExternalLink className="h-3.5 w-3.5" /></a>
+            <a href="https://github.com/Atingaii/ProofBridge/releases/tag/v0.3.44" target="_blank" rel="noreferrer" className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-border px-3 text-xs font-medium hover:bg-muted">查看 Release <ExternalLink className="h-3.5 w-3.5" /></a>
           </div>
           <div className="mt-8 grid gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-3">
             {highlights.map(({ icon: Icon, label, value }) => (

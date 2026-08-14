@@ -101,8 +101,8 @@ Bridge (independent execution handles per run)
 Codex CLI / Claude CLI
 ```
 
-For administrators in the `orchestration-plan-workspace` rollout, new durable
-runs prepend planner and independent plan-review tasks. Their structured event
+For users in the `orchestration-plan-workspace` rollout, new durable runs
+prepend planner and independent plan-review tasks. Their structured event
 markers are projected by `internal/hub/task_graph.go:reduceOrchestrationPlan`
 into one proof-domain plan containing the overall goal, branches,
 dependencies, difficulty, priority, readiness, local progress, and evidence.

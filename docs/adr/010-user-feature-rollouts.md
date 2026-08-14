@@ -32,8 +32,9 @@ Each new gated feature registers a stable key in
 `hub.feature_rollouts`, and checks the evaluator at every state-changing
 backend entry point. The frontend reads the same key from `user.features`; it
 must not infer rollout membership from administrator status or duplicate a
-rollout policy. The first consumer is `strict-workspace`, whose default policy
-is `admin`.
+rollout policy. The current stable defaults for `strict-workspace` and
+`orchestration-plan-workspace` are `all`. The former remains a selectable
+opt-in profile rather than changing existing endpoints automatically.
 
 ## Consequences
 

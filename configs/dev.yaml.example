@@ -30,8 +30,8 @@ hub:
   max_assistant_message_bytes: 4194304
   # User feature rollouts: off, admin, all, percent:N, or users:name1,name2.
   feature_rollouts:
-    strict-workspace: admin
-    orchestration-plan-workspace: admin
+    strict-workspace: all
+    orchestration-plan-workspace: all
 
 bridge:
   hub_url: http://127.0.0.1:8088

@@ -6,11 +6,12 @@ Add an opt-in CLI endpoint permission profile that runs Codex and Claude Code
 without browser approvals while preventing their process trees from reading or
 writing user projects outside the directory bound by `codex-bridge link`.
 
-The first production release uses the shared feature rollout evaluator with an
-`admin` policy. The Hub omits this profile from accounts outside the rollout
-and rejects their create or repair requests that explicitly name
-`strict-workspace`. This rollout gate is enforced server-side; the UI hiding
-the option is only a convenience. See
+The initial production validation used the shared feature rollout evaluator
+with an `admin` policy. The stable default is now `all`, so every account can
+explicitly select this profile when creating or repairing an endpoint. The Hub
+continues to enforce the rollout policy server-side if an operator overrides
+it. Existing endpoints keep their selected profile; this release does not
+silently migrate them. See
 [ADR-010](../adr/010-user-feature-rollouts.md).
 
 The existing `review-required` and `auto-execute` profiles keep their current
@@ -176,8 +177,8 @@ first-run capability declaration for user-installed tools.
   process wrapper.
 - Bridge capability metadata reports `approvalMode=strict-workspace`.
 - Bridge-token APIs include a third `permissionProfiles` entry. Existing
-  response fields remain compatible. During the gray rollout, only admin
-  responses include that entry.
+  response fields remain compatible. With the default `all` rollout, every
+  account receives that entry.
 
 ## Implementation Steps
 

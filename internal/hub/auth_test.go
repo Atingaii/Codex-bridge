@@ -61,9 +61,9 @@ func TestAuthResponsesExposeEnabledFeatures(t *testing.T) {
 	assertUserFeatures(t, authRequestWithCookie(t, s, http.MethodGet, "/api/me", adminCookie, http.StatusOK), "strict-workspace", "orchestration-plan-workspace")
 
 	workerLogin := login(t, s, map[string]string{"username": "worker", "password": "abc1234567"}, http.StatusOK)
-	assertUserFeatures(t, workerLogin)
+	assertUserFeatures(t, workerLogin, "strict-workspace", "orchestration-plan-workspace")
 	workerCookie := loginCookie(t, s, map[string]string{"username": "worker", "password": "abc1234567"})
-	assertUserFeatures(t, authRequestWithCookie(t, s, http.MethodGet, "/api/me", workerCookie, http.StatusOK))
+	assertUserFeatures(t, authRequestWithCookie(t, s, http.MethodGet, "/api/me", workerCookie, http.StatusOK), "strict-workspace", "orchestration-plan-workspace")
 }
 
 func assertUserFeatures(t *testing.T, body map[string]any, want ...string) {

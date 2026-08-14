@@ -4,9 +4,9 @@
 
 - Keep the live orchestration transcript as the primary browser surface while
   exposing prompt navigation and durable progress from one dedicated workspace.
-- Add an administrator-only rollout that prepends a planning node and an
-  independent plan-review node to the existing candidate, integration, and
-  final-review task graph.
+- Add a rollout-controlled planning node and an independent plan-review node
+  to the existing candidate, integration, and final-review task graph. The
+  stable default makes this workflow available to every user.
 - Show the initial prompt and every persisted turn prompt without replacing or
   duplicating the orchestration conversation.
 - Derive a visible checklist from machine-readable planner markers and apply
@@ -26,7 +26,7 @@
   evidence requirements.
 - No requirement for an old Bridge to understand new browser-only progress
   response fields.
-- No layout change for users outside the rollout.
+- No layout change when an operator explicitly disables the rollout.
 
 ## User Experience
 
@@ -68,7 +68,7 @@ layout.
 
 - Register `orchestration-plan-workspace` in
   `internal/rollout/rollout.go:RegisteredFeatures`; the default policy is
-  `admin`.
+  `all`.
 - Add the optional `planWorkspace` field to
   `internal/protocol.OrchestrationStartPayload`. JSON omission preserves old
   Hub and Bridge compatibility.

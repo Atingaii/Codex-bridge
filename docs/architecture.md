@@ -101,6 +101,24 @@ Bridge (independent execution handles per run)
 Codex CLI / Claude CLI
 ```
 
+For administrators in the `orchestration-plan-workspace` rollout, new durable
+runs prepend planner and independent plan-review tasks. Their structured event
+markers are projected by `internal/hub/task_graph.go:reduceOrchestrationPlan`
+into one proof-domain plan containing the overall goal, branches,
+dependencies, difficulty, priority, readiness, local progress, and evidence.
+The browser renders this proof map and checklist from the same projection while
+keeping the durable Agent task graph as a separate, secondary runtime view.
+The workspace is a default-closed inline section immediately below the runtime
+toolbar. Its bounded expanded state leaves the transcript in normal document
+flow, and its checklist never falls back to internal Agent errors.
+
+Active-run deletion is a durable state transition rather than a browser-only
+removal. `internal/store/store.go:RequestDeleteOrchestrationRun` records the
+delete intent and atomically cancels unfinished attempts, tasks, and the active
+graph before Hub dispatches the Bridge cancellation. Late terminal events
+cannot revive the run or unlock successor tasks, and terminal acknowledgment
+or the existing cancellation timeout deletes the requested row by cascade.
+
 The Bridge keeps orchestration deterministic while preserving native CLI
 continuity. Each run persists a narrow `worker_pair`: `claude-codex` keeps the
 default Claude Code + Codex relay, while `codex-codex` runs two Codex

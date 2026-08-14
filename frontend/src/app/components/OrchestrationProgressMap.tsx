@@ -45,6 +45,9 @@ export interface OrchestrationProgressTask {
   dependencies?: string[];
   detail?: string;
   durationMs?: number;
+  obligationCount?: number;
+  completedObligationCount?: number;
+  activeObligation?: string;
 }
 
 export interface OrchestrationProgressMapProps {
@@ -169,7 +172,10 @@ export function OrchestrationProgressMap({
 function ProgressNodeCard({ data }: NodeProps<ProgressNode>) {
   const tone = progressStatusTone(data.task.status, data.active);
   const StatusIcon = tone.icon;
-  const meta = data.task.detail || data.task.role;
+  const obligationProgress = data.task.obligationCount != null
+    ? `${data.task.completedObligationCount || 0}/${data.task.obligationCount} 义务`
+    : '';
+  const meta = data.task.activeObligation || obligationProgress || data.task.detail || data.task.role;
   return (
     <div
       className={cn(

@@ -1841,6 +1841,36 @@ func (s *Store) RequestDeleteOrchestrationRun(ctx context.Context, id, userID st
 	`, OrchestrationCanceling, now, id, userID); err != nil {
 		return OrchestrationRun{}, "", err
 	}
+	const deleteReason = "orchestration deletion requested"
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_task_attempts
+		SET status = 'canceled', error = ?, finished_at = ?
+		WHERE status IN ('pending','dispatching','running')
+			AND task_id IN (
+				SELECT t.id FROM orchestration_tasks t
+				JOIN orchestration_task_graphs g ON g.id = t.graph_id
+				WHERE g.run_id = ? AND g.status = 'running'
+			)
+	`, deleteReason, now, id); err != nil {
+		return OrchestrationRun{}, "", err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_tasks
+		SET status = 'canceled', error = ?, updated_at = ?, finished_at = ?
+		WHERE status IN ('pending','ready','dispatching','running','unknown','blocked')
+			AND graph_id IN (
+				SELECT id FROM orchestration_task_graphs WHERE run_id = ? AND status = 'running'
+			)
+	`, deleteReason, now, now, id); err != nil {
+		return OrchestrationRun{}, "", err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orchestration_task_graphs
+		SET status = 'canceled', updated_at = ?, finished_at = ?
+		WHERE run_id = ? AND status = 'running'
+	`, now, now, id); err != nil {
+		return OrchestrationRun{}, "", err
+	}
 	if err := tx.Commit(); err != nil {
 		return OrchestrationRun{}, "", err
 	}

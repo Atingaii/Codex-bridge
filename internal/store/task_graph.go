@@ -119,6 +119,20 @@ func (s *Store) createOrchestrationTaskGraph(ctx context.Context, runID, previou
 		return OrchestrationTaskGraph{}, false, err
 	}
 	defer tx.Rollback()
+	var runStatus string
+	var deleteRequested int
+	if err := tx.QueryRowContext(ctx, `SELECT status, COALESCE(delete_requested,0) FROM orchestration_runs WHERE id = ?`, runID).Scan(&runStatus, &deleteRequested); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return OrchestrationTaskGraph{}, false, ErrNotFound
+		}
+		return OrchestrationTaskGraph{}, false, err
+	}
+	if deleteRequested != 0 || (runStatus != OrchestrationQueued && runStatus != OrchestrationRunning) {
+		if previousGraphID != "" {
+			return OrchestrationTaskGraph{}, false, nil
+		}
+		return OrchestrationTaskGraph{}, false, ErrConflict
+	}
 	var latestID string
 	var latestGeneration int
 	err = tx.QueryRowContext(ctx, `SELECT id, generation FROM orchestration_task_graphs WHERE run_id = ? ORDER BY generation DESC LIMIT 1`, runID).Scan(&latestID, &latestGeneration)
@@ -408,6 +422,14 @@ func propagateTaskGraphTx(ctx context.Context, tx *sql.Tx, taskID, terminal stri
 			UPDATE orchestration_tasks
 			SET status = 'ready', updated_at = ?
 			WHERE graph_id = ? AND status = 'pending'
+				AND EXISTS (
+					SELECT 1 FROM orchestration_task_graphs g
+					JOIN orchestration_runs r ON r.id = g.run_id
+					WHERE g.id = orchestration_tasks.graph_id
+						AND g.status = 'running'
+						AND r.status IN ('queued','running')
+						AND r.delete_requested = 0
+				)
 				AND NOT EXISTS (
 					SELECT 1 FROM orchestration_task_dependencies d
 					JOIN orchestration_tasks parent ON parent.id = d.depends_on_task_id

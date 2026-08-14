@@ -985,6 +985,18 @@ func TestDeleteRequestedRunCannotBeRevivedAndCascades(t *testing.T) {
 	if _, _, claimed, err := st.ClaimReadyTask(ctx, graph.Tasks[0].ID, ""); err != nil || claimed {
 		t.Fatalf("claim after delete: claimed=%v err=%v", claimed, err)
 	}
+	canceledGraph, err := st.TaskGraphByRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canceledGraph.Status != TaskGraphCanceled {
+		t.Fatalf("delete request graph status = %q", canceledGraph.Status)
+	}
+	for _, task := range canceledGraph.Tasks {
+		if task.Status != TaskCanceled {
+			t.Fatalf("delete request left unfinished task active: %#v", task)
+		}
+	}
 	if _, changed, err := st.CancelOrchestrationRunIfStillCanceling(ctx, run.ID, "delete requested"); err != nil || !changed {
 		t.Fatalf("settle deletion: changed=%v err=%v", changed, err)
 	}

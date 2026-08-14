@@ -18,6 +18,7 @@ export function PublicSharePage({ shareID, t }: { shareID: string; t: UIText }) 
   const [error, setError] = useState('');
   const [collapsedTimelineGroups, setCollapsedTimelineGroups] = useState<Record<string, boolean>>({});
   const collapsedTimelineShareKeyRef = React.useRef('');
+  const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const visibleEvents = useMemo(() => {
     if (!payload?.run) return [];
     return visibleOrchestrationEvents(payload.events || [], payload.run.id, payload.run, t);
@@ -80,7 +81,12 @@ export function PublicSharePage({ shareID, t }: { shareID: string; t: UIText }) 
     setCollapsedTimelineGroups((current) => ({ ...current, [groupKey]: false }));
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
-        document.getElementById(targetID)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        const container = timelineScrollRef.current;
+        const target = document.getElementById(targetID);
+        if (!container || !target) return;
+        const containerTop = container.getBoundingClientRect().top;
+        const targetTop = target.getBoundingClientRect().top;
+        container.scrollTo({ top: container.scrollTop + targetTop - containerTop - 12, behavior: 'smooth' });
       });
     });
   };
@@ -167,7 +173,7 @@ export function PublicSharePage({ shareID, t }: { shareID: string; t: UIText }) 
         </div>
 
         <div className="relative flex-1 min-h-0">
-          <div className="h-full overflow-y-auto p-4 md:p-6 space-y-4 elegant-scrollbar">
+          <div ref={timelineScrollRef} className="h-full overflow-y-auto p-4 md:p-6 space-y-4 elegant-scrollbar">
             {loading ? (
               <div className="h-full flex items-center justify-center">
                 <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />

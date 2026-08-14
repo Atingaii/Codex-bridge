@@ -166,15 +166,68 @@ func TestReduceOrchestrationPlanUsesReviewedListAndValidatedUpdates(t *testing.T
 		{Task: ref("candidate-a"), Content: "[PLAN_UPDATE id=\"P1\" status=\"in_progress\"] started proof\n[PLAN_UPDATE id=\"P2\" status=\"completed\"] stale draft id"},
 		{Task: ref("review"), Content: "[PLAN_UPDATE id=\"P1\" status=\"completed\"] coqc Proof.v passed\n[PLAN_UPDATE id=\"P3\" status=\"blocked\"] missing axiom"},
 	}
-	items := reduceOrchestrationPlan(events)
-	if len(items) != 2 {
-		t.Fatalf("reduced reviewed plan = %#v", items)
+	plan := reduceOrchestrationPlan(events)
+	if len(plan.Items) != 2 {
+		t.Fatalf("reduced reviewed plan = %#v", plan)
 	}
-	if items[0].ID != "P1" || items[0].Title != "reviewed one" || items[0].Status != "completed" || items[0].Evidence != "coqc Proof.v passed" {
-		t.Fatalf("reduced P1 = %#v", items[0])
+	if plan.Items[0].ID != "P1" || plan.Items[0].Title != "reviewed one" || plan.Items[0].Status != "completed" || plan.Items[0].Progress != 100 || plan.Items[0].Evidence != "coqc Proof.v passed" {
+		t.Fatalf("reduced P1 = %#v", plan.Items[0])
 	}
-	if items[1].ID != "P3" || items[1].Title != "reviewed three" || items[1].Status != "blocked" || items[1].Evidence != "missing axiom" {
-		t.Fatalf("reduced P3 = %#v", items[1])
+	if plan.Items[1].ID != "P3" || plan.Items[1].Title != "reviewed three" || plan.Items[1].Status != "blocked" || plan.Items[1].Evidence != "missing axiom" {
+		t.Fatalf("reduced P3 = %#v", plan.Items[1])
+	}
+}
+
+func TestReduceOrchestrationPlanProjectsEnrichedMetadataAndFiltersDependencies(t *testing.T) {
+	ref := func(name string) *protocol.TaskAttemptRef { return &protocol.TaskAttemptRef{Name: name} }
+	events := []store.OrchestrationEvent{
+		{Task: ref("plan"), Content: "[PLAN_GOAL] 证明锁协议满足互斥性\n" +
+			"[PLAN_ITEM priority=\"2\" id=\"P2\" branch=\"归纳步\" depends=\"P1,P2,P9,P1\" status=\"pending\" difficulty=\"hard\" kind=\"proof\"] 证明归纳保持 | 依赖基础定义\n" +
+			"[PLAN_ITEM id=\"P1\" status=\"completed\" kind=\"research\" difficulty=\"easy\" priority=\"1\" depends=\"\"] 建立状态模型 | 固化语义"},
+		{Task: ref("candidate-a"), Content: "[PLAN_UPDATE progress=\"40\" status=\"in_progress\" id=\"P2\"] 已完成关键引理\n" +
+			"[PLAN_UPDATE id=\"P9\" status=\"completed\"] unknown\n" +
+			"[PLAN_UPDATE id=\"P2\" status=\"invalid\"] forged"},
+	}
+	plan := reduceOrchestrationPlan(events)
+	if plan.Goal != "证明锁协议满足互斥性" || plan.Total != 2 || plan.Completed != 1 || plan.InProgress != 1 || plan.Percent != 50 || plan.CurrentFocus != "P2" {
+		t.Fatalf("enriched plan summary = %#v", plan)
+	}
+	if plan.Labels["branch"] != "证明分支" || plan.Labels["progress"] != "局部进度" {
+		t.Fatalf("localized labels = %#v", plan.Labels)
+	}
+	item := plan.Items[0]
+	if item.ID != "P2" || item.Branch != "归纳步" || item.Kind != "proof" || item.Difficulty != "hard" || item.Priority != 2 || item.Progress != 40 || item.Evidence != "已完成关键引理" {
+		t.Fatalf("enriched item = %#v", item)
+	}
+	if len(item.DependsOn) != 1 || item.DependsOn[0] != "P1" || len(item.BlockedBy) != 0 {
+		t.Fatalf("filtered dependencies = %#v blocked=%#v", item.DependsOn, item.BlockedBy)
+	}
+}
+
+func TestReduceOrchestrationPlanReviewReplacesGoalAndList(t *testing.T) {
+	ref := func(name string) *protocol.TaskAttemptRef { return &protocol.TaskAttemptRef{Name: name} }
+	events := []store.OrchestrationEvent{
+		{Task: ref("plan"), Content: "[PLAN_GOAL] 草稿目标\n[PLAN_ITEM id=\"P1\" status=\"pending\"] 草稿"},
+		{Task: ref("plan-review"), Content: "[PLAN_GOAL] 审核目标\n[PLAN_ITEM id=\"P2\" status=\"pending\" difficulty=\"bogus\" priority=\"999\" depends=\"\"] 审核项"},
+	}
+	plan := reduceOrchestrationPlan(events)
+	if plan.Goal != "审核目标" || len(plan.Items) != 1 || plan.Items[0].ID != "P2" {
+		t.Fatalf("review did not replace plan = %#v", plan)
+	}
+	if plan.Items[0].Difficulty != "" || plan.Items[0].Priority != 1 || !plan.Items[0].Ready || plan.Ready != 1 {
+		t.Fatalf("invalid metadata was not normalized = %#v", plan.Items[0])
+	}
+}
+
+func TestReduceOrchestrationPlanReviewBoundaryDoesNotMixDraftItems(t *testing.T) {
+	ref := func(name string) *protocol.TaskAttemptRef { return &protocol.TaskAttemptRef{Name: name} }
+	events := []store.OrchestrationEvent{
+		{Task: ref("plan"), Content: "[PLAN_GOAL] 草稿目标\n[PLAN_ITEM id=\"P1\" status=\"pending\"] 草稿项"},
+		{Task: ref("plan-review"), Content: "审核输出格式无效，不能作为结构化计划。"},
+	}
+	plan := reduceOrchestrationPlan(events)
+	if plan.Goal != "" || len(plan.Items) != 0 {
+		t.Fatalf("review boundary mixed draft and reviewed state = %#v", plan)
 	}
 }
 
@@ -221,6 +274,14 @@ func TestOrchestrationProgressRequiresRolloutAndOwnership(t *testing.T) {
 	item := items[0].(map[string]any)
 	if item["title"] != "prove reviewed" || item["status"] != "completed" || item["evidence"] != "coqc passed" {
 		t.Fatalf("admin progress item = %#v", item)
+	}
+	plan, ok := body["plan"].(map[string]any)
+	if !ok || plan["total"] != float64(1) || plan["completed"] != float64(1) || plan["percent"] != float64(100) {
+		t.Fatalf("admin progress summary = %#v", body["plan"])
+	}
+	labels, ok := plan["labels"].(map[string]any)
+	if !ok || labels["goal"] != "总体目标" || labels["progress"] != "局部进度" {
+		t.Fatalf("admin progress labels = %#v", plan["labels"])
 	}
 	getJSON(t, s, member.ID, "/api/orchestrations/"+run.ID+"/progress", http.StatusNotFound)
 

@@ -19,39 +19,110 @@ import (
 )
 
 type orchestrationPlanItem struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Status   string `json:"status"`
-	Evidence string `json:"evidence,omitempty"`
+	ID         string   `json:"id"`
+	Title      string   `json:"title"`
+	Status     string   `json:"status"`
+	Kind       string   `json:"kind,omitempty"`
+	Branch     string   `json:"branch,omitempty"`
+	Difficulty string   `json:"difficulty,omitempty"`
+	Priority   int      `json:"priority,omitempty"`
+	DependsOn  []string `json:"dependsOn,omitempty"`
+	Progress   int      `json:"progress"`
+	Rationale  string   `json:"rationale,omitempty"`
+	Evidence   string   `json:"evidence,omitempty"`
+	Ready      bool     `json:"ready"`
+	BlockedBy  []string `json:"blockedBy,omitempty"`
 }
 
-var orchestrationPlanMarker = regexp.MustCompile(`(?m)^\[(PLAN_ITEM|PLAN_UPDATE)\s+id="([A-Za-z][A-Za-z0-9_-]{0,31})"\s+status="(pending|in_progress|completed|blocked)"\]\s*(.+?)\s*$`)
+type orchestrationPlanProgress struct {
+	Goal         string                  `json:"goal,omitempty"`
+	Items        []orchestrationPlanItem `json:"items"`
+	Total        int                     `json:"total"`
+	Completed    int                     `json:"completed"`
+	InProgress   int                     `json:"inProgress"`
+	Blocked      int                     `json:"blocked"`
+	Pending      int                     `json:"pending"`
+	Ready        int                     `json:"ready"`
+	Percent      int                     `json:"percent"`
+	CurrentFocus string                  `json:"currentFocus,omitempty"`
+	Labels       map[string]string       `json:"labels,omitempty"`
+}
 
-func reduceOrchestrationPlan(events []store.OrchestrationEvent) []orchestrationPlanItem {
+var (
+	orchestrationPlanGoalMarker = regexp.MustCompile(`(?m)^\[PLAN_GOAL\]\s*(.+?)\s*$`)
+	orchestrationPlanMarker     = regexp.MustCompile(`^\[(PLAN_ITEM|PLAN_UPDATE)\s+([^\]]+)\]\s*(.*?)\s*$`)
+	orchestrationPlanAttribute  = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9_-]*)="([^"]*)"`)
+)
+
+var orchestrationPlanLabels = map[string]string{
+	"goal":         "总体目标",
+	"branch":       "证明分支",
+	"difficulty":   "难度",
+	"priority":     "优先级",
+	"dependencies": "依赖",
+	"progress":     "局部进度",
+}
+
+func reduceOrchestrationPlan(events []store.OrchestrationEvent) orchestrationPlanProgress {
 	items := make([]orchestrationPlanItem, 0, 12)
 	indexes := make(map[string]int)
 	planReviewStarted := false
+	goal := ""
 	for _, event := range events {
 		name := ""
 		if event.Task != nil {
 			name = event.Task.Name
 		}
-		for _, match := range orchestrationPlanMarker.FindAllStringSubmatch(event.Content, -1) {
-			kind, id, status, detail := match[1], match[2], match[3], strings.TrimSpace(match[4])
+		if name == "plan-review" && !planReviewStarted {
+			items = items[:0]
+			indexes = make(map[string]int)
+			goal = ""
+			planReviewStarted = true
+		}
+		if name == "plan" || name == "plan-review" {
+			if match := orchestrationPlanGoalMarker.FindStringSubmatch(event.Content); len(match) == 2 {
+				goal = strings.TrimSpace(match[1])
+			}
+		}
+		for _, line := range strings.Split(event.Content, "\n") {
+			match := orchestrationPlanMarker.FindStringSubmatch(strings.TrimSpace(line))
+			if len(match) != 4 {
+				continue
+			}
+			kind, attributes, detail := match[1], parsePlanAttributes(match[2]), strings.TrimSpace(match[3])
+			id, status := attributes["id"], attributes["status"]
+			if !validPlanID(id) || !validPlanStatus(status) {
+				continue
+			}
 			if kind == "PLAN_ITEM" {
 				if name != "plan" && name != "plan-review" {
 					continue
 				}
-				if name == "plan-review" && !planReviewStarted {
-					items = items[:0]
-					indexes = make(map[string]int)
-					planReviewStarted = true
-				}
 				if _, exists := indexes[id]; exists || len(items) >= 12 {
 					continue
 				}
+				title, rationale := splitPlanItemDetail(detail)
+				if title == "" {
+					continue
+				}
+				priority := len(items) + 1
+				if parsed := boundedPlanNumber(attributes["priority"], 1, 99); parsed > 0 {
+					priority = parsed
+				}
+				item := orchestrationPlanItem{
+					ID: id, Title: title, Status: status, Priority: priority,
+					Branch: strings.TrimSpace(attributes["branch"]), Rationale: rationale,
+					DependsOn: parsePlanDependencies(attributes["depends"]),
+				}
+				if validPlanKind(attributes["kind"]) {
+					item.Kind = attributes["kind"]
+				}
+				if validPlanDifficulty(attributes["difficulty"]) {
+					item.Difficulty = attributes["difficulty"]
+				}
+				item.Progress = planProgress(status, attributes["progress"], 0)
 				indexes[id] = len(items)
-				items = append(items, orchestrationPlanItem{ID: id, Title: detail, Status: status})
+				items = append(items, item)
 				continue
 			}
 			index, exists := indexes[id]
@@ -60,9 +131,158 @@ func reduceOrchestrationPlan(events []store.OrchestrationEvent) []orchestrationP
 			}
 			items[index].Status = status
 			items[index].Evidence = detail
+			items[index].Progress = planProgress(status, attributes["progress"], items[index].Progress)
 		}
 	}
-	return items
+	return projectOrchestrationPlan(goal, items)
+}
+
+func parsePlanAttributes(raw string) map[string]string {
+	attributes := make(map[string]string)
+	for _, match := range orchestrationPlanAttribute.FindAllStringSubmatch(raw, -1) {
+		attributes[strings.ToLower(match[1])] = strings.TrimSpace(match[2])
+	}
+	return attributes
+}
+
+func validPlanID(id string) bool {
+	if len(id) == 0 || len(id) > 32 || (id[0] < 'A' || id[0] > 'Z') && (id[0] < 'a' || id[0] > 'z') {
+		return false
+	}
+	for _, char := range id[1:] {
+		if (char < 'A' || char > 'Z') && (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '_' && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validPlanStatus(status string) bool {
+	return status == "pending" || status == "in_progress" || status == "completed" || status == "blocked"
+}
+
+func validPlanKind(kind string) bool {
+	return kind == "proof" || kind == "implementation" || kind == "verification" || kind == "research"
+}
+
+func validPlanDifficulty(difficulty string) bool {
+	return difficulty == "easy" || difficulty == "medium" || difficulty == "hard" || difficulty == "critical"
+}
+
+func boundedPlanNumber(raw string, minimum, maximum int) int {
+	value := -1
+	if _, err := fmt.Sscanf(strings.TrimSpace(raw), "%d", &value); err != nil || value < minimum || value > maximum {
+		return -1
+	}
+	return value
+}
+
+func planProgress(status, raw string, previous int) int {
+	if status == "completed" {
+		return 100
+	}
+	if status == "pending" {
+		return 0
+	}
+	if strings.TrimSpace(raw) != "" {
+		if parsed := boundedPlanNumber(raw, 0, 100); parsed >= 0 {
+			return parsed
+		}
+	}
+	if previous > 0 {
+		return previous
+	}
+	if status == "in_progress" {
+		return 50
+	}
+	return 0
+}
+
+func splitPlanItemDetail(detail string) (string, string) {
+	parts := strings.SplitN(strings.TrimSpace(detail), " | ", 2)
+	if len(parts) == 1 {
+		return parts[0], ""
+	}
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+}
+
+func parsePlanDependencies(raw string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' })
+	dependencies := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, exists := seen[part]; exists {
+			continue
+		}
+		seen[part] = struct{}{}
+		dependencies = append(dependencies, part)
+	}
+	return dependencies
+}
+
+func projectOrchestrationPlan(goal string, items []orchestrationPlanItem) orchestrationPlanProgress {
+	knownIDs := make(map[string]struct{}, len(items))
+	statuses := make(map[string]string, len(items))
+	for _, item := range items {
+		knownIDs[item.ID] = struct{}{}
+		statuses[item.ID] = item.Status
+	}
+	progress := orchestrationPlanProgress{Goal: goal, Items: items, Total: len(items), Labels: orchestrationPlanLabels}
+	for index := range progress.Items {
+		item := &progress.Items[index]
+		dependencies := item.DependsOn[:0]
+		seen := make(map[string]struct{}, len(item.DependsOn))
+		for _, dependency := range item.DependsOn {
+			if dependency == item.ID {
+				continue
+			}
+			if _, exists := knownIDs[dependency]; !exists {
+				continue
+			}
+			if _, exists := seen[dependency]; exists {
+				continue
+			}
+			seen[dependency] = struct{}{}
+			dependencies = append(dependencies, dependency)
+			if statuses[dependency] != "completed" {
+				item.BlockedBy = append(item.BlockedBy, dependency)
+			}
+		}
+		item.DependsOn = dependencies
+		item.Ready = item.Status == "pending" && len(item.BlockedBy) == 0
+		switch item.Status {
+		case "completed":
+			progress.Completed++
+		case "in_progress":
+			progress.InProgress++
+			if progress.CurrentFocus == "" {
+				progress.CurrentFocus = item.ID
+			}
+		case "blocked":
+			progress.Blocked++
+		default:
+			progress.Pending++
+			if item.Ready {
+				progress.Ready++
+			}
+		}
+	}
+	if progress.CurrentFocus == "" {
+		for _, item := range progress.Items {
+			if item.Ready {
+				progress.CurrentFocus = item.ID
+				break
+			}
+		}
+	}
+	if progress.Total > 0 {
+		progress.Percent = progress.Completed * 100 / progress.Total
+	}
+	return progress
 }
 
 func (s *Server) handleOrchestrationProgress(w http.ResponseWriter, r *http.Request, uid string) {
@@ -79,7 +299,7 @@ func (s *Server) handleOrchestrationProgress(w http.ResponseWriter, r *http.Requ
 	graph, err := s.store.TaskGraphByRun(r.Context(), runID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			serverutil.WriteJSON(w, http.StatusOK, map[string]any{"graph": nil, "planItems": []orchestrationPlanItem{}})
+			serverutil.WriteJSON(w, http.StatusOK, map[string]any{"graph": nil, "planItems": []orchestrationPlanItem{}, "plan": orchestrationPlanProgress{Items: []orchestrationPlanItem{}}})
 			return
 		}
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration progress")
@@ -88,7 +308,7 @@ func (s *Server) handleOrchestrationProgress(w http.ResponseWriter, r *http.Requ
 	var payload protocol.OrchestrationStartPayload
 	_ = json.Unmarshal([]byte(graph.PayloadJSON), &payload)
 	if !payload.PlanWorkspace {
-		serverutil.WriteJSON(w, http.StatusOK, map[string]any{"graph": graph, "planItems": []orchestrationPlanItem{}, "planWorkspace": false})
+		serverutil.WriteJSON(w, http.StatusOK, map[string]any{"graph": graph, "planItems": []orchestrationPlanItem{}, "plan": orchestrationPlanProgress{Items: []orchestrationPlanItem{}}, "planWorkspace": false})
 		return
 	}
 	events, err := s.store.ListOrchestrationEvents(r.Context(), runID, 10000)
@@ -96,9 +316,11 @@ func (s *Server) handleOrchestrationProgress(w http.ResponseWriter, r *http.Requ
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration progress events")
 		return
 	}
+	plan := reduceOrchestrationPlan(events)
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"graph":         graph,
-		"planItems":     reduceOrchestrationPlan(events),
+		"planItems":     plan.Items,
+		"plan":          plan,
 		"planWorkspace": true,
 	})
 }
@@ -138,9 +360,9 @@ func orchestrationTaskSpecs(baseDigest, workerPair, mode string, planWorkspace .
 	deps := [][]int{nil, {0}, {0, 1}, {2}}
 	names := []string{"candidate-a", "candidate-b", "integrate", "review"}
 	if len(planWorkspace) > 0 && planWorkspace[0] {
-		planInstruction := "Act as the planning agent. Inspect the user's initial request and the selected workspace only as needed to decompose the work into a bounded, dependency-aware checklist before implementation. Do not implement the requested changes. End with 2-12 stable machine-readable lines in the exact form [PLAN_ITEM id=\"P1\" status=\"pending\"] concise task, using unique P-prefixed ids."
-		planReviewInstruction := "Act as the independent plan reviewer. Check the proposed checklist against the original request, workspace constraints, formal-proof branches, verification obligations, and missing dependencies. Do not implement the requested changes. End by restating the corrected complete checklist as 2-12 exact [PLAN_ITEM id=\"P1\" status=\"pending\"] concise task lines; these replace the planner list."
-		updateSuffix := " Track the reviewed plan while working. When evidence changes an item, append exact lines [PLAN_UPDATE id=\"P1\" status=\"in_progress\"] evidence, [PLAN_UPDATE id=\"P1\" status=\"completed\"] evidence, or [PLAN_UPDATE id=\"P1\" status=\"blocked\"] evidence for ids from the reviewed plan."
+		planInstruction := "Act as the planning agent. Inspect the user's initial request and selected workspace only as needed to produce the complete task plan before implementation. For formal-verification work, decompose the goal into concrete proof branches and verification obligations, identify dependencies, rate difficulty, and choose the recommended order. Do not implement. Write the goal, titles, and rationale in concise Chinese while preserving theorem, file, and command names. End with one exact [PLAN_GOAL] Chinese overall goal line and 2-12 exact lines [PLAN_ITEM id=\"P1\" status=\"pending\" kind=\"proof\" difficulty=\"hard\" priority=\"1\" depends=\"\"] Chinese task title | Chinese reason and recommended order. Allowed kind values: proof, implementation, verification, research. Allowed difficulty values: easy, medium, hard, critical. Use comma-separated P ids in depends, or an empty value for roots."
+		planReviewInstruction := "Act as the independent plan reviewer. Audit the proposed complete plan against the original request, workspace constraints, formal-proof branches, dependencies, difficulty, recommended order, and verification obligations. Do not implement. Write all human-facing goal, titles, and rationale in concise Chinese while preserving theorem, file, and command names. End by restating one corrected [PLAN_GOAL] line and the complete corrected 2-12 item list using the exact enriched [PLAN_ITEM id=\"P1\" status=\"pending\" kind=\"proof\" difficulty=\"hard\" priority=\"1\" depends=\"\"] Chinese title | Chinese rationale form; these replace the planner list."
+		updateSuffix := " Track the reviewed whole-task plan while working. When evidence changes an item, append exact lines [PLAN_UPDATE id=\"P1\" status=\"in_progress\" progress=\"40\"] concise Chinese evidence, [PLAN_UPDATE id=\"P1\" status=\"completed\" progress=\"100\"] concise Chinese evidence, or [PLAN_UPDATE id=\"P1\" status=\"blocked\" progress=\"40\"] concise Chinese blocker for ids from the reviewed plan. Progress is an integer from 0 through 100. Preserve command and theorem names verbatim."
 		instructions = []orchestrationTaskInstruction{
 			{Instruction: planInstruction},
 			{Instruction: planReviewInstruction},

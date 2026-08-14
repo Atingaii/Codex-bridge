@@ -6,12 +6,12 @@ import {
   ArrowLeft,
   BookOpen,
   Check,
+  ChevronDown,
   Command,
   FileUp,
   FolderInput,
   GitBranch,
   History,
-  ListChecks,
   Plus,
   RefreshCw,
   Send,
@@ -27,7 +27,6 @@ import {
   Trash2,
   UsersRound,
   Workflow,
-  X,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import type {
@@ -48,6 +47,7 @@ import type { Language, UIText } from '../lib/i18n';
 import { AgentSelector } from '../components/AgentSelector';
 import { OrchestrationFileRow } from '../components/OrchestrationFiles';
 import { OrchestrationProgressMap } from '../components/OrchestrationProgressMap';
+import { OrchestrationProofProgress } from '../components/OrchestrationProofProgress';
 import {
   CapabilityMatrix,
   RunConclusionCard,
@@ -219,6 +219,9 @@ export function OrchestrationWorkspace({
     return views;
   }, [activeRun, events, t.initialPrompt, t.roundPrompt, t.turnPrefix]);
   const selectedPromptView = promptViews.find((item) => item.key === selectedPromptKey) || promptViews[0];
+  const projectedPlan = orchestrationProgress?.plan;
+  const projectedPlanItems = projectedPlan?.items?.length ? projectedPlan.items : (orchestrationProgress?.planItems || []);
+  const currentPlanItem = projectedPlanItems.find((item) => item.id === projectedPlan?.currentFocus);
   const progressRefreshKey = useMemo(() => {
     const relevant = events.filter((event) => event.task && ['run.start', 'turn.end', 'run.end', 'run.error', 'run.cancelled'].includes(event.kind));
     const latest = relevant[relevant.length - 1];
@@ -671,9 +674,9 @@ export function OrchestrationWorkspace({
   }, [activeRunId]);
 
   useEffect(() => {
-    if (!planningWorkspaceOpen || !activeRunId || !planWorkspaceEnabled) return;
+    if (!activeRunId || !planWorkspaceEnabled) return;
     void loadOrchestrationProgress(activeRunId).catch(() => undefined);
-  }, [activeRunId, loadOrchestrationProgress, planWorkspaceEnabled, planningWorkspaceOpen, progressRefreshKey]);
+  }, [activeRunId, loadOrchestrationProgress, planWorkspaceEnabled, progressRefreshKey]);
 
   useEffect(() => {
     setCollapsedTimelineGroups((current) => {
@@ -949,7 +952,12 @@ export function OrchestrationWorkspace({
     stickToBottomRef.current = false;
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
-        document.getElementById(targetID)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        const container = scrollRef.current;
+        const target = document.getElementById(targetID);
+        if (!container || !target) return;
+        const containerTop = container.getBoundingClientRect().top;
+        const targetTop = target.getBoundingClientRect().top;
+        container.scrollTo({ top: container.scrollTop + targetTop - containerTop - 12, behavior: 'smooth' });
       });
     });
   };
@@ -1095,19 +1103,6 @@ export function OrchestrationWorkspace({
               <PieChart className="h-3.5 w-3.5" />
             </Button>
             {user.isAdmin && <Button variant="secondary" size="icon" className="h-8 w-8 rounded-lg" onClick={() => navigate('/admin/usage')} aria-label={t.adminDashboard} title={t.adminDashboard}><ShieldCheck className="h-3.5 w-3.5" /></Button>}
-            {planWorkspaceEnabled && (
-              <Button
-                variant={planningWorkspaceOpen ? 'default' : 'secondary'}
-                size="sm"
-                className="h-8 gap-1.5 rounded-lg"
-                onClick={() => setPlanningWorkspaceOpen((current) => !current)}
-                aria-label={planningWorkspaceOpen ? t.closePlanningWorkspace : t.openPlanningWorkspace}
-                title={planningWorkspaceOpen ? t.closePlanningWorkspace : t.openPlanningWorkspace}
-              >
-                <Workflow className="h-3.5 w-3.5" />
-                <span className="hidden xl:inline">{t.planningWorkspace}</span>
-              </Button>
-            )}
             <Button
               variant="ghost"
               size="icon"
@@ -1157,89 +1152,74 @@ export function OrchestrationWorkspace({
           </div>
         </div>
 
-        {planWorkspaceEnabled && planningWorkspaceOpen && (
-          <section className="absolute inset-x-3 bottom-3 top-[7.35rem] z-30 overflow-hidden rounded-xl border border-border bg-background/98 shadow-2xl backdrop-blur md:inset-x-5">
-            <div className="flex h-12 items-center justify-between border-b border-border px-4">
-              <div className="flex min-w-0 items-center gap-2">
-                <Workflow className="h-4 w-4 text-primary" />
-                <h2 className="truncate text-sm font-semibold">{t.planningWorkspace}</h2>
-                <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">{t.rolloutPreview}</span>
+        {planWorkspaceEnabled && activeRun && (
+          <section className="shrink-0 border-b border-border bg-background">
+            <button
+              type="button"
+              className="flex min-h-11 w-full items-center gap-3 px-4 py-2 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+              onClick={() => setPlanningWorkspaceOpen((current) => !current)}
+              aria-expanded={planningWorkspaceOpen}
+              aria-label={planningWorkspaceOpen ? t.closePlanningWorkspace : t.openPlanningWorkspace}
+            >
+              <Workflow className="h-4 w-4 shrink-0 text-primary" />
+              <span className="shrink-0 text-xs font-semibold">{t.planningWorkspace}</span>
+              <span className="hidden shrink-0 rounded border border-amber-500/25 bg-amber-500/[0.07] px-1.5 py-0.5 text-[9px] font-medium text-amber-700 dark:text-amber-300 sm:inline">{t.rolloutPreview}</span>
+              <div className="h-1.5 min-w-[5rem] max-w-40 flex-1 overflow-hidden rounded-full bg-muted">
+                <div className="h-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${Math.max(0, Math.min(100, projectedPlan?.percent || 0))}%` }} />
               </div>
-              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setPlanningWorkspaceOpen(false)} aria-label={t.closePlanningWorkspace}>
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-            <div className="grid h-[calc(100%-3rem)] min-h-0 grid-cols-1 grid-rows-[minmax(12rem,0.65fr)_minmax(0,1.35fr)] xl:grid-cols-[minmax(15rem,0.7fr)_minmax(32rem,1.8fr)] xl:grid-rows-1">
-              <aside className="min-h-0 overflow-hidden border-b border-border bg-muted/20 xl:border-b-0 xl:border-r">
-                <div className="flex h-full min-h-0 flex-col">
-                  <div className="flex items-center gap-2 border-b border-border px-4 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    <BookOpen className="h-3.5 w-3.5" />
-                    {t.promptNavigator}
-                  </div>
-                  <div className="grid max-h-32 shrink-0 grid-cols-2 gap-1 overflow-y-auto border-b border-border p-2 elegant-scrollbar xl:max-h-none xl:grid-cols-1">
-                    {promptViews.map((view) => (
-                      <button
-                        key={view.key}
-                        type="button"
-                        onClick={() => setSelectedPromptKey(view.key)}
-                        className={cn(
-                          "truncate rounded-md px-3 py-2 text-left text-xs transition-colors",
-                          selectedPromptView?.key === view.key ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                        )}
-                        title={view.label}
-                      >
-                        {view.label}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="min-h-[8rem] flex-1 overflow-y-auto p-4 elegant-scrollbar">
-                    <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-6 text-foreground">{selectedPromptView?.content || t.noRoundPrompts}</pre>
-                  </div>
-                </div>
-              </aside>
-              <div className="min-h-0 overflow-y-auto p-4 elegant-scrollbar md:p-5">
-                <div className="grid min-h-full gap-4 2xl:grid-cols-[minmax(30rem,1.45fr)_minmax(18rem,0.75fr)]">
-                  <section className="min-w-0 rounded-lg border border-border bg-card/50 p-3">
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2 text-sm font-semibold"><Workflow className="h-4 w-4 text-primary" />{t.nodeMap}</div>
-                      {orchestrationProgress?.graph && <span className="text-[11px] text-muted-foreground">{t.graphGeneration} {orchestrationProgress.graph.generation}</span>}
-                    </div>
-                    <OrchestrationProgressMap
-                      tasks={(orchestrationProgress?.graph?.tasks || []).map((task) => ({ ...task, dependencies: task.dependencies || [] }))}
-                      height={Math.max(300, Math.min(520, (orchestrationProgress?.graph?.tasks?.length || 4) * 72))}
-                      ariaLabel={t.nodeMap}
-                      emptyLabel={t.planWaiting}
-                      statusLabels={{ pending: 'pending', ready: t.ready, dispatching: t.connecting, running: t.running, succeeded: 'completed', failed: 'failed', blocked: 'blocked', canceled: 'canceled', unknown: 'unknown' }}
-                    />
-                  </section>
-                  <section className="rounded-lg border border-border bg-card/50 p-4">
-                    <div className="mb-3 flex items-center gap-2 text-sm font-semibold"><ListChecks className="h-4 w-4 text-primary" />{t.planChecklist}</div>
-                    <div className="space-y-2">
-                      {(orchestrationProgress?.planItems?.length ? orchestrationProgress.planItems : (orchestrationProgress?.graph?.tasks || []).map((task) => ({
-                        id: task.id,
-                        title: task.name,
-                        status: task.status === 'succeeded' ? 'completed' : task.status === 'running' || task.status === 'dispatching' ? 'in_progress' : task.status,
-                        evidence: task.error,
-                      }))).map((item) => (
-                        <div key={item.id} className="flex items-start gap-2 rounded-md border border-border/70 bg-background/70 px-3 py-2.5">
-                          <span className={cn(
-                            "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[10px]",
-                            item.status === 'completed' ? "border-emerald-500 bg-emerald-500 text-white" :
-                              item.status === 'in_progress' ? "border-emerald-500 text-emerald-600" :
-                                item.status === 'blocked' || item.status === 'failed' ? "border-destructive text-destructive" : "border-muted-foreground/50 text-muted-foreground",
-                          )}>{item.status === 'completed' ? <Check className="h-2.5 w-2.5" /> : ''}</span>
-                          <div className="min-w-0 flex-1">
-                            <p className="text-xs font-medium leading-5">{item.title}</p>
-                            {item.evidence && <p className="mt-1 break-words text-[11px] leading-4 text-muted-foreground">{item.evidence}</p>}
-                          </div>
-                        </div>
+              <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
+                {projectedPlanItems.length ? `${projectedPlan?.completed || 0}/${projectedPlan?.total || projectedPlanItems.length} · ${projectedPlan?.percent || 0}%` : t.planWaiting}
+              </span>
+              {currentPlanItem && <span className="hidden min-w-0 max-w-[28rem] truncate text-xs text-muted-foreground lg:block">{language === 'zh' ? '当前' : 'Current'}: {currentPlanItem.title}</span>}
+              <ChevronDown className={cn('h-4 w-4 shrink-0 text-muted-foreground transition-transform', planningWorkspaceOpen && 'rotate-180')} />
+            </button>
+            {planningWorkspaceOpen && (
+              <div className="max-h-[min(62vh,42rem)] overflow-y-auto border-t border-border bg-muted/10 p-3 elegant-scrollbar md:p-4">
+                <div className="grid gap-3 xl:grid-cols-[minmax(16rem,0.6fr)_minmax(34rem,1.4fr)]">
+                  <aside className="min-w-0 overflow-hidden rounded-md border border-border bg-background">
+                    <div className="flex items-center gap-2 border-b border-border px-3 py-2.5 text-xs font-semibold text-muted-foreground"><BookOpen className="h-3.5 w-3.5" />{t.promptNavigator}</div>
+                    <div className="flex max-h-28 gap-1 overflow-auto border-b border-border p-2 elegant-scrollbar xl:flex-col">
+                      {promptViews.map((view) => (
+                        <button key={view.key} type="button" onClick={() => setSelectedPromptKey(view.key)} className={cn('shrink-0 truncate rounded-md px-2.5 py-2 text-left text-xs transition-colors xl:w-full', selectedPromptView?.key === view.key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground')} title={view.label}>{view.label}</button>
                       ))}
-                      {!orchestrationProgress?.graph && <p className="rounded-md border border-dashed border-border p-4 text-xs leading-5 text-muted-foreground">{t.planWaiting}</p>}
                     </div>
-                  </section>
+                    <div className="max-h-56 overflow-y-auto p-3 elegant-scrollbar"><pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5 text-foreground">{selectedPromptView?.content || t.noRoundPrompts}</pre></div>
+                  </aside>
+
+                  <div className="min-w-0 space-y-3">
+                    <section className="min-w-0 rounded-md border border-border bg-background p-3">
+                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                        <div><div className="flex items-center gap-2 text-sm font-semibold"><Workflow className="h-4 w-4 text-primary" />{language === 'zh' ? '任务分支地图' : 'Task branch map'}</div><p className="mt-1 text-[11px] text-muted-foreground">{language === 'zh' ? '整体路线、局部进度、依赖与推荐顺序。' : 'Overall route, local progress, dependencies, and recommended order.'}</p></div>
+                        {currentPlanItem && <span className="rounded border border-sky-500/20 bg-sky-500/[0.06] px-2 py-1 text-[10px] text-sky-700 dark:text-sky-300">{language === 'zh' ? '当前' : 'Focus'} · {currentPlanItem.title}</span>}
+                      </div>
+                      <OrchestrationProgressMap
+                        tasks={projectedPlanItems.map((item, index) => ({ id: item.id, name: item.title, role: item.branch || item.kind, status: item.status, position: item.priority || index + 1, dependencies: item.dependsOn || [], detail: item.evidence || item.rationale }))}
+                        activeTaskId={projectedPlan?.currentFocus}
+                        height={Math.max(220, Math.min(400, Math.ceil(Math.max(projectedPlanItems.length, 3) / 3) * 96))}
+                        ariaLabel={language === 'zh' ? '任务分支地图' : 'Task branch map'}
+                        emptyLabel={isRunning ? (language === 'zh' ? '正在生成整个任务的中文计划…' : 'Generating the structured whole-task plan...') : (language === 'zh' ? '本次任务没有可用的结构化计划。' : 'No structured task plan is available for this run.')}
+                        statusLabels={orchestrationStatusLabels(language, t)}
+                        inferSequentialDependencies={false}
+                      />
+                    </section>
+
+                    <div className="grid min-w-0 gap-3 2xl:grid-cols-[minmax(24rem,1.25fr)_minmax(26rem,1fr)]">
+                      <OrchestrationProofProgress plan={projectedPlan} planItems={projectedPlanItems} labels={language === 'zh' ? { empty: isRunning ? '正在生成整个任务的中文计划…' : '本次任务没有可用的结构化计划。' } : { title: 'Whole-task plan', completed: 'Completed', active: 'Active', pending: 'Pending', blocked: 'Blocked', ready: 'Ready', empty: isRunning ? 'Generating the structured whole-task plan...' : 'No structured task plan is available for this run.', evidence: 'Evidence', rationale: 'Rationale', dependency: 'Blocked by', showCompleted: 'Show completed', hideCompleted: 'Hide completed' }} />
+                      <section className="min-w-0 rounded-md border border-border bg-background p-3">
+                        <div className="mb-2 flex items-center justify-between gap-3"><div><div className="flex items-center gap-2 text-xs font-semibold"><Activity className="h-3.5 w-3.5 text-muted-foreground" />{language === 'zh' ? 'Agent 执行链（次级）' : 'Agent execution chain (secondary)'}</div><p className="mt-1 text-[10px] text-muted-foreground">{language === 'zh' ? '仅用于诊断运行阶段，不作为任务计划。' : 'Runtime diagnostics only; not the task plan.'}</p></div>{orchestrationProgress?.graph && <span className="shrink-0 text-[10px] text-muted-foreground">{t.graphGeneration} {orchestrationProgress.graph.generation}</span>}</div>
+                        <OrchestrationProgressMap
+                          tasks={(orchestrationProgress?.graph?.tasks || []).map((task) => ({ ...task, name: orchestrationTaskDisplayName(task.name, language), dependencies: task.dependencies || [] }))}
+                          height={180}
+                          ariaLabel={language === 'zh' ? 'Agent 执行链' : 'Agent execution chain'}
+                          emptyLabel={language === 'zh' ? '暂无执行节点。' : 'No execution nodes yet.'}
+                          statusLabels={orchestrationStatusLabels(language, t)}
+                        />
+                      </section>
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
           </section>
         )}
 
@@ -1530,6 +1510,52 @@ function orchestrationRunPath(runId: string) {
 function orchestrationRunIdFromPath(path: string) {
   const match = path.match(/^\/orchestrate\/runs\/([^/?#]+)/);
   return match ? decodeURIComponent(match[1]) : '';
+}
+
+function orchestrationTaskDisplayName(name: string, language: Language) {
+  if (language !== 'zh') return name;
+  const labels: Record<string, string> = {
+    plan: '规划任务',
+    'plan-review': '审核计划',
+    'candidate-a': '候选方案 A',
+    'candidate-b': '候选方案 B',
+    integrate: '整合实现',
+    review: '独立复核',
+  };
+  return labels[name] || name;
+}
+
+function orchestrationStatusLabels(language: Language, t: UIText) {
+  if (language !== 'zh') {
+    return {
+      pending: 'Pending',
+      ready: t.ready,
+      dispatching: 'Starting',
+      running: 'Running',
+      in_progress: 'In progress',
+      succeeded: 'Completed',
+      completed: 'Completed',
+      failed: 'Failed',
+      blocked: 'Blocked',
+      canceling: 'Canceling',
+      canceled: 'Canceled',
+      unknown: 'Unknown',
+    };
+  }
+  return {
+    pending: '待处理',
+    ready: '可开始',
+    dispatching: '启动中',
+    running: '进行中',
+    in_progress: '进行中',
+    succeeded: '已完成',
+    completed: '已完成',
+    failed: '失败',
+    blocked: '受阻',
+    canceling: '取消中',
+    canceled: '已取消',
+    unknown: '状态未知',
+  };
 }
 
 function maxOrchestrationEventSeq(events: OrchestrationEvent[], initial = 0) {

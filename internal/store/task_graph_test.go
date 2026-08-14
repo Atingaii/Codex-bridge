@@ -256,17 +256,54 @@ func TestDeleteRequestedTaskGraphCannotDispatchNextTask(t *testing.T) {
 	if _, _, err := st.RequestDeleteOrchestrationRun(ctx, run.ID, run.UserID); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := st.UpdateTaskAttempt(ctx, task.ID, attempt.ID, task.PayloadDigest, TaskSucceeded, map[string]any{"content": "late success"}, ""); err != nil || !ok {
-		t.Fatalf("finish in-flight task: ok=%v err=%v", ok, err)
+	if ok, err := st.UpdateTaskAttempt(ctx, task.ID, attempt.ID, task.PayloadDigest, TaskSucceeded, map[string]any{"content": "late success"}, ""); err != nil || ok {
+		t.Fatalf("late task success changed canceled attempt: ok=%v err=%v", ok, err)
 	}
 	updated, err := st.TaskGraphByRun(ctx, graph.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Tasks[1].Status != TaskReady {
-		t.Fatalf("dependency propagation changed = %#v", updated.Tasks[1])
+	if updated.Status != TaskGraphCanceled {
+		t.Fatalf("delete-pending graph status = %q", updated.Status)
+	}
+	for _, updatedTask := range updated.Tasks {
+		if updatedTask.Status != TaskCanceled {
+			t.Fatalf("delete-pending unfinished task remains active = %#v", updatedTask)
+		}
 	}
 	if _, _, claimed, err := st.ClaimReadyTask(ctx, updated.Tasks[1].ID, ""); err != nil || claimed {
 		t.Fatalf("delete-pending graph dispatched successor: claimed=%v err=%v", claimed, err)
+	}
+}
+
+func TestDeleteRequestedRunCannotCreateNextTaskGraph(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	graph := createTestTaskGraph(t, st)
+	if err := st.UpdateOrchestrationRunStatus(ctx, graph.RunID, OrchestrationRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+	run, err := st.OrchestrationRunByIDAnyUser(ctx, graph.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.RequestDeleteOrchestrationRun(ctx, run.ID, run.UserID); err != nil {
+		t.Fatal(err)
+	}
+	created, ok, err := st.CreateNextOrchestrationTaskGraph(ctx, graph.RunID, graph.ID, `{}`, "next-after-delete", []CreateTaskSpec{{
+		Name: "worker", Role: TaskRoleWorker, PayloadJSON: `{}`, PayloadDigest: "next-worker",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok || created.ID != "" {
+		t.Fatalf("delete-pending run created successor graph: created=%v graph=%#v", ok, created)
+	}
+	latest, err := st.TaskGraphByRun(ctx, graph.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.ID != graph.ID || latest.Generation != graph.Generation {
+		t.Fatalf("latest graph changed after delete request: %#v", latest)
 	}
 }

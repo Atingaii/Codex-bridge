@@ -36,6 +36,17 @@ type UpdateItem = {
 
 const releases: Array<{ date: string; version: string; summary: string; items: UpdateItem[] }> = [
   {
+    date: '2026 年 8 月 14 日',
+    version: 'v0.3.40',
+    summary: '管理员规划工作台补齐证明任务地图，并强化活跃任务删除的并发收敛。',
+    items: [
+      { icon: Network, category: '证明进度', title: '证明路线与运行节点分层展示', detail: '证明任务地图按分支、依赖、难度、优先级和局部进度展示整体路线；Agent 节点作为次级运行视图，不再混同为证明完成度。' },
+      { icon: Bot, category: '规划', title: '计划与审核输出完整证明义务', detail: '规划 Agent 先拆解总体目标和证明分支，审核 Agent 修正依赖与顺序；后续候选、整合和复核节点用结构化标志持续更新证据。' },
+      { icon: Wrench, category: '状态机', title: '删除意图立即停止持久化任务图', detail: '删除活跃运行时原子取消未完成尝试、节点和任务图，迟到完成事件不能派发后继轮次或重新激活已删除运行。' },
+      { icon: Zap, category: '交互', title: '规划进度内联折叠展示', detail: '规划摘要位于运行状态栏下方，展开后显示提示词、中文任务计划和次级执行诊断；跳到每轮第一条消息只滚动消息容器。' },
+    ],
+  },
+  {
     date: '2026 年 8 月 13 日',
     version: 'v0.3.39',
     summary: '多机器编排选择保持稳定，并为管理员灰度加入不挤压对话区的规划进度工作台。',
@@ -184,13 +195,13 @@ export function UpdatesPage({ language, setLanguage, isDarkMode, setIsDarkMode }
 
       <main className="mx-auto max-w-5xl px-4 pb-24 pt-12 md:px-6 md:pt-16">
         <section className="border-b border-border pb-12">
-          <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />当前版本 v0.3.39</div>
+          <div className="mb-4 flex items-center gap-2 text-xs font-medium text-emerald-600 dark:text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />当前版本 v0.3.40</div>
           <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
             <div>
               <h1 className="text-3xl font-semibold leading-tight sm:text-4xl">最近更新</h1>
               <p className="mt-4 max-w-2xl text-base leading-7 text-muted-foreground">品牌、模型切换、多机器稳定性和长编排体验，最近几次更新集中解决了这些高频问题。</p>
             </div>
-            <a href="https://github.com/Atingaii/ProofBridge/releases/tag/v0.3.39" target="_blank" rel="noreferrer" className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-border px-3 text-xs font-medium hover:bg-muted">查看 Release <ExternalLink className="h-3.5 w-3.5" /></a>
+            <a href="https://github.com/Atingaii/ProofBridge/releases/tag/v0.3.40" target="_blank" rel="noreferrer" className="inline-flex h-9 w-fit items-center gap-2 rounded-md border border-border px-3 text-xs font-medium hover:bg-muted">查看 Release <ExternalLink className="h-3.5 w-3.5" /></a>
           </div>
           <div className="mt-8 grid gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-3">
             {highlights.map(({ icon: Icon, label, value }) => (

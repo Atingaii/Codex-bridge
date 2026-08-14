@@ -419,12 +419,36 @@ export type OrchestrationPlanItem = {
   id: string;
   title: string;
   status: 'pending' | 'in_progress' | 'completed' | 'blocked' | string;
+  kind?: 'proof' | 'implementation' | 'verification' | 'research' | string;
+  branch?: string;
+  difficulty?: 'easy' | 'medium' | 'hard' | 'critical' | string;
+  priority?: number;
+  dependsOn?: string[];
+  progress?: number;
+  rationale?: string;
   evidence?: string;
+  ready?: boolean;
+  blockedBy?: string[];
+};
+
+export type OrchestrationPlanProgress = {
+  goal?: string;
+  items: OrchestrationPlanItem[];
+  total?: number;
+  completed?: number;
+  inProgress?: number;
+  blocked?: number;
+  pending?: number;
+  ready?: number;
+  percent?: number;
+  currentFocus?: string;
+  labels?: Record<string, string>;
 };
 
 export type OrchestrationProgress = {
   graph?: OrchestrationTaskGraph | null;
   planItems: OrchestrationPlanItem[];
+  plan?: OrchestrationPlanProgress;
   planWorkspace?: boolean;
 };
 

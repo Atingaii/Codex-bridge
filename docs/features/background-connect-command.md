@@ -129,26 +129,14 @@ download and starts a fresh attempt. A transient TLS or HTTP/2 edge failure
 therefore tries wget when available, continues from the existing temporary
 file, and never replaces the working Bridge with a partial download.
 
-After the atomic replacement succeeds, the same install command refreshes
-already linked endpoints without adding another user-facing command or daemon:
-
-- It enumerates only `codex-bridge-*.service` files under the current user's
-  `~/.config/systemd/user/`, reloads the user manager once, and restarts each
-  exact discovered unit name. Where the standard `timeout` utility is
-  available, each user-manager operation is bounded to 30 seconds. An
-  unavailable or stalled user manager is reported but does not turn a
-  successful binary installation into a destructive partial update.
-- The `nohup` fallback records its released process id in
-  `~/.codex-bridge/services/<cwd-hash>.pid`. On a later install, the script
-  accepts only numeric PIDs whose `/proc/<pid>/exe` resolves to the installed
-  Bridge path (including Linux's ` (deleted)` suffix after atomic replacement),
-  terminates those owned processes with a bounded wait, and restarts the
-  corresponding `<cwd-hash>.sh` helper while preserving its existing log.
-- It never uses a process-name-wide `pkill` or starts an endpoint for which no
-  prior service helper/workspace ownership record exists. For an older nohup
-  link without a PID file, the installer scans `/proc` read-only and adopts an
-  instance only when both its executable and working directory exactly match
-  the existing managed helper metadata, then migrates it to PID management.
+After the atomic replacement succeeds, the installer exits without touching any
+existing endpoint. The following `codex-bridge link` targets one exact
+working-directory hash and starts or restarts only that endpoint. This is a
+deliberate isolation boundary: linking a new workspace must not interrupt a
+native CLI session or orchestration task active in another workspace on the
+same machine. Updating an existing endpoint is done by generating and running
+that endpoint's repair command, which intentionally performs the same
+directory-scoped restart.
 
 ## Implementation Steps
 
@@ -172,8 +160,8 @@ already linked endpoints without adding another user-facing command or daemon:
 12. Stop forcing CCB installation during `codex-bridge link`.
 13. Resume interrupted binary downloads with bounded backoff while preserving
     the currently installed Bridge until the download completes.
-14. Restart existing user-systemd endpoints after replacement and persist a
-    per-link PID for safely updating the nohup fallback.
+14. Keep installer updates endpoint-neutral; let the following directory-scoped
+    `link` command restart only its selected endpoint.
 
 ## Exit Gates
 
@@ -181,11 +169,9 @@ already linked endpoints without adding another user-facing command or daemon:
 - `make doc-lint`
 - `make build` produces a static Linux binary for `/install.sh` downloads.
 - Generated token responses and settings UI do not expose sudo/root commands.
-- Re-running only the existing install command replaces the binary and restarts
-  every discovered managed endpoint; users do not run a separate restart
-  command.
-- Nohup replacement validates PID ownership against the installed executable
-  before sending a signal and never uses a broad process-name match.
+- Re-running only the install command replaces the binary without restarting
+  any discovered endpoint. The following `link` command restarts only its
+  selected working-directory endpoint.
 - Running the generated link command as user `alice` from `/work/repo` produces
   a user service and env file under Alice's home. Later native resume uses the
   same identity, for example `cd /work/repo && codex`, then `/resume`.

@@ -76,6 +76,10 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 
 ## Maintenance Log
 
+- 2026-08-14: Made Bridge installation endpoint-neutral. `/install.sh` now
+  atomically replaces only the local binary; the following directory-scoped
+  `link` starts or restarts only the selected endpoint, so linking another
+  workspace cannot interrupt active same-machine orchestration runs.
 - 2026-08-11: Archived the Android wrapper and removed APK builds from the
   automatic release path. Android is no longer maintained or considered a
   release exit gate; existing wrapper sources remain for historical reference.

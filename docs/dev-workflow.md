@@ -98,11 +98,12 @@ command, and only prints `codex-bridge connected` after the Bridge logs
 downloads the Bridge binary into a temporary file using bounded, backed-off
 resume attempts over HTTP/1.1, so transient TLS/edge interruptions do not
 replace the existing executable or restart the transfer from zero. It
-then restarts exact existing `codex-bridge-*.service` user units; for the nohup
-fallback it validates per-link PID files against the installed executable and
-restarts only those owned links. The normal workflow therefore remains the same
-two install/connect commands, and an update needs no manual process or service
-command. It
+then exits; the following `link` starts or restarts only the endpoint for the
+selected working directory. The installer itself never scans, stops, or
+restarts other linked endpoints on the same machine. This keeps active runs in
+other directories connected while a new endpoint is linked or a selected
+endpoint is repaired. The normal workflow therefore remains the same two
+install/connect commands. It
 preserves `HOME`, `PATH`, `CODEX_HOME`, Claude config location variables,
 resolved `BRIDGE_CODEX_PATH` / `BRIDGE_CLAUDE_PATH`, common model credential
 variables such as `OPENAI_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and
@@ -176,7 +177,9 @@ Existing endpoints in the settings UI can be expanded to generate a repair
 command. The repair command mints a fresh enroll token, installs the latest
 Bridge binary, and reconnects with the endpoint's existing machine id, name, and
 first known working directory so older endpoints do not accidentally register as
-new agents.
+new agents. Because this is a directory-scoped `link`, it restarts only that
+endpoint; do not run it on an endpoint that has an active task unless that task
+is intentionally being interrupted.
 
 An enroll token's expiry is the deadline for its first successful machine
 binding. After binding, the same machine id may use that credential for normal

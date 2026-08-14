@@ -19,7 +19,7 @@ keeps only the top frequent subset.
 | Add or change ACP takeover UI | `frontend/src/app/components/chat/TakeoverHint.tsx`, `frontend/src/app/pages/Workspace.tsx`, `frontend/src/app/lib/types.ts`, `frontend/src/app/lib/i18n.ts`, rebuild `internal/web/static` via `npm run build`, `docs/features/acp-runner-pr2.md` |
 | Add or change deployment unit | `deploy/`, `Dockerfile`, `Makefile`, `docs/deployment.md`, README/README.zh-CN deployment sections |
 | Add or change CI / build pipeline | `.github/workflows/ci.yml`, `Makefile` targets it calls, README CI badge |
-| Add or change install/download flow | `internal/hub/server.go`, `configs/*.yaml.example`, README/README.zh-CN, integration tests |
+| Add or change install/download flow | `internal/hub/server.go`, generated-installer tests, `configs/*.yaml.example`, README/README.zh-CN, `docs/dev-workflow.md`, relevant feature docs |
 | Hub, Bridge, or frontend change while Android is archived | Do not sync, build, test, or update `android/`; Android is not a release exit gate unless maintenance is explicitly reactivated |
 | Add or change embedded static assets | `frontend/` source, run `npm run build`, verify generated `internal/web/static/` |
 

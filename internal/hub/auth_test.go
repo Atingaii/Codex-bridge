@@ -372,17 +372,6 @@ func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
 		`bridge download failed after $attempt attempts`,
 		`echo "Download complete."`,
 		`mv -f "$TMP" "$BIN"`,
-		`timeout 30s systemctl "$@"`,
-		`echo "Refreshing existing ProofBridge services..."`,
-		`for unit_path in "$SYSTEMD_DIR"/codex-bridge-*.service; do`,
-		`run_systemctl --user restart "$unit"`,
-		`for pid_path in "$SERVICES_DIR"/*.pid; do`,
-		`for proc_exe in /proc/[0-9]*/exe; do`,
-		`[ "$proc_cwd" = "$expected_cwd" ] || continue`,
-		`[ -f "$SYSTEMD_DIR/codex-bridge-$hash.service" ] && systemd_owned=true`,
-		`if [ "$systemd_owned" = true ]; then`,
-		`"$BIN"|"$BIN (deleted)"`,
-		`nohup "$start_path" >>"$log_path" 2>&1 &`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("install script missing %q: %s", want, body)
@@ -390,6 +379,18 @@ func TestInstallScriptDefaultsToHubBinaryDownload(t *testing.T) {
 	}
 	if strings.Contains(body, "pkill") || strings.Contains(body, "killall") {
 		t.Fatalf("install script must not terminate processes by broad name: %s", body)
+	}
+	for _, unwanted := range []string{
+		`Refreshing existing ProofBridge services`,
+		`SYSTEMD_DIR=`,
+		`SERVICES_DIR=`,
+		`systemctl --user restart`,
+		`Stopping managed background Bridge`,
+		`Restarting managed background Bridge`,
+	} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("install script must not restart unrelated endpoints; found %q in: %s", unwanted, body)
+		}
 	}
 	cmd := exec.Command("sh", "-n")
 	cmd.Stdin = strings.NewReader(body)
@@ -466,7 +467,7 @@ func TestBridgeInstallCommandIsShortAndPortable(t *testing.T) {
 	}
 }
 
-func TestInstallScriptReplacesBinaryAndRestartsExistingUserService(t *testing.T) {
+func TestInstallScriptReplacesBinaryWithoutRestartingExistingUserServices(t *testing.T) {
 	t.Parallel()
 
 	s, _ := newAuthTestServer(t)
@@ -524,17 +525,14 @@ exit 0
 	if !strings.Contains(string(installed), "new-binary") {
 		t.Fatalf("installed binary was not replaced: %q", installed)
 	}
-	logBytes, err := os.ReadFile(systemctlLog)
-	if err != nil {
+	if logBytes, err := os.ReadFile(systemctlLog); err == nil && len(logBytes) != 0 {
+		t.Fatalf("installer must not restart existing endpoint services: %q", logBytes)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
-	}
-	log := string(logBytes)
-	if !strings.Contains(log, "--user daemon-reload") || !strings.Contains(log, "--user restart "+unit) {
-		t.Fatalf("systemctl calls = %q", log)
 	}
 }
 
-func TestInstallScriptAdoptsAndRestartsLegacyNohupBridge(t *testing.T) {
+func TestInstallScriptLeavesExistingNohupBridgeRunning(t *testing.T) {
 	t.Parallel()
 
 	s, _ := newAuthTestServer(t)
@@ -576,6 +574,9 @@ func TestInstallScriptAdoptsAndRestartsLegacyNohupBridge(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(servicesDir, hash+".cwd"), []byte(tmp+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprint(oldProcess.Process.Pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	restartedMarker := filepath.Join(tmp, "restarted")
 	writeExecutable(t, filepath.Join(servicesDir, hash+".sh"), "#!/bin/sh\nprintf 'restarted\\n' >"+shellQuote(restartedMarker)+"\n")
 	writeExecutable(t, filepath.Join(binDir, "curl"), `#!/bin/sh
@@ -597,28 +598,18 @@ cp /bin/true "$out"
 	}
 	select {
 	case err := <-oldExit:
-		if err == nil {
-			t.Fatal("old managed Bridge process exited successfully instead of receiving termination")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("legacy Bridge process was not terminated")
+		t.Fatalf("installer terminated an unrelated nohup Bridge: %v", err)
+	case <-time.After(250 * time.Millisecond):
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if marker, err := os.ReadFile(restartedMarker); err == nil && strings.Contains(string(marker), "restarted") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("managed nohup start script was not restarted")
-		}
-		time.Sleep(20 * time.Millisecond)
+	if _, err := os.Stat(restartedMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("installer must not restart existing nohup Bridge: %v", err)
 	}
-	newPID, err := os.ReadFile(pidPath)
+	pidBytes, err := os.ReadFile(pidPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(newPID)) == fmt.Sprint(oldProcess.Process.Pid) {
-		t.Fatalf("nohup PID was not refreshed: %s", newPID)
+	if strings.TrimSpace(string(pidBytes)) != fmt.Sprint(oldProcess.Process.Pid) {
+		t.Fatalf("nohup PID changed: got %s want %d", pidBytes, oldProcess.Process.Pid)
 	}
 }
 

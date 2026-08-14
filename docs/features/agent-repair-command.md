@@ -35,6 +35,11 @@ that value to `--machine-id-file` before loading the machine id. This lets a
 repair command bind back to the existing agent instead of accidentally creating
 a new endpoint if the command is run from a different directory.
 
+`/install.sh` only atomically replaces the local Bridge binary. It does not
+enumerate, stop, or restart other Bridge services or nohup processes. The
+following directory-scoped `codex-bridge link` restarts only the selected repair
+endpoint, so repairing another directory cannot interrupt its active task.
+
 The settings UI expands each row under `Agent & Runtime` into a detail section.
 The detail section shows live capability status when available and a button to
 generate repair commands. The repair token is only created when the user asks

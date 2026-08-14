@@ -48,6 +48,20 @@ type orchestrationPlanProgress struct {
 	Labels       map[string]string       `json:"labels,omitempty"`
 }
 
+type orchestrationProgressTask struct {
+	TaskNumber int                            `json:"taskNumber"`
+	PromptSeq  int64                          `json:"promptSeq,omitempty"`
+	Prompt     string                         `json:"prompt,omitempty"`
+	Status     string                         `json:"status,omitempty"`
+	CreatedAt  int64                          `json:"createdAt,omitempty"`
+	UpdatedAt  int64                          `json:"updatedAt,omitempty"`
+	FinishedAt int64                          `json:"finishedAt,omitempty"`
+	Graphs     []store.OrchestrationTaskGraph `json:"graphs"`
+	Graph      *store.OrchestrationTaskGraph  `json:"graph,omitempty"`
+	PlanItems  []orchestrationPlanItem        `json:"planItems"`
+	Plan       orchestrationPlanProgress      `json:"plan"`
+}
+
 var (
 	orchestrationPlanGoalMarker = regexp.MustCompile(`(?m)^\[PLAN_GOAL\]\s*(.+?)\s*$`)
 	orchestrationPlanMarker     = regexp.MustCompile(`^\[(PLAN_ITEM|PLAN_UPDATE)\s+([^\]]+)\]\s*(.*?)\s*$`)
@@ -285,6 +299,70 @@ func projectOrchestrationPlan(goal string, items []orchestrationPlanItem) orches
 	return progress
 }
 
+func groupOrchestrationProgressGraphs(graphs []store.OrchestrationTaskGraph, events []store.OrchestrationEvent) []orchestrationProgressTask {
+	groups := make([]orchestrationProgressTask, 0)
+	var previousPayload protocol.OrchestrationStartPayload
+	previousPayloadValid := false
+	for _, graph := range graphs {
+		var payload protocol.OrchestrationStartPayload
+		payloadValid := json.Unmarshal([]byte(graph.PayloadJSON), &payload) == nil
+		payload.Prompt = strings.TrimSpace(payload.Prompt)
+		continuesPrevious := len(groups) > 0 && sameOrchestrationUserTask(previousPayload, previousPayloadValid, payload, payloadValid)
+		if !continuesPrevious {
+			groups = append(groups, orchestrationProgressTask{
+				TaskNumber: len(groups) + 1, PromptSeq: payload.PromptSeq, Prompt: payload.Prompt,
+				CreatedAt: graph.CreatedAt, UpdatedAt: graph.UpdatedAt, Status: graph.Status,
+				Graphs: make([]store.OrchestrationTaskGraph, 0, 1), PlanItems: []orchestrationPlanItem{},
+				Plan: orchestrationPlanProgress{Items: []orchestrationPlanItem{}},
+			})
+		}
+		group := &groups[len(groups)-1]
+		group.Graphs = append(group.Graphs, graph)
+		graphCopy := graph
+		group.Graph = &graphCopy
+		group.Status = graph.Status
+		group.UpdatedAt = graph.UpdatedAt
+		group.FinishedAt = graph.FinishedAt
+		previousPayload = payload
+		previousPayloadValid = payloadValid
+	}
+	graphGroup := make(map[string]int, len(graphs))
+	for index := range groups {
+		for _, graph := range groups[index].Graphs {
+			graphGroup[graph.ID] = index
+		}
+	}
+	taskEvents := make([][]store.OrchestrationEvent, len(groups))
+	for _, event := range events {
+		if event.Task == nil {
+			continue
+		}
+		if index, exists := graphGroup[event.Task.GraphID]; exists {
+			taskEvents[index] = append(taskEvents[index], event)
+		} else if event.Task.GraphID == "" && len(groups) > 0 {
+			// Older persisted task events predate graph-scoped references. Keep
+			// their previous latest-plan behavior without leaking them into all
+			// historical tasks.
+			taskEvents[len(groups)-1] = append(taskEvents[len(groups)-1], event)
+		}
+	}
+	for index := range groups {
+		groups[index].Plan = reduceOrchestrationPlan(taskEvents[index])
+		groups[index].PlanItems = groups[index].Plan.Items
+	}
+	return groups
+}
+
+func sameOrchestrationUserTask(previous protocol.OrchestrationStartPayload, previousValid bool, current protocol.OrchestrationStartPayload, currentValid bool) bool {
+	if !previousValid || !currentValid {
+		return false
+	}
+	if previous.PromptSeq > 0 || current.PromptSeq > 0 {
+		return previous.PromptSeq > 0 && previous.PromptSeq == current.PromptSeq
+	}
+	return previous.Prompt != "" && previous.Prompt == current.Prompt
+}
+
 func (s *Server) handleOrchestrationProgress(w http.ResponseWriter, r *http.Request, uid string) {
 	user, err := s.store.UserByID(r.Context(), uid)
 	if err != nil || !s.featureEnabled(rollout.FeatureOrchestrationPlanWorkspace, user) {
@@ -296,19 +374,20 @@ func (s *Server) handleOrchestrationProgress(w http.ResponseWriter, r *http.Requ
 		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "orchestration run not found")
 		return
 	}
-	graph, err := s.store.TaskGraphByRun(r.Context(), runID)
+	graphs, err := s.store.ListTaskGraphsByRun(r.Context(), runID)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			serverutil.WriteJSON(w, http.StatusOK, map[string]any{"graph": nil, "planItems": []orchestrationPlanItem{}, "plan": orchestrationPlanProgress{Items: []orchestrationPlanItem{}}})
-			return
-		}
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration progress")
 		return
 	}
+	if len(graphs) == 0 {
+		serverutil.WriteJSON(w, http.StatusOK, map[string]any{"graph": nil, "graphs": graphs, "tasks": []orchestrationProgressTask{}, "planItems": []orchestrationPlanItem{}, "plan": orchestrationPlanProgress{Items: []orchestrationPlanItem{}}})
+		return
+	}
+	graph := graphs[len(graphs)-1]
 	var payload protocol.OrchestrationStartPayload
 	_ = json.Unmarshal([]byte(graph.PayloadJSON), &payload)
 	if !payload.PlanWorkspace {
-		serverutil.WriteJSON(w, http.StatusOK, map[string]any{"graph": graph, "planItems": []orchestrationPlanItem{}, "plan": orchestrationPlanProgress{Items: []orchestrationPlanItem{}}, "planWorkspace": false})
+		serverutil.WriteJSON(w, http.StatusOK, map[string]any{"graph": graph, "graphs": graphs, "tasks": []orchestrationProgressTask{}, "planItems": []orchestrationPlanItem{}, "plan": orchestrationPlanProgress{Items: []orchestrationPlanItem{}}, "planWorkspace": false})
 		return
 	}
 	events, err := s.store.ListOrchestrationEvents(r.Context(), runID, 10000)
@@ -316,11 +395,14 @@ func (s *Server) handleOrchestrationProgress(w http.ResponseWriter, r *http.Requ
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration progress events")
 		return
 	}
-	plan := reduceOrchestrationPlan(events)
+	tasks := groupOrchestrationProgressGraphs(graphs, events)
+	latestTask := tasks[len(tasks)-1]
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"graph":         graph,
-		"planItems":     plan.Items,
-		"plan":          plan,
+		"graphs":        graphs,
+		"tasks":         tasks,
+		"planItems":     latestTask.PlanItems,
+		"plan":          latestTask.Plan,
 		"planWorkspace": true,
 	})
 }

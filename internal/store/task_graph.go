@@ -257,7 +257,7 @@ func validTaskRole(role string) bool {
 
 func (s *Store) TaskGraphByRun(ctx context.Context, runID string) (OrchestrationTaskGraph, error) {
 	var graph OrchestrationTaskGraph
-	if err := s.db.QueryRowContext(ctx, `SELECT id, run_id, generation, status, parallel_limit, payload_json, payload_digest, created_at, updated_at, COALESCE(finished_at,0) FROM orchestration_task_graphs WHERE run_id = ? ORDER BY generation DESC LIMIT 1`, runID).Scan(&graph.ID, &graph.RunID, &graph.Generation, &graph.Status, &graph.ParallelLimit, &graph.PayloadJSON, &graph.PayloadDigest, &graph.CreatedAt, &graph.UpdatedAt, &graph.FinishedAt); err != nil {
+	if err := scanOrchestrationTaskGraph(s.db.QueryRowContext(ctx, `SELECT id, run_id, generation, status, parallel_limit, payload_json, payload_digest, created_at, updated_at, COALESCE(finished_at,0) FROM orchestration_task_graphs WHERE run_id = ? ORDER BY generation DESC LIMIT 1`, runID), &graph); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return OrchestrationTaskGraph{}, ErrNotFound
 		}
@@ -269,6 +269,48 @@ func (s *Store) TaskGraphByRun(ctx context.Context, runID string) (Orchestration
 	}
 	graph.Tasks = tasks
 	return graph, nil
+}
+
+// ListTaskGraphsByRun returns every durable graph for a run in generation
+// order. The query rows are closed before task hydration because Hub SQLite
+// intentionally uses one open connection.
+func (s *Store) ListTaskGraphsByRun(ctx context.Context, runID string) ([]OrchestrationTaskGraph, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, run_id, generation, status, parallel_limit, payload_json, payload_digest, created_at, updated_at, COALESCE(finished_at,0) FROM orchestration_task_graphs WHERE run_id = ? ORDER BY generation`, runID)
+	if err != nil {
+		return nil, err
+	}
+	graphs := make([]OrchestrationTaskGraph, 0)
+	for rows.Next() {
+		var graph OrchestrationTaskGraph
+		if err := scanOrchestrationTaskGraph(rows, &graph); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		graphs = append(graphs, graph)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range graphs {
+		tasks, err := s.listTasks(ctx, graphs[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		graphs[i].Tasks = tasks
+	}
+	return graphs, nil
+}
+
+type orchestrationTaskGraphScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanOrchestrationTaskGraph(scanner orchestrationTaskGraphScanner, graph *OrchestrationTaskGraph) error {
+	return scanner.Scan(&graph.ID, &graph.RunID, &graph.Generation, &graph.Status, &graph.ParallelLimit, &graph.PayloadJSON, &graph.PayloadDigest, &graph.CreatedAt, &graph.UpdatedAt, &graph.FinishedAt)
 }
 
 func (s *Store) listTasks(ctx context.Context, graphID string) ([]OrchestrationTask, error) {

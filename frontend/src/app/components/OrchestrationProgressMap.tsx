@@ -4,8 +4,11 @@ import {
   Circle,
   CircleDashed,
   LoaderCircle,
+  Minus,
   OctagonAlert,
   Pause,
+  Plus,
+  Scan,
   X,
 } from 'lucide-react';
 import {
@@ -59,6 +62,7 @@ export interface OrchestrationProgressMapProps {
   emptyLabel?: string;
   statusLabels?: Partial<Record<OrchestrationProgressStatus, string>>;
   inferSequentialDependencies?: boolean;
+  interactive?: boolean;
 }
 
 type ProgressNodeData = {
@@ -100,6 +104,7 @@ export function OrchestrationProgressMap({
   emptyLabel = 'No progress nodes yet',
   statusLabels,
   inferSequentialDependencies = true,
+  interactive = false,
 }: OrchestrationProgressMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
@@ -144,27 +149,39 @@ export function OrchestrationProgressMap({
           elementsSelectable={false}
           edgesFocusable={false}
           nodesFocusable={false}
-          panOnDrag={false}
-          panOnScroll={false}
-          zoomOnScroll={false}
-          zoomOnPinch={false}
-          zoomOnDoubleClick={false}
-          preventScrolling={false}
+          panOnDrag={interactive}
+          panOnScroll={interactive}
+          zoomOnScroll={interactive}
+          zoomOnPinch={interactive}
+          zoomOnDoubleClick={interactive}
+          preventScrolling={interactive}
           fitView
           fitViewOptions={{ padding: 0.12, minZoom: 0.25, maxZoom: 1 }}
           minZoom={0.25}
-          maxZoom={1}
+          maxZoom={interactive ? 2.5 : 1}
           proOptions={{ hideAttribution: true }}
           disableKeyboardA11y
           className="bg-[radial-gradient(circle_at_center,color-mix(in_oklab,var(--muted-foreground)_11%,transparent)_0.7px,transparent_0.8px)] bg-[length:14px_14px]"
         >
           <FitFlowToContainer layoutKey={layoutKey} />
+          {interactive ? <FlowViewportControls /> : null}
         </ReactFlow>
       ) : (
         <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted-foreground">
           {emptyLabel}
         </div>
       )}
+    </div>
+  );
+}
+
+function FlowViewportControls() {
+  const { fitView, zoomIn, zoomOut } = useReactFlow();
+  return (
+    <div className="absolute bottom-3 right-3 z-10 flex items-center gap-1 rounded-md border border-border bg-background/95 p-1 shadow-sm backdrop-blur">
+      <button type="button" className="flex h-8 w-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" onClick={() => void zoomOut({ duration: 120 })} aria-label="缩小" title="缩小"><Minus className="h-3.5 w-3.5" /></button>
+      <button type="button" className="flex h-8 w-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" onClick={() => void fitView({ padding: 0.16, minZoom: 0.25, maxZoom: 1.35, duration: 180 })} aria-label="适配画布" title="适配画布"><Scan className="h-3.5 w-3.5" /></button>
+      <button type="button" className="flex h-8 w-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" onClick={() => void zoomIn({ duration: 120 })} aria-label="放大" title="放大"><Plus className="h-3.5 w-3.5" /></button>
     </div>
   );
 }

@@ -124,6 +124,35 @@ func TestCreateNextTaskGraphIsIdempotentForPreviousGeneration(t *testing.T) {
 	}
 }
 
+func TestListTaskGraphsByRunReturnsEveryGenerationWithTasks(t *testing.T) {
+	st := openTestStore(t)
+	first := createTestTaskGraph(t, st)
+	specs := []CreateTaskSpec{{Name: "review", Role: TaskRoleReviewer, PayloadJSON: `{}`, PayloadDigest: "next"}}
+	second, created, err := st.CreateNextOrchestrationTaskGraph(context.Background(), first.RunID, first.ID, `{"promptSeq":2}`, "next-base", specs)
+	if err != nil || !created {
+		t.Fatalf("create successor: graph=%#v created=%v err=%v", second, created, err)
+	}
+
+	graphs, err := st.ListTaskGraphsByRun(context.Background(), first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(graphs) != 2 || graphs[0].ID != first.ID || graphs[1].ID != second.ID {
+		t.Fatalf("listed graphs = %#v", graphs)
+	}
+	if graphs[0].Generation != 1 || len(graphs[0].Tasks) != len(first.Tasks) || graphs[1].Generation != 2 || len(graphs[1].Tasks) != 1 {
+		t.Fatalf("listed graph tasks = %#v", graphs)
+	}
+	if graphs[1].Tasks[0].Name != "review" || graphs[1].Tasks[0].GraphID != second.ID {
+		t.Fatalf("listed successor task = %#v", graphs[1].Tasks)
+	}
+
+	empty, err := st.ListTaskGraphsByRun(context.Background(), "orc_missing")
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("missing run graphs = %#v err=%v", empty, err)
+	}
+}
+
 func TestRecoverTaskGraphsMarksAmbiguousAttemptUnknown(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)

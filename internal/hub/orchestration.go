@@ -351,6 +351,10 @@ type orchestrationRunStats struct {
 	AccountingSource string                    `json:"accountingSource"`
 	ScannedAt        int64                     `json:"scannedAt,omitempty"`
 	Rounds           []orchestrationRoundStats `json:"rounds,omitempty"`
+	TaskNumber       int                       `json:"taskNumber,omitempty"`
+	PromptSeq        int64                     `json:"promptSeq,omitempty"`
+	Prompt           string                    `json:"prompt,omitempty"`
+	Tasks            []orchestrationRunStats   `json:"tasks,omitempty"`
 }
 
 type orchestrationUsageOverviewItem struct {
@@ -535,7 +539,14 @@ func (s *Server) handleOrchestrationStats(w http.ResponseWriter, r *http.Request
 	if len(syncs) == 0 && orchestrationTerminalStatus(run.Status) {
 		_ = s.requestOrchestrationUsageSync(run, events)
 	}
-	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"stats": buildOrchestrationRunStatsWithLedger(run, events, ledger, syncs)})
+	stats := buildOrchestrationRunStatsWithLedger(run, events, ledger, syncs)
+	graphs, graphErr := s.store.ListTaskGraphsByRun(r.Context(), run.ID)
+	if graphErr != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration task boundaries")
+		return
+	}
+	stats.Tasks = buildOrchestrationTaskStats(run, events, ledger, syncs, graphs)
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"stats": stats})
 }
 
 func (s *Server) handleUsageOverview(w http.ResponseWriter, r *http.Request, uid string) {
@@ -717,6 +728,86 @@ func appendOverviewTrend(trend map[string]*orchestrationUsageTrendPoint, run sto
 
 func buildOrchestrationRunStats(run store.OrchestrationRun, events []store.OrchestrationEvent) orchestrationRunStats {
 	return buildOrchestrationRunStatsWithLedger(run, events, nil, nil)
+}
+
+type orchestrationTaskBoundary struct {
+	TaskNumber int
+	PromptSeq  int64
+	Prompt     string
+	StartedAt  int64
+	FinishedAt int64
+}
+
+func orchestrationTaskBoundaries(run store.OrchestrationRun, graphs []store.OrchestrationTaskGraph) []orchestrationTaskBoundary {
+	boundaries := make([]orchestrationTaskBoundary, 0)
+	var previousPayload protocol.OrchestrationStartPayload
+	previousPayloadValid := false
+	for _, graph := range graphs {
+		var payload protocol.OrchestrationStartPayload
+		payloadValid := json.Unmarshal([]byte(graph.PayloadJSON), &payload) == nil
+		payload.Prompt = strings.TrimSpace(payload.Prompt)
+		continuesPrevious := len(boundaries) > 0 && sameOrchestrationUserTask(previousPayload, previousPayloadValid, payload, payloadValid)
+		if !continuesPrevious {
+			boundaries = append(boundaries, orchestrationTaskBoundary{TaskNumber: len(boundaries) + 1, PromptSeq: payload.PromptSeq, Prompt: payload.Prompt, StartedAt: graph.CreatedAt})
+		}
+		boundaries[len(boundaries)-1].FinishedAt = graph.FinishedAt
+		previousPayload = payload
+		previousPayloadValid = payloadValid
+	}
+	if len(boundaries) == 0 {
+		return []orchestrationTaskBoundary{{TaskNumber: 1, Prompt: run.Prompt, StartedAt: run.CreatedAt, FinishedAt: run.FinishedAt}}
+	}
+	for index := range boundaries {
+		if index+1 < len(boundaries) {
+			boundaries[index].FinishedAt = boundaries[index+1].StartedAt
+		} else if orchestrationTerminalStatus(run.Status) && run.FinishedAt > 0 {
+			boundaries[index].FinishedAt = run.FinishedAt
+		} else {
+			boundaries[index].FinishedAt = 0
+		}
+	}
+	return boundaries
+}
+
+func buildOrchestrationTaskStats(run store.OrchestrationRun, timeline []store.OrchestrationEvent, ledger []protocol.OrchestrationUsageEvent, syncs []store.OrchestrationUsageSync, graphs []store.OrchestrationTaskGraph) []orchestrationRunStats {
+	boundaries := orchestrationTaskBoundaries(run, graphs)
+	tasks := make([]orchestrationRunStats, 0, len(boundaries))
+	for index, boundary := range boundaries {
+		end := boundary.FinishedAt
+		contains := func(timestamp int64) bool {
+			if timestamp < boundary.StartedAt {
+				return false
+			}
+			if index+1 < len(boundaries) {
+				return timestamp < boundaries[index+1].StartedAt
+			}
+			return end == 0 || timestamp <= end
+		}
+		filteredTimeline := make([]store.OrchestrationEvent, 0)
+		for _, event := range timeline {
+			if contains(event.CreatedAt) {
+				filteredTimeline = append(filteredTimeline, event)
+			}
+		}
+		filteredLedger := make([]protocol.OrchestrationUsageEvent, 0)
+		for _, event := range ledger {
+			if (event.OccurredAt <= 0 && index == 0) || (event.OccurredAt > 0 && contains(event.OccurredAt)) {
+				filteredLedger = append(filteredLedger, event)
+			}
+		}
+		taskRun := run
+		taskRun.CreatedAt = boundary.StartedAt
+		taskRun.FinishedAt = end
+		if index+1 < len(boundaries) || end > 0 {
+			taskRun.Status = store.OrchestrationCompleted
+		}
+		stats := buildOrchestrationRunStatsWithLedger(taskRun, filteredTimeline, filteredLedger, syncs)
+		stats.TaskNumber = boundary.TaskNumber
+		stats.PromptSeq = boundary.PromptSeq
+		stats.Prompt = boundary.Prompt
+		tasks = append(tasks, stats)
+	}
+	return tasks
 }
 
 func orchestrationStatsStartTime(run store.OrchestrationRun, events []store.OrchestrationEvent) int64 {

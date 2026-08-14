@@ -168,7 +168,7 @@ export type OrchestrationRoundStats = {
   callCount: number;
 };
 
-export type OrchestrationRunStats = {
+export type OrchestrationRunStatsBase = {
   runId: string;
   startedAt?: number;
   finishedAt?: number;
@@ -192,6 +192,16 @@ export type OrchestrationRunStats = {
   cacheTokens: number;
   totalTokens: number;
   rounds?: OrchestrationRoundStats[];
+};
+
+export type OrchestrationRunStats = OrchestrationRunStatsBase & {
+  tasks?: OrchestrationTaskUsageStats[];
+};
+
+export type OrchestrationTaskUsageStats = OrchestrationRunStatsBase & {
+  taskNumber: number;
+  promptSeq?: number;
+  prompt?: string;
 };
 
 export type OrchestrationUsageOverviewItem = {
@@ -450,6 +460,21 @@ export type OrchestrationProgress = {
   planItems: OrchestrationPlanItem[];
   plan?: OrchestrationPlanProgress;
   planWorkspace?: boolean;
+  tasks?: OrchestrationProgressTaskSegment[];
+};
+
+export type OrchestrationProgressTaskSegment = {
+  taskNumber: number;
+  promptSeq?: number;
+  prompt?: string;
+  status?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  finishedAt?: number;
+  graphs: OrchestrationTaskGraph[];
+  graph?: OrchestrationTaskGraph | null;
+  planItems: OrchestrationPlanItem[];
+  plan?: OrchestrationPlanProgress;
 };
 
 export type CommandData = {

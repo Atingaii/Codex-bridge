@@ -105,6 +105,81 @@ func TestBuildLedgerOrchestrationRunStatsIncludesEveryObservedRound(t *testing.T
 	}
 }
 
+func TestBuildOrchestrationTaskStatsSplitsFollowupsWithoutSplittingInternalRounds(t *testing.T) {
+	run := store.OrchestrationRun{ID: "orc_task_stats", Prompt: "first", CreatedAt: 100, FinishedAt: 240, Status: store.OrchestrationCompleted}
+	payload := func(prompt string, promptSeq int64) string {
+		raw, err := json.Marshal(protocol.OrchestrationStartPayload{Prompt: prompt, PromptSeq: promptSeq})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	graphs := []store.OrchestrationTaskGraph{
+		{ID: "otg_1", Generation: 1, PayloadJSON: payload("first", 1), CreatedAt: 100, FinishedAt: 140},
+		{ID: "otg_2", Generation: 2, PayloadJSON: payload("first", 1), CreatedAt: 150, FinishedAt: 180},
+		{ID: "otg_3", Generation: 3, PayloadJSON: payload("followup", 20), CreatedAt: 200, FinishedAt: 240},
+	}
+	timeline := []store.OrchestrationEvent{
+		{Kind: "run.start", CreatedAt: 100, RunStartData: &protocol.RunStartData{Round: 1}},
+		{Kind: "run.start", CreatedAt: 150, RunStartData: &protocol.RunStartData{Round: 2}},
+		{Kind: "run.start", CreatedAt: 200, RunStartData: &protocol.RunStartData{Round: 1}},
+	}
+	ledger := []protocol.OrchestrationUsageEvent{
+		{CLI: "codex", Model: "gpt-5.6-sol", OccurredAt: 110, InputTokens: 10},
+		{CLI: "claude", Model: "claude-sonnet-5", OccurredAt: 160, InputTokens: 20},
+		{CLI: "codex", Model: "gpt-5.6-sol", OccurredAt: 210, InputTokens: 30},
+	}
+	tasks := buildOrchestrationTaskStats(run, timeline, ledger, []store.OrchestrationUsageSync{{Status: "complete"}}, graphs)
+	if len(tasks) != 2 {
+		t.Fatalf("tasks = %#v", tasks)
+	}
+	if tasks[0].TaskNumber != 1 || tasks[0].Prompt != "first" || tasks[0].InputTokens != 30 || len(tasks[0].Rounds) != 2 || tasks[0].RuntimeSeconds != 100 {
+		t.Fatalf("first task = %#v", tasks[0])
+	}
+	if tasks[1].TaskNumber != 2 || tasks[1].Prompt != "followup" || tasks[1].InputTokens != 30 || len(tasks[1].Rounds) != 1 || tasks[1].RuntimeSeconds != 40 {
+		t.Fatalf("second task = %#v", tasks[1])
+	}
+}
+
+func TestBuildOrchestrationTaskStatsKeepsActiveLatestRoundRunning(t *testing.T) {
+	run := store.OrchestrationRun{ID: "orc_active_task", Prompt: "first", CreatedAt: 100, Status: store.OrchestrationRunning}
+	payload, err := json.Marshal(protocol.OrchestrationStartPayload{Prompt: "first", PromptSeq: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphs := []store.OrchestrationTaskGraph{
+		{ID: "otg_1", PayloadJSON: string(payload), CreatedAt: 100, FinishedAt: 120},
+		{ID: "otg_2", PayloadJSON: string(payload), CreatedAt: 130},
+	}
+	tasks := buildOrchestrationTaskStats(run, nil, nil, nil, graphs)
+	if len(tasks) != 1 || tasks[0].FinishedAt != 0 || tasks[0].RuntimeSeconds < 1 {
+		t.Fatalf("active task stats = %#v", tasks)
+	}
+}
+
+func TestBuildOrchestrationTaskStatsAssignsUndatedUsageToFirstTask(t *testing.T) {
+	run := store.OrchestrationRun{ID: "orc_undated_usage", Prompt: "first", CreatedAt: 100, FinishedAt: 220, Status: store.OrchestrationCompleted}
+	payload := func(prompt string, promptSeq int64) string {
+		raw, err := json.Marshal(protocol.OrchestrationStartPayload{Prompt: prompt, PromptSeq: promptSeq})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	graphs := []store.OrchestrationTaskGraph{
+		{ID: "otg_1", PayloadJSON: payload("first", 1), CreatedAt: 100, FinishedAt: 150},
+		{ID: "otg_2", PayloadJSON: payload("followup", 2), CreatedAt: 180, FinishedAt: 220},
+	}
+	ledger := []protocol.OrchestrationUsageEvent{
+		{CLI: "codex", Model: "gpt-5.6-sol", InputTokens: 10},
+		{CLI: "codex", Model: "gpt-5.6-sol", OccurredAt: 190, InputTokens: 20},
+	}
+	tasks := buildOrchestrationTaskStats(run, nil, ledger, []store.OrchestrationUsageSync{{Status: "complete"}}, graphs)
+	if len(tasks) != 2 || tasks[0].InputTokens != 10 || tasks[1].InputTokens != 20 || tasks[0].InputTokens+tasks[1].InputTokens != 30 {
+		t.Fatalf("task usage stats = %#v", tasks)
+	}
+}
+
 func TestUsageOverviewRange(t *testing.T) {
 	tests := []struct {
 		name       string

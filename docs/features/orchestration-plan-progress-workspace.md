@@ -33,24 +33,37 @@
 For users with the `orchestration-plan-workspace` feature, a compact,
 default-closed progress row appears directly below the runtime status toolbar.
 Its collapsed state shows whole-task completion and current focus. Expanding
-the inline section keeps the three-column transcript in normal document flow
-and contains two responsive information rails:
+opens a large independent work area above the unchanged three-column
+transcript, so prompt and graph inspection never reduce the live conversation
+height or width. The work area contains two responsive information rails:
 
 1. The prompt rail switches between the original request and persisted
    `turn.start` prompts. The selected prompt is read-only.
 2. The progress rail starts with an overall Chinese goal and completion
-   summary. Its primary map is a proof-task dependency graph whose nodes show
+summary. Its primary map is a proof-task dependency graph whose nodes show
    difficulty, priority, status, and recommended order. A synchronized local
    checklist lists active, ready, dependency-blocked, and completed proof
    obligations with rationale and evidence.
 3. The six durable Agent nodes remain visible as a compact secondary execution
    chain. They explain where the orchestration runtime is, but do not masquerade
-   as proof completion.
+   as proof completion. The compact chain can be opened in a large dialog with
+   pan, wheel/pinch zoom, zoom controls, and fit-to-view.
+4. Continuing the same run creates another task segment without losing native
+   conversation context. A task selector groups durable graph generations by
+   their persisted `promptSeq`: configured internal rounds stay inside one task,
+   while each new user follow-up becomes Task 2, Task 3, and so on. Selecting a
+   task switches its prompt, reviewed plan, checklist, and Agent diagnostics as
+   one coherent view; the newest task is selected by default.
+5. On viewports wide enough to preserve the existing transcript width, the
+   unused outer margins become compact prompt and progress rails. They never
+   overlap the transcript or appear at narrower widths; the large work area
+   remains the complete view.
 
-Below desktop width the section stacks prompt navigation above progress with
-bounded, independently scrollable rows. Collapsing it leaves only the compact
-summary row. Runs created outside the rollout keep the existing four-node graph
-and existing layout.
+Below desktop width the work area stacks prompt navigation above progress with
+bounded, independently scrollable rows. Closing it leaves only the compact
+summary row and the transcript retains its original layout throughout. Runs
+created outside the rollout keep the existing four-node graph and existing
+layout.
 
 ## Data And Protocol Impact
 
@@ -73,8 +86,16 @@ and existing layout.
   ```
 
 - `GET /api/orchestrations/{runID}/progress` returns the latest owned graph and
-  a reconstructed checklist. It returns 404 outside the rollout so the backend,
-  rather than only the browser, enforces the boundary.
+  a reconstructed checklist. It also returns task segments grouped by
+  `promptSeq`, including all graph generations, each task's prompt, time range,
+  status, and independently reconstructed checklist in the `tasks` field;
+  generation-ordered raw graphs are also available in `graphs`. The initial
+  prompt is task 1; positive `promptSeq` values are authoritative, while legacy
+  zero/missing sequences remain grouped only across consecutive graphs with the
+  same prompt. Each distinct follow-up becomes the next task. The existing top-level
+  `graph`, `plan`, and `planItems` fields remain aliases for the latest task so
+  older browsers continue to work. It returns 404 outside the rollout so the
+  backend, rather than only the browser, enforces the boundary.
 - Planner output may include `[PLAN_GOAL] Chinese goal summary` and uses the
   enriched fixed-order marker
   `[PLAN_ITEM id="P1" status="pending" kind="proof" difficulty="hard"
@@ -120,6 +141,12 @@ and existing layout.
 - Follow-ups keep the same run id. The latest graph payload determines whether
   the expanded topology continues, so rollout changes do not silently alter an
   existing run.
+- Task segmentation is presentational only. It does not create a new run or
+  native CLI session and does not alter scheduler generation numbers.
+- Run usage statistics retain the existing all-run totals and add per-task
+  projections using the same persisted task boundaries. The browser can switch
+  cards, round trend, and CLI/model totals between all tasks and one task
+  without requesting another usage sync.
 
 ## Implementation Steps
 
@@ -131,6 +158,8 @@ and existing layout.
 5. Add prompt, proof-map, checklist, and execution-stage rails to the existing
    workspace.
 6. Rebuild embedded assets and run focused and full regression suites.
+7. Add task-scoped progress and usage selectors plus an enlarged interactive
+   Agent-chain dialog.
 
 ## Exit Gates
 
@@ -147,6 +176,12 @@ and existing layout.
       the Agent graph is visibly secondary.
 - [x] Navigation, active-run deletion, cancellation convergence, and live event
       rendering retain regression coverage.
+- [x] Follow-up prompts appear as separate task choices while configured rounds
+      remain grouped under the same task.
+- [x] Task selection switches prompt, plan, checklist, Agent chain, and timing;
+      the enlarged chain supports zoom, pan, and fit-to-view.
+- [x] Usage statistics switch between all tasks and one task, including cards,
+      round trend, and CLI/model totals.
 - [x] Frontend tests/build, Go tests/build, document lint, and diff checks pass.
 
 ## Reviewer Q&A

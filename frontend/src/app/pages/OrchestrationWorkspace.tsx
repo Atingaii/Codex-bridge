@@ -6,12 +6,12 @@ import {
   ArrowLeft,
   BookOpen,
   Check,
-  ChevronDown,
   Command,
   FileUp,
   FolderInput,
   GitBranch,
   History,
+  Maximize2,
   Plus,
   RefreshCw,
   Send,
@@ -57,6 +57,7 @@ import {
 } from '../components/OrchestrationComponents';
 import { SettingsModal } from '../components/Settings';
 import { Button, Input } from '../components/ui';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import {
   activeOrchestrationRunStorageKey,
   activeOrchestrationStatus,
@@ -84,6 +85,7 @@ import {
   forgetActiveOrchestrationRunForAgent,
   rememberActiveOrchestrationRunForAgent,
   sessionDateLabel,
+  formatDuration,
   startWSHeartbeat,
   titleFromPrompt,
   updateApprovalItemStatus,
@@ -147,6 +149,9 @@ export function OrchestrationWorkspace({
   const [deletingRunId, setDeletingRunId] = useState('');
   const [planningWorkspaceOpen, setPlanningWorkspaceOpen] = useState(false);
   const [orchestrationProgress, setOrchestrationProgress] = useState<OrchestrationProgress | null>(null);
+  const [selectedProgressTaskNumber, setSelectedProgressTaskNumber] = useState<number | null>(null);
+  const [selectedProgressGraphId, setSelectedProgressGraphId] = useState('');
+  const [agentGraphExpanded, setAgentGraphExpanded] = useState(false);
   const [selectedPromptKey, setSelectedPromptKey] = useState('initial');
   const [connectionStatus, setConnectionStatus] = useState(t.disconnected);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
@@ -204,12 +209,26 @@ export function OrchestrationWorkspace({
   const visibleApprovals = useMemo(() => approvals.filter((item) => item.approval.runId === activeRunId), [approvals, activeRunId]);
   const timelineItems = useMemo(() => orchestrationTimelineItems(visibleEvents, visibleApprovals), [visibleEvents, visibleApprovals]);
   const timelineGroups = useMemo(() => orchestrationTimelineGroups(timelineItems, activeRun, events), [timelineItems, activeRun, events, elapsedTick]);
+  const progressTasks = orchestrationProgress?.tasks || [];
+  const selectedProgressTask = useMemo(() => {
+    if (!progressTasks.length) return null;
+    return progressTasks.find((item) => item.taskNumber === selectedProgressTaskNumber) || progressTasks[progressTasks.length - 1];
+  }, [progressTasks, selectedProgressTaskNumber]);
+  const selectedProgressGraphIDs = useMemo(() => new Set((selectedProgressTask?.graphs || []).map((graph) => graph.id)), [selectedProgressTask]);
   const promptViews = useMemo(() => {
     if (!activeRun) return [];
-    const views = [{ key: 'initial', label: t.initialPrompt, content: activeRun.prompt }];
+    const taskNumber = selectedProgressTask?.taskNumber;
+    const taskPrompt = selectedProgressTask?.prompt || activeRun.prompt;
+    const views = [{ key: `task-${taskNumber || 1}`, label: taskNumber ? `${language === 'zh' ? '任务' : 'Task'} ${taskNumber}` : t.initialPrompt, content: taskPrompt }];
     events.forEach((event) => {
       const content = event.turnStartData?.promptText?.trim();
       if (!content) return;
+      if (selectedProgressGraphIDs.size && event.task?.graphId && !selectedProgressGraphIDs.has(event.task.graphId)) return;
+      if (selectedProgressGraphIDs.size && !event.task?.graphId && selectedProgressTask && event.createdAt) {
+        const taskStart = selectedProgressTask.createdAt || 0;
+        const taskEnd = selectedProgressTask.finishedAt || 0;
+        if ((taskStart && event.createdAt < taskStart) || (taskEnd && event.createdAt > taskEnd)) return;
+      }
       const key = `turn-${event.id || event.seq || views.length}`;
       const round = event.task?.round || event.turnStartData?.round;
       const node = event.task?.name || event.role || event.cli;
@@ -217,10 +236,14 @@ export function OrchestrationWorkspace({
       views.push({ key, label, content });
     });
     return views;
-  }, [activeRun, events, t.initialPrompt, t.roundPrompt, t.turnPrefix]);
+  }, [activeRun, events, language, selectedProgressGraphIDs, selectedProgressTask, t.initialPrompt, t.roundPrompt, t.turnPrefix]);
   const selectedPromptView = promptViews.find((item) => item.key === selectedPromptKey) || promptViews[0];
-  const projectedPlan = orchestrationProgress?.plan;
-  const projectedPlanItems = projectedPlan?.items?.length ? projectedPlan.items : (orchestrationProgress?.planItems || []);
+  const projectedPlan = selectedProgressTask?.plan || orchestrationProgress?.plan;
+  const projectedPlanItems = projectedPlan?.items?.length ? projectedPlan.items : (selectedProgressTask?.planItems || orchestrationProgress?.planItems || []);
+  const selectedAgentGraph = useMemo(() => {
+    const graphs = selectedProgressTask?.graphs || [];
+    return graphs.find((graph) => graph.id === selectedProgressGraphId) || selectedProgressTask?.graph || graphs[graphs.length - 1] || orchestrationProgress?.graph;
+  }, [orchestrationProgress?.graph, selectedProgressGraphId, selectedProgressTask]);
   const currentPlanItem = projectedPlanItems.find((item) => item.id === projectedPlan?.currentFocus);
   const progressRefreshKey = useMemo(() => {
     const relevant = events.filter((event) => event.task && ['run.start', 'turn.end', 'run.end', 'run.error', 'run.cancelled'].includes(event.kind));
@@ -258,15 +281,7 @@ export function OrchestrationWorkspace({
     const nextAgents = data.agents || [];
     setAgents(nextAgents);
     setAgentsLoaded(true);
-    setSelectedAgentId((current) => {
-      const next = activeRunIdRef.current && activeRunAgentIdRef.current === current
-        ? current
-        : preferredAgentID(nextAgents, current);
-      selectedAgentIdRef.current = next;
-      if (next) localStorage.setItem('codexBridge.selectedAgentId', next);
-      else localStorage.removeItem('codexBridge.selectedAgentId');
-      return next;
-    });
+    return nextAgents;
   }, []);
 
   const loadRuns = useCallback(async () => {
@@ -609,6 +624,26 @@ export function OrchestrationWorkspace({
     return task;
   }, [activateRun, clearActiveOrchestration, loadAgents, loadRun, loadRuns]);
 
+  const refreshVisibleOrchestrationData = useCallback(async () => {
+    const runId = orchestrationRunIdFromPath(window.location.pathname) || activeRunIdRef.current;
+    setRefreshingOrchestration(true);
+    try {
+      const [nextAgents, nextRuns, refreshedRun] = await Promise.all([
+        api<{ agents: Agent[] }>('/api/agents'),
+        api<{ runs: OrchestrationRun[] }>('/api/orchestrations?limit=200'),
+        runId ? api<{ run: OrchestrationRun }>(`/api/orchestrations/${encodeURIComponent(runId)}`) : Promise.resolve(null),
+        runId ? loadRunEvents(runId, false, 'after') : Promise.resolve([]),
+      ]);
+      setAgents(nextAgents.agents || []);
+      setAgentsLoaded(true);
+      const incomingRuns = Array.isArray(nextRuns.runs) ? nextRuns.runs.filter(isOrchestrationRun) : [];
+      const currentRun = refreshedRun && isOrchestrationRun(refreshedRun.run) ? refreshedRun.run : null;
+      setRuns(currentRun ? upsertOrchestrationRun(incomingRuns, currentRun) : incomingRuns);
+    } finally {
+      setRefreshingOrchestration(false);
+    }
+  }, [loadRunEvents]);
+
   useEffect(() => {
     let stopped = false;
     let retryTimer: number | null = null;
@@ -629,7 +664,12 @@ export function OrchestrationWorkspace({
         });
     };
     const recover = () => {
-      if (document.visibilityState === 'visible' && navigator.onLine) retry();
+      if (document.visibilityState !== 'visible' || !navigator.onLine) return;
+      if (!orchestrationBootedRef.current) {
+        retry();
+        return;
+      }
+      void refreshVisibleOrchestrationData().catch(() => undefined);
     };
     retry();
     window.addEventListener('online', recover);
@@ -670,8 +710,21 @@ export function OrchestrationWorkspace({
   useEffect(() => {
     setSelectedPromptKey('initial');
     setOrchestrationProgress(null);
+    setSelectedProgressTaskNumber(null);
+    setSelectedProgressGraphId('');
+    setAgentGraphExpanded(false);
     setPlanningWorkspaceOpen(false);
   }, [activeRunId]);
+
+  useEffect(() => {
+    if (!progressTasks.length) return;
+    setSelectedProgressTaskNumber((current) => progressTasks.some((item) => item.taskNumber === current) ? current : progressTasks[progressTasks.length - 1].taskNumber);
+  }, [progressTasks]);
+
+  useEffect(() => {
+    setSelectedPromptKey(`task-${selectedProgressTask?.taskNumber || 1}`);
+    setSelectedProgressGraphId(selectedProgressTask?.graph?.id || selectedProgressTask?.graphs?.[selectedProgressTask.graphs.length - 1]?.id || '');
+  }, [selectedProgressTask?.taskNumber]);
 
   useEffect(() => {
     if (!activeRunId || !planWorkspaceEnabled) return;
@@ -1107,7 +1160,7 @@ export function OrchestrationWorkspace({
               variant="ghost"
               size="icon"
               className="text-muted-foreground rounded-full h-8 w-8"
-              onClick={() => refreshOrchestration().catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration))}
+              onClick={() => refreshVisibleOrchestrationData().catch((err) => setError(err instanceof Error ? err.message : t.failedLoadOrchestration))}
               disabled={refreshingOrchestration}
               aria-label={t.refresh}
               title={t.refresh}
@@ -1171,11 +1224,38 @@ export function OrchestrationWorkspace({
                 {projectedPlanItems.length ? `${projectedPlan?.completed || 0}/${projectedPlan?.total || projectedPlanItems.length} · ${projectedPlan?.percent || 0}%` : t.planWaiting}
               </span>
               {currentPlanItem && <span className="hidden min-w-0 max-w-[28rem] truncate text-xs text-muted-foreground lg:block">{language === 'zh' ? '当前' : 'Current'}: {currentPlanItem.title}</span>}
-              <ChevronDown className={cn('h-4 w-4 shrink-0 text-muted-foreground transition-transform', planningWorkspaceOpen && 'rotate-180')} />
+              <Maximize2 className="h-4 w-4 shrink-0 text-muted-foreground" />
             </button>
-            {planningWorkspaceOpen && (
-              <div className="max-h-[min(62vh,42rem)] overflow-y-auto border-t border-border bg-muted/10 p-3 elegant-scrollbar md:p-4">
-                <div className="grid gap-3 xl:grid-cols-[minmax(16rem,0.6fr)_minmax(34rem,1.4fr)]">
+            <Dialog open={planningWorkspaceOpen} onOpenChange={setPlanningWorkspaceOpen}>
+              <DialogContent className="flex h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-none flex-col gap-3 overflow-hidden p-4 sm:max-w-none md:p-5">
+                <DialogHeader className="shrink-0 pr-10">
+                  <DialogTitle className="flex items-center gap-2 text-base"><Workflow className="h-4 w-4 text-primary" />{t.planningWorkspace}</DialogTitle>
+                  <DialogDescription>{language === 'zh' ? '在不改变实时对话布局的独立工作区中查看任务提示词、计划清单、分支地图和 Agent 执行链。' : 'Inspect task prompts, plan checklist, branch map, and Agent execution chain without changing the live transcript layout.'}</DialogDescription>
+                </DialogHeader>
+                <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-muted/10 p-3 elegant-scrollbar md:p-4">
+                {progressTasks.length > 0 && (
+                  <div className="mb-3 flex min-w-0 items-center gap-2 overflow-x-auto rounded-md border border-border bg-background p-1.5 elegant-scrollbar">
+                    <span className="shrink-0 px-1.5 text-[10px] font-medium uppercase text-muted-foreground">{language === 'zh' ? '任务' : 'Tasks'}</span>
+                    {progressTasks.map((task) => {
+                      const active = task.taskNumber === selectedProgressTask?.taskNumber;
+                      const end = task.finishedAt || (activeOrchestrationStatus(task.status) ? Math.floor(Date.now() / 1000) : task.updatedAt);
+                      const duration = task.createdAt && end && end >= task.createdAt ? formatDuration((end - task.createdAt) * 1000) : '';
+                      return (
+                        <button
+                          key={task.taskNumber}
+                          type="button"
+                          onClick={() => setSelectedProgressTaskNumber(task.taskNumber)}
+                          className={cn('flex h-8 shrink-0 items-center gap-2 rounded px-2.5 text-xs transition-colors', active ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground')}
+                          aria-pressed={active}
+                        >
+                          <span>{language === 'zh' ? `任务 ${task.taskNumber}` : `Task ${task.taskNumber}`}</span>
+                          <span className={cn('font-mono text-[10px] tabular-nums', active ? 'text-primary-foreground/75' : 'text-muted-foreground')}>{task.graphs.length} {language === 'zh' ? '轮' : task.graphs.length === 1 ? 'round' : 'rounds'}{duration ? ` · ${duration}` : ''}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className="grid gap-3 xl:grid-cols-[minmax(16rem,0.5fr)_minmax(34rem,1.5fr)]">
                   <aside className="min-w-0 overflow-hidden rounded-md border border-border bg-background">
                     <div className="flex items-center gap-2 border-b border-border px-3 py-2.5 text-xs font-semibold text-muted-foreground"><BookOpen className="h-3.5 w-3.5" />{t.promptNavigator}</div>
                     <div className="flex max-h-28 gap-1 overflow-auto border-b border-border p-2 elegant-scrollbar xl:flex-col">
@@ -1206,9 +1286,20 @@ export function OrchestrationWorkspace({
                     <div className="grid min-w-0 gap-3 2xl:grid-cols-[minmax(24rem,1.25fr)_minmax(26rem,1fr)]">
                       <OrchestrationProofProgress plan={projectedPlan} planItems={projectedPlanItems} labels={language === 'zh' ? { empty: isRunning ? '正在生成整个任务的中文计划…' : '本次任务没有可用的结构化计划。' } : { title: 'Whole-task plan', completed: 'Completed', active: 'Active', pending: 'Pending', blocked: 'Blocked', ready: 'Ready', empty: isRunning ? 'Generating the structured whole-task plan...' : 'No structured task plan is available for this run.', evidence: 'Evidence', rationale: 'Rationale', dependency: 'Blocked by', showCompleted: 'Show completed', hideCompleted: 'Hide completed' }} />
                       <section className="min-w-0 rounded-md border border-border bg-background p-3">
-                        <div className="mb-2 flex items-center justify-between gap-3"><div><div className="flex items-center gap-2 text-xs font-semibold"><Activity className="h-3.5 w-3.5 text-muted-foreground" />{language === 'zh' ? 'Agent 执行链（次级）' : 'Agent execution chain (secondary)'}</div><p className="mt-1 text-[10px] text-muted-foreground">{language === 'zh' ? '仅用于诊断运行阶段，不作为任务计划。' : 'Runtime diagnostics only; not the task plan.'}</p></div>{orchestrationProgress?.graph && <span className="shrink-0 text-[10px] text-muted-foreground">{t.graphGeneration} {orchestrationProgress.graph.generation}</span>}</div>
+                        <div className="mb-2 flex items-start justify-between gap-3">
+                          <div><div className="flex items-center gap-2 text-xs font-semibold"><Activity className="h-3.5 w-3.5 text-muted-foreground" />{language === 'zh' ? 'Agent 执行链（次级）' : 'Agent execution chain (secondary)'}</div><p className="mt-1 text-[10px] text-muted-foreground">{language === 'zh' ? '仅用于诊断运行阶段，不作为任务计划。' : 'Runtime diagnostics only; not the task plan.'}</p></div>
+                          <div className="flex shrink-0 items-center gap-1">
+                            {selectedAgentGraph && <span className="px-1 text-[10px] text-muted-foreground">{language === 'zh' ? `第 ${Math.max(1, (selectedProgressTask?.graphs || []).findIndex((graph) => graph.id === selectedAgentGraph.id) + 1)}/${Math.max(1, selectedProgressTask?.graphs?.length || 1)} 轮` : `Round ${Math.max(1, (selectedProgressTask?.graphs || []).findIndex((graph) => graph.id === selectedAgentGraph.id) + 1)}/${Math.max(1, selectedProgressTask?.graphs?.length || 1)}`}</span>}
+                            <Button variant="ghost" size="icon" className="h-7 w-7 rounded" onClick={() => setAgentGraphExpanded(true)} disabled={!selectedAgentGraph} aria-label={language === 'zh' ? '放大执行链' : 'Expand execution chain'} title={language === 'zh' ? '放大执行链' : 'Expand execution chain'}><Maximize2 className="h-3.5 w-3.5" /></Button>
+                          </div>
+                        </div>
+                        {(selectedProgressTask?.graphs?.length || 0) > 1 && (
+                          <div className="mb-2 flex max-w-full gap-1 overflow-x-auto rounded border border-border bg-muted/20 p-1 elegant-scrollbar">
+                            {selectedProgressTask?.graphs.map((graph, index) => <button key={graph.id} type="button" onClick={() => setSelectedProgressGraphId(graph.id)} className={cn('h-6 shrink-0 rounded px-2 text-[10px] transition-colors', selectedAgentGraph?.id === graph.id ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}>{language === 'zh' ? `第 ${index + 1} 轮` : `Round ${index + 1}`}</button>)}
+                          </div>
+                        )}
                         <OrchestrationProgressMap
-                          tasks={(orchestrationProgress?.graph?.tasks || []).map((task) => ({ ...task, name: orchestrationTaskDisplayName(task.name, language), dependencies: task.dependencies || [] }))}
+                          tasks={(selectedAgentGraph?.tasks || []).map((task) => ({ ...task, name: orchestrationTaskDisplayName(task.name, language), dependencies: task.dependencies || [] }))}
                           height={180}
                           ariaLabel={language === 'zh' ? 'Agent 执行链' : 'Agent execution chain'}
                           emptyLabel={language === 'zh' ? '暂无执行节点。' : 'No execution nodes yet.'}
@@ -1218,13 +1309,44 @@ export function OrchestrationWorkspace({
                     </div>
                   </div>
                 </div>
-              </div>
-            )}
+                </div>
+              </DialogContent>
+            </Dialog>
           </section>
         )}
 
         <div className="grid flex-1 min-h-0 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] lg:overflow-hidden">
           <div className="relative min-h-0">
+            {planWorkspaceEnabled && activeRun && (
+              <>
+                <aside className="pointer-events-none absolute inset-y-3 left-3 z-10 hidden w-40 min-[1900px]:flex">
+                  <div className="pointer-events-auto flex max-h-full w-full flex-col overflow-hidden rounded-md border border-border bg-background/95 shadow-sm backdrop-blur">
+                    <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-2 text-[10px] font-semibold text-muted-foreground"><BookOpen className="h-3 w-3" />{t.promptNavigator}</div>
+                    <div className="flex gap-1 overflow-x-auto border-b border-border p-1.5 elegant-scrollbar">
+                      {promptViews.map((view) => <button key={view.key} type="button" onClick={() => setSelectedPromptKey(view.key)} className={cn('h-6 max-w-28 shrink-0 truncate rounded px-2 text-[9px] transition-colors', selectedPromptView?.key === view.key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground')} title={view.label}>{view.label}</button>)}
+                    </div>
+                    <pre className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap break-words p-2.5 font-sans text-[10px] leading-4 text-foreground elegant-scrollbar">{selectedPromptView?.content || t.noRoundPrompts}</pre>
+                  </div>
+                </aside>
+                <aside className="pointer-events-none absolute inset-y-3 right-6 z-10 hidden w-36 min-[1900px]:flex">
+                  <div className="pointer-events-auto flex max-h-full w-full flex-col overflow-hidden rounded-md border border-border bg-background/95 shadow-sm backdrop-blur">
+                    <button type="button" className="flex items-center justify-between gap-2 border-b border-border px-2.5 py-2 text-left" onClick={() => setPlanningWorkspaceOpen(true)}>
+                      <span className="flex min-w-0 items-center gap-1.5 text-[10px] font-semibold text-muted-foreground"><Workflow className="h-3 w-3 text-primary" />{t.planningWorkspace}</span>
+                      <Maximize2 className="h-3 w-3 shrink-0 text-muted-foreground" />
+                    </button>
+                    <div className="space-y-2 border-b border-border p-2.5">
+                      <div className="flex items-center justify-between gap-2 text-[9px] text-muted-foreground"><span>{language === 'zh' ? `任务 ${selectedProgressTask?.taskNumber || 1}` : `Task ${selectedProgressTask?.taskNumber || 1}`}</span><span className="font-mono tabular-nums">{projectedPlan?.percent || 0}%</span></div>
+                      <div className="h-1 overflow-hidden rounded-full bg-muted"><div className="h-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${Math.max(0, Math.min(100, projectedPlan?.percent || 0))}%` }} /></div>
+                      <div className="text-[9px] text-muted-foreground">{language === 'zh' ? `第 ${Math.max(1, (selectedProgressTask?.graphs || []).findIndex((graph) => graph.id === selectedAgentGraph?.id) + 1)}/${Math.max(1, selectedProgressTask?.graphs?.length || 1)} 轮` : `Round ${Math.max(1, (selectedProgressTask?.graphs || []).findIndex((graph) => graph.id === selectedAgentGraph?.id) + 1)}/${Math.max(1, selectedProgressTask?.graphs?.length || 1)}`}</div>
+                    </div>
+                    <div className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2 elegant-scrollbar">
+                      {projectedPlanItems.slice(0, 12).map((item) => <div key={item.id} className="flex items-start gap-1.5 rounded px-1.5 py-1 text-[9px] leading-3.5 hover:bg-muted/60"><span className={cn('mt-1 h-1.5 w-1.5 shrink-0 rounded-full', item.status === 'completed' ? 'bg-emerald-500' : item.status === 'in_progress' ? 'bg-sky-500' : item.status === 'blocked' ? 'bg-destructive' : 'bg-muted-foreground/45')} /><span className="line-clamp-2 text-foreground" title={item.title}>{item.title}</span></div>)}
+                      {!projectedPlanItems.length && <div className="px-1.5 py-2 text-[9px] leading-4 text-muted-foreground">{t.planWaiting}</div>}
+                    </div>
+                  </div>
+                </aside>
+              </>
+            )}
             <div
               ref={scrollRef}
               onScroll={updateTimelineScrollState}
@@ -1482,13 +1604,26 @@ export function OrchestrationWorkspace({
         </div>
       </main>
 
+      <Dialog open={agentGraphExpanded} onOpenChange={setAgentGraphExpanded}>
+        <DialogContent className="flex h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-none flex-col gap-3 overflow-hidden p-4 sm:max-w-none md:p-5">
+          <DialogHeader className="shrink-0 pr-10">
+            <DialogTitle className="text-base">{language === 'zh' ? `任务 ${selectedProgressTask?.taskNumber || 1} · Agent 执行链` : `Task ${selectedProgressTask?.taskNumber || 1} · Agent execution chain`}</DialogTitle>
+            <DialogDescription>{language === 'zh' ? `第 ${Math.max(1, (selectedProgressTask?.graphs || []).findIndex((graph) => graph.id === selectedAgentGraph?.id) + 1)}/${Math.max(1, selectedProgressTask?.graphs?.length || 1)} 轮 · 拖动画布，滚轮或双指缩放。` : `Round ${Math.max(1, (selectedProgressTask?.graphs || []).findIndex((graph) => graph.id === selectedAgentGraph?.id) + 1)}/${Math.max(1, selectedProgressTask?.graphs?.length || 1)} · Drag to pan and scroll or pinch to zoom.`}</DialogDescription>
+          </DialogHeader>
+          {(selectedProgressTask?.graphs?.length || 0) > 1 && <div className="flex shrink-0 gap-1 overflow-x-auto rounded-md border border-border bg-muted/20 p-1 elegant-scrollbar">{selectedProgressTask?.graphs.map((graph, index) => <button key={graph.id} type="button" onClick={() => setSelectedProgressGraphId(graph.id)} className={cn('h-7 shrink-0 rounded px-2.5 text-xs transition-colors', selectedAgentGraph?.id === graph.id ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}>{language === 'zh' ? `第 ${index + 1} 轮` : `Round ${index + 1}`}</button>)}</div>}
+          <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border">
+            <OrchestrationProgressMap tasks={(selectedAgentGraph?.tasks || []).map((task) => ({ ...task, name: orchestrationTaskDisplayName(task.name, language), dependencies: task.dependencies || [] }))} height="100%" interactive ariaLabel={language === 'zh' ? '可缩放的 Agent 执行链' : 'Interactive Agent execution chain'} emptyLabel={language === 'zh' ? '暂无执行节点。' : 'No execution nodes yet.'} statusLabels={orchestrationStatusLabels(language, t)} />
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {settingsOpen && (
         <SettingsModal
           user={user}
           agents={agents}
           selectedAgentId={selectedAgentId}
           onSelectAgent={selectAgent}
-          onAgentsChanged={loadAgents}
+          onAgentsChanged={async () => { await loadAgents(); }}
           onLogout={logout}
           isDarkMode={isDarkMode}
           setIsDarkMode={setIsDarkMode}

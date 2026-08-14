@@ -231,6 +231,86 @@ func TestReduceOrchestrationPlanReviewBoundaryDoesNotMixDraftItems(t *testing.T)
 	}
 }
 
+func TestGroupOrchestrationProgressGraphsKeepsRoundsUnderTheirPrompt(t *testing.T) {
+	payloadJSON := func(prompt string, promptSeq int64) string {
+		raw, err := json.Marshal(protocol.OrchestrationStartPayload{Prompt: prompt, PromptSeq: promptSeq})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	graphs := []store.OrchestrationTaskGraph{
+		{ID: "otg_1", Generation: 1, Status: store.TaskGraphCompleted, PayloadJSON: payloadJSON("初始证明任务", 0), CreatedAt: 100, UpdatedAt: 120, FinishedAt: 120},
+		{ID: "otg_2", Generation: 2, Status: store.TaskGraphCompleted, PayloadJSON: payloadJSON("初始证明任务", 0), CreatedAt: 121, UpdatedAt: 150, FinishedAt: 150},
+		{ID: "otg_3", Generation: 3, Status: store.TaskGraphRunning, PayloadJSON: payloadJSON("补充证明边界", 9), CreatedAt: 200, UpdatedAt: 220},
+	}
+
+	groups := groupOrchestrationProgressGraphs(graphs, nil)
+	if len(groups) != 2 {
+		t.Fatalf("task groups = %#v", groups)
+	}
+	first := groups[0]
+	if first.TaskNumber != 1 || first.PromptSeq != 0 || first.Prompt != "初始证明任务" || first.CreatedAt != 100 || first.UpdatedAt != 150 || first.FinishedAt != 150 || first.Status != store.TaskGraphCompleted || len(first.Graphs) != 2 || first.Graph == nil || first.Graph.ID != "otg_2" {
+		t.Fatalf("initial task group = %#v", first)
+	}
+	second := groups[1]
+	if second.TaskNumber != 2 || second.PromptSeq != 9 || second.Prompt != "补充证明边界" || second.CreatedAt != 200 || second.UpdatedAt != 220 || second.FinishedAt != 0 || second.Status != store.TaskGraphRunning || len(second.Graphs) != 1 || second.Graph == nil || second.Graph.ID != "otg_3" {
+		t.Fatalf("follow-up task group = %#v", second)
+	}
+}
+
+func TestGroupOrchestrationProgressGraphsSeparatesLegacyPromptChangesAndInvalidPayloads(t *testing.T) {
+	payload := func(prompt string) string {
+		raw, err := json.Marshal(protocol.OrchestrationStartPayload{Prompt: prompt})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	graphs := []store.OrchestrationTaskGraph{
+		{ID: "otg_1", PayloadJSON: payload("first"), CreatedAt: 100},
+		{ID: "otg_2", PayloadJSON: payload("first"), CreatedAt: 110},
+		{ID: "otg_3", PayloadJSON: payload("followup"), CreatedAt: 120},
+		{ID: "otg_4", PayloadJSON: "{", CreatedAt: 130},
+		{ID: "otg_5", PayloadJSON: "{", CreatedAt: 140},
+	}
+
+	groups := groupOrchestrationProgressGraphs(graphs, nil)
+	if len(groups) != 4 || len(groups[0].Graphs) != 2 || groups[1].Prompt != "followup" || groups[2].Graph.ID != "otg_4" || groups[3].Graph.ID != "otg_5" {
+		t.Fatalf("legacy task groups = %#v", groups)
+	}
+}
+
+func TestGroupOrchestrationProgressGraphsProjectsPlanPerTask(t *testing.T) {
+	payload := func(prompt string, promptSeq int64) string {
+		raw, err := json.Marshal(protocol.OrchestrationStartPayload{Prompt: prompt, PromptSeq: promptSeq})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	graphs := []store.OrchestrationTaskGraph{
+		{ID: "otg_first", Generation: 1, Status: store.TaskGraphCompleted, PayloadJSON: payload("first", 1)},
+		{ID: "otg_second", Generation: 2, Status: store.TaskGraphCompleted, PayloadJSON: payload("second", 2)},
+	}
+	ref := func(graphID, name string) *protocol.TaskAttemptRef {
+		return &protocol.TaskAttemptRef{GraphID: graphID, Name: name}
+	}
+	events := []store.OrchestrationEvent{
+		{Task: ref("otg_first", "plan-review"), Content: "[PLAN_ITEM id=\"P1\" status=\"pending\"] first item"},
+		{Task: ref("otg_first", "review"), Content: "[PLAN_UPDATE id=\"P1\" status=\"completed\"] first evidence"},
+		{Task: ref("otg_second", "plan-review"), Content: "[PLAN_ITEM id=\"P2\" status=\"pending\"] second item"},
+	}
+
+	tasks := groupOrchestrationProgressGraphs(graphs, events)
+	if len(tasks) != 2 || len(tasks[0].PlanItems) != 1 || len(tasks[1].PlanItems) != 1 {
+		t.Fatalf("task plans = %#v", tasks)
+	}
+	if tasks[0].PlanItems[0].ID != "P1" || tasks[0].PlanItems[0].Status != "completed" || tasks[1].PlanItems[0].ID != "P2" || tasks[1].PlanItems[0].Status != "pending" {
+		t.Fatalf("task plan isolation = %#v", tasks)
+	}
+}
+
 func TestOrchestrationProgressRequiresRolloutAndOwnership(t *testing.T) {
 	s, st, adminID, agentID := newOrchestrationTestServer(t)
 	ctx := context.Background()
@@ -266,6 +346,18 @@ func TestOrchestrationProgressRequiresRolloutAndOwnership(t *testing.T) {
 	loadedGraph, ok := body["graph"].(map[string]any)
 	if !ok || loadedGraph["id"] != graph.ID {
 		t.Fatalf("admin progress graph = %#v", body["graph"])
+	}
+	graphs, ok := body["graphs"].([]any)
+	if !ok || len(graphs) != 1 || graphs[0].(map[string]any)["id"] != graph.ID {
+		t.Fatalf("admin progress graphs = %#v", body["graphs"])
+	}
+	tasks, ok := body["tasks"].([]any)
+	if !ok || len(tasks) != 1 {
+		t.Fatalf("admin progress tasks = %#v", body["tasks"])
+	}
+	task := tasks[0].(map[string]any)
+	if task["taskNumber"] != float64(1) || task["prompt"] != "prove" || len(task["graphs"].([]any)) != 1 {
+		t.Fatalf("admin progress task = %#v", task)
 	}
 	items, ok := body["planItems"].([]any)
 	if !ok || len(items) != 1 {

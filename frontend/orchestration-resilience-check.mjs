@@ -47,8 +47,8 @@ assert.match(workspace, /activeOrchestrationStatus\(run\.status\) \? t\.deleteAc
 assert.match(workspace, /planWorkspaceEnabled && activeRun && \(/);
 assert.match(workspace, /aria-expanded=\{planningWorkspaceOpen\}/);
 assert.match(workspace, /<Dialog open=\{planningWorkspaceOpen\} onOpenChange=\{setPlanningWorkspaceOpen\}>/);
-assert.match(workspace, /min-\[1900px\]:flex/);
-assert.match(workspace, /pointer-events-none absolute inset-y-3 left-3/);
+assert.doesNotMatch(workspace, /min-\[1900px\]:flex/);
+assert.doesNotMatch(workspace, /pointer-events-none absolute inset-y-3 left-3/);
 assert.match(workspace, /if \(!activeRunId \|\| !planWorkspaceEnabled\) return;/);
 assert.doesNotMatch(workspace, /className="absolute inset-x-3 bottom-3 top-\[7\.35rem\] z-30/);
 assert.match(workspace, /<OrchestrationProgressMap/);

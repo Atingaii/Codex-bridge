@@ -1317,36 +1317,6 @@ export function OrchestrationWorkspace({
 
         <div className="grid flex-1 min-h-0 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] lg:overflow-hidden">
           <div className="relative min-h-0">
-            {planWorkspaceEnabled && activeRun && (
-              <>
-                <aside className="pointer-events-none absolute inset-y-3 left-3 z-10 hidden w-40 min-[1900px]:flex">
-                  <div className="pointer-events-auto flex max-h-full w-full flex-col overflow-hidden rounded-md border border-border bg-background/95 shadow-sm backdrop-blur">
-                    <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-2 text-[10px] font-semibold text-muted-foreground"><BookOpen className="h-3 w-3" />{t.promptNavigator}</div>
-                    <div className="flex gap-1 overflow-x-auto border-b border-border p-1.5 elegant-scrollbar">
-                      {promptViews.map((view) => <button key={view.key} type="button" onClick={() => setSelectedPromptKey(view.key)} className={cn('h-6 max-w-28 shrink-0 truncate rounded px-2 text-[9px] transition-colors', selectedPromptView?.key === view.key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground')} title={view.label}>{view.label}</button>)}
-                    </div>
-                    <pre className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap break-words p-2.5 font-sans text-[10px] leading-4 text-foreground elegant-scrollbar">{selectedPromptView?.content || t.noRoundPrompts}</pre>
-                  </div>
-                </aside>
-                <aside className="pointer-events-none absolute inset-y-3 right-6 z-10 hidden w-36 min-[1900px]:flex">
-                  <div className="pointer-events-auto flex max-h-full w-full flex-col overflow-hidden rounded-md border border-border bg-background/95 shadow-sm backdrop-blur">
-                    <button type="button" className="flex items-center justify-between gap-2 border-b border-border px-2.5 py-2 text-left" onClick={() => setPlanningWorkspaceOpen(true)}>
-                      <span className="flex min-w-0 items-center gap-1.5 text-[10px] font-semibold text-muted-foreground"><Workflow className="h-3 w-3 text-primary" />{t.planningWorkspace}</span>
-                      <Maximize2 className="h-3 w-3 shrink-0 text-muted-foreground" />
-                    </button>
-                    <div className="space-y-2 border-b border-border p-2.5">
-                      <div className="flex items-center justify-between gap-2 text-[9px] text-muted-foreground"><span>{language === 'zh' ? `任务 ${selectedProgressTask?.taskNumber || 1}` : `Task ${selectedProgressTask?.taskNumber || 1}`}</span><span className="font-mono tabular-nums">{projectedPlan?.percent || 0}%</span></div>
-                      <div className="h-1 overflow-hidden rounded-full bg-muted"><div className="h-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${Math.max(0, Math.min(100, projectedPlan?.percent || 0))}%` }} /></div>
-                      <div className="text-[9px] text-muted-foreground">{language === 'zh' ? `第 ${Math.max(1, (selectedProgressTask?.graphs || []).findIndex((graph) => graph.id === selectedAgentGraph?.id) + 1)}/${Math.max(1, selectedProgressTask?.graphs?.length || 1)} 轮` : `Round ${Math.max(1, (selectedProgressTask?.graphs || []).findIndex((graph) => graph.id === selectedAgentGraph?.id) + 1)}/${Math.max(1, selectedProgressTask?.graphs?.length || 1)}`}</div>
-                    </div>
-                    <div className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2 elegant-scrollbar">
-                      {projectedPlanItems.slice(0, 12).map((item) => <div key={item.id} className="flex items-start gap-1.5 rounded px-1.5 py-1 text-[9px] leading-3.5 hover:bg-muted/60"><span className={cn('mt-1 h-1.5 w-1.5 shrink-0 rounded-full', item.status === 'completed' ? 'bg-emerald-500' : item.status === 'in_progress' ? 'bg-sky-500' : item.status === 'blocked' ? 'bg-destructive' : 'bg-muted-foreground/45')} /><span className="line-clamp-2 text-foreground" title={item.title}>{item.title}</span></div>)}
-                      {!projectedPlanItems.length && <div className="px-1.5 py-2 text-[9px] leading-4 text-muted-foreground">{t.planWaiting}</div>}
-                    </div>
-                  </div>
-                </aside>
-              </>
-            )}
             <div
               ref={scrollRef}
               onScroll={updateTimelineScrollState}

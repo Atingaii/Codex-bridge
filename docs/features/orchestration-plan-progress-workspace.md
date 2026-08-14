@@ -3,7 +3,7 @@
 ## Goals
 
 - Keep the live orchestration transcript as the primary browser surface while
-  using the unused horizontal space for prompt navigation and durable progress.
+  exposing prompt navigation and durable progress from one dedicated workspace.
 - Add an administrator-only rollout that prepends a planning node and an
   independent plan-review node to the existing candidate, integration, and
   final-review task graph.
@@ -54,10 +54,9 @@ summary. Its primary map is a proof-task dependency graph whose nodes show
    while each new user follow-up becomes Task 2, Task 3, and so on. Selecting a
    task switches its prompt, reviewed plan, checklist, and Agent diagnostics as
    one coherent view; the newest task is selected by default.
-5. On viewports wide enough to preserve the existing transcript width, the
-   unused outer margins become compact prompt and progress rails. They never
-   overlap the transcript or appear at narrower widths; the large work area
-   remains the complete view.
+5. The transcript never renders duplicate prompt or progress rails in its outer
+   margins. The compact row below the runtime toolbar is the single entry point
+   to the complete planning workspace at every viewport width.
 
 Below desktop width the work area stacks prompt navigation above progress with
 bounded, independently scrollable rows. Closing it leaves only the compact
@@ -160,6 +159,8 @@ layout.
 6. Rebuild embedded assets and run focused and full regression suites.
 7. Add task-scoped progress and usage selectors plus an enlarged interactive
    Agent-chain dialog.
+8. Remove the duplicate ultra-wide transcript rails after the compact planning
+   row became the single planning entry point.
 
 ## Exit Gates
 

@@ -9,7 +9,7 @@ const orchestration = read('./src/app/pages/OrchestrationWorkspace.tsx');
 assert(app.includes("path === '/updates'"), 'missing /updates route');
 assert(app.indexOf('if (isUpdatesRoute)') < app.indexOf('if (!user)'), 'updates must render before authentication');
 assert(updates.includes('修正时间线'), 'missing update timeline');
-assert(updates.includes('当前版本 v0.3.41'), 'missing current version');
+assert(updates.includes('当前版本 v0.3.42'), 'missing current version');
 assert(updates.includes('续聊任务独立切换'), 'missing task-scoped progress update');
 assert(updates.includes('Token 统计支持任务范围'), 'missing task-scoped usage update');
 assert(updates.includes('Agent 执行链可全屏查看'), 'missing enlarged agent graph update');

@@ -187,8 +187,8 @@ function ProofRow({
           {ready ? <MetaBadge>{labels.ready}</MetaBadge> : null}
           {item.branch ? <MetaBadge>{item.branch}</MetaBadge> : null}
           {item.difficulty ? <MetaBadge>{difficultyLabel(item.difficulty)}</MetaBadge> : null}
-          {item.priority ? <MetaBadge>优先级 {item.priority}</MetaBadge> : null}
-          {item.progress != null && status !== 'completed' ? <MetaBadge>{clampPercent(item.progress)}%</MetaBadge> : null}
+          {item.priority ? <MetaBadge>{`优先级 ${item.priority}`}</MetaBadge> : null}
+          {item.progress != null && status !== 'completed' ? <MetaBadge>{`${clampPercent(item.progress)}%`}</MetaBadge> : null}
         </div>
         {item.rationale ? <Detail label={labels.rationale} value={item.rationale} /> : null}
         {item.evidence ? <Detail label={labels.evidence} value={item.evidence} /> : null}

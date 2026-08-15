@@ -121,26 +121,43 @@ type EncryptedSecret struct {
 }
 
 type CLIConfigRequest struct {
-	RequestID string          `json:"requestId"`
-	CLI       string          `json:"cli"`
-	Name      string          `json:"name,omitempty"`
-	BaseURL   string          `json:"baseUrl,omitempty"`
-	Model     string          `json:"model,omitempty"`
-	Secret    EncryptedSecret `json:"secret,omitempty"`
+	RequestID        string   `json:"requestId"`
+	CLI              string   `json:"cli"`
+	Name             string   `json:"name,omitempty"`
+	BaseURL          string   `json:"baseUrl,omitempty"`
+	Model            string   `json:"model,omitempty"`
+	ReasoningEffort  string   `json:"reasoningEffort,omitempty"`
+	ReasoningLevels  []string `json:"reasoningLevels,omitempty"`
+	ReasoningDefault string   `json:"reasoningDefault,omitempty"`
+	// ClaudeContextWindow and ClaudeDisableUnknownModelWindowEnforcement are
+	// reviewed, Hub-authorized settings. Bridge only materializes them.
+	ClaudeContextWindow                        int             `json:"claudeContextWindow,omitempty"`
+	ClaudeDisableUnknownModelWindowEnforcement bool            `json:"claudeDisableUnknownModelWindowEnforcement,omitempty"`
+	Secret                                     EncryptedSecret `json:"secret,omitempty"`
 }
 
 type CLIConfigResult struct {
-	RequestID     string   `json:"requestId"`
-	OK            bool     `json:"ok"`
-	CLI           string   `json:"cli,omitempty"`
-	BaseURL       string   `json:"baseUrl,omitempty"`
-	Protocol      string   `json:"protocol,omitempty"`
-	Models        []string `json:"models,omitempty"`
-	ModelsListed  bool     `json:"modelsListed,omitempty"`
-	AppliedModel  string   `json:"appliedModel,omitempty"`
-	Message       string   `json:"message,omitempty"`
-	Error         string   `json:"error,omitempty"`
-	ConfigChanged bool     `json:"configChanged,omitempty"`
+	RequestID     string            `json:"requestId"`
+	OK            bool              `json:"ok"`
+	CLI           string            `json:"cli,omitempty"`
+	BaseURL       string            `json:"baseUrl,omitempty"`
+	Protocol      string            `json:"protocol,omitempty"`
+	Models        []string          `json:"models,omitempty"`
+	ModelsListed  bool              `json:"modelsListed,omitempty"`
+	ModelMetadata *CLIModelMetadata `json:"modelMetadata,omitempty"`
+	AppliedModel  string            `json:"appliedModel,omitempty"`
+	Message       string            `json:"message,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	ConfigChanged bool              `json:"configChanged,omitempty"`
+}
+
+// CLIModelMetadata is sourced only from the Hub's reviewed model catalog.
+// An unknown provider alias intentionally has no reasoning levels.
+type CLIModelMetadata struct {
+	Model                    string   `json:"model"`
+	Reviewed                 bool     `json:"reviewed"`
+	SupportedReasoningLevels []string `json:"supportedReasoningLevels,omitempty"`
+	DefaultReasoningLevel    string   `json:"defaultReasoningLevel,omitempty"`
 }
 
 // ACPCapability advertises whether the endpoint can run an Agent Client
@@ -248,28 +265,47 @@ type ApprovalResponsePayload struct {
 }
 
 type OrchestrationStartPayload struct {
-	RunID                   string              `json:"runId"`
-	Mode                    string              `json:"mode"`
-	WorkerPair              string              `json:"workerPair,omitempty"`
-	FirstCLI                string              `json:"firstCli,omitempty"`
-	Prompt                  string              `json:"prompt"`
-	Context                 string              `json:"context,omitempty"`
-	Resume                  bool                `json:"resume,omitempty"`
-	PromptSeq               int64               `json:"promptSeq,omitempty"`
-	MaxTurns                int                 `json:"maxTurns,omitempty"`
-	MaxTurnsRequested       int                 `json:"maxTurnsRequested,omitempty"`
-	Round                   int                 `json:"round,omitempty"`
-	MaxRounds               int                 `json:"maxRounds,omitempty"`
-	CWD                     string              `json:"cwd,omitempty"`
-	Files                   []AttachmentPayload `json:"files,omitempty"`
-	CodexThreadID           string              `json:"codexThreadId,omitempty"`
-	CodexThreadIDs          map[string]string   `json:"codexThreadIds,omitempty"`
-	ClaudeStarted           bool                `json:"claudeStarted,omitempty"`
-	RunCWD                  string              `json:"runCwd,omitempty"`
-	Profile                 string              `json:"profile,omitempty"`
-	NativeContextCompaction string              `json:"nativeContextCompaction,omitempty"`
-	PlanWorkspace           bool                `json:"planWorkspace,omitempty"`
-	TaskGraph               *TaskGraphPayload   `json:"taskGraph,omitempty"`
+	RunID                   string                          `json:"runId"`
+	Mode                    string                          `json:"mode"`
+	WorkerPair              string                          `json:"workerPair,omitempty"`
+	FirstCLI                string                          `json:"firstCli,omitempty"`
+	Prompt                  string                          `json:"prompt"`
+	Context                 string                          `json:"context,omitempty"`
+	Resume                  bool                            `json:"resume,omitempty"`
+	PromptSeq               int64                           `json:"promptSeq,omitempty"`
+	MaxTurns                int                             `json:"maxTurns,omitempty"`
+	MaxTurnsRequested       int                             `json:"maxTurnsRequested,omitempty"`
+	Round                   int                             `json:"round,omitempty"`
+	MaxRounds               int                             `json:"maxRounds,omitempty"`
+	CWD                     string                          `json:"cwd,omitempty"`
+	Files                   []AttachmentPayload             `json:"files,omitempty"`
+	CodexThreadID           string                          `json:"codexThreadId,omitempty"`
+	CodexThreadIDs          map[string]string               `json:"codexThreadIds,omitempty"`
+	ClaudeStarted           bool                            `json:"claudeStarted,omitempty"`
+	ClaudeSessionIDs        map[string]string               `json:"claudeSessionIds,omitempty"`
+	ClaudeStartedSlots      map[string]bool                 `json:"claudeStartedSlots,omitempty"`
+	RunCWD                  string                          `json:"runCwd,omitempty"`
+	Profile                 string                          `json:"profile,omitempty"`
+	NativeContextCompaction string                          `json:"nativeContextCompaction,omitempty"`
+	PlanWorkspace           bool                            `json:"planWorkspace,omitempty"`
+	TaskGraph               *TaskGraphPayload               `json:"taskGraph,omitempty"`
+	WorkerProfiles          map[string]WorkerProfileBinding `json:"workerProfiles,omitempty"`
+}
+
+// WorkerProfileBinding is an immutable Hub-authorized worker snapshot. The
+// credential remains encrypted end-to-end for the selected Bridge.
+type WorkerProfileBinding struct {
+	PresetID                                   string          `json:"presetId"`
+	CLI                                        string          `json:"cli"`
+	Name                                       string          `json:"name"`
+	BaseURL                                    string          `json:"baseUrl"`
+	Model                                      string          `json:"model"`
+	ReasoningEffort                            string          `json:"reasoningEffort,omitempty"`
+	ReasoningLevels                            []string        `json:"reasoningLevels,omitempty"`
+	ReasoningDefault                           string          `json:"reasoningDefault,omitempty"`
+	ClaudeContextWindow                        int             `json:"claudeContextWindow,omitempty"`
+	ClaudeDisableUnknownModelWindowEnforcement bool            `json:"claudeDisableUnknownModelWindowEnforcement,omitempty"`
+	Secret                                     EncryptedSecret `json:"secret"`
 }
 
 type TaskGraphPayload struct {
@@ -311,6 +347,9 @@ type OrchestrationUsageSession struct {
 	CLI        string `json:"cli"`
 	WorkerSlot string `json:"workerSlot,omitempty"`
 	SessionID  string `json:"sessionId"`
+	// Isolated prevents a post-run ledger scan from falling back to the
+	// operator's global CLI home for a profile-bound worker.
+	Isolated bool `json:"isolated,omitempty"`
 }
 
 type OrchestrationUsageSyncRequest struct {
@@ -414,16 +453,19 @@ type RunStartData struct {
 }
 
 type TurnStartData struct {
-	StartedAt  int64  `json:"startedAt,omitempty"`
-	CLI        string `json:"cli,omitempty"`
-	WorkerSlot string `json:"workerSlot,omitempty"`
-	Turn       int    `json:"turn,omitempty"`
-	MaxTurns   int    `json:"maxTurns,omitempty"`
-	Round      int    `json:"round,omitempty"`
-	MaxRounds  int    `json:"maxRounds,omitempty"`
-	PromptText string `json:"promptText,omitempty"`
-	Profile    string `json:"profile,omitempty"`
-	ResumeMode string `json:"resumeMode,omitempty"`
+	StartedAt       int64  `json:"startedAt,omitempty"`
+	CLI             string `json:"cli,omitempty"`
+	WorkerSlot      string `json:"workerSlot,omitempty"`
+	PresetName      string `json:"presetName,omitempty"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+	Turn            int    `json:"turn,omitempty"`
+	MaxTurns        int    `json:"maxTurns,omitempty"`
+	Round           int    `json:"round,omitempty"`
+	MaxRounds       int    `json:"maxRounds,omitempty"`
+	PromptText      string `json:"promptText,omitempty"`
+	Profile         string `json:"profile,omitempty"`
+	ResumeMode      string `json:"resumeMode,omitempty"`
 }
 
 // TurnEndData records elapsed wall-clock time for one CLI turn. It is emitted
@@ -439,10 +481,28 @@ type RunEndData struct {
 	CodexThreadID      string             `json:"codexThreadId,omitempty"`
 	CodexThreadIDs     map[string]string  `json:"codexThreadIds,omitempty"`
 	ClaudeSessionID    string             `json:"claudeSessionId,omitempty"`
+	ClaudeSessionIDs   map[string]string  `json:"claudeSessionIds,omitempty"`
 	WorkerPair         string             `json:"workerPair,omitempty"`
 	NativeResume       []NativeResumeInfo `json:"nativeResume,omitempty"`
 	CodexNativeResume  *NativeResumeInfo  `json:"codexNativeResume,omitempty"`
 	ClaudeNativeResume *NativeResumeInfo  `json:"claudeNativeResume,omitempty"`
+	TerminalReason     string             `json:"terminalReason,omitempty"`
+	VerifierVerdict    *VerifierVerdict   `json:"verifierVerdict,omitempty"`
+}
+
+type VerifierVerdict struct {
+	Status   string          `json:"status"`
+	Reason   string          `json:"reason"`
+	Evidence []string        `json:"evidence,omitempty"`
+	Checkers []VerifierCheck `json:"checkers,omitempty"`
+}
+
+// VerifierCheck is one bounded deterministic adjudication role. A passed
+// verdict requires every checker to pass.
+type VerifierCheck struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Reason string `json:"reason"`
 }
 
 type BridgeNoteData struct {
@@ -454,6 +514,7 @@ type BridgeNoteData struct {
 
 type NativeResumeInfo struct {
 	CLI              string `json:"cli,omitempty"`
+	WorkerSlot       string `json:"workerSlot,omitempty"`
 	ID               string `json:"id,omitempty"`
 	Command          string `json:"command,omitempty"`
 	CWD              string `json:"cwd,omitempty"`
@@ -467,6 +528,7 @@ const (
 	NativeContextCompactionAfterTurn = "after-turn"
 	WorkerPairClaudeCodex            = "claude-codex"
 	WorkerPairCodexCodex             = "codex-codex"
+	WorkerPairClaudeClaude           = "claude-claude"
 )
 
 func NormalizeNativeContextCompaction(value string) string {
@@ -482,6 +544,8 @@ func NormalizeOrchestrationWorkerPair(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case WorkerPairCodexCodex:
 		return WorkerPairCodexCodex
+	case WorkerPairClaudeClaude:
+		return WorkerPairClaudeClaude
 	default:
 		return WorkerPairClaudeCodex
 	}

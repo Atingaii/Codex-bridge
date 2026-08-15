@@ -168,6 +168,8 @@ func TestPublicOrchestrationShareSanitizesRunAndEventData(t *testing.T) {
 		Status: store.OrchestrationCompleted,
 		RunEndData: &protocol.RunEndData{
 			WorkerPair:      "claude-codex",
+			TerminalReason:  "verified-early",
+			VerifierVerdict: &protocol.VerifierVerdict{Status: "pass", Reason: "independent reviewer confirmed the result", Evidence: []string{"successful command evidence"}},
 			CodexThreadID:   "thread-secret-1",
 			ClaudeSessionID: "claude-session-secret",
 			NativeResume: []protocol.NativeResumeInfo{{
@@ -201,7 +203,7 @@ func TestPublicOrchestrationShareSanitizesRunAndEventData(t *testing.T) {
 			t.Fatalf("public orchestration share leaked %q: %s", forbidden, raw)
 		}
 	}
-	for _, want := range []string{"go test ./...", "Model.thy", `"events"`, `"turn.end"`, "claude exited mid-turn", "claude-codex", `"durationMs":2250`} {
+	for _, want := range []string{"go test ./...", "Model.thy", `"events"`, `"turn.end"`, "claude exited mid-turn", "claude-codex", `"durationMs":2250`, "verified-early", "independent reviewer confirmed the result"} {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("public orchestration share missing %q: %s", want, raw)
 		}

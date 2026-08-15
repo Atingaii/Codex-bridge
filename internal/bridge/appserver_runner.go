@@ -128,6 +128,9 @@ const appServerPostReconnectTerminalQuietPeriod = 30 * time.Second
 func (r *CodexAppServerRunner) start(ctx context.Context, req RunnerRequest) (*appServerClient, error) {
 	cmd := exec.CommandContext(ctx, r.codexPath(), "app-server", "--listen", "stdio://")
 	configureManagedCommand(cmd)
+	if len(req.Env) > 0 {
+		replaceCommandEnv(cmd, req.Env...)
+	}
 	cwd := r.cwd(req)
 	if cwd != "" {
 		cmd.Dir = cwd
@@ -174,7 +177,7 @@ func (r *CodexAppServerRunner) threadStartParams(req ...RunnerRequest) map[strin
 		"ephemeral":             false,
 		"threadSource":          "user",
 	}
-	if model := codexBridgeModel(r.cfg); model != "" {
+	if model := r.model(req...); model != "" {
 		params["model"] = model
 	}
 	return params
@@ -188,10 +191,17 @@ func (r *CodexAppServerRunner) threadResumeParams(threadID string, req ...Runner
 		"approvalsReviewer": "user",
 		"sandbox":           r.sandbox(),
 	}
-	if model := codexBridgeModel(r.cfg); model != "" {
+	if model := r.model(req...); model != "" {
 		params["model"] = model
 	}
 	return params
+}
+
+func (r *CodexAppServerRunner) model(req ...RunnerRequest) string {
+	if len(req) > 0 && strings.TrimSpace(req[0].Model) != "" {
+		return strings.TrimSpace(req[0].Model)
+	}
+	return codexBridgeModel(r.cfg)
 }
 
 func (r *CodexAppServerRunner) turnStartParams(threadID, content string, req ...RunnerRequest) map[string]any {

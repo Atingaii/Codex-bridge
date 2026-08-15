@@ -51,6 +51,9 @@ func scanUsageSession(session protocol.OrchestrationUsageSession) ([]protocol.Or
 	if !validNativeSessionID(session.SessionID) {
 		return nil, errors.New("invalid native session id")
 	}
+	if session.Isolated {
+		return nil, errors.New("isolated worker runtime is no longer available")
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, errors.New("home directory unavailable")

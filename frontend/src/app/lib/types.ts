@@ -55,6 +55,9 @@ export type CLIConfigPreset = {
 	name: string;
 	baseUrl: string;
 	model: string;
+	reasoningEffort?: string;
+	reasoningLevels?: string[];
+	reasoningDefault?: string;
 	keyHint?: string;
 	active: boolean;
 	createdAt: number;
@@ -68,6 +71,12 @@ export type CLIConfigResult = {
 	protocol?: string;
 	models?: string[];
 	modelsListed?: boolean;
+	modelMetadata?: {
+		model: string;
+		reviewed: boolean;
+		supportedReasoningLevels?: string[];
+		defaultReasoningLevel?: string;
+	};
 	appliedModel?: string;
 	message?: string;
 };
@@ -119,7 +128,7 @@ export type OrchestrationFile = {
 };
 
 export type NativeContextCompaction = 'off' | 'after-turn';
-export type WorkerPair = 'claude-codex' | 'codex-codex';
+export type WorkerPair = 'claude-codex' | 'codex-codex' | 'claude-claude';
 
 export type OrchestrationRun = {
   id: string;
@@ -363,7 +372,7 @@ export type OrchestrationEvent = {
   seq?: number;
   timelineOrder?: number;
   kind: string;
-  source?: 'cli' | 'bridge' | 'user';
+  source?: 'cli' | 'bridge' | 'user' | 'verifier';
   severity?: 'info' | 'warning' | 'error';
   role?: string;
   cli?: string;
@@ -530,14 +539,28 @@ export type RunEndData = {
   codexThreadId?: string;
   codexThreadIds?: Record<string, string>;
   claudeSessionId?: string;
+  claudeSessionIds?: Record<string, string>;
   workerPair?: WorkerPair;
   nativeResume?: NativeResumeInfo[];
   codexNativeResume?: NativeResumeInfo;
   claudeNativeResume?: NativeResumeInfo;
+  terminalReason?: string;
+  verifierVerdict?: VerifierVerdict;
+};
+
+export type VerifierVerdict = {
+  status?: string;
+  reason?: string;
+  evidence?: string[];
+  checkers?: Array<{ name?: string; status?: string; reason?: string }>;
 };
 
 export type NativeResumeInfo = {
-  cli?: 'codex' | 'claude' | string;
+	cli?: 'codex' | 'claude' | string;
+	workerSlot?: string;
+	presetName?: string;
+	model?: string;
+	reasoningEffort?: string;
   id?: string;
   command?: string;
   cwd?: string;

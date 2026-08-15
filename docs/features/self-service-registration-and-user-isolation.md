@@ -3,15 +3,17 @@
 ## Goals
 
 - Let an operator explicitly enable browser self-registration.
-- Require Cloudflare Turnstile for every enabled registration and validate its
-  single-use token on the Hub before creating a user.
+- Require Cloudflare Turnstile by default for every enabled registration and
+  validate its single-use token on the Hub before creating a user.
+- Permit a deliberately isolated, trusted trial deployment to enable
+  registration without Turnstile, without weakening the default deployment.
 - Sign a newly registered user in with the existing HttpOnly JWT cookie.
 - Let users reveal or hide login, registration, and confirmation passwords
   independently without changing the submitted values.
 - Let every user, including the bootstrap administrator, use chat while keeping agents, sessions, messages, runs,
   orchestrations, and share-management operations scoped to their `users.id`.
-- Keep registration disabled and fail closed when Turnstile is incomplete or
-  unavailable.
+- Keep normal registration disabled and fail closed when Turnstile is required
+  but incomplete or unavailable.
 
 ## Non-Goals
 
@@ -34,14 +36,16 @@
 - `GET /api/auth/config` is an anonymous, no-store endpoint. It returns only
   `registrationEnabled` and the public `turnstileSiteKey`. It never returns the
   Turnstile secret or expected hostname.
-- `POST /api/register` accepts `username`, `password`, and `turnstileToken`.
-  Enabled registration requires a 3-32 character ASCII username, a 10-256 byte
-  password, a successful Turnstile Siteverify result, the configured action,
-  and (when configured) the expected hostname. Success creates the user and
-  returns the same `{user, expiresAt}` shape and cookie as login.
-- Registration configuration lives under `auth.registration` and can be
-  overridden by `REGISTRATION_ENABLED`, `TURNSTILE_SITE_KEY`,
-  `TURNSTILE_SECRET`, and `TURNSTILE_HOSTNAME`. The secret remains server-only.
+- `POST /api/register` accepts `username`, `password`, and optionally
+  `turnstileToken`. Enabled registration requires a 3-32 character ASCII
+  username and a 10-256 byte password. When `require_turnstile` is true, it
+  also requires successful Turnstile Siteverify, the configured action, and
+  (when configured) the expected hostname. Success creates the user and returns
+  the same `{user, expiresAt}` shape and cookie as login.
+- Registration configuration lives under `auth.registration`; Turnstile is
+  required by default and can be overridden by `REGISTRATION_ENABLED`,
+  `REGISTRATION_REQUIRE_TURNSTILE`, `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET`,
+  and `TURNSTILE_HOSTNAME`. The secret remains server-only.
 - Chat HTTP endpoints and `/ws/chat` move from administrator-only middleware to
   authenticated middleware. Their existing store calls continue to require the
   JWT `uid`, and session creation first verifies that the selected agent is
@@ -61,10 +65,11 @@ set. Network errors, malformed responses, empty tokens, expired/replayed tokens,
 and mismatches reject registration without creating a user.
 
 Cloudflare test keys may be used only in local/test configuration. Production
-must use a managed widget restricted to the deployed hostname. At implementation
-time the available Cloudflare MCP account credential returned authentication
-error `10000`, so account-side widget creation is a documented deployment gate;
-no credential or placeholder secret is committed.
+must use a managed widget restricted to the deployed hostname. A separately
+isolated trusted trial may set `require_turnstile: false`; it retains the same
+input validation, registration rate limit, ownership isolation, and session
+creation but intentionally makes no Siteverify request. This exception must not
+be used by the primary deployment.
 
 ## Implementation Steps
 
@@ -85,7 +90,9 @@ no credential or placeholder secret is committed.
 
 ## Exit Gates
 
-- No user row is created unless the server validates Turnstile successfully.
+- In normal deployments, no user row is created unless the server validates
+  Turnstile successfully. The isolated trusted-trial opt-out is explicitly
+  tested and requires configuration.
 - A registered user can sign in, enroll only their own Bridge, and use chat and
   orchestration against that Bridge.
 - User A cannot list, load, mutate, delete, stream, continue, cancel, revoke, or
@@ -105,7 +112,8 @@ no credential or placeholder secret is committed.
 
 This service grants remote execution on enrolled private machines. An operator
 must deliberately enable account creation and provide a working anti-abuse
-configuration; an empty or broken Turnstile setup must not silently open access.
+configuration; an empty or broken required Turnstile setup must not silently
+open access.
 
 ### Why not trust Cloudflare's browser callback?
 

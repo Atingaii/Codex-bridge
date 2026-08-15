@@ -32,6 +32,8 @@ type orchestrationCreateRequest struct {
 	CWD                     string                       `json:"cwd"`
 	MaxTurns                int                          `json:"maxTurns"`
 	Files                   []protocol.AttachmentPayload `json:"files"`
+	WorkerProfilePresetIDs  map[string]string            `json:"workerProfilePresetIds"`
+	WorkerProfileEfforts    map[string]string            `json:"workerProfileEfforts"`
 }
 
 type orchestrationStartRequest struct {
@@ -48,6 +50,8 @@ type orchestrationStartRequest struct {
 	MaxTurnsRequested       int
 	Files                   []protocol.AttachmentPayload
 	PlanWorkspace           bool
+	WorkerProfiles          map[string]protocol.WorkerProfileBinding
+	WorkerProfileEfforts    map[string]string
 }
 
 const orchestrationCancelAckTimeout = 5 * time.Second
@@ -88,6 +92,7 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		CWD:                     req.CWD,
 		MaxTurns:                req.MaxTurns,
 		Files:                   req.Files,
+		WorkerProfiles:          nil,
 	}
 	if user, err := s.store.UserByID(r.Context(), uid); err == nil {
 		startReq.PlanWorkspace = s.featureEnabled(rollout.FeatureOrchestrationPlanWorkspace, user)
@@ -109,6 +114,12 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		serverutil.WriteError(w, http.StatusConflict, "ORCHESTRATION_CAPABILITY_UNAVAILABLE", err.Error())
 		return
 	}
+	profiles, err := s.resolveWorkerProfiles(r.Context(), uid, agentID, normalized.WorkerPair, req.WorkerProfilePresetIDs, req.WorkerProfileEfforts)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_WORKER_PROFILE", err.Error())
+		return
+	}
+	normalized.WorkerProfiles = profiles
 	files := orchestrationFileMeta(normalized.Files)
 	run, err := s.store.CreateOrchestrationRun(r.Context(), store.CreateOrchestrationRunParams{
 		UserID:                  uid,
@@ -123,6 +134,7 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		CWD:                     normalized.CWD,
 		MaxTurns:                normalized.MaxTurns,
 		Files:                   files,
+		WorkerProfiles:          normalized.WorkerProfiles,
 	})
 	if err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to create orchestration run")
@@ -169,11 +181,22 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		CWD:                     req.CWD,
 		MaxTurns:                req.MaxTurns,
 		Files:                   req.Files,
+		WorkerProfiles:          nil,
+	}
+	previousProfiles, profilesErr := s.store.OrchestrationWorkerProfiles(r.Context(), run.ID)
+	if profilesErr != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration worker profiles")
+		return
 	}
 	if graph, graphErr := s.store.TaskGraphByRun(r.Context(), run.ID); graphErr == nil {
 		var previous protocol.OrchestrationStartPayload
 		if json.Unmarshal([]byte(graph.PayloadJSON), &previous) == nil {
 			startReq.PlanWorkspace = previous.PlanWorkspace
+			if previousProfiles == nil {
+				// Compatibility with runs created before bindings had their own
+				// private persistence table.
+				previousProfiles = previous.WorkerProfiles
+			}
 		}
 	}
 	if startReq.AgentID == "" {
@@ -221,6 +244,16 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		serverutil.WriteError(w, http.StatusConflict, "ORCHESTRATION_CAPABILITY_UNAVAILABLE", err.Error())
 		return
 	}
+	if req.WorkerProfilePresetIDs == nil {
+		normalized.WorkerProfiles = previousProfiles
+	} else {
+		profiles, err := s.resolveWorkerProfiles(r.Context(), uid, agentID, normalized.WorkerPair, req.WorkerProfilePresetIDs, req.WorkerProfileEfforts)
+		if err != nil {
+			serverutil.WriteError(w, http.StatusBadRequest, "BAD_WORKER_PROFILE", err.Error())
+			return
+		}
+		normalized.WorkerProfiles = profiles
+	}
 	normalized.AgentID = agentID
 	files := mergeOrchestrationFiles(run.Files, orchestrationFileMeta(normalized.Files))
 
@@ -243,6 +276,12 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to update orchestration run")
 		return
 	}
+	if req.WorkerProfilePresetIDs != nil {
+		if err := s.store.SetOrchestrationWorkerProfiles(r.Context(), run.ID, normalized.WorkerProfiles); err != nil {
+			serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to update orchestration worker profiles")
+			return
+		}
+	}
 	run.AgentID = agentID
 	run.Mode = normalized.Mode
 	run.WorkerPair = normalized.WorkerPair
@@ -260,6 +299,80 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 	run.Error = ""
 	run.FinishedAt = 0
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"run": run})
+}
+
+// resolveWorkerProfiles authorizes the encrypted preset snapshot for only the
+// worker slots used by this run. Hub deliberately does not decrypt it.
+func (s *Server) resolveWorkerProfiles(ctx context.Context, userID, agentID, workerPair string, requested map[string]string, requestedEfforts map[string]string) (map[string]protocol.WorkerProfileBinding, error) {
+	if len(requested) == 0 {
+		return nil, nil
+	}
+	expected := map[string]string{"claude": "claude", "codex": "codex"}
+	switch protocol.NormalizeOrchestrationWorkerPair(workerPair) {
+	case protocol.WorkerPairCodexCodex:
+		expected = map[string]string{"codex-a": "codex", "codex-b": "codex"}
+	case protocol.WorkerPairClaudeClaude:
+		expected = map[string]string{"claude-a": "claude", "claude-b": "claude"}
+	}
+	if len(requested) != len(expected) {
+		return nil, fmt.Errorf("select exactly one saved preset for every %s worker", protocol.NormalizeOrchestrationWorkerPair(workerPair))
+	}
+	for slot := range expected {
+		if strings.TrimSpace(requested[slot]) == "" {
+			return nil, fmt.Errorf("worker slot %q requires a saved preset", slot)
+		}
+	}
+	connection, online := s.pool.AgentConnectionInfo(agentID)
+	if !online || connection.Capabilities == nil || connection.Capabilities.ConfigSwitcher == nil {
+		return nil, errors.New("selected CLI endpoint does not support encrypted model profiles")
+	}
+	keyID := connection.Capabilities.ConfigSwitcher.KeyID
+	profiles := make(map[string]protocol.WorkerProfileBinding, len(requested))
+	for rawSlot, rawPresetID := range requested {
+		slot := strings.TrimSpace(rawSlot)
+		presetID := strings.TrimSpace(rawPresetID)
+		if slot == "" || presetID == "" {
+			return nil, errors.New("worker profile slot and preset id are required")
+		}
+		wantCLI, ok := expected[slot]
+		if !ok {
+			return nil, fmt.Errorf("worker slot %q is not available for %s", slot, protocol.NormalizeOrchestrationWorkerPair(workerPair))
+		}
+		preset, err := s.store.CLIConfigPresetByID(ctx, presetID, userID, agentID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("model preset %q was not found for the selected endpoint", presetID)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load model preset: %w", err)
+		}
+		if preset.CLI != wantCLI {
+			return nil, fmt.Errorf("worker slot %q requires a %s preset", slot, wantCLI)
+		}
+		normalizeReviewedPreset(&preset)
+		if preset.KeyHint == "" || preset.KeyHint != keyID {
+			return nil, fmt.Errorf("model preset %q was encrypted for an earlier Bridge key; update its API key first", preset.Name)
+		}
+		effort := preset.ReasoningEffort
+		if requestedEfforts != nil {
+			if selected := strings.TrimSpace(requestedEfforts[slot]); selected != "" {
+				if len(preset.ReasoningLevels) == 0 || !containsString(preset.ReasoningLevels, selected) {
+					return nil, fmt.Errorf("worker slot %q selects unsupported reasoning effort %q for preset %q", slot, selected, preset.Name)
+				}
+				effort = selected
+			}
+		}
+		binding := protocol.WorkerProfileBinding{
+			PresetID: preset.ID, CLI: preset.CLI, Name: preset.Name, BaseURL: preset.BaseURL, Model: preset.Model, ReasoningEffort: effort, ReasoningLevels: append([]string(nil), preset.ReasoningLevels...), ReasoningDefault: preset.ReasoningDefault, Secret: preset.Secret,
+		}
+		if preset.CLI == "claude" {
+			if contextProfile, ok := reviewedClaudeContextForModel(preset.Model); ok {
+				binding.ClaudeContextWindow = contextProfile.Window
+				binding.ClaudeDisableUnknownModelWindowEnforcement = contextProfile.DisableUnknownEnforcement
+			}
+		}
+		profiles[slot] = binding
+	}
+	return profiles, nil
 }
 
 func (s *Server) normalizeOrchestrationStart(w http.ResponseWriter, req orchestrationStartRequest) (orchestrationStartRequest, bool) {
@@ -283,6 +396,8 @@ func (s *Server) normalizeOrchestrationStart(w http.ResponseWriter, req orchestr
 	req.FirstCLI = normalizeOrchestrationFirstCLI(req.FirstCLI)
 	if req.WorkerPair == protocol.WorkerPairCodexCodex {
 		req.FirstCLI = "codex"
+	} else if req.WorkerPair == protocol.WorkerPairClaudeClaude {
+		req.FirstCLI = "claude"
 	}
 	req.Profile = normalizeOrchestrationProfile(req.Profile)
 	req.NativeContextCompaction = protocol.NormalizeNativeContextCompaction(req.NativeContextCompaction)
@@ -1013,14 +1128,18 @@ func (s *Server) requestOrchestrationUsageSync(run store.OrchestrationRun, event
 	if !s.pool.AgentSupportsUsageLedger(run.AgentID) {
 		return errors.New("connected Bridge does not support the local usage ledger")
 	}
-	sessions := orchestrationUsageSessions(run, events)
+	profiles, err := s.store.OrchestrationWorkerProfiles(context.Background(), run.ID)
+	if err != nil {
+		return fmt.Errorf("load worker profile bindings: %w", err)
+	}
+	sessions := orchestrationUsageSessions(run, events, profiles)
 	if len(sessions) == 0 {
 		return errors.New("native session metadata unavailable")
 	}
 	return s.pool.SendToAgent(run.AgentID, protocol.MustEnvelope(protocol.TypeOrchestrationUsageSyncRequest, "", protocol.OrchestrationUsageSyncRequest{RunID: run.ID, Sessions: sessions}))
 }
 
-func orchestrationUsageSessions(run store.OrchestrationRun, events []store.OrchestrationEvent) []protocol.OrchestrationUsageSession {
+func orchestrationUsageSessions(run store.OrchestrationRun, events []store.OrchestrationEvent, profiles map[string]protocol.WorkerProfileBinding) []protocol.OrchestrationUsageSession {
 	seen := map[string]bool{}
 	var sessions []protocol.OrchestrationUsageSession
 	add := func(cli, slot, id string) {
@@ -1028,7 +1147,8 @@ func orchestrationUsageSessions(run store.OrchestrationRun, events []store.Orche
 		key := cli + "\x00" + slot + "\x00" + id
 		if id != "" && !seen[key] {
 			seen[key] = true
-			sessions = append(sessions, protocol.OrchestrationUsageSession{CLI: cli, WorkerSlot: slot, SessionID: id})
+			_, isolated := profiles[slot]
+			sessions = append(sessions, protocol.OrchestrationUsageSession{CLI: cli, WorkerSlot: slot, SessionID: id, Isolated: isolated})
 		}
 	}
 	for slot, id := range run.CodexThreadIDs {
@@ -1037,13 +1157,19 @@ func orchestrationUsageSessions(run store.OrchestrationRun, events []store.Orche
 	if len(run.CodexThreadIDs) == 0 {
 		add("codex", "codex", run.CodexThreadID)
 	}
+	for slot, id := range run.ClaudeSessionIDs {
+		add("claude", slot, id)
+	}
 	for _, event := range events {
 		if event.RunEndData == nil {
 			continue
 		}
 		add("claude", "claude", event.RunEndData.ClaudeSessionID)
+		for slot, id := range event.RunEndData.ClaudeSessionIDs {
+			add("claude", slot, id)
+		}
 		for _, native := range event.RunEndData.NativeResume {
-			add(native.CLI, native.CLI, native.ID)
+			add(native.CLI, native.WorkerSlot, native.ID)
 		}
 	}
 	return sessions
@@ -1148,10 +1274,13 @@ func (s *Server) startOrchestration(ctx context.Context, run store.Orchestration
 		CodexThreadID:           orchestrationResumeString(resume, run.CodexThreadID),
 		CodexThreadIDs:          orchestrationResumeStringMap(resume, run.CodexThreadIDs),
 		ClaudeStarted:           resume && run.ClaudeStarted,
+		ClaudeSessionIDs:        orchestrationResumeStringMap(resume, run.ClaudeSessionIDs),
+		ClaudeStartedSlots:      orchestrationResumeBoolMap(resume, run.ClaudeStartedSlots),
 		RunCWD:                  orchestrationResumeString(resume, run.RunCWD),
 		Profile:                 req.Profile,
 		NativeContextCompaction: req.NativeContextCompaction,
 		PlanWorkspace:           req.PlanWorkspace,
+		WorkerProfiles:          req.WorkerProfiles,
 	}
 	if s.durableTaskGraphEnabled(run.AgentID) {
 		if err := s.createAndDispatchTaskGraph(ctx, run, payload); err != nil {
@@ -1243,6 +1372,8 @@ func orchestrationRequiredCLIs(workerPair string) []string {
 	switch protocol.NormalizeOrchestrationWorkerPair(workerPair) {
 	case protocol.WorkerPairCodexCodex:
 		return []string{"codex"}
+	case protocol.WorkerPairClaudeClaude:
+		return []string{"claude"}
 	default:
 		return []string{"claude", "codex"}
 	}
@@ -1531,6 +1662,22 @@ func orchestrationResumeStringMap(resume bool, values map[string]string) map[str
 	return out
 }
 
+func orchestrationResumeBoolMap(resume bool, values map[string]bool) map[string]bool {
+	if !resume || len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(values))
+	for key, value := range values {
+		if key = strings.TrimSpace(key); key != "" && value {
+			out[key] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func boundedQueryLimit(r *http.Request, name string, defaultLimit, maxLimit int) int {
 	value := strings.TrimSpace(r.URL.Query().Get(name))
 	if value == "" {
@@ -1758,6 +1905,37 @@ func stringMapFromMap(data map[string]any, key string) map[string]string {
 			valueString := strings.TrimSpace(fmt.Sprint(value))
 			if key != "" && valueString != "" {
 				out[key] = valueString
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func boolMapFromMap(data map[string]any, key string) map[string]bool {
+	if data == nil {
+		return nil
+	}
+	raw, ok := data[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	out := map[string]bool{}
+	switch typed := raw.(type) {
+	case map[string]bool:
+		for key, value := range typed {
+			if key = strings.TrimSpace(key); key != "" && value {
+				out[key] = true
+			}
+		}
+	case map[string]any:
+		for key, value := range typed {
+			if started, ok := value.(bool); ok && started {
+				if key = strings.TrimSpace(key); key != "" {
+					out[key] = true
+				}
 			}
 		}
 	}
@@ -2013,10 +2191,25 @@ func (s *Server) updateOrchestrationRunSessionFromEvent(ctx context.Context, pay
 		if len(codexThreadIDs) == 0 && payload.RunEndData != nil {
 			codexThreadIDs = payload.RunEndData.CodexThreadIDs
 		}
+		claudeSessionIDs := stringMapFromMap(payload.Data, "claudeSessionIds")
+		if len(claudeSessionIDs) == 0 && payload.RunEndData != nil {
+			claudeSessionIDs = payload.RunEndData.ClaudeSessionIDs
+		}
+		claudeStartedSlots := boolMapFromMap(payload.Data, "claudeStartedSlots")
 		claudeStarted := payload.Kind == "turn.end" && strings.EqualFold(payload.CLI, "claude") &&
 			!strings.EqualFold(payload.Status, "error") && !strings.EqualFold(payload.Severity, "error")
-		if codexThreadID != "" || len(codexThreadIDs) > 0 || claudeStarted {
-			if err := s.store.UpdateOrchestrationRunSessionState(ctx, payload.RunID, codexThreadID, codexThreadIDs, claudeStarted, ""); err != nil {
+		claudeWorkerSlot := stringFromMap(payload.Data, "workerSlot")
+		if claudeWorkerSlot == "" && payload.TurnStartData != nil {
+			claudeWorkerSlot = payload.TurnStartData.WorkerSlot
+		}
+		if claudeStarted && claudeWorkerSlot != "" {
+			if claudeStartedSlots == nil {
+				claudeStartedSlots = map[string]bool{}
+			}
+			claudeStartedSlots[claudeWorkerSlot] = true
+		}
+		if codexThreadID != "" || len(codexThreadIDs) > 0 || len(claudeSessionIDs) > 0 || len(claudeStartedSlots) > 0 || claudeStarted {
+			if err := s.store.UpdateOrchestrationRunSessionStateWithClaude(ctx, payload.RunID, codexThreadID, codexThreadIDs, claudeStarted, claudeSessionIDs, claudeStartedSlots, ""); err != nil {
 				slog.Error("[hub] update orchestration run session failed", "run_id", payload.RunID, "error", err)
 			}
 		}

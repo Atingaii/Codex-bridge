@@ -63,7 +63,7 @@ func (m *OrchestrationManager) runPostTurnNativeMaintenance(ctx context.Context,
 		m.runNativeContextCompaction(ctx, runID, turnID, role, cli, compactAfterTurn, session, codex)
 		m.flushCodexInteractiveThread(session, codex)
 	case "claude":
-		claude := session.claude
+		claude := session.claudeSessionLocked(workerSlot)
 		m.runNativeContextCompaction(ctx, runID, turnID, role, cli, compactAfterTurn, session, claude)
 	}
 }
@@ -133,7 +133,7 @@ func codexNativeResumeInfo(threadID, cwd string) *protocol.NativeResumeInfo {
 	return codexNativeResumeInfoForSlot(orchestrationCodexDefaultSlot, threadID, cwd)
 }
 
-func codexNativeResumeInfoForSlot(workerSlot, threadID, cwd string) *protocol.NativeResumeInfo {
+func codexNativeResumeInfoForSlot(workerSlot, threadID, cwd string, runtimes ...orchestrationWorkerRuntime) *protocol.NativeResumeInfo {
 	threadID = strings.TrimSpace(threadID)
 	if threadID == "" {
 		return nil
@@ -145,28 +145,102 @@ func codexNativeResumeInfoForSlot(workerSlot, threadID, cwd string) *protocol.Na
 		cli = workerSlot
 		reason = "Codex app-server returned a persisted native thread id for " + workerSlot + "."
 	}
+	command := "codex resume " + threadID
+	if len(runtimes) > 0 {
+		if home := runtimes[0].codexHome(); home != "" {
+			command = "CODEX_HOME=" + nativeResumeShellQuote(home) + " codex resume " + threadID
+			if err := materializeCodexPickerVisibility(home, threadID); err != nil {
+				reason += " The ordinary picker is not synchronized yet; use the slot's private CODEX_HOME: " + err.Error()
+			} else {
+				reason += " Bridge synchronized only its session record into the ordinary Codex /resume picker; the direct command preserves this slot's isolated configuration."
+			}
+		}
+	}
 	return &protocol.NativeResumeInfo{
 		CLI:              cli,
 		ID:               threadID,
-		Command:          "codex resume " + threadID,
+		Command:          command,
 		CWD:              cwd,
 		Visible:          true,
 		VisibilityReason: reason,
 	}
 }
 
+func materializeCodexPickerVisibility(privateHome, threadID string) error {
+	privateHome = strings.TrimSpace(privateHome)
+	threadID = strings.TrimSpace(threadID)
+	if privateHome == "" || threadID == "" {
+		return nil
+	}
+	sourceRoot := filepath.Join(privateHome, "sessions")
+	var source string
+	err := filepath.WalkDir(sourceRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") || !strings.Contains(entry.Name(), threadID) {
+			return nil
+		}
+		source = path
+		return filepath.SkipAll
+	})
+	if err != nil {
+		return err
+	}
+	if source == "" {
+		return errors.New("native session record has not been written yet")
+	}
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	if len(strings.TrimSpace(string(data))) == 0 || !strings.Contains(string(data), threadID) {
+		return errors.New("native session record is empty or does not match the thread")
+	}
+	relative, err := filepath.Rel(sourceRoot, source)
+	if err != nil || relative == "." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("native session record escaped its private sessions directory")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	target := filepath.Join(home, ".codex", "sessions", relative)
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		return err
+	}
+	return atomicWrite(target, data, 0o600)
+}
+
+func nativeResumeShellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\\"'\\\"'") + "'"
+}
+
 func (m *OrchestrationManager) claudeNativeResumeInfo(sessionID, cwd string) *protocol.NativeResumeInfo {
+	return m.claudeNativeResumeInfoForSlot(orchestrationClaudeDefaultSlot, sessionID, cwd)
+}
+
+func (m *OrchestrationManager) claudeNativeResumeInfoForSlot(workerSlot, sessionID, cwd string) *protocol.NativeResumeInfo {
+	return m.claudeNativeResumeInfoForSlotWithRuntime(workerSlot, sessionID, cwd, orchestrationWorkerRuntime{})
+}
+
+func (m *OrchestrationManager) claudeNativeResumeInfoForSlotWithRuntime(workerSlot, sessionID, cwd string, runtime orchestrationWorkerRuntime) *protocol.NativeResumeInfo {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return nil
 	}
+	workerSlot = normalizeClaudeWorkerSlot(workerSlot)
 	info := &protocol.NativeResumeInfo{
-		CLI:     "claude",
-		ID:      sessionID,
-		Command: "claude --resume " + sessionID,
-		CWD:     cwd,
+		CLI:        "claude",
+		WorkerSlot: workerSlot,
+		ID:         sessionID,
+		Command:    "claude --resume " + sessionID,
+		CWD:        cwd,
 	}
-	path := claudeSessionFilePath(cwd, sessionID)
+	if configDir := runtime.claudeConfigDir(); configDir != "" {
+		info.Command = "CLAUDE_CONFIG_DIR=" + nativeResumeShellQuote(configDir) + " claude --resume " + sessionID
+	}
+	path := claudeSessionFilePathForConfig(cwd, sessionID, runtime.claudeConfigDir())
 	info.TranscriptPath = path
 	if ok, reason := verifyClaudeTranscript(path, sessionID); ok {
 		info.Visible = true
@@ -178,25 +252,53 @@ func (m *OrchestrationManager) claudeNativeResumeInfo(sessionID, cwd string) *pr
 	return info
 }
 
-func runEndDataWithNativeResume(data *protocol.RunEndData, cwd string) *protocol.RunEndData {
+func (m *OrchestrationManager) runEndDataWithNativeResume(data *protocol.RunEndData, cwd string) *protocol.RunEndData {
+	return m.runEndDataWithNativeResumeForSession(data, cwd, nil)
+}
+
+func (m *OrchestrationManager) runEndDataWithNativeResumeForSession(data *protocol.RunEndData, cwd string, session *orchestrationNativeSession) *protocol.RunEndData {
 	if data == nil {
 		return nil
 	}
 	if data.CodexThreadID != "" && data.CodexNativeResume == nil {
-		data.CodexNativeResume = codexNativeResumeInfoForSlot(codexThreadSlotForLegacyID(data.CodexThreadID, data.CodexThreadIDs), data.CodexThreadID, cwd)
+		slot := codexThreadSlotForLegacyID(data.CodexThreadID, data.CodexThreadIDs)
+		data.CodexNativeResume = codexNativeResumeInfoForSlot(slot, data.CodexThreadID, cwd, codexWorkerRuntime(session, slot))
 	}
 	if data.CodexNativeResume != nil {
 		data.NativeResume = appendNativeResumeInfo(data.NativeResume, *data.CodexNativeResume)
 	}
 	for _, slot := range orderedCodexThreadSlots(data.CodexThreadIDs) {
-		if info := codexNativeResumeInfoForSlot(slot, data.CodexThreadIDs[slot], cwd); info != nil {
+		if info := codexNativeResumeInfoForSlot(slot, data.CodexThreadIDs[slot], cwd, codexWorkerRuntime(session, slot)); info != nil {
 			data.NativeResume = appendNativeResumeInfo(data.NativeResume, *info)
 		}
 	}
 	if data.ClaudeNativeResume != nil {
 		data.NativeResume = appendNativeResumeInfo(data.NativeResume, *data.ClaudeNativeResume)
 	}
+	for _, slot := range orderedClaudeSessionSlots(data.ClaudeSessionIDs) {
+		if info := m.claudeNativeResumeInfoForSlotWithRuntime(slot, data.ClaudeSessionIDs[slot], cwd, claudeWorkerRuntime(session, slot)); info != nil {
+			data.NativeResume = appendNativeResumeInfo(data.NativeResume, *info)
+		}
+	}
 	return data
+}
+
+func claudeWorkerRuntime(session *orchestrationNativeSession, workerSlot string) orchestrationWorkerRuntime {
+	if session == nil {
+		return orchestrationWorkerRuntime{}
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.profileRuntime[normalizeClaudeWorkerSlot(workerSlot)]
+}
+
+func codexWorkerRuntime(session *orchestrationNativeSession, workerSlot string) orchestrationWorkerRuntime {
+	if session == nil {
+		return orchestrationWorkerRuntime{}
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.profileRuntime[normalizeCodexWorkerSlot(workerSlot)]
 }
 
 func codexThreadSlotForLegacyID(threadID string, threadIDs map[string]string) string {
@@ -232,12 +334,35 @@ func orderedCodexThreadSlots(threadIDs map[string]string) []string {
 	return slots
 }
 
+func orderedClaudeSessionSlots(sessionIDs map[string]string) []string {
+	if len(sessionIDs) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(sessionIDs))
+	var slots []string
+	for _, slot := range []string{orchestrationClaudeDefaultSlot, orchestrationClaudeSlotA, orchestrationClaudeSlotB} {
+		if strings.TrimSpace(sessionIDs[slot]) != "" {
+			slots = append(slots, slot)
+			seen[slot] = true
+		}
+	}
+	for slot, sessionID := range sessionIDs {
+		slot = strings.TrimSpace(slot)
+		if slot == "" || seen[slot] || strings.TrimSpace(sessionID) == "" {
+			continue
+		}
+		slots = append(slots, slot)
+		seen[slot] = true
+	}
+	return slots
+}
+
 func appendNativeResumeInfo(values []protocol.NativeResumeInfo, value protocol.NativeResumeInfo) []protocol.NativeResumeInfo {
 	if strings.TrimSpace(value.CLI) == "" || strings.TrimSpace(value.ID) == "" {
 		return values
 	}
 	for i := range values {
-		if values[i].CLI == value.CLI {
+		if values[i].CLI == value.CLI && values[i].WorkerSlot == value.WorkerSlot {
 			values[i] = value
 			return values
 		}
@@ -245,25 +370,30 @@ func appendNativeResumeInfo(values []protocol.NativeResumeInfo, value protocol.N
 	return append(values, value)
 }
 
-func (m *OrchestrationManager) registerClaudeNativeResume(session *orchestrationNativeSession, claude *orchestrationClaudeSession, runID, cwd string) *protocol.NativeResumeInfo {
+func (m *OrchestrationManager) registerClaudeNativeResume(session *orchestrationNativeSession, claude *orchestrationClaudeSession, workerSlot, runID, cwd string) *protocol.NativeResumeInfo {
 	if claude == nil {
 		return nil
 	}
 	if strings.TrimSpace(cwd) == "" && session != nil {
 		cwd = session.cwd
 	}
-	info := m.claudeNativeResumeInfo(claude.sessionID, cwd)
+	runtime := claudeWorkerRuntime(session, workerSlot)
+	info := m.claudeNativeResumeInfoForSlotWithRuntime(workerSlot, claude.sessionID, cwd, runtime)
 	if info == nil {
 		return nil
 	}
 	if err := updateClaudeProjectLastSession(cwd, claude.sessionID); err != nil && info.VisibilityReason == "" {
 		info.VisibilityReason = "Claude transcript was checked, but Bridge could not update Claude project metadata: " + err.Error()
 	}
-	if err := materializeClaudePickerVisibility(cwd, claude.sessionID, runID); err != nil {
+	if err := materializeClaudePickerVisibility(cwd, claude.sessionID, runID, info.TranscriptPath); err != nil {
 		info.Visible = false
 		info.VisibilityReason = "Claude transcript exists, but Bridge could not materialize it for Claude Code /resume picker visibility: " + err.Error()
 	} else if info.Visible {
-		if refreshed := m.claudeNativeResumeInfo(claude.sessionID, cwd); refreshed != nil {
+		if refreshed := m.claudeNativeResumeInfoForSlotWithRuntime(workerSlot, claude.sessionID, cwd, runtime); refreshed != nil {
+			// The picker uses the global copy, while the direct command must keep
+			// using this worker slot's isolated configuration.
+			refreshed.TranscriptPath = claudeSessionFilePath(cwd, claude.sessionID)
+			refreshed.Visible = true
 			info = refreshed
 		}
 		info.Visible = true
@@ -288,7 +418,11 @@ func cwdForNativeSession(session *orchestrationNativeSession, fallback string) s
 }
 
 func claudeSessionFilePath(cwd, sessionID string) string {
-	dir := claudeProjectDir(cwd)
+	return claudeSessionFilePathForConfig(cwd, sessionID, "")
+}
+
+func claudeSessionFilePathForConfig(cwd, sessionID, configDir string) string {
+	dir := claudeProjectDirForConfig(cwd, configDir)
 	if dir == "" || strings.TrimSpace(sessionID) == "" {
 		return ""
 	}
@@ -363,20 +497,24 @@ func updateClaudeProjectLastSession(cwd, sessionID string) error {
 	return os.WriteFile(path, append(out, '\n'), 0o600)
 }
 
-func materializeClaudePickerVisibility(cwd, sessionID, runID string) error {
+func materializeClaudePickerVisibility(cwd, sessionID, runID string, sourcePaths ...string) error {
 	cwd = strings.TrimSpace(cwd)
 	sessionID = strings.TrimSpace(sessionID)
 	if cwd == "" || sessionID == "" {
 		return nil
 	}
-	transcriptPath := claudeSessionFilePath(cwd, sessionID)
-	if strings.TrimSpace(transcriptPath) == "" {
+	targetPath := claudeSessionFilePath(cwd, sessionID)
+	if strings.TrimSpace(targetPath) == "" {
 		return errors.New("Claude transcript path could not be resolved")
 	}
-	if err := waitForStableClaudeTranscript(transcriptPath, claudeTranscriptStableWait); err != nil {
+	sourcePath := targetPath
+	if len(sourcePaths) > 0 && strings.TrimSpace(sourcePaths[0]) != "" {
+		sourcePath = sourcePaths[0]
+	}
+	if err := waitForStableClaudeTranscript(sourcePath, claudeTranscriptStableWait); err != nil {
 		return err
 	}
-	data, err := os.ReadFile(transcriptPath)
+	data, err := os.ReadFile(sourcePath)
 	if err != nil {
 		return err
 	}
@@ -390,7 +528,10 @@ func materializeClaudePickerVisibility(cwd, sessionID, runID string) error {
 	if !strings.Contains(string(materialized), `"entrypoint":"cli"`) {
 		return errors.New("materialized transcript does not contain a cli entrypoint")
 	}
-	if err := os.WriteFile(transcriptPath, materialized, 0o600); err != nil {
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o700); err != nil {
+		return err
+	}
+	if err := atomicWrite(targetPath, materialized, 0o600); err != nil {
 		return err
 	}
 	return appendClaudeHistoryIndex(cwd, sessionID, runID, materialized)

@@ -319,6 +319,9 @@ func groupOrchestrationProgressGraphs(graphs []store.OrchestrationTaskGraph, eve
 			})
 		}
 		group := &groups[len(groups)-1]
+		// PayloadJSON can contain an encrypted worker credential snapshot. It is
+		// required above for grouping, but never belongs in a browser response.
+		graph = publicOrchestrationTaskGraph(graph)
 		group.Graphs = append(group.Graphs, graph)
 		graphCopy := graph
 		group.Graph = &graphCopy
@@ -353,6 +356,11 @@ func groupOrchestrationProgressGraphs(graphs []store.OrchestrationTaskGraph, eve
 		groups[index].PlanItems = groups[index].Plan.Items
 	}
 	return groups
+}
+
+func publicOrchestrationTaskGraph(graph store.OrchestrationTaskGraph) store.OrchestrationTaskGraph {
+	graph.PayloadJSON = ""
+	return graph
 }
 
 // mergeOrchestrationProgressEvents preserves the bounded live-event query for
@@ -417,8 +425,13 @@ func (s *Server) handleOrchestrationProgress(w http.ResponseWriter, r *http.Requ
 	graph := graphs[len(graphs)-1]
 	var payload protocol.OrchestrationStartPayload
 	_ = json.Unmarshal([]byte(graph.PayloadJSON), &payload)
+	publicGraphs := make([]store.OrchestrationTaskGraph, len(graphs))
+	for index, item := range graphs {
+		publicGraphs[index] = publicOrchestrationTaskGraph(item)
+	}
+	graph = publicOrchestrationTaskGraph(graph)
 	if !payload.PlanWorkspace {
-		serverutil.WriteJSON(w, http.StatusOK, map[string]any{"graph": graph, "graphs": graphs, "tasks": []orchestrationProgressTask{}, "planItems": []orchestrationPlanItem{}, "plan": orchestrationPlanProgress{Items: []orchestrationPlanItem{}}, "planWorkspace": false})
+		serverutil.WriteJSON(w, http.StatusOK, map[string]any{"graph": graph, "graphs": publicGraphs, "tasks": []orchestrationProgressTask{}, "planItems": []orchestrationPlanItem{}, "plan": orchestrationPlanProgress{Items: []orchestrationPlanItem{}}, "planWorkspace": false})
 		return
 	}
 	events, err := s.store.ListOrchestrationEvents(r.Context(), runID, 10000)
@@ -436,12 +449,16 @@ func (s *Server) handleOrchestrationProgress(w http.ResponseWriter, r *http.Requ
 	latestTask := tasks[len(tasks)-1]
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"graph":         graph,
-		"graphs":        graphs,
+		"graphs":        publicGraphs,
 		"tasks":         tasks,
 		"planItems":     latestTask.PlanItems,
 		"plan":          latestTask.Plan,
 		"planWorkspace": true,
 	})
+}
+
+func verifiedEarly(payload protocol.OrchestrationEventPayload) bool {
+	return payload.RunEndData != nil && payload.RunEndData.TerminalReason == "verified-early"
 }
 
 type orchestrationTaskInstruction struct {
@@ -459,8 +476,11 @@ func taskPayloadDigest(parts ...string) string {
 
 func orchestrationTaskSpecs(baseDigest, workerPair, mode string, planWorkspace ...bool) []store.CreateTaskSpec {
 	workerA, workerB := "claude", "codex"
-	if protocol.NormalizeOrchestrationWorkerPair(workerPair) == protocol.WorkerPairCodexCodex {
+	switch protocol.NormalizeOrchestrationWorkerPair(workerPair) {
+	case protocol.WorkerPairCodexCodex:
 		workerA, workerB = "codex-a", "codex-b"
+	case protocol.WorkerPairClaudeClaude:
+		workerA, workerB = "claude-a", "claude-b"
 	}
 	workerDuty := "Build one independent candidate in the user's selected project directory. Inspect the actual project, maximize useful implementation progress through viable approaches, run focused checks, and finish with an engineer-to-engineer handoff naming changed files, exact commands and results, repeated blockers, attempted approaches, and the next executable entry point."
 	if mode == "debate" {
@@ -631,6 +651,8 @@ func (s *Server) dispatchTaskAttempt(ctx context.Context, run store.Orchestratio
 	payload.CodexThreadID = ""
 	payload.CodexThreadIDs = nil
 	payload.ClaudeStarted = false
+	payload.ClaudeSessionIDs = nil
+	payload.ClaudeStartedSlots = nil
 	payload.RunCWD = ""
 	payload.Resume = false
 	maxRounds := payload.MaxRounds
@@ -688,6 +710,8 @@ func nextTaskGraphPayload(graph store.OrchestrationTaskGraph, run store.Orchestr
 	payload.CodexThreadID = run.CodexThreadID
 	payload.CodexThreadIDs = run.CodexThreadIDs
 	payload.ClaudeStarted = run.ClaudeStarted
+	payload.ClaudeSessionIDs = run.ClaudeSessionIDs
+	payload.ClaudeStartedSlots = run.ClaudeStartedSlots
 	payload.RunCWD = run.RunCWD
 	reviewContext := trimForContext(review.Content, 8*1024)
 	if review.RunConclusion != nil {
@@ -779,9 +803,13 @@ func (s *Server) handleTaskGraphEvent(ctx context.Context, payload protocol.Orch
 			if orchestrationTerminalStatus(run.Status) {
 				return true, nil
 			}
-			advanced, err := s.advanceCompletedTaskGraph(ctx, run, updated, payload)
-			if err != nil {
-				return true, err
+			advanced := false
+			if !verifiedEarly(payload) {
+				var err error
+				advanced, err = s.advanceCompletedTaskGraph(ctx, run, updated, payload)
+				if err != nil {
+					return true, err
+				}
 			}
 			if advanced {
 				return true, nil
@@ -794,7 +822,7 @@ func (s *Server) handleTaskGraphEvent(ctx context.Context, payload protocol.Orch
 				conclusion = &protocol.RunConclusion{Outcome: "satisfied", Summary: payload.Content}
 			}
 			terminal, err := s.store.AddOrchestrationEvent(ctx, store.OrchestrationEvent{
-				RunID: payload.RunID, Kind: "run.end", Source: "bridge", Role: "summary", Content: payload.Content, Status: store.OrchestrationCompleted, RunConclusion: conclusion,
+				RunID: payload.RunID, Kind: "run.end", Source: "bridge", Role: "summary", Content: payload.Content, Status: store.OrchestrationCompleted, RunConclusion: conclusion, RunEndData: payload.RunEndData,
 			})
 			if err != nil {
 				return true, err

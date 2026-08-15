@@ -103,6 +103,7 @@ type AuthConfig struct {
 
 type RegistrationConfig struct {
 	Enabled           bool   `yaml:"enabled"`
+	RequireTurnstile  bool   `yaml:"require_turnstile"`
 	TurnstileSiteKey  string `yaml:"turnstile_site_key"`
 	TurnstileSecret   string `yaml:"turnstile_secret"`
 	TurnstileHostname string `yaml:"turnstile_hostname"`
@@ -181,7 +182,9 @@ func Default() Config {
 			JWTSecret:         "dev-only-change-me-32-byte-minimum-secret",
 			AccessTokenTTL:    Duration{Duration: 24 * 60 * 60 * 1_000_000_000},
 			BootstrapUsername: "admin",
-			Registration:      RegistrationConfig{},
+			Registration: RegistrationConfig{
+				RequireTurnstile: true,
+			},
 		},
 		Observability: ObservabilityConfig{
 			LogLevel:  "info",

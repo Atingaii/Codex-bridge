@@ -1206,7 +1206,7 @@ func TestClaudeNativeResumeMetadataUpdatesProjectVisibility(t *testing.T) {
 
 	manager := NewOrchestrationManager(&config.Config{})
 	claude := &orchestrationClaudeSession{sessionID: sessionID}
-	info := manager.registerClaudeNativeResume(&orchestrationNativeSession{cwd: cwd}, claude, "orc_resume", cwd)
+	info := manager.registerClaudeNativeResume(&orchestrationNativeSession{cwd: cwd}, claude, orchestrationClaudeDefaultSlot, "orc_resume", cwd)
 	if info == nil {
 		t.Fatal("expected claude native resume info")
 	}
@@ -1261,6 +1261,79 @@ func TestClaudeNativeResumeMetadataUpdatesProjectVisibility(t *testing.T) {
 	}
 }
 
+func TestIsolatedCodexSessionIsVisibleWithoutCopyingConfiguration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	threadID := "019fffff-1111-7222-8333-444444444444"
+	privateHome := filepath.Join(home, ".codex-bridge", "orchestration-profiles", "run", "codex-a", "codex")
+	source := filepath.Join(privateHome, "sessions", "2026", "08", "15", "rollout-2026-08-15T00-00-00-"+threadID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcript := []byte(`{"type":"session_meta","payload":{"id":"` + threadID + `","cwd":"/work","model_provider":"custom"}}` + "\n")
+	if err := os.WriteFile(source, transcript, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(privateHome, "config.toml"), []byte("secret-config"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(privateHome, "auth.json"), []byte("secret-auth"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	info := codexNativeResumeInfoForSlot("codex-a", threadID, "/work", orchestrationWorkerRuntime{env: []string{"CODEX_HOME=" + privateHome}})
+	if info == nil || !strings.Contains(info.Command, "CODEX_HOME=") || !strings.Contains(info.VisibilityReason, "ordinary Codex /resume picker") {
+		t.Fatalf("isolated Codex resume info = %#v", info)
+	}
+	target := filepath.Join(home, ".codex", "sessions", "2026", "08", "15", filepath.Base(source))
+	if got, err := os.ReadFile(target); err != nil || !bytes.Equal(got, transcript) {
+		t.Fatalf("ordinary picker transcript = %q, %v", got, err)
+	}
+	for _, path := range []string{filepath.Join(home, ".codex", "config.toml"), filepath.Join(home, ".codex", "auth.json")} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("isolated configuration leaked to %q: %v", path, err)
+		}
+	}
+}
+
+func TestIsolatedClaudeSessionIsVisibleWithoutCopyingConfiguration(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "work")
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "11111111-2222-5333-8444-666666666666"
+	configDir := filepath.Join(home, ".codex-bridge", "orchestration-profiles", "run", "claude-a", "claude")
+	source := claudeSessionFilePathForConfig(cwd, sessionID, configDir)
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcript := `{"type":"user","entrypoint":"sdk-cli","cwd":"` + cwd + `","sessionId":"` + sessionID + `","message":{"role":"user","content":"isolated session"}}` + "\n"
+	if err := os.WriteFile(source, []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"env":{"ANTHROPIC_AUTH_TOKEN":"secret"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	native := &orchestrationNativeSession{cwd: cwd, profileRuntime: map[string]orchestrationWorkerRuntime{
+		"claude-a": {env: []string{"CLAUDE_CONFIG_DIR=" + configDir}},
+	}}
+	manager := NewOrchestrationManager(&config.Config{})
+	info := manager.registerClaudeNativeResume(native, &orchestrationClaudeSession{sessionID: sessionID}, "claude-a", "orc_isolated", cwd)
+	if info == nil || !info.Visible || !strings.Contains(info.Command, "CLAUDE_CONFIG_DIR=") {
+		t.Fatalf("isolated Claude resume info = %#v", info)
+	}
+	target := claudeSessionFilePath(cwd, sessionID)
+	materialized, err := os.ReadFile(target)
+	if err != nil || !strings.Contains(string(materialized), `"entrypoint":"cli"`) {
+		t.Fatalf("ordinary Claude picker transcript = %q, %v", materialized, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("isolated Claude settings leaked into the ordinary config: %v", err)
+	}
+}
+
 func TestClaudeTranscriptTitlePrefersNativeTitleOverFirstUserMessage(t *testing.T) {
 	transcript := strings.Join([]string{
 		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Return exactly this phrase for the smoke run"}]}}`,
@@ -1293,7 +1366,7 @@ func TestOrchestrationCodexResumeMissingThreadRetriesFresh(t *testing.T) {
 	content, _, threadID, resumeMode, err := manager.runCodexWithThread(context.Background(), protocol.OrchestrationStartPayload{
 		RunID: "orc_codex_retry",
 		CWD:   tmp,
-	}, "turn_1", "reviewer", "continue", "thread_missing")
+	}, "turn_1", "reviewer", orchestrationCodexDefaultSlot, "continue", "thread_missing")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3708,11 +3781,11 @@ func TestRelayRunStopsAfterReviewerConvergence(t *testing.T) {
 	claudePath := filepath.Join(tmp, "claude")
 	codexPath := filepath.Join(tmp, "codex")
 	implementer := "交接总结：实现已完成，请复查。\nMsg: to=reviewer; intent=review; need=verify fix\nHandoff: status=needs_next; changed=main.go; verified=none; next=review fix; risks=none"
-	reviewer := "最终结论：独立复查通过。\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=main.go; verified=reviewed regression; next=none; risks=none"
+	reviewer := "最终结论：独立复查通过。\nMsg: to=user; intent=final; need=none\nHandoff: status=resolved; changed=main.go; verified=go test ./...; next=none; risks=none"
 	if err := os.WriteFile(claudePath, []byte(fakeClaudePrintScript(implementer)), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(codexPath, []byte(fakeCodexExecScript(reviewer)), 0o755); err != nil {
+	if err := os.WriteFile(codexPath, []byte(fakeCodexExecScriptWithSuccessfulCommand(reviewer)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default()
@@ -3743,6 +3816,227 @@ func TestRelayRunStopsAfterReviewerConvergence(t *testing.T) {
 	}
 	if runEnd.RunConclusion == nil || runEnd.RunConclusion.Outcome != "satisfied" || !strings.Contains(runEnd.Content, "独立复查通过") {
 		t.Fatalf("run.end = %#v", runEnd)
+	}
+	if runEnd.RunEndData == nil || runEnd.RunEndData.TerminalReason != "verified-early" || runEnd.RunEndData.VerifierVerdict == nil || runEnd.RunEndData.VerifierVerdict.Status != verifierVerdictPass {
+		t.Fatalf("run end did not retain verified early verdict: %#v", runEnd.RunEndData)
+	}
+	foundVerdict := false
+	for _, event := range events {
+		if event.Kind == "verifier.verdict" {
+			foundVerdict = true
+			break
+		}
+	}
+	if !foundVerdict {
+		t.Fatalf("expected visible verifier verdict: %#v", events)
+	}
+}
+
+func TestWorkerProfileRuntimesAreSlotIsolatedAndRetainOnlyResumeMetadata(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.Default()
+	manager := NewOrchestrationManager(&cfg)
+	cliConfig, err := newCLIConfigManager(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.SetCLIConfigManager(cliConfig)
+	payload := protocol.OrchestrationStartPayload{RunID: "orc/profile-isolation", WorkerPair: protocol.WorkerPairCodexCodex, WorkerProfiles: map[string]protocol.WorkerProfileBinding{
+		"codex-a": {PresetID: "preset-a", CLI: "codex", BaseURL: "https://a.example/v1", Model: "model-a", ReasoningEffort: "low", ReasoningLevels: []string{"low", "high"}, ReasoningDefault: "low", Secret: encryptCLIConfigSecretForTest(t, cliConfig.private.PublicKey(), []byte("key-a"))},
+		"codex-b": {PresetID: "preset-b", CLI: "codex", BaseURL: "https://b.example/v1", Model: "model-b", ReasoningEffort: "high", ReasoningLevels: []string{"low", "high"}, ReasoningDefault: "high", Secret: encryptCLIConfigSecretForTest(t, cliConfig.private.PublicKey(), []byte("key-b"))},
+	}}
+	session := manager.nativeSession(payload.RunID, home)
+	first, err := manager.workerRuntime(payload, "codex-a", "codex", session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.workerRuntime(payload, "codex-b", "codex", session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.dir == second.dir || first.model != "model-a" || second.model != "model-b" || !containsTestString(first.env, "CODEX_HOME="+filepath.Join(first.dir, "codex")) || !containsTestString(second.env, "CODEX_HOME="+filepath.Join(second.dir, "codex")) {
+		t.Fatalf("isolated runtimes = first=%#v second=%#v", first, second)
+	}
+	firstConfig, err := os.ReadFile(filepath.Join(first.dir, "codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondConfig, err := os.ReadFile(filepath.Join(second.dir, "codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(firstConfig), "model-a") || strings.Contains(string(firstConfig), "model-b") || !strings.Contains(string(secondConfig), "model-b") || strings.Contains(string(secondConfig), "model-a") {
+		t.Fatalf("runtime configurations crossed slots: a=%q b=%q", firstConfig, secondConfig)
+	}
+	if !strings.Contains(string(firstConfig), `model_reasoning_effort = "low"`) || !strings.Contains(string(secondConfig), `model_reasoning_effort = "high"`) {
+		t.Fatalf("runtime reasoning effort crossed or missing: a=%q b=%q", firstConfig, secondConfig)
+	}
+	firstAuth, err := os.ReadFile(filepath.Join(first.dir, "codex", "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondAuth, err := os.ReadFile(filepath.Join(second.dir, "codex", "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(firstConfig), "model_catalog_json") || strings.Contains(string(secondConfig), "model_catalog_json") {
+		t.Fatalf("isolated Codex config must not reference a generated model catalog: a=%q b=%q", firstConfig, secondConfig)
+	}
+	for _, catalogPath := range []string{filepath.Join(first.dir, "codex", "model-catalog.json"), filepath.Join(second.dir, "codex", "model-catalog.json")} {
+		if _, err := os.Stat(catalogPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Bridge generated a model catalog at %q: %v", catalogPath, err)
+		}
+	}
+	if !strings.Contains(string(firstAuth), "key-a") || strings.Contains(string(firstAuth), "key-b") || !strings.Contains(string(secondAuth), "key-b") || strings.Contains(string(secondAuth), "key-a") {
+		t.Fatalf("runtime credentials crossed slots: a=%q b=%q", firstAuth, secondAuth)
+	}
+	for _, path := range []string{
+		filepath.Join(first.dir, "codex", "config.toml"),
+		filepath.Join(first.dir, "codex", "auth.json"),
+		filepath.Join(second.dir, "codex", "config.toml"),
+		filepath.Join(second.dir, "codex", "auth.json"),
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("runtime file %q mode = %#o, want 0600", path, got)
+		}
+	}
+	manager.closeNativeSession(payload.RunID)
+	for _, authPath := range []string{filepath.Join(first.dir, "codex", "auth.json"), filepath.Join(second.dir, "codex", "auth.json")} {
+		if _, err := os.Stat(authPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("runtime credential %q remained after close: %v", authPath, err)
+		}
+	}
+	for _, configPath := range []string{filepath.Join(first.dir, "codex", "config.toml"), filepath.Join(second.dir, "codex", "config.toml")} {
+		if _, err := os.Stat(configPath); err != nil {
+			t.Fatalf("resume runtime metadata %q was removed: %v", configPath, err)
+		}
+	}
+}
+
+func TestClaudeWorkerProfileRuntimesAreSlotIsolated(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.Default()
+	manager := NewOrchestrationManager(&cfg)
+	cliConfig, err := newCLIConfigManager(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.SetCLIConfigManager(cliConfig)
+	payload := protocol.OrchestrationStartPayload{RunID: "orc/claude-profile-isolation", WorkerPair: protocol.WorkerPairClaudeClaude, WorkerProfiles: map[string]protocol.WorkerProfileBinding{
+		"claude-a": {PresetID: "preset-a", CLI: "claude", BaseURL: "https://a.example/v1", Model: "claude-sonnet-5", ClaudeContextWindow: 1_000_000, Secret: encryptCLIConfigSecretForTest(t, cliConfig.private.PublicKey(), []byte("key-a"))},
+		"claude-b": {PresetID: "preset-b", CLI: "claude", BaseURL: "https://b.example/v1", Model: "deepseek-v4-flash", ClaudeContextWindow: 128_000, ClaudeDisableUnknownModelWindowEnforcement: true, Secret: encryptCLIConfigSecretForTest(t, cliConfig.private.PublicKey(), []byte("key-b"))},
+	}}
+	session := manager.nativeSession(payload.RunID, home)
+	first, err := manager.workerRuntime(payload, "claude-a", "claude", session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.workerRuntime(payload, "claude-b", "claude", session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.dir == second.dir || first.model != "claude-sonnet-5" || second.model != "deepseek-v4-flash" || !containsTestString(first.env, "CLAUDE_CONFIG_DIR="+filepath.Join(first.dir, "claude")) || !containsTestString(second.env, "CLAUDE_CONFIG_DIR="+filepath.Join(second.dir, "claude")) {
+		t.Fatalf("isolated Claude runtimes = first=%#v second=%#v", first, second)
+	}
+	firstConfig, err := os.ReadFile(filepath.Join(first.dir, "claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondConfig, err := os.ReadFile(filepath.Join(second.dir, "claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(firstConfig), "claude-sonnet-5") || strings.Contains(string(firstConfig), "deepseek-v4-flash") || !strings.Contains(string(secondConfig), "deepseek-v4-flash") || strings.Contains(string(secondConfig), "claude-sonnet-5") {
+		t.Fatalf("Claude runtime settings crossed slots: a=%q b=%q", firstConfig, secondConfig)
+	}
+	var firstSettings, secondSettings map[string]any
+	if err := json.Unmarshal(firstConfig, &firstSettings); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(secondConfig, &secondSettings); err != nil {
+		t.Fatal(err)
+	}
+	firstEnv := firstSettings["env"].(map[string]any)
+	secondEnv := secondSettings["env"].(map[string]any)
+	if firstEnv["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "1000000" {
+		t.Fatalf("Claude A context profile = %#v", firstEnv)
+	}
+	if _, exists := firstEnv["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"]; exists {
+		t.Fatalf("recognized Claude model must not disable window enforcement: %#v", firstEnv)
+	}
+	if secondEnv["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "128000" || secondEnv["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] != "1" {
+		t.Fatalf("Claude B context profile = %#v", secondEnv)
+	}
+	manager.closeNativeSession(payload.RunID)
+}
+
+func TestClaudeWorkerProfileUnknownModelUsesNativeContextDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.Default()
+	manager := NewOrchestrationManager(&cfg)
+	cliConfig, err := newCLIConfigManager(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.SetCLIConfigManager(cliConfig)
+	payload := protocol.OrchestrationStartPayload{RunID: "orc/claude-unreviewed-context", WorkerProfiles: map[string]protocol.WorkerProfileBinding{
+		"claude": {PresetID: "preset-unreviewed", CLI: "claude", BaseURL: "https://provider.example/v1", Model: "provider-invented-alias", Secret: encryptCLIConfigSecretForTest(t, cliConfig.private.PublicKey(), []byte("key"))},
+	}}
+	runtime, err := manager.workerRuntime(payload, "claude", "claude", manager.nativeSession(payload.RunID, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(runtime.dir, "claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env := settings["env"].(map[string]any)
+	for _, key := range claudeContextEnvironmentKeys {
+		if _, exists := env[key]; exists {
+			t.Fatalf("unreviewed runtime model must not set %s: %#v", key, env)
+		}
+	}
+	manager.closeNativeSession(payload.RunID)
+}
+
+func TestVerifierQuorumRequiresEveryChecker(t *testing.T) {
+	exit := 0
+	base := orchestrationTurn{
+		Role: "reviewer", CLI: "codex", WorkerSlot: "codex", Tools: []RunnerToolEvent{{Status: "completed", ExitCode: &exit}},
+		Relay: orchestrationRelayPacket{Structured: true, Status: "resolved", To: "user", Intent: "final", Next: "none", Risks: "none"},
+	}
+	for name, mutate := range map[string]func(*orchestrationTurn, *[]orchestrationTurn){
+		"handoff":      func(turn *orchestrationTurn, _ *[]orchestrationTurn) { turn.Relay.Next = "run another check" },
+		"evidence":     func(turn *orchestrationTurn, _ *[]orchestrationTurn) { turn.Tools = nil },
+		"independence": func(turn *orchestrationTurn, history *[]orchestrationTurn) { *history = []orchestrationTurn{*turn} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			turn := base
+			history := []orchestrationTurn{{Role: "implementer", CLI: "claude", WorkerSlot: "claude"}, turn}
+			mutate(&turn, &history)
+			if len(history) > 1 {
+				history[len(history)-1] = turn
+			}
+			verdict := evaluateOrchestrationVerdict("collaboration", "default", false, history)
+			if verdict.Status != verifierVerdictContinue || len(verdict.Checkers) != 3 {
+				t.Fatalf("%s checker incorrectly allowed early completion: %#v", name, verdict)
+			}
+		})
+	}
+	verdict := evaluateOrchestrationVerdict("collaboration", "default", false, []orchestrationTurn{{Role: "implementer", CLI: "claude", WorkerSlot: "claude"}, base})
+	if verdict.Status != verifierVerdictPass || len(verdict.Checkers) != 3 {
+		t.Fatalf("unanimous checker quorum = %#v", verdict)
 	}
 }
 
@@ -4636,6 +4930,39 @@ if len(sys.argv) >= 2 and sys.argv[1] == "app-server":
 if len(sys.argv) < 2 or sys.argv[1] != "exec":
     print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
     sys.exit(1)
+print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
+`
+}
+
+func fakeCodexExecScriptWithSuccessfulCommand(text string) string {
+	raw, _ := json.Marshal(text)
+	return `#!/usr/bin/env python3
+import json
+import sys
+
+text = ` + string(raw) + `
+if len(sys.argv) >= 2 and sys.argv[1] == "app-server":
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        params = msg.get("params") or {}
+        if method == "initialize":
+            print(json.dumps({"id":msg["id"],"result":{"userAgent":"fake"}}), flush=True)
+        elif method == "thread/start":
+            print(json.dumps({"id":msg["id"],"result":{"thread":{"id":"thread_verified"}}}), flush=True)
+        elif method == "thread/resume":
+            print(json.dumps({"id":msg["id"],"result":{"thread":{"id":params.get("threadId") or "thread_verified"}}}), flush=True)
+        elif method == "thread/name/set" or method == "thread/unsubscribe":
+            print(json.dumps({"id":msg["id"],"result":{}}), flush=True)
+        elif method == "turn/start":
+            thread_id = params.get("threadId") or "thread_verified"
+            turn_id = "turn_verified"
+            print(json.dumps({"id":msg["id"],"result":{"turn":{"id":turn_id,"status":"inProgress"}}}), flush=True)
+            print(json.dumps({"method":"item/started","params":{"threadId":thread_id,"turnId":turn_id,"item":{"id":"cmd_verified","type":"commandExecution","command":"go test ./..."}}}), flush=True)
+            print(json.dumps({"method":"item/completed","params":{"threadId":thread_id,"turnId":turn_id,"item":{"id":"cmd_verified","type":"commandExecution","command":"go test ./...","exitCode":0,"status":"completed"}}}), flush=True)
+            print(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":thread_id,"turnId":turn_id,"delta":text}}), flush=True)
+            print(json.dumps({"method":"turn/completed","params":{"threadId":thread_id,"turn":{"id":turn_id,"status":"completed"}}}), flush=True)
+    raise SystemExit(0)
 print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
 `
 }

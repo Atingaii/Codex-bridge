@@ -67,6 +67,7 @@ export function LoginScreen({
   const [turnstileToken, setTurnstileToken] = useState('');
   const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
   const turnstileWidgetRef = useRef<string | null>(null);
+  const requiresTurnstile = mode === 'register' && Boolean(authConfig?.turnstileSiteKey);
 
   const selectMode = (nextMode: 'login' | 'register') => {
     setMode(nextMode);
@@ -132,7 +133,7 @@ export function LoginScreen({
       setLoading(false);
       return;
     }
-    if (mode === 'register' && !turnstileToken) {
+    if (requiresTurnstile && !turnstileToken) {
       setError(t.completeSecurityVerification);
       setLoading(false);
       return;
@@ -143,7 +144,7 @@ export function LoginScreen({
         body: JSON.stringify({
           username: String(form.get('username') || ''),
           password,
-          ...(mode === 'register' ? { turnstileToken } : {}),
+          ...(requiresTurnstile ? { turnstileToken } : {}),
         }),
       });
       onLogin(data.user);
@@ -231,7 +232,7 @@ export function LoginScreen({
             )}
           </div>
 
-          {mode === 'register' && <div ref={turnstileContainerRef} className="min-h-[65px] w-full overflow-hidden flex justify-center" />}
+          {requiresTurnstile && <div ref={turnstileContainerRef} className="min-h-[65px] w-full overflow-hidden flex justify-center" />}
 
           {error && (
             <div className="p-3 text-sm bg-destructive/10 text-destructive rounded-md border border-destructive/20 flex items-start gap-2">

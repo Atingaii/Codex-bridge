@@ -49,6 +49,10 @@ func configureStrictWorkspaceCommand(cmd *exec.Cmd, cfg *config.Config, cwd stri
 	if !strictPathWithin(workspace, commandCWD) {
 		return fmt.Errorf("strict workspace rejected command directory %q outside bound workspace %q", commandCWD, workspace)
 	}
+	// A worker-bound orchestration supplies an already materialized private CLI
+	// home. Preserve it through strict mode and grant the sandbox access only to
+	// that exact directory, rather than falling back to the shared CLI state.
+	profileEnv := commandEnvValues(cmd, "CODEX_HOME", "CLAUDE_CONFIG_DIR")
 	runtimeDir := filepath.Join(strictWorkspaceRuntimeBase(), strictWorkspaceID(workspace))
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		return fmt.Errorf("create strict workspace runtime: %w", err)
@@ -81,6 +85,11 @@ func configureStrictWorkspaceCommand(cmd *exec.Cmd, cfg *config.Config, cwd stri
 	for _, path := range strictWorkspaceDevicePaths() {
 		args = append(args, "--state", path)
 	}
+	for _, path := range profileEnv {
+		if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+			args = append(args, "--state", path)
+		}
+	}
 	args = append(args, "--", target)
 	if len(cmd.Args) > 1 {
 		args = append(args, cmd.Args[1:]...)
@@ -94,7 +103,33 @@ func configureStrictWorkspaceCommand(cmd *exec.Cmd, cfg *config.Config, cwd stri
 		"XDG_CACHE_HOME="+filepath.Join(privateStateHome, ".cache"),
 		"TMPDIR="+filepath.Join(runtimeDir, "tmp"), "TMP="+filepath.Join(runtimeDir, "tmp"), "TEMP="+filepath.Join(runtimeDir, "tmp"),
 	)
+	for key, value := range profileEnv {
+		replaceCommandEnv(cmd, key+"="+value)
+	}
 	return nil
+}
+
+func commandEnvValues(cmd *exec.Cmd, keys ...string) map[string]string {
+	values := make(map[string]string, len(keys))
+	if cmd == nil {
+		return values
+	}
+	env := cmd.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	for _, value := range env {
+		key, value, ok := strings.Cut(value, "=")
+		if !ok {
+			continue
+		}
+		for _, want := range keys {
+			if key == want && value != "" {
+				values[key] = value
+			}
+		}
+	}
+	return values
 }
 
 func canonicalDirectory(path string) (string, error) {

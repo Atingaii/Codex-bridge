@@ -40,6 +40,7 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 | P10 | Public screenshot guide for chat, orchestration, and formal proof | implemented |
 | P10.1 | Orchestration runtime, token usage, cost estimates, one-turn mode, and prominent final conclusion | implemented |
 | P10.2 | Administrator activity and usage dashboard with user aggregates and read-only conversation detail | implemented |
+| P10.3 | Isolated Codex/Claude worker profiles, dual-provider pairs, and deterministic quorum early-stop | implemented |
 
 ## Engineering Workflow
 
@@ -57,10 +58,16 @@ Let a single user talk from any browser to Codex CLI running on a private machin
   `turn/start` / streamed deltas / `turn/interrupt`.
 - Orchestration is a native-session relay: Claude + Codex runs keep one
   long-lived Codex app-server thread and one long-lived Claude Code stream-json
-  session per run, while Codex + Codex runs keep independent `codex-a` and
-  `codex-b` app-server threads. Native sessions are reused across turns so the
+  session per run, Codex + Codex runs keep independent `codex-a` and `codex-b`
+  app-server threads, and Claude + Claude runs keep independent `claude-a` and
+  `claude-b` sessions. Native sessions are reused across turns so the
   user can `resume` them from the workspace. The Bridge only relays output and
-  turn context; it does not inject verifier/remediation/assessment turns.
+  turn context; it does not inject model verifier/remediation/assessment turns.
+  A bounded local three-checker quorum observes successful turns and can end a
+  run early only after a structured, independently evidenced final handoff.
+  Saved CLI presets can be pinned independently to `claude`, `codex-a`,
+  `codex-b`, `claude-a`, and `claude-b` worker slots without changing
+  machine-wide configuration.
   Formal-proof is opt-in *prompt guidance* via
   `internal/bridge/profiles/registry` + `internal/bridge/profiles/formalproof`;
   new formal-proof runs also get a persistent lightweight proof ledger under the

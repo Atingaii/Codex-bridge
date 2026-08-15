@@ -17,8 +17,8 @@ func TestCodexOrchestrationStrictWorkspaceUsesOuterSandbox(t *testing.T) {
 	defer manager.CloseAll()
 
 	for name, args := range map[string][]string{
-		"new":    manager.codexOrchestrationArgs(protocol.OrchestrationStartPayload{}, ""),
-		"resume": manager.codexOrchestrationArgs(protocol.OrchestrationStartPayload{}, "thr_strict"),
+		"new":    manager.codexOrchestrationArgs(protocol.OrchestrationStartPayload{}, orchestrationCodexDefaultSlot, ""),
+		"resume": manager.codexOrchestrationArgs(protocol.OrchestrationStartPayload{}, orchestrationCodexDefaultSlot, "thr_strict"),
 	} {
 		if !containsArg(args, "--dangerously-bypass-approvals-and-sandbox") {
 			t.Fatalf("strict orchestration %s args do not bypass nested Codex sandbox: %#v", name, args)

@@ -88,7 +88,13 @@ func (v cloudflareTurnstileVerifier) Verify(ctx context.Context, req turnstileVe
 
 func (s *Server) registrationReady() bool {
 	cfg := s.cfg.Auth.Registration
-	return cfg.Enabled && strings.TrimSpace(cfg.TurnstileSiteKey) != "" && strings.TrimSpace(cfg.TurnstileSecret) != ""
+	if !cfg.Enabled {
+		return false
+	}
+	if !cfg.RequireTurnstile {
+		return true
+	}
+	return strings.TrimSpace(cfg.TurnstileSiteKey) != "" && strings.TrimSpace(cfg.TurnstileSecret) != ""
 }
 
 func (s *Server) handleAuthConfig(w http.ResponseWriter, _ *http.Request) {
@@ -100,7 +106,7 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, _ *http.Request) {
 }
 
 func publicTurnstileSiteKey(s *Server) string {
-	if !s.registrationReady() {
+	if !s.registrationReady() || !s.cfg.Auth.Registration.RequireTurnstile {
 		return ""
 	}
 	return strings.TrimSpace(s.cfg.Auth.Registration.TurnstileSiteKey)
@@ -133,21 +139,23 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		serverutil.WriteError(w, http.StatusBadRequest, "INVALID_PASSWORD", "password must be 10-256 bytes")
 		return
 	}
-	if strings.TrimSpace(req.TurnstileToken) == "" {
-		serverutil.WriteError(w, http.StatusBadRequest, "TURNSTILE_REQUIRED", "security verification is required")
-		return
-	}
-	verifyCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
-	defer cancel()
-	if err := s.turnstile.Verify(verifyCtx, turnstileVerifyRequest{
-		Secret:           s.cfg.Auth.Registration.TurnstileSecret,
-		Token:            req.TurnstileToken,
-		RemoteIP:         authClientIP(r),
-		ExpectedHostname: strings.TrimSpace(s.cfg.Auth.Registration.TurnstileHostname),
-		ExpectedAction:   turnstileAction,
-	}); err != nil {
-		serverutil.WriteError(w, http.StatusBadRequest, "TURNSTILE_FAILED", "security verification failed")
-		return
+	if s.cfg.Auth.Registration.RequireTurnstile {
+		if strings.TrimSpace(req.TurnstileToken) == "" {
+			serverutil.WriteError(w, http.StatusBadRequest, "TURNSTILE_REQUIRED", "security verification is required")
+			return
+		}
+		verifyCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+		defer cancel()
+		if err := s.turnstile.Verify(verifyCtx, turnstileVerifyRequest{
+			Secret:           s.cfg.Auth.Registration.TurnstileSecret,
+			Token:            req.TurnstileToken,
+			RemoteIP:         authClientIP(r),
+			ExpectedHostname: strings.TrimSpace(s.cfg.Auth.Registration.TurnstileHostname),
+			ExpectedAction:   turnstileAction,
+		}); err != nil {
+			serverutil.WriteError(w, http.StatusBadRequest, "TURNSTILE_FAILED", "security verification failed")
+			return
+		}
 	}
 	user, err := s.store.CreateUser(r.Context(), username, req.Password)
 	if errors.Is(err, store.ErrConflict) {

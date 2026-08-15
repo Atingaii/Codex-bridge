@@ -53,3 +53,14 @@ func TestParseClaudeUsageLog(t *testing.T) {
 		t.Fatalf("events = %+v", events)
 	}
 }
+
+func TestScanUsageSessionDoesNotFallBackForIsolatedWorker(t *testing.T) {
+	_, err := scanUsageSession(protocol.OrchestrationUsageSession{
+		CLI:       "claude",
+		SessionID: "session-12345678",
+		Isolated:  true,
+	})
+	if err == nil || err.Error() != "isolated worker runtime is no longer available" {
+		t.Fatalf("error = %v", err)
+	}
+}

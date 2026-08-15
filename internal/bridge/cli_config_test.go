@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -74,6 +75,36 @@ func TestCLIConfigDecryptRoundTrip(t *testing.T) {
 	}
 }
 
+func TestClaudeEffortIsPersistedAndRestored(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"effortLevel":"low","env":{"KEEP":"yes"}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := newCLIConfigManager(&config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.apply("claude", "https://provider.example/v1", "claude-sonnet-5", "key", nil, cliApplyOptions{ReasoningEffort: "max"}); err != nil {
+		t.Fatal(err)
+	}
+	got := readClaudeSettings(t, home)
+	if got["effortLevel"] != "max" {
+		t.Fatalf("effortLevel after apply = %#v", got["effortLevel"])
+	}
+	if err := m.reset("claude"); err != nil {
+		t.Fatal(err)
+	}
+	got = readClaudeSettings(t, home)
+	if got["effortLevel"] != "low" {
+		t.Fatalf("effortLevel after reset = %#v", got["effortLevel"])
+	}
+}
+
 func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -108,7 +139,7 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	}
 
 	codexApplied := readTestFile(t, filepath.Join(home, ".codex", "config.toml"))
-	for _, wanted := range []string{"sandbox_mode = \"workspace-write\"", "[mcp_servers.keep]", "command = \"keep-me\"", "[model_providers.custom]", "model = \"codex-model\"", "model_catalog_json = "} {
+	for _, wanted := range []string{"sandbox_mode = \"workspace-write\"", "[mcp_servers.keep]", "command = \"keep-me\"", "[model_providers.custom]", "model = \"codex-model\""} {
 		if !strings.Contains(codexApplied, wanted) {
 			t.Fatalf("Codex config missing %q:\n%s", wanted, codexApplied)
 		}
@@ -123,12 +154,11 @@ func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	if auth["refresh_token"] != "keep" || auth["OPENAI_API_KEY"] != "codex-key" {
 		t.Fatalf("unexpected Codex auth fields: %#v", auth)
 	}
-	var catalog codexModelCatalog
-	if err := json.Unmarshal([]byte(readTestFile(t, filepath.Join(m.root, "codex-model-catalog.json"))), &catalog); err != nil {
-		t.Fatal(err)
+	if strings.Contains(codexApplied, "model_catalog_json") {
+		t.Fatalf("Bridge must not install a custom Codex model catalog:\n%s", codexApplied)
 	}
-	if len(catalog.Models) != 2 || catalog.Models[0].Slug != "codex-model" || catalog.Models[1].Slug != "codex-model-fast" || catalog.Models[0].ContextWindow != unknownContextWindow {
-		t.Fatalf("unexpected Codex model catalog: %#v", catalog)
+	if _, err := os.Stat(filepath.Join(m.root, "codex-model-catalog.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Bridge generated a model catalog: %v", err)
 	}
 	var claude map[string]any
 	if err := json.Unmarshal([]byte(readTestFile(t, filepath.Join(home, ".claude", "settings.json"))), &claude); err != nil {
@@ -251,7 +281,7 @@ func TestCLIConfigApplyMigratesLegacyClaudeOverride(t *testing.T) {
 	}
 }
 
-func TestClaudeContextProfileFollowsSelectedModelAndRestoresUserSettings(t *testing.T) {
+func TestClaudeContextUsesHubSnapshotAndRestoresUserSettings(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
@@ -265,24 +295,24 @@ func TestClaudeContextProfileFollowsSelectedModelAndRestoresUserSettings(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.apply("claude", "https://claude.example/v1", "claude-sonnet-5", "key", nil); err != nil {
+	if err := m.apply("claude", "https://claude.example/v1", "provider-alias-a", "key", nil, cliApplyOptions{ClaudeContextWindow: 1_000_000}); err != nil {
 		t.Fatal(err)
 	}
 	claude := readClaudeSettings(t, home)
 	env := claude["env"].(map[string]any)
 	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "1000000" {
-		t.Fatalf("Sonnet 5 context = %#v, want 1000000", env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"])
+		t.Fatalf("Hub snapshot context = %#v, want 1000000", env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"])
 	}
 	if _, exists := env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"]; exists {
 		t.Fatalf("recognized Anthropic model should not need unknown-model override: %#v", env)
 	}
-	if err := m.apply("claude", "https://claude.example/v1", "deepseek-v4-flash", "key", nil); err != nil {
+	if err := m.apply("claude", "https://claude.example/v1", "provider-alias-b", "key", nil, cliApplyOptions{ClaudeContextWindow: 128_000, ClaudeDisableUnknownModelWindowEnforcement: true}); err != nil {
 		t.Fatal(err)
 	}
 	claude = readClaudeSettings(t, home)
 	env = claude["env"].(map[string]any)
-	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "1000000" || env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] != "1" {
-		t.Fatalf("DeepSeek context profile = %#v", env)
+	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "128000" || env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] != "1" {
+		t.Fatalf("second Hub context snapshot = %#v", env)
 	}
 	if err := m.reset("claude"); err != nil {
 		t.Fatal(err)
@@ -292,7 +322,7 @@ func TestClaudeContextProfileFollowsSelectedModelAndRestoresUserSettings(t *test
 	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "333333" || env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] != "0" || env["KEEP"] != "yes" {
 		t.Fatalf("switching known models lost original user context settings: %#v", env)
 	}
-	if err := m.apply("claude", "https://claude.example/v1", "deepseek-v4-flash", "key", nil); err != nil {
+	if err := m.apply("claude", "https://claude.example/v1", "provider-alias-b", "key", nil, cliApplyOptions{ClaudeContextWindow: 128_000, ClaudeDisableUnknownModelWindowEnforcement: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.apply("claude", "https://claude.example/v1", "provider-unlisted-model", "key", nil); err != nil {
@@ -303,7 +333,7 @@ func TestClaudeContextProfileFollowsSelectedModelAndRestoresUserSettings(t *test
 	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "333333" || env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] != "0" || env["KEEP"] != "yes" {
 		t.Fatalf("unknown model did not restore user context settings: %#v", env)
 	}
-	if err := m.apply("claude", "https://claude.example/v1", "claude-sonnet-5", "key", nil); err != nil {
+	if err := m.apply("claude", "https://claude.example/v1", "provider-alias-a", "key", nil, cliApplyOptions{ClaudeContextWindow: 1_000_000}); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.reset("claude"); err != nil {
@@ -316,40 +346,29 @@ func TestClaudeContextProfileFollowsSelectedModelAndRestoresUserSettings(t *test
 	}
 }
 
-func TestClaudeContextProfilesCoverPopularModelAliases(t *testing.T) {
-	tests := []struct {
-		model   string
-		window  int
-		disable bool
-	}{
-		{model: "claude-sonnet-5", window: 1_000_000},
-		{model: "anthropic/claude-sonnet-5[1m]", window: 1_000_000},
-		{model: "claude-3-7-sonnet", window: 200_000},
-		{model: "gpt-5.6-sol", window: 1_050_000, disable: true},
-		{model: "models/gpt-4.1-mini", window: 1_047_576, disable: true},
-		{model: "gpt-4o", window: 128_000, disable: true},
-		{model: "deepseek-v4-flash", window: 1_000_000, disable: true},
-		{model: "deepseek/deepseek-chat", window: 128_000, disable: true},
-		{model: "kimi-k3", window: 1_000_000, disable: true},
-		{model: "gemini-2.5-pro", window: 1_048_576, disable: true},
-		{model: "gemini-2.0-flash", window: 1_048_576, disable: true},
-		{model: "llama-3.3-70b-instruct", window: 128_000, disable: true},
-		{model: "mistral-large-latest", window: 128_000, disable: true},
+func TestApplyClaudeContextSettingsUsesOnlySnapshotValues(t *testing.T) {
+	settings := map[string]any{"env": map[string]any{
+		"KEEP":                           "yes",
+		"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
+		"CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1",
+	}}
+	applyClaudeContextSettings(settings, 0, false)
+	env := settings["env"].(map[string]any)
+	if env["KEEP"] != "yes" {
+		t.Fatalf("isolated profile lost unrelated environment: %#v", env)
 	}
-	for _, tc := range tests {
-		t.Run(tc.model, func(t *testing.T) {
-			profile, ok := claudeContextProfileForModel(tc.model)
-			if !ok || profile.Window != tc.window || profile.DisableUnknownEnforcement != tc.disable {
-				t.Fatalf("profile(%q) = %#v, %v; want window=%d disable=%v", tc.model, profile, ok, tc.window, tc.disable)
-			}
-		})
+	for _, key := range claudeContextEnvironmentKeys {
+		if _, exists := env[key]; exists {
+			t.Fatalf("unreviewed model retained %s: %#v", key, env)
+		}
 	}
-	if _, ok := claudeContextProfileForModel("provider-invented-alias"); ok {
-		t.Fatal("unverified provider alias must retain conservative native behavior")
+	applyClaudeContextSettings(settings, 1_050_000, true)
+	if env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] != "1050000" || env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] != "1" {
+		t.Fatalf("reviewed model context profile = %#v", env)
 	}
 }
 
-func TestCLIConfigStartupAppliesContextProfileForExistingManagedPreset(t *testing.T) {
+func TestCLIConfigStartupReappliesPersistedHubContextSnapshot(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
@@ -363,7 +382,7 @@ func TestCLIConfigStartupAppliesContextProfileForExistingManagedPreset(t *testin
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	state := `{"claudeModel":"deepseek-v4-flash","claudeConfigManaged":true}`
+	state := `{"claudeModel":"provider-alias","claudeConfigManaged":true,"claudeContextWindow":1000000,"claudeContextDisableUnknownEnforcement":true}`
 	if err := os.WriteFile(filepath.Join(root, "state.json"), []byte(state), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -671,6 +671,17 @@ func claudeSessionFileExists(cwd, sessionID string) bool {
 // claudeProjectDir maps an absolute cwd to ~/.claude/projects/<encoded-cwd>.
 // Claude encodes the path by replacing path separators with dashes.
 func claudeProjectDir(cwd string) string {
+	return claudeProjectDirForConfig(cwd, "")
+}
+
+func claudeProjectDirForConfig(cwd, configDir string) string {
+	if strings.TrimSpace(configDir) != "" {
+		if cwd == "" {
+			return ""
+		}
+		encoded := strings.ReplaceAll(cwd, string(filepath.Separator), "-")
+		return filepath.Join(configDir, "projects", encoded)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || cwd == "" {
 		return ""

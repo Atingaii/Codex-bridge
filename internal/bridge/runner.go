@@ -89,6 +89,10 @@ type RunnerRequest struct {
 	PromptID       string
 	CWD            string
 	Approvals      ApprovalRequester
+	// Env and Model are orchestration-only process overrides. They remain local
+	// to the spawned CLI and never enter a browser payload or transcript.
+	Env   []string
+	Model string
 }
 
 type RunnerResult struct {

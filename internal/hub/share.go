@@ -327,7 +327,7 @@ func publicRunStartData(data *protocol.RunStartData) *protocol.RunStartData {
 	return &copy
 }
 
-// publicRunEndData keeps only the worker pair. Native resume commands, thread
+// publicRunEndData keeps only the worker pair and verifier verdict. Native resume commands, thread
 // and session ids, transcript paths, and the run cwd describe the Bridge
 // host's filesystem and live CLI state — none of that belongs in an anonymous
 // share.
@@ -335,7 +335,13 @@ func publicRunEndData(data *protocol.RunEndData) *protocol.RunEndData {
 	if data == nil {
 		return nil
 	}
-	return &protocol.RunEndData{WorkerPair: data.WorkerPair}
+	copy := &protocol.RunEndData{WorkerPair: data.WorkerPair, TerminalReason: data.TerminalReason}
+	if data.VerifierVerdict != nil {
+		verdict := *data.VerifierVerdict
+		verdict.Evidence = append([]string(nil), verdict.Evidence...)
+		copy.VerifierVerdict = &verdict
+	}
+	return copy
 }
 
 func publicTurnStartData(data *protocol.TurnStartData) *protocol.TurnStartData {

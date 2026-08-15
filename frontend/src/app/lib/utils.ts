@@ -160,7 +160,7 @@ export function compareOrchestrationEvents(a: OrchestrationEvent, b: Orchestrati
 }
 
 export function orchestrationEventSource(event: OrchestrationEvent) {
-  if (event.source === 'cli' || event.source === 'bridge' || event.source === 'user') return event.source;
+  if (event.source === 'cli' || event.source === 'bridge' || event.source === 'user' || event.source === 'verifier') return event.source;
   if (event.kind === 'user.message') return 'user';
   if (event.kind === 'run.start' || event.kind === 'run.end' || event.kind === 'run.error' || event.kind === 'run.cancelled' || event.kind === 'run.canceling' || event.kind === 'run.conclusion' || event.kind === 'turn.start') return 'bridge';
   return 'cli';
@@ -678,6 +678,28 @@ export function visibleOrchestrationEvents(events: OrchestrationEvent[], runId: 
         runId: event.runId,
         kind: event.kind,
         role: event.role,
+        cli: event.cli,
+        ...orchestrationVisibleTaskMeta(event),
+        turnId: event.turnId,
+        content,
+        status: event.status,
+        error: event.error,
+        createdAt: event.createdAt,
+        timelineOrder: event.timelineOrder,
+        commands: [],
+      });
+      return;
+    }
+
+    if (event.kind === 'verifier.verdict') {
+      const content = cleanOrchestrationDisplayContent(event.content);
+      if (!content) return;
+      visible.push({
+        type: 'message',
+        key: orchestrationEventKey(event, index),
+        runId: event.runId,
+        kind: event.kind,
+        role: 'verifier',
         cli: event.cli,
         ...orchestrationVisibleTaskMeta(event),
         turnId: event.turnId,
@@ -1225,7 +1247,8 @@ export function orchestrationCapability(agent: Agent | null | undefined, cli: 'c
 }
 
 export function normalizeOrchestrationWorkerPair(value?: string): WorkerPair {
-  return value === 'codex-codex' ? 'codex-codex' : 'claude-codex';
+	if (value === 'codex-codex' || value === 'claude-claude') return value;
+	return 'claude-codex';
 }
 
 export function orchestrationCapabilityProblems(agent: Agent | null | undefined, t: UIText, workerPair: WorkerPair = 'claude-codex') {
@@ -1234,7 +1257,8 @@ export function orchestrationCapabilityProblems(agent: Agent | null | undefined,
   if (bridgeVersionBefore(agent.version, [0, 3, 1])) return [t.bridgeUpdateRequired];
   if (orchestrationApprovalMode(agent) !== 'review-required') return [];
   const problems: string[] = [];
-  const required = normalizeOrchestrationWorkerPair(workerPair) === 'codex-codex' ? ['codex'] : ['claude', 'codex'];
+	const pair = normalizeOrchestrationWorkerPair(workerPair);
+	const required = pair === 'codex-codex' ? ['codex'] : pair === 'claude-claude' ? ['claude'] : ['claude', 'codex'];
   if (required.includes('claude') && !orchestrationCapability(agent, 'claude')?.browserApproval) problems.push(t.claudeOrchestrationApprovalMissing);
   if (required.includes('codex') && !orchestrationCapability(agent, 'codex')?.browserApproval) problems.push(t.codexOrchestrationApprovalMissing);
   return problems;

@@ -198,6 +198,49 @@ credentials, and proxy variables, and only reports success after the Bridge logs
 `[bridge] connected`. See the README "Commands" section for `link` / `connect` /
 `bridge` details.
 
+### Isolated Cloudflare Variant
+
+Use this layout when trialing a major orchestration change without sharing the
+current Hub service or SQLite database. The isolated ProofBridge deployment is
+served at `https://proofbridge.sparkon.cn`; it must not reuse the live
+`sparkon.cn` binary, configuration directory, database, JWT secret, systemd
+units, or Bridge enrollment token.
+
+1. Build the embedded frontend and binary with the low-resource settings used
+   by this host: `GOMAXPROCS=2 make frontend`, then
+   `GOMAXPROCS=2 CGO_ENABLED=0 go build -p 1 -ldflags "-s -w" -o bin/codex-bridge .`.
+2. Install the binary at `/opt/proofbridge-isolated/codex-bridge`, create
+   `/etc/proofbridge-isolated/prod.yaml`, and set `gateway.host: 127.0.0.1`,
+   `gateway.port: 8090`, `hub.db_path: /var/lib/proofbridge-isolated/proofbridge.db`,
+   `hub.cookie_secure: true`, and a fresh `auth.jwt_secret`.
+   To allow accounts on this isolated trial while Cloudflare Turnstile is not
+   provisioned, set `auth.registration.enabled: true` and
+   `auth.registration.require_turnstile: false`. Leave all Turnstile fields
+   empty. This exception is limited to the isolated hostname; the primary
+   deployment retains the default `require_turnstile: true`.
+3. Create a new administrator and enrollment token using only
+   `CODEX_BRIDGE_CONFIG_DIR=/etc/proofbridge-isolated APP_ENV=prod`. Do not
+   copy credentials from the existing deployment. Store the token in the
+   isolated Bridge unit or its token file.
+4. Create separate `proofbridge-isolated-hub.service` and
+   `proofbridge-isolated-bridge.service` units. The Bridge points to
+   `https://proofbridge.sparkon.cn`, runs as the intended CLI user, and keeps
+   its existing workspace scope.
+5. Add a separate Caddy site block that reverse-proxies only
+   `proofbridge.sparkon.cn` to `127.0.0.1:8090`. In Cloudflare, add a proxied
+   A/AAAA record for that exact hostname in the `sparkon.cn` zone. Do not edit
+   the existing `sparkon.cn` record or its Caddy upstream.
+6. Verify both endpoints independently: `curl -fsS
+   https://proofbridge.sparkon.cn/health` and `curl -fsS https://sparkon.cn/health`.
+   Confirm the isolated Settings page shows only the new Bridge, then exercise
+   Codex + Codex, Claude + Codex, and Claude + Claude with fake or low-cost
+   presets before normal use.
+
+The isolated Hub owns its own database. CLI worker profiles are additionally
+materialized per run and slot, so `codex-a` / `codex-b` and `claude-a` /
+`claude-b` can use different saved presets without changing the Bridge user's
+global Codex or Claude configuration.
+
 ## Configuration reference
 
 Config loads from `configs/${APP_ENV:-dev}.yaml`, then selected environment
@@ -208,7 +251,7 @@ another directory. Common overrides:
 - `HUB_DB_PATH`, `HUB_COOKIE_SECURE`, `HUB_BROWSER_LEASE_TTL`
 - `JWT_SECRET`, `HUB_USERNAME`, `HUB_PASSWORD`
 - `REGISTRATION_ENABLED`, `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET`,
-  `TURNSTILE_HOSTNAME`
+  `TURNSTILE_HOSTNAME`, `REGISTRATION_REQUIRE_TURNSTILE`
 - `BRIDGE_HUB_URL`, `BRIDGE_TOKEN`, `BRIDGE_TOKEN_FILE`
 - `BRIDGE_NAME`, `BRIDGE_CWD`, `BRIDGE_RUNNER`, `BRIDGE_MODEL`
 - `BRIDGE_SANDBOX`, `BRIDGE_APPROVAL_POLICY`
@@ -224,8 +267,8 @@ runner, and the long-command observer) lives in
 2. Bridge connection: the Bridge logs `[bridge] connected`; the Hub logs
    `bridge connected` and the endpoint appears online under Settings.
 3. Open a chat session and send a prompt; confirm streamed output.
-4. When registration is enabled, open the register tab, complete the Turnstile
-   challenge, and confirm the new account sees no other user's endpoints,
+4. When registration is enabled, open the register tab and complete Turnstile
+   when it is required. Confirm the new account sees no other user's endpoints,
    sessions, runs, or shares.
 
 ## Troubleshooting
@@ -236,6 +279,7 @@ runner, and the long-command observer) lives in
   `internal/web/static` is regenerated, then rebuild the binary.
 - **Cookies rejected over HTTPS** — set `hub.cookie_secure: true` only when
   serving over TLS; keep it `false` for plain-HTTP local dev.
-- **Registration tab is hidden** — registration fails closed unless enabled and
-  both Turnstile keys are non-empty. Check the widget hostname and set
-  `TURNSTILE_HOSTNAME` to the hostname Siteverify returns in production.
+- **Registration tab is hidden** — registration fails closed unless enabled;
+  when `require_turnstile: true`, both Turnstile keys must also be non-empty.
+  Check the widget hostname and set `TURNSTILE_HOSTNAME` to the hostname
+  Siteverify returns in production.

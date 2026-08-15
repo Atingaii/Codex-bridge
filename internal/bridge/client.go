@@ -55,12 +55,13 @@ func (c *Client) Run(ctx context.Context) error {
 	c.machineID = machineID
 	c.hostname = hostname
 	c.instance = store.NewID("bin")
-	c.sessions = NewSessionManager(c.cfg)
-	c.orchestrations = NewOrchestrationManager(c.cfg)
 	c.cliConfig, err = newCLIConfigManager(c.cfg)
 	if err != nil {
 		return fmt.Errorf("initialize CLI configuration switcher: %w", err)
 	}
+	c.sessions = NewSessionManager(c.cfg)
+	c.orchestrations = NewOrchestrationManager(c.cfg)
+	c.orchestrations.SetCLIConfigManager(c.cliConfig)
 
 	minDelay := c.cfg.Bridge.ReconnectMin.Duration
 	maxDelay := c.cfg.Bridge.ReconnectMax.Duration
@@ -145,6 +146,9 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 			return fmt.Errorf("initialize CLI configuration switcher: %w", err)
 		}
 		c.cliConfig = manager
+	}
+	if c.orchestrations != nil {
+		c.orchestrations.SetCLIConfigManager(c.cliConfig)
 	}
 	wsURL, err := c.bridgeURL(token)
 	if err != nil {

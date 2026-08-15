@@ -10,7 +10,8 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | CLI entry and subcommands | `main.go` |
 | Config structs/load | `internal/config/config.go`, `internal/config/load.go`, `internal/config/duration.go` |
 | User feature rollouts | `internal/rollout/rollout.go:Evaluator`, `internal/hub/server.go:featureEnabled`, `internal/hub/server.go:decorateUser` |
-| Remote CLI provider switcher | `internal/hub/cli_config.go`, `internal/bridge/cli_config.go`, `frontend/src/app/components/CLIConfigSwitcher.tsx` |
+| Remote CLI provider switcher and reviewed reasoning catalog | `internal/hub/model_catalog.go`, `internal/hub/cli_config.go`, `internal/bridge/cli_config.go`, `frontend/src/app/components/CLIConfigSwitcher.tsx` |
+| Isolated native resume visibility | `internal/bridge/orchestration_native.go:materializeCodexPickerVisibility`, `internal/bridge/orchestration_native.go:materializeClaudePickerVisibility`, `internal/protocol/envelope.go:NativeResumeInfo` |
 | Hub routes, auth, static serving | `internal/hub/server.go`, `internal/hub/registration.go` |
 | Public conversation shares | `internal/hub/share.go` |
 | Browser chat WebSocket | `internal/hub/ws_browser.go` |
@@ -18,7 +19,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Orchestration transport recovery | `internal/bridge/client.go:connectOnce`, `internal/bridge/orchestration_events.go:send`, `internal/hub/ws_bridge.go:bridgeReconnectGrace` |
 | Orchestration transient CLI recovery | `internal/bridge/appserver_runner.go:readEvents`, `internal/bridge/orchestration_relay.go:isRecoverableCLITransportError`, `internal/bridge/orchestration.go:runRelayTurnWithContinuations`, `docs/features/orchestration-transient-cli-recovery.md` |
 | Browser/Bridge connection pools | `internal/hub/pool.go` |
-| Orchestration HTTP/WS, event history, run navigation, and turn timing | `internal/hub/orchestration.go:handleOrchestrationEvents`, `internal/hub/ws_bridge.go:handleBridgeWS`, `frontend/src/app/pages/OrchestrationWorkspace.tsx`, `frontend/src/app/lib/utils.ts:orchestrationTimelineGroups`, `internal/bridge/orchestration.go:run` |
+| Orchestration HTTP/WS, profiles, verdicts, event history, run navigation, and turn timing | `internal/hub/orchestration.go:resolveWorkerProfiles`, `internal/hub/task_graph.go:handleTaskGraphEvent`, `internal/bridge/orchestration_worker_profiles.go:workerRuntime`, `internal/bridge/orchestration_verifier.go:evaluateOrchestrationVerdict`, `frontend/src/app/pages/OrchestrationWorkspace.tsx`, `frontend/src/app/lib/utils.ts:visibleOrchestrationEvents` |
 | Orchestration plan/progress workspace | `internal/hub/task_graph.go:handleOrchestrationProgress`, `internal/hub/task_graph.go:reduceOrchestrationPlan`, `frontend/src/app/components/OrchestrationProofProgress.tsx:OrchestrationProofProgress`, `frontend/src/app/components/OrchestrationProgressMap.tsx:OrchestrationProgressMap`, `frontend/src/app/pages/OrchestrationWorkspace.tsx` |
 | Orchestration cancel-before-delete state machine | `internal/store/store.go:RequestDeleteOrchestrationRun`, `internal/store/store.go:UpdateOrchestrationRunStatusIfAllowed`, `internal/store/task_graph.go:CreateNextOrchestrationTaskGraph`, `internal/hub/orchestration.go:handleDeleteOrchestration` |
 | Orchestration runtime/usage statistics | `internal/hub/orchestration.go:handleOrchestrationStats`, `internal/bridge/usage_ledger.go:scanOrchestrationUsage`, `internal/store/orchestration_usage.go:ReplaceOrchestrationUsage`, `internal/usagepricing/catalog.go:EstimateNormalized`, `frontend/src/app/pages/OrchestrationStatsPage.tsx` |
@@ -61,7 +62,8 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 ### Change Registration Or User Isolation
 
 1. `internal/hub/registration.go:handleRegister` validates registration input,
-   rate limits attempts, verifies Turnstile, and issues the existing auth cookie.
+   rate limits attempts, verifies Turnstile when configured as required, and
+   issues the existing auth cookie.
 2. `internal/hub/server.go:NewServer` exposes public auth config and protects
    chat/orchestration routes with authenticated middleware.
 3. Store lookups for agents, sessions, orchestration runs, and shares must carry
@@ -250,9 +252,10 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 1. `internal/hub/orchestration.go:handleCreateOrchestration` creates a new run.
 2. `internal/hub/orchestration.go:handleContinueOrchestration` appends a prompt
    to the same run, preserves or updates persisted settings such as
-   `workerPair` and `firstCli`, and compacts previous events into context.
+   `workerPair`, `firstCli`, and omitted worker-profile bindings, and compacts
+   previous events into context.
 3. `internal/hub/orchestration.go:startOrchestration` restores saved Codex
-   thread id(s), Claude-started state, and locked run cwd into
+   thread id(s), Claude session ids and started state by worker slot, and locked run cwd into
    `internal/protocol.OrchestrationStartPayload` for resumed runs.
 4. `internal/hub/orchestration.go:handleOrchestrationEvent` persists those
    native CLI continuity fields from `run.start`, `turn.end`, and `run.end`
@@ -278,7 +281,8 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 2. `internal/hub/task_graph.go:createAndDispatchTaskGraph` creates and advances
    each fixed candidate/integrator/reviewer generation;
    `internal/hub/task_graph.go:advanceCompletedTaskGraph` consumes the explicit
-   round budget without opening a new run.
+   round budget without opening a new run unless the reviewer has earned
+   terminal reason `verified-early`.
 3. `internal/hub/orchestration.go:handleOrchestrationEvent` persists node events
    without allowing a node terminal event to bypass the reviewer barrier.
 4. `internal/bridge/orchestration.go:run` preserves the user-selected CWD for
@@ -296,7 +300,8 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    `internal/hub/orchestration.go:normalizeOrchestrationStart`,
    `internal/store/store.go:OrchestrationRun`, and
    `frontend/src/app/pages/OrchestrationWorkspace.tsx:OrchestrationWorkspace`
-   carry the persisted worker pair (`claude-codex` or `codex-codex`).
+   carry the persisted worker pair (`claude-codex`, `codex-codex`, or
+   `claude-claude`).
 2. `internal/hub/orchestration.go:normalizeOrchestrationFirstCLI`,
    `internal/store/store.go:OrchestrationRun`, and
    `internal/protocol.OrchestrationStartPayload` carry the persisted first-turn
@@ -334,12 +339,15 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    compatibility fallback; and
    `internal/bridge/orchestration_relay.go:relayCanConverge` permits only an
    evidenced reviewer/critic turn to finish below the configured turn ceiling.
+   `internal/bridge/orchestration_verifier.go:evaluateOrchestrationVerdict`
+   independently checks this evidence and emits the visible early-stop verdict.
 9. `internal/bridge/orchestration_relay.go:runRelayCLI`,
    `internal/bridge/orchestration_codex.go:runCodexInteractive`, and
    `internal/bridge/orchestration_claude.go:runClaudeInteractive` preserve the
    run-scoped native Codex app-server thread(s), Claude stream-json process,
    stable Claude session id, and Codex thread id(s) when launching the next CLI
-   turn. Codex + Codex uses separate `codex-a` and `codex-b` sessions.
+   turn. Codex + Codex uses separate `codex-a` and `codex-b` sessions; Claude
+   + Claude uses separate `claude-a` and `claude-b` sessions and profile homes.
 10. `internal/bridge/orchestration_native.go:runNativeContextCompaction` runs
    native compaction only through verified CLI control channels, records skip
    Bridge notes for unsupported surfaces, and emits warning-only Bridge notes on
@@ -380,7 +388,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 6. `frontend/src/app/lib/utils.ts:visibleOrchestrationEvents` reduces events
    using `source`, `severity`, `commandData`, and `runConclusion`, and
    `frontend/src/app/components/OrchestrationComponents.tsx:OrchestrationEventItem`
-   renders the result.
+   renders the result, including `verifier.verdict`.
 7. `internal/hub/share.go:publicOrchestrationEvents` is the public transcript
    sanitizer for typed orchestration events.
 8. Update [docs/features/orchestration-event-protocol-hardening(1).md](features/orchestration-event-protocol-hardening(1).md).

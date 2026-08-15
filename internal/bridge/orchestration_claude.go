@@ -100,6 +100,7 @@ type claudeScanOptions struct {
 	ReturnAfterResult   bool
 	LongCommandObserver longCommandObserverConfig
 	ExplicitTimeouts    *explicitTimeoutWatchdogs
+	Model               string
 }
 
 type longCommandObserverConfig struct {
@@ -115,21 +116,30 @@ func (m *OrchestrationManager) runClaude(ctx context.Context, payload protocol.O
 }
 
 func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, string, error) {
+	return m.runClaudeInteractiveSlot(ctx, payload, turnID, role, orchestrationClaudeDefaultSlot, prompt, state)
+}
+
+func (m *OrchestrationManager) runClaudeInteractiveSlot(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, workerSlot, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, string, error) {
 	if state == nil || state.NativeSession == nil {
 		return m.runClaudeWithSession(ctx, payload, turnID, role, prompt, "", false)
 	}
+	workerSlot = normalizeClaudeWorkerSlot(workerSlot)
 	session := state.NativeSession
+	runtime, err := m.workerRuntime(payload, workerSlot, "claude", session)
+	if err != nil {
+		return "", nil, "claude-profile-error", err
+	}
 	session.mu.Lock()
 	// Hub can remember that a previous Claude turn completed after this Bridge
 	// process has restarted. Only resume when the actual Claude transcript is
 	// present in this Bridge process's HOME and project directory.
 	transcriptMissing := false
-	if state.ClaudeSessionStarted && !claudeSessionAvailableForResume(session, state.ClaudeSessionID) {
-		state.ClaudeSessionStarted = false
+	if state.claudeStarted(workerSlot) && !claudeSessionAvailableForResumeLocked(session, workerSlot, state.claudeSessionID(workerSlot), runtime) {
+		state.setClaudeStarted(workerSlot, false)
 		state.ClaudeResumeMode = "claude-new-after-transcript-miss"
 		transcriptMissing = true
 	}
-	claude, err := m.ensureClaudeInteractiveSessionLocked(ctx, payload, state)
+	claude, err := m.ensureClaudeInteractiveSessionLocked(ctx, payload, state, workerSlot, runtime)
 	sessionCWD := session.cwd
 	session.mu.Unlock()
 	if err != nil {
@@ -144,14 +154,15 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 			Status:  "warning",
 			Content: "Claude native transcript is unavailable in this Bridge environment. Bridge is starting a replacement Claude session with the same orchestration id and the persisted task context.",
 			Data: map[string]any{
-				"sessionId":  state.ClaudeSessionID,
+				"sessionId":  state.claudeSessionID(workerSlot),
+				"workerSlot": workerSlot,
 				"resumeMode": "claude-new-after-transcript-miss",
 				"relayOnly":  true,
 			},
 		})
 	}
 	if err := writeClaudeStreamUserMessage(claude.stdin, prompt); err != nil {
-		m.resetClaudeSessionIfDead(session, claude, payload.RunID)
+		m.resetClaudeSessionIfDead(session, workerSlot, claude, payload.RunID)
 		return "", nil, claude.mode, err
 	}
 	if claude.approvalServer != nil {
@@ -171,6 +182,7 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 		NudgeAfter:          observer.After,
 		ReturnAfterResult:   true,
 		ExplicitTimeouts:    timeouts,
+		Model:               m.claudeModelForPayloadSlot(payload, workerSlot),
 	})
 	if timeoutErr := timeouts.Err(); timeoutErr != nil {
 		err = timeoutErr
@@ -182,36 +194,39 @@ func (m *OrchestrationManager) runClaudeInteractive(ctx context.Context, payload
 		}
 	}
 	if err != nil {
-		m.resetClaudeSessionIfDead(session, claude, payload.RunID)
+		m.resetClaudeSessionIfDead(session, workerSlot, claude, payload.RunID)
 	}
 	if err == nil {
-		m.registerClaudeNativeResume(state.NativeSession, claude, payload.RunID, sessionCWD)
+		m.registerClaudeNativeResume(state.NativeSession, claude, workerSlot, payload.RunID, sessionCWD)
 	}
 	return content, tools, claude.mode, err
 }
 
-func claudeSessionAvailableForResume(session *orchestrationNativeSession, sessionID string) bool {
-	if session != nil && session.claude != nil && !claudeSessionExited(session.claude) {
+// claudeSessionAvailableForResumeLocked runs while session.mu is held. The
+// immutable worker runtime is supplied by the caller to avoid recursively
+// acquiring that mutex when resolving an isolated Claude config directory.
+func claudeSessionAvailableForResumeLocked(session *orchestrationNativeSession, workerSlot, sessionID string, runtime orchestrationWorkerRuntime) bool {
+	if session != nil && session.claudeSessionLocked(workerSlot) != nil && !claudeSessionExited(session.claudeSessionLocked(workerSlot)) {
 		return true
 	}
 	cwd := ""
 	if session != nil {
 		cwd = session.cwd
 	}
-	ok, _ := verifyClaudeTranscript(claudeSessionFilePath(cwd, sessionID), sessionID)
+	ok, _ := verifyClaudeTranscript(claudeSessionFilePathForConfig(cwd, sessionID, runtime.claudeConfigDir()), sessionID)
 	return ok
 }
 
 // resetClaudeSessionIfDead drops a cached interactive session whose CLI
 // process has exited so the next turn respawns it, instead of leaving every
 // following turn to fail against the same broken pipes.
-func (m *OrchestrationManager) resetClaudeSessionIfDead(session *orchestrationNativeSession, claude *orchestrationClaudeSession, runID string) {
+func (m *OrchestrationManager) resetClaudeSessionIfDead(session *orchestrationNativeSession, workerSlot string, claude *orchestrationClaudeSession, runID string) {
 	if !claudeSessionExited(claude) {
 		return
 	}
 	session.mu.Lock()
-	if session.claude == claude {
-		session.claude = nil
+	if session.claudeSessionLocked(workerSlot) == claude {
+		session.setClaudeSessionLocked(workerSlot, nil)
 	}
 	session.mu.Unlock()
 	_ = claude.stdin.Close()
@@ -221,24 +236,24 @@ func (m *OrchestrationManager) resetClaudeSessionIfDead(session *orchestrationNa
 	slog.Warn("[bridge] claude interactive session process died; next turn will respawn", "run_id", runID)
 }
 
-func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.Context, payload protocol.OrchestrationStartPayload, state *orchestrationSessionState) (*orchestrationClaudeSession, error) {
+func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.Context, payload protocol.OrchestrationStartPayload, state *orchestrationSessionState, workerSlot string, runtime orchestrationWorkerRuntime) (*orchestrationClaudeSession, error) {
 	session := state.NativeSession
-	if session.claude != nil && session.claude.stdin != nil && session.claude.stdout != nil {
-		if !claudeSessionExited(session.claude) {
-			return session.claude, nil
+	if current := session.claudeSessionLocked(workerSlot); current != nil && current.stdin != nil && current.stdout != nil {
+		if !claudeSessionExited(current) {
+			return current, nil
 		}
 		// The CLI process died between turns; tear the cached session down and
 		// respawn instead of writing every following turn into a broken pipe.
-		stale := session.claude
-		session.claude = nil
+		stale := current
+		session.setClaudeSessionLocked(workerSlot, nil)
 		_ = stale.stdin.Close()
 		if stale.release != nil {
 			stale.release()
 		}
 		slog.Warn("[bridge] claude interactive session process exited; respawning", "run_id", payload.RunID)
 	}
-	resume := state.ClaudeSessionStarted
-	args := m.claudeArgsWithStreamInput(payload, state.ClaudeSessionID, resume)
+	resume := state.claudeStarted(workerSlot)
+	args := m.claudeArgsWithStreamInputForSlot(payload, workerSlot, state.claudeSessionID(workerSlot), resume)
 	// Don't set --name, let Claude CLI use default project name based on cwd
 	approvalServer, releaseApprovalServer, err := m.prepareClaudeApprovalServer(ctx, payload, "", "")
 	if err != nil {
@@ -250,6 +265,7 @@ func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.
 	cmd := exec.CommandContext(context.Background(), m.claudePath(), args...)
 	configureManagedCommand(cmd)
 	configureClaudeCommandEnv(cmd)
+	applyWorkerRuntime(cmd, runtime)
 	cwd := m.cwd(payload)
 	if cwd != "" {
 		cmd.Dir = cwd
@@ -283,7 +299,7 @@ func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.
 		stdin:          stdin,
 		stdout:         bufio.NewReaderSize(stdout, 64*1024),
 		stderr:         stderr,
-		sessionID:      state.ClaudeSessionID,
+		sessionID:      state.claudeSessionID(workerSlot),
 		mode:           mode,
 		approvalServer: approvalServer,
 		release:        releaseApprovalServer,
@@ -293,7 +309,7 @@ func (m *OrchestrationManager) ensureClaudeInteractiveSessionLocked(ctx context.
 		_ = c.cmd.Wait()
 		close(c.exited)
 	}(claude)
-	session.claude = claude
+	session.setClaudeSessionLocked(workerSlot, claude)
 	return claude, nil
 }
 
@@ -344,6 +360,11 @@ func (m *OrchestrationManager) runClaudeWithSessionAttempt(ctx context.Context, 
 	cmd := exec.CommandContext(cmdCtx, m.claudePath(), args...)
 	configureManagedCommand(cmd)
 	configureClaudeCommandEnv(cmd)
+	runtime, runtimeErr := m.workerRuntime(payload, "claude", "claude", m.nativeSession(payload.RunID, m.cwd(payload)))
+	if runtimeErr != nil {
+		return "", nil, runtimeErr
+	}
+	applyWorkerRuntime(cmd, runtime)
 	if cwd := m.cwd(payload); cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -389,6 +410,7 @@ func (m *OrchestrationManager) runClaudeWithSessionAttempt(ctx context.Context, 
 		NudgeAfter:          observer.After,
 		LongCommandObserver: observer,
 		ExplicitTimeouts:    timeouts,
+		Model:               m.claudeModelForPayload(payload),
 	})
 	if scanErr != nil {
 		cancel()
@@ -527,17 +549,21 @@ func (m *OrchestrationManager) claudeArgsWithSession(payload protocol.Orchestrat
 	if m.noApprovalExecution() {
 		args = append(args, "--permission-mode", "bypassPermissions")
 	}
-	if model := claudeBridgeModel(m.cfg); model != "" {
+	if model := m.claudeModelForPayload(payload); model != "" {
 		args = append(args, "--model", model)
 	}
-	if m.cfg.Bridge.ClaudeEffort != "" {
-		args = append(args, "--effort", m.cfg.Bridge.ClaudeEffort)
+	if effort := m.claudeEffortForPayloadSlot(payload, orchestrationClaudeDefaultSlot); effort != "" {
+		args = append(args, "--effort", effort)
 	}
 	args = append(args, prompt)
 	return args
 }
 
 func (m *OrchestrationManager) claudeArgsWithStreamInput(payload protocol.OrchestrationStartPayload, sessionID string, resume bool) []string {
+	return m.claudeArgsWithStreamInputForSlot(payload, orchestrationClaudeDefaultSlot, sessionID, resume)
+}
+
+func (m *OrchestrationManager) claudeArgsWithStreamInputForSlot(payload protocol.OrchestrationStartPayload, workerSlot, sessionID string, resume bool) []string {
 	args := []string{"--input-format=stream-json", "--output-format=stream-json"}
 	if cwd := m.cwd(payload); cwd != "" {
 		args = append(args, "--add-dir", cwd)
@@ -553,11 +579,11 @@ func (m *OrchestrationManager) claudeArgsWithStreamInput(payload protocol.Orches
 	if m.noApprovalExecution() {
 		args = append(args, "--permission-mode", "bypassPermissions")
 	}
-	if model := claudeBridgeModel(m.cfg); model != "" {
+	if model := m.claudeModelForPayloadSlot(payload, workerSlot); model != "" {
 		args = append(args, "--model", model)
 	}
-	if m.cfg.Bridge.ClaudeEffort != "" {
-		args = append(args, "--effort", m.cfg.Bridge.ClaudeEffort)
+	if effort := m.claudeEffortForPayloadSlot(payload, workerSlot); effort != "" {
+		args = append(args, "--effort", effort)
 	}
 	return args
 }
@@ -979,7 +1005,7 @@ func (m *OrchestrationManager) scanClaudeJSONLWithOptions(stdout io.Reader, runI
 				}
 			}
 			if raw, marshalErr := json.Marshal(usagePayload); marshalErr == nil {
-				m.recordNativeUsage(turnID, "claude", claudeBridgeModel(m.cfg), raw)
+				m.recordNativeUsage(turnID, "claude", firstNonEmpty(options.Model, claudeBridgeModel(m.cfg)), raw)
 			}
 			if isErr, _ := msg["is_error"].(bool); isErr {
 				if text := firstString(msg, "result", "error"); text != "" {

@@ -85,6 +85,9 @@ export function OrchestrationEventItem({ item, t }: { item: OrchestrationVisible
   const content = isUser ? rawContent : stripMachineContractLines(rawContent);
   const status = isUser ? '' : item.status;
   const roleTone = orchestrationRoleTone(item.role, item.taskName);
+	const model = item.turnStartData?.model || (typeof item.data?.model === 'string' ? item.data.model : '');
+	const effort = item.turnStartData?.reasoningEffort || (typeof item.data?.reasoningEffort === 'string' ? item.data.reasoningEffort : '');
+	const preset = item.turnStartData?.presetName || (typeof item.data?.presetName === 'string' ? item.data.presetName : '');
 
   return (
     <div className={cn('group mx-auto flex w-full max-w-4xl gap-4 rounded-lg border px-3 py-3', roleTone.card)}>
@@ -100,6 +103,7 @@ export function OrchestrationEventItem({ item, t }: { item: OrchestrationVisible
         <div className="flex items-center gap-2 mb-1 min-h-6">
           <span className={cn('rounded-md px-1.5 py-0.5 text-xs font-semibold', roleTone.badge)}>{title}</span>
           {item.turnInfo && <span className="text-[10px] font-medium text-muted-foreground">{orchestrationTurnLabel(item.turnInfo, t)}</span>}
+		  {model && <span className="max-w-[18rem] truncate font-mono text-[10px] text-muted-foreground" title={[preset, model, effort].filter(Boolean).join(' · ')}>{[preset, model, effort].filter(Boolean).join(' · ')}</span>}
           {item.createdAt && <span className="text-[10px] text-muted-foreground">{formatTime(item.createdAt)}</span>}
           {status && <span className="ml-auto rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">{status}</span>}
         </div>

@@ -1285,6 +1285,179 @@ func TestContinueCodexCodexRestoresWorkerPairAndThreadIDs(t *testing.T) {
 	}
 }
 
+func TestContinueClaudeClaudeRestoresIndependentSlotState(t *testing.T) {
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run, err := st.CreateOrchestrationRun(ctx, store.CreateOrchestrationRunParams{
+		UserID: userID, AgentID: agentID, Title: "claude pair", Mode: "collaboration", WorkerPair: protocol.WorkerPairClaudeClaude, FirstCLI: "codex", Prompt: "review with two Claude workers", MaxTurns: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateOrchestrationRunSessionStateWithClaude(ctx, run.ID, "", nil, false, map[string]string{"claude-a": "session_a", "claude-b": "session_b"}, map[string]bool{"claude-a": true}, "/abs/claude-pair"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+	conn := &BridgeConn{agentID: agentID, capabilities: &protocol.BridgeCapabilities{Orchestration: map[string]protocol.BridgeCLICapability{"claude": {Available: true, BrowserApproval: true}}}, wsSender: wsSender{send: make(chan protocol.Envelope, 2), done: make(chan struct{})}}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+	continueOrchestration(t, s, userID, run.ID, map[string]any{"prompt": "continue Claude pair", "maxTurns": 4}, http.StatusOK)
+	payload, err := protocol.Decode[protocol.OrchestrationStartPayload](<-conn.send)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.WorkerPair != protocol.WorkerPairClaudeClaude || payload.FirstCLI != "claude" || !payload.Resume || payload.ClaudeSessionIDs["claude-a"] != "session_a" || payload.ClaudeSessionIDs["claude-b"] != "session_b" || !payload.ClaudeStartedSlots["claude-a"] || payload.ClaudeStartedSlots["claude-b"] || payload.RunCWD != "/abs/claude-pair" {
+		t.Fatalf("continued Claude pair payload = %#v", payload)
+	}
+}
+
+func TestOrchestrationWorkerProfilesPersistAcrossFollowUpAndCanClear(t *testing.T) {
+	// This exercises ordinary relay runs, where no durable task graph exists to
+	// carry the private binding snapshot.
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	conn := &BridgeConn{
+		agentID: agentID,
+		capabilities: &protocol.BridgeCapabilities{
+			ConfigSwitcher: &protocol.CLIConfigSwitcherCapability{Version: 1, KeyID: "bridge-key", CLIs: []string{"codex"}},
+			Orchestration:  map[string]protocol.BridgeCLICapability{"codex": {Available: true, BrowserApproval: true}},
+		},
+		wsSender: wsSender{send: make(chan protocol.Envelope, 4), done: make(chan struct{})},
+	}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+	newPreset := func(name, model string) store.CLIConfigPreset {
+		preset, err := st.CreateCLIConfigPreset(ctx, store.CLIConfigPreset{
+			UserID: userID, AgentID: agentID, CLI: "codex", Name: name, BaseURL: "https://provider.example/v1", Model: model, KeyHint: "bridge-key",
+			ReasoningLevels: []string{"low", "high"}, ReasoningDefault: "low",
+			Secret: protocol.EncryptedSecret{EphemeralPublicKey: "pub", Salt: "salt", IV: "iv", Ciphertext: "cipher-" + model},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return preset
+	}
+	first := newPreset("first", "gpt-5.6-sol")
+	second := newPreset("second", "gpt-5.6-terra")
+	createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId": agentID, "prompt": "reject partial isolated profiles", "workerPair": "codex-codex", "maxTurns": 2,
+		"workerProfilePresetIds": map[string]string{"codex-a": first.ID},
+	}, http.StatusBadRequest)
+	body := createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId": agentID, "prompt": "use isolated profiles", "workerPair": "codex-codex", "maxTurns": 2,
+		"workerProfilePresetIds": map[string]string{"codex-a": first.ID, "codex-b": second.ID},
+		"workerProfileEfforts":   map[string]string{"codex-a": "high", "codex-b": "low"},
+	}, http.StatusCreated)
+	run := body["run"].(map[string]any)
+	runID := run["id"].(string)
+	if strings.Contains(toJSON(run), "cipher-") {
+		t.Fatalf("create response exposed profile ciphertext: %#v", run)
+	}
+	env := <-conn.send
+	payload, err := protocol.Decode[protocol.OrchestrationStartPayload](env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.WorkerProfiles["codex-a"].Model != "gpt-5.6-sol" || payload.WorkerProfiles["codex-b"].Model != "gpt-5.6-terra" {
+		t.Fatalf("create profile bindings = %#v", payload.WorkerProfiles)
+	}
+	if payload.WorkerProfiles["codex-a"].ReasoningEffort != "high" || payload.WorkerProfiles["codex-b"].ReasoningEffort != "low" {
+		t.Fatalf("create profile reasoning efforts = %#v", payload.WorkerProfiles)
+	}
+	if err := st.UpdateOrchestrationRunStatus(ctx, runID, store.OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+	continueOrchestration(t, s, userID, runID, map[string]any{"prompt": "preserve profiles"}, http.StatusOK)
+	env = <-conn.send
+	payload, err = protocol.Decode[protocol.OrchestrationStartPayload](env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.WorkerProfiles["codex-a"].PresetID != first.ID || payload.WorkerProfiles["codex-b"].PresetID != second.ID {
+		t.Fatalf("follow-up did not preserve private profiles: %#v", payload.WorkerProfiles)
+	}
+	if err := st.UpdateOrchestrationRunStatus(ctx, runID, store.OrchestrationCompleted, ""); err != nil {
+		t.Fatal(err)
+	}
+	continueOrchestration(t, s, userID, runID, map[string]any{"prompt": "clear profiles", "workerProfilePresetIds": map[string]string{}}, http.StatusOK)
+	env = <-conn.send
+	payload, err = protocol.Decode[protocol.OrchestrationStartPayload](env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.WorkerProfiles) != 0 {
+		t.Fatalf("explicit empty profile map did not clear bindings: %#v", payload.WorkerProfiles)
+	}
+	stored, err := st.OrchestrationWorkerProfiles(ctx, runID)
+	if err != nil || len(stored) != 0 {
+		t.Fatalf("stored profiles after explicit clear = %#v, err=%v", stored, err)
+	}
+}
+
+func TestOrchestrationWorkerProfilesRejectUnsupportedReasoningEffort(t *testing.T) {
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	conn := &BridgeConn{agentID: agentID, capabilities: &protocol.BridgeCapabilities{
+		ConfigSwitcher: &protocol.CLIConfigSwitcherCapability{Version: 1, KeyID: "bridge-key", CLIs: []string{"codex"}},
+		Orchestration:  map[string]protocol.BridgeCLICapability{"codex": {Available: true, BrowserApproval: true}},
+	}, wsSender: wsSender{send: make(chan protocol.Envelope, 1), done: make(chan struct{})}}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+	preset, err := st.CreateCLIConfigPreset(ctx, store.CLIConfigPreset{
+		UserID: userID, AgentID: agentID, CLI: "codex", Name: "reviewed", BaseURL: "https://provider.example/v1", Model: "gpt-5.6-sol", KeyHint: "bridge-key",
+		ReasoningLevels: []string{"low", "high"}, ReasoningDefault: "low",
+		Secret: protocol.EncryptedSecret{EphemeralPublicKey: "pub", Salt: "salt", IV: "iv", Ciphertext: "cipher"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId": agentID, "prompt": "reject unsupported effort", "workerPair": "codex-codex", "maxTurns": 1,
+		"workerProfilePresetIds": map[string]string{"codex-a": preset.ID, "codex-b": preset.ID},
+		"workerProfileEfforts":   map[string]string{"codex-a": "ultra", "codex-b": "low"},
+	}, http.StatusBadRequest)
+}
+
+func TestClaudeClaudeWorkerProfilesBindIndependentModelsAndEfforts(t *testing.T) {
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	conn := &BridgeConn{agentID: agentID, capabilities: &protocol.BridgeCapabilities{
+		ConfigSwitcher: &protocol.CLIConfigSwitcherCapability{Version: 1, KeyID: "bridge-key", CLIs: []string{"claude"}},
+		Orchestration:  map[string]protocol.BridgeCLICapability{"claude": {Available: true, BrowserApproval: true}},
+	}, wsSender: wsSender{send: make(chan protocol.Envelope, 1), done: make(chan struct{})}}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+	newPreset := func(name, model string) store.CLIConfigPreset {
+		preset, err := st.CreateCLIConfigPreset(ctx, store.CLIConfigPreset{
+			UserID: userID, AgentID: agentID, CLI: "claude", Name: name, BaseURL: "https://provider.example/v1", Model: model, KeyHint: "bridge-key",
+			ReasoningLevels: []string{"low", "high"}, ReasoningDefault: "high",
+			Secret: protocol.EncryptedSecret{EphemeralPublicKey: "pub", Salt: "salt", IV: "iv", Ciphertext: "cipher-" + model},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return preset
+	}
+	first, second := newPreset("claude-a", "claude-opus-4-6"), newPreset("claude-b", "claude-sonnet-4-6")
+	createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId": agentID, "prompt": "bind Claude pair", "workerPair": "claude-claude", "maxTurns": 1,
+		"workerProfilePresetIds": map[string]string{"claude-a": first.ID, "claude-b": second.ID},
+		"workerProfileEfforts":   map[string]string{"claude-a": "low", "claude-b": "high"},
+	}, http.StatusCreated)
+	payload, err := protocol.Decode[protocol.OrchestrationStartPayload](<-conn.send)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.WorkerPair != protocol.WorkerPairClaudeClaude || payload.WorkerProfiles["claude-a"].Model != "claude-opus-4-6" || payload.WorkerProfiles["claude-b"].Model != "claude-sonnet-4-6" {
+		t.Fatalf("Claude pair profile bindings = %#v", payload.WorkerProfiles)
+	}
+	if payload.WorkerProfiles["claude-a"].ReasoningEffort != "low" || payload.WorkerProfiles["claude-b"].ReasoningEffort != "high" {
+		t.Fatalf("Claude pair reasoning efforts = %#v", payload.WorkerProfiles)
+	}
+}
+
 func TestContinueOrchestrationPreservesExistingRunFiles(t *testing.T) {
 	t.Parallel()
 

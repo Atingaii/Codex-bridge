@@ -1114,6 +1114,7 @@ export function Workspace({
           selectedAgentId={selectedAgentId}
           onSelectAgent={selectAgent}
           onAgentsChanged={loadAgents}
+          onPresetsChanged={() => undefined}
           onLogout={logout}
           isDarkMode={isDarkMode}
           setIsDarkMode={setIsDarkMode}

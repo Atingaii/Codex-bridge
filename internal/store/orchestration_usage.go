@@ -22,8 +22,8 @@ type OrchestrationUsageSync struct {
 
 func (s *Store) ListAllOrchestrationRuns(ctx context.Context, userID string) ([]OrchestrationRun, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+	SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0), COALESCE(claude_session_ids_json,'{}'), COALESCE(claude_started_slots_json,'{}'),
 			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
 		WHERE user_id = ? AND delete_requested = 0
@@ -126,8 +126,8 @@ func (s *Store) ListTerminalOrchestrationRunsByAgent(ctx context.Context, agentI
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+	SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0), COALESCE(claude_session_ids_json,'{}'), COALESCE(claude_started_slots_json,'{}'),
 			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
 		WHERE agent_id = ? AND status IN ('completed','failed','canceled') AND delete_requested = 0

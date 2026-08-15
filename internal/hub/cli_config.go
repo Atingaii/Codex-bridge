@@ -29,13 +29,16 @@ type cliConfigPendingRequest struct {
 }
 
 type cliConfigInput struct {
-	CLI      string                   `json:"cli"`
-	PresetID string                   `json:"presetId,omitempty"`
-	Name     string                   `json:"name,omitempty"`
-	BaseURL  string                   `json:"baseUrl"`
-	Model    string                   `json:"model,omitempty"`
-	Secret   protocol.EncryptedSecret `json:"secret"`
-	KeyID    string                   `json:"keyId"`
+	CLI              string                   `json:"cli"`
+	PresetID         string                   `json:"presetId,omitempty"`
+	Name             string                   `json:"name,omitempty"`
+	BaseURL          string                   `json:"baseUrl"`
+	Model            string                   `json:"model,omitempty"`
+	ReasoningEffort  string                   `json:"reasoningEffort,omitempty"`
+	ReasoningLevels  []string                 `json:"reasoningLevels,omitempty"`
+	ReasoningDefault string                   `json:"reasoningDefault,omitempty"`
+	Secret           protocol.EncryptedSecret `json:"secret"`
+	KeyID            string                   `json:"keyId"`
 }
 
 type cliConfigResetInput struct {
@@ -51,6 +54,9 @@ func (s *Server) handleListCLIConfigPresets(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to list model presets")
 		return
+	}
+	for i := range presets {
+		normalizeReviewedPreset(&presets[i])
 	}
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"presets": presets})
 }
@@ -93,9 +99,11 @@ func (s *Server) handleTestCLIConfig(w http.ResponseWriter, r *http.Request, uid
 			secret = preset.Secret
 		}
 	}
-	result, err := s.sendCLIConfigRequest(r.Context(), agentID, protocol.TypeCLIConfigTest, protocol.CLIConfigRequest{
-		CLI: input.CLI, BaseURL: strings.TrimSpace(input.BaseURL), Model: strings.TrimSpace(input.Model), Secret: secret,
-	})
+	request := protocol.CLIConfigRequest{
+		CLI: input.CLI, BaseURL: strings.TrimSpace(input.BaseURL), Model: strings.TrimSpace(input.Model), ReasoningEffort: strings.TrimSpace(input.ReasoningEffort), ReasoningLevels: append([]string(nil), input.ReasoningLevels...), ReasoningDefault: strings.TrimSpace(input.ReasoningDefault), Secret: secret,
+	}
+	s.applyReviewedClaudeContext(&request)
+	result, err := s.sendCLIConfigRequest(r.Context(), agentID, protocol.TypeCLIConfigTest, request)
 	if err != nil {
 		s.writeCLIConfigRelayError(w, err)
 		return
@@ -104,7 +112,21 @@ func (s *Server) handleTestCLIConfig(w http.ResponseWriter, r *http.Request, uid
 		serverutil.WriteError(w, http.StatusBadGateway, "TEST_FAILED", result.Error)
 		return
 	}
+	result.ModelMetadata = reviewedModelMetadata(input.CLI, input.Model)
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"result": result})
+}
+
+// applyReviewedClaudeContext adds only Hub-reviewed context settings to a
+// request. An unknown model intentionally leaves both values unset so Claude
+// Code uses its own conservative defaults.
+func (s *Server) applyReviewedClaudeContext(request *protocol.CLIConfigRequest) {
+	if request == nil || request.CLI != "claude" {
+		return
+	}
+	if profile, ok := reviewedClaudeContextForModel(request.Model); ok {
+		request.ClaudeContextWindow = profile.Window
+		request.ClaudeDisableUnknownModelWindowEnforcement = profile.DisableUnknownEnforcement
+	}
 }
 
 func (s *Server) handleCreateCLIConfigPreset(w http.ResponseWriter, r *http.Request, uid string) {
@@ -118,9 +140,14 @@ func (s *Server) handleCreateCLIConfigPreset(w http.ResponseWriter, r *http.Requ
 	if !ok || !s.validateCLIConfigInput(w, input, capability, true, true) {
 		return
 	}
+	if !s.authorizeReviewedReasoning(w, r.Context(), agentID, &input, input.Secret) {
+		return
+	}
 	preset, err := s.store.CreateCLIConfigPreset(r.Context(), store.CLIConfigPreset{
 		UserID: uid, AgentID: agentID, CLI: input.CLI, Name: strings.TrimSpace(input.Name),
 		BaseURL: strings.TrimRight(strings.TrimSpace(input.BaseURL), "/"), Model: strings.TrimSpace(input.Model),
+		ReasoningEffort: strings.TrimSpace(input.ReasoningEffort),
+		ReasoningLevels: append([]string(nil), input.ReasoningLevels...), ReasoningDefault: strings.TrimSpace(input.ReasoningDefault),
 		Secret: input.Secret, KeyHint: input.KeyID,
 	})
 	if err != nil {
@@ -165,13 +192,18 @@ func (s *Server) handleUpdateCLIConfigPreset(w http.ResponseWriter, r *http.Requ
 		serverutil.WriteError(w, http.StatusConflict, "KEY_CHANGED", "Bridge encryption key changed; enter the API Key again")
 		return
 	}
+	if !s.authorizeReviewedReasoning(w, r.Context(), agentID, &input, secret) {
+		return
+	}
 	baseURL := strings.TrimRight(strings.TrimSpace(input.BaseURL), "/")
 	model := strings.TrimSpace(input.Model)
 	preset, err := s.store.UpdateCLIConfigPreset(r.Context(), store.CLIConfigPreset{
 		ID: existing.ID, UserID: uid, AgentID: agentID, CLI: input.CLI,
 		Name: strings.TrimSpace(input.Name), BaseURL: baseURL, Model: model,
+		ReasoningEffort: strings.TrimSpace(input.ReasoningEffort),
+		ReasoningLevels: append([]string(nil), input.ReasoningLevels...), ReasoningDefault: strings.TrimSpace(input.ReasoningDefault),
 		Secret: secret, KeyHint: keyHint,
-	}, existing.Active && existing.BaseURL == baseURL && existing.Model == model && !credentialChanged)
+	}, existing.Active && existing.BaseURL == baseURL && existing.Model == model && existing.ReasoningEffort == strings.TrimSpace(input.ReasoningEffort) && !credentialChanged)
 	if errors.Is(err, store.ErrNotFound) {
 		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "model preset not found")
 		return
@@ -206,9 +238,13 @@ func (s *Server) handleApplyCLIConfigPreset(w http.ResponseWriter, r *http.Reque
 		serverutil.WriteError(w, http.StatusConflict, "KEY_CHANGED", "Bridge encryption key changed; delete this preset and enter the API Key again")
 		return
 	}
-	result, err := s.sendCLIConfigRequest(r.Context(), agentID, protocol.TypeCLIConfigApply, protocol.CLIConfigRequest{
-		CLI: preset.CLI, Name: preset.Name, BaseURL: preset.BaseURL, Model: preset.Model, Secret: preset.Secret,
-	})
+	normalizeReviewedPreset(&preset)
+	request := protocol.CLIConfigRequest{
+		CLI: preset.CLI, Name: preset.Name, BaseURL: preset.BaseURL, Model: preset.Model, ReasoningEffort: preset.ReasoningEffort, Secret: preset.Secret,
+		ReasoningLevels: append([]string(nil), preset.ReasoningLevels...), ReasoningDefault: preset.ReasoningDefault,
+	}
+	s.applyReviewedClaudeContext(&request)
+	result, err := s.sendCLIConfigRequest(r.Context(), agentID, protocol.TypeCLIConfigApply, request)
 	if err != nil {
 		s.writeCLIConfigRelayError(w, err)
 		return
@@ -310,6 +346,12 @@ func (s *Server) validateCLIConfigInput(w http.ResponseWriter, input cliConfigIn
 		serverutil.WriteError(w, http.StatusBadRequest, "BAD_MODEL", "model is required and must be at most 160 bytes")
 		return false
 	}
+	if effort := strings.TrimSpace(input.ReasoningEffort); effort != "" {
+		if len(input.ReasoningLevels) == 0 || !containsString(input.ReasoningLevels, effort) {
+			serverutil.WriteError(w, http.StatusBadRequest, "BAD_REASONING_EFFORT", "selected reasoning effort is not supported by the reviewed model catalog")
+			return false
+		}
+	}
 	parsed, err := url.Parse(baseURL)
 	if err != nil || len(baseURL) > maxCLIConfigURLBytes || parsed.Host == "" || parsed.Scheme != "https" && parsed.Scheme != "http" {
 		serverutil.WriteError(w, http.StatusBadRequest, "BAD_BASE_URL", "Base URL must be an http:// or https:// URL")
@@ -322,6 +364,45 @@ func (s *Server) validateCLIConfigInput(w http.ResponseWriter, input cliConfigIn
 	if requireSecret || encryptedSecretPresent(input.Secret) {
 		return validEncryptedSecret(w, input.Secret)
 	}
+	return true
+}
+
+// authorizeReviewedReasoning asks the private Bridge for the authoritative
+// model metadata before a preset is persisted. Browser-supplied reasoning
+// levels are never trusted as a catalog source.
+func (s *Server) authorizeReviewedReasoning(w http.ResponseWriter, ctx context.Context, agentID string, input *cliConfigInput, secret protocol.EncryptedSecret) bool {
+	result, err := s.sendCLIConfigRequest(ctx, agentID, protocol.TypeCLIConfigTest, protocol.CLIConfigRequest{
+		CLI: input.CLI, BaseURL: strings.TrimSpace(input.BaseURL), Model: strings.TrimSpace(input.Model), Secret: secret,
+	})
+	if err != nil {
+		s.writeCLIConfigRelayError(w, err)
+		return false
+	}
+	if !result.OK {
+		serverutil.WriteError(w, http.StatusBadGateway, "TEST_FAILED", result.Error)
+		return false
+	}
+	// The Hub catalog is the approval authority. Bridge metadata remains useful
+	// for runtime observability but is not trusted to approve browser input.
+	metadata := reviewedModelMetadata(input.CLI, input.Model)
+	// An unreviewed model may still be saved for ordinary use, but it cannot
+	// carry caller-provided effort metadata or a selected effort.
+	if metadata == nil || !metadata.Reviewed || len(metadata.SupportedReasoningLevels) == 0 {
+		if strings.TrimSpace(input.ReasoningEffort) != "" {
+			serverutil.WriteError(w, http.StatusBadRequest, "BAD_REASONING_EFFORT", "selected model has no reviewed reasoning levels")
+			return false
+		}
+		input.ReasoningLevels = nil
+		input.ReasoningDefault = ""
+		return true
+	}
+	levels := append([]string(nil), metadata.SupportedReasoningLevels...)
+	if effort := strings.TrimSpace(input.ReasoningEffort); effort != "" && !containsString(levels, effort) {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REASONING_EFFORT", "selected reasoning effort is not supported by the reviewed model catalog")
+		return false
+	}
+	input.ReasoningLevels = levels
+	input.ReasoningDefault = strings.TrimSpace(metadata.DefaultReasoningLevel)
 	return true
 }
 

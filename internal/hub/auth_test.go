@@ -105,6 +105,7 @@ func TestRegistrationRequiresTurnstileAndCreatesSignedInUser(t *testing.T) {
 
 	s, st := newAuthTestServer(t)
 	s.cfg.Auth.Registration.Enabled = true
+	s.cfg.Auth.Registration.RequireTurnstile = true
 	s.cfg.Auth.Registration.TurnstileSiteKey = "site-public"
 	s.cfg.Auth.Registration.TurnstileSecret = "server-secret"
 	s.cfg.Auth.Registration.TurnstileHostname = "bridge.example"
@@ -158,6 +159,7 @@ func TestRegistrationFailsClosedAndRejectsPrivilegeAlias(t *testing.T) {
 
 	s, st := newAuthTestServer(t)
 	s.cfg.Auth.Registration.Enabled = true
+	s.cfg.Auth.Registration.RequireTurnstile = true
 	s.cfg.Auth.Registration.TurnstileSiteKey = "site-public"
 	s.cfg.Auth.Registration.TurnstileSecret = "server-secret"
 	verifier := &stubTurnstileVerifier{err: errors.New("siteverify unavailable")}
@@ -230,6 +232,7 @@ func TestRegistrationRateLimitIsIndependent(t *testing.T) {
 
 	s, _ := newAuthTestServer(t)
 	s.cfg.Auth.Registration.Enabled = true
+	s.cfg.Auth.Registration.RequireTurnstile = true
 	s.cfg.Auth.Registration.TurnstileSiteKey = "site-public"
 	s.cfg.Auth.Registration.TurnstileSecret = "server-secret"
 	s.turnstile = &stubTurnstileVerifier{err: errors.New("rejected")}
@@ -243,6 +246,31 @@ func TestRegistrationRateLimitIsIndependent(t *testing.T) {
 		t.Fatal(err)
 	}
 	login(t, s, map[string]string{"username": "limited-user", "password": "long-password"}, http.StatusOK)
+}
+
+func TestRegistrationWithoutTurnstileCreatesSignedInUser(t *testing.T) {
+	t.Parallel()
+
+	s, st := newAuthTestServer(t)
+	s.cfg.Auth.Registration.Enabled = true
+	s.cfg.Auth.Registration.RequireTurnstile = false
+	verifier := &stubTurnstileVerifier{err: errors.New("must not be called")}
+	s.turnstile = verifier
+
+	configReq := httptest.NewRequest(http.MethodGet, "/api/auth/config", nil)
+	configRR := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(configRR, configReq)
+	if configRR.Code != http.StatusOK || !strings.Contains(configRR.Body.String(), `"registrationEnabled":true`) || !strings.Contains(configRR.Body.String(), `"turnstileSiteKey":""`) {
+		t.Fatalf("auth config = status %d body %s", configRR.Code, configRR.Body.String())
+	}
+
+	register(t, s, map[string]string{"username": "member", "password": "long-password"}, http.StatusCreated)
+	if len(verifier.requests) != 0 {
+		t.Fatalf("turnstile verifier calls = %#v", verifier.requests)
+	}
+	if _, err := st.AuthenticateUser(context.Background(), "member", "long-password"); err != nil {
+		t.Fatalf("registered user cannot authenticate: %v", err)
+	}
 }
 
 func TestAuthenticatedChatRoutesAreUserIsolated(t *testing.T) {

@@ -433,7 +433,7 @@ func runConclusionFromTerminalEvent(event protocol.OrchestrationEventPayload) *p
 
 func normalizeEventSource(source, kind string) string {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "cli", "bridge", "user":
+	case "cli", "bridge", "user", "verifier":
 		return strings.ToLower(strings.TrimSpace(source))
 	}
 	switch kind {

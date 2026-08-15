@@ -39,12 +39,19 @@ context in the same `runID`.
   `default` is the generic relay profile; `formal-proof` is explicit opt-in for
   proof-assistant guidance. The default profile does not silently enable formal
   proof instructions based on keywords in the user prompt.
+- Follow-up prompts preserve saved worker-profile bindings when the request
+  omits them. An explicit empty binding map clears them. Hub authorizes each
+  binding for its endpoint and worker CLI, while Bridge materializes its
+  encrypted snapshot only inside a run- and slot-private CLI home; no bound
+  orchestration turn changes the operator's global CLI configuration.
 - Follow-up prompts restore native CLI continuity where possible. Hub persists
   the legacy Codex thread id and the Codex thread id map reported by Bridge
   because app-server thread ids are non-deterministic. Claude + Codex runs use
-  the `codex` slot; Codex + Codex runs use separate `codex-a` and `codex-b`
-  slots. Hub also stores whether Claude reached a successful `turn.end` and
-  records the absolute run cwd reported by `run.start`. Resumed
+  the `codex` and `claude` slots; Codex + Codex uses separate `codex-a` and
+  `codex-b` slots; Claude + Claude uses separate `claude-a` and `claude-b`
+  slots. Hub stores each Claude session id and whether that slot reached a
+  successful `turn.end`, then records the absolute run cwd reported by
+  `run.start`. Resumed
   `orchestration_start` payloads send those values back so Bridge can reuse live
   run-scoped native sessions while it is running, resume saved Codex app-server
   thread(s) after restart where possible, choose Claude `--resume` only for an
@@ -121,6 +128,13 @@ context in the same `runID`.
   receive lightweight, browser-visible proof workflow reminders up front so the
   CLI records target obligations, build/scan/audit evidence, and blockers in
   its normal result.
+- After every successful relay turn, Bridge runs three local deterministic
+  checker roles over the recorded handoff and command lifecycle: handoff
+  completeness, command/proof evidence, and independent reviewer boundary.
+  It emits a visible `verifier.verdict` event without invoking another model or
+  command. Only a unanimous pass may set
+  `run.end.data.terminalReason=verified-early` and end unused scheduled turns;
+  every other verdict leaves the relay schedule unchanged.
 - Uploaded orchestration file contents are sent to the Bridge with the current
   prompt, while `user.message` events persist only file metadata in
   `event.data.files` so the timeline can show what was attached without
@@ -203,9 +217,11 @@ CLI answer after command events instead of visually ending on the last
 `command.end` card. Bridge only emits a successful relay `turn.end` after the
 CLI has supplied a final conclusion or handoff summary; progress-only text such
 as "next I will..." is retried in the same turn first. Bridge does not append
-proof-specific acceptance summaries or final verifier conclusions; if a CLI
-response is sparse, the browser still shows the recorded command events and
-relay terminal message.
+proof-specific acceptance summaries or model-generated verifier conclusions.
+Its local deterministic verifier may append an explicit safe
+`verifier.verdict` event derived only from the structured handoff and recorded
+command evidence; if a CLI response is sparse, the browser still shows the
+recorded command events and relay terminal message.
 The browser event stream is only kept open for active runs. Completed, failed,
 or canceled runs are read from persisted Hub events and show the stream as idle,
 so the stream indicator cannot be confused with the selected worker's online
@@ -251,7 +267,9 @@ endpoints' runs before the user switches to them.
 15. Emit successful `turn.end` content and render contentful turn-end events as
     final answer cards after command events.
 16. Preserve CLI-provided turn-end and run-end content without adding hidden
-    proof assessment, verifier, or remediation conclusions.
+    proof assessment, model-generated verifier, or remediation conclusions;
+    permit only the explicit deterministic `verifier.verdict` event and a
+    passing `verified-early` terminal reason.
 17. Only open `/ws/orchestrations` for active runs; terminal runs should use
     persisted events and show an idle event stream.
 18. Manage CLI subprocess groups and detect idle direct-Codex JSONL turns after
@@ -262,8 +280,9 @@ endpoints' runs before the user switches to them.
 20. Preserve worker-pair and first-turn CLI selection across create, refresh,
     and continue so Codex-first and Codex + Codex runs keep their selected
     relay schedule.
-21. Persist Codex thread id(s), Claude-started state, and absolute run cwd from
-    Bridge events, then include them in resumed `orchestration_start` payloads.
+21. Persist Codex thread id(s), Claude session ids and started state by worker
+    slot, and absolute run cwd from Bridge events, then include them in resumed
+    `orchestration_start` payloads.
 22. Materialize uploaded files under the locked absolute run cwd when a run is
     resumed.
 23. Preserve the orchestration profile across create, refresh, and continue.
@@ -280,6 +299,11 @@ endpoints' runs before the user switches to them.
     incrementally with `afterSeq` during active-run polling and reconnects.
 29. Load only the latest timeline event page when selecting a run, and expose a
     load-older control that fetches earlier persisted events with `beforeSeq`.
+30. Preserve compatible worker-profile bindings across create, refresh, and
+    continue, while stripping encrypted snapshots from progress APIs and public
+    shares.
+31. Evaluate successful turns with the three-checker quorum, render every
+    checker result, and stop the remaining schedule only for a unanimous pass.
 
 ## Exit Gates
 
@@ -349,11 +373,13 @@ endpoints' runs before the user switches to them.
 - Continuing a Codex + Codex run sends `WorkerPair=codex-codex`,
   `FirstCLI=codex`, and the saved `codexThreadIds` map in the resumed
   `orchestration_start` payload unless the user intentionally changes the
-  worker pair.
+  worker pair. A Claude + Claude run sends `WorkerPair=claude-claude` and
+  preserves independently bound Claude worker presets.
 - Continuing a formal-proof run sends `Profile=formal-proof` in the resumed
   `orchestration_start` payload unless the user intentionally changes it.
 - A resumed run sends the saved legacy Codex thread id, Codex thread ids by
-  worker slot, Claude-started state, and locked absolute run cwd to Bridge.
+  worker slot, Claude session ids and started state by worker slot, and locked
+  absolute run cwd to Bridge.
 - The first Codex turn in a resumed run uses Codex app-server `thread/resume`
   when Hub has a saved thread id; the first Claude turn uses `--resume` only
   after a prior Claude turn reached `turn.end`.
@@ -368,6 +394,17 @@ endpoints' runs before the user switches to them.
   `--resume`, emits a visible fallback warning, and starts a replacement
   session with the deterministic orchestration session ID and persisted task
   context.
+- A `codex-codex` run can use two distinct saved Codex presets and a
+  `claude-claude` run can use two distinct saved Claude presets without changing
+  either machine-wide configuration; every bound worker receives a private
+  runtime home.
+- Omitted worker-profile selections retain the run's saved bindings; an
+  explicit empty selection clears them. Ciphertext never appears in progress
+  APIs or public shares.
+- A passing three-checker quorum is visible in the timeline and terminates
+  remaining turns with `verified-early`; any missing handoff condition,
+  evidence, reviewer boundary, failed command, or unresolved formal-proof work
+  continues the normal schedule.
 - `turn.start.content` does not contain the full relay prompt or compacted
   context; the full prompt is carried only in typed `TurnStartData.PromptText`
   for authenticated local diagnostics and is stripped from public shares.

@@ -8,6 +8,15 @@ User-facing production rollouts are evaluated by `internal/rollout` from
 returns enabled keys in `user.features`; browser code never determines rollout
 membership itself. See [ADR-010](adr/010-user-feature-rollouts.md).
 
+The Hub owns the reviewed, CLI-scoped model reasoning and Claude-context policy
+in `internal/hub/model_catalog.go`; it resolves immutable saved-preset and
+orchestration-binding snapshots before they reach a Bridge. The Bridge only
+decrypts credentials and materializes native configuration. It does not infer
+capabilities or create a Codex model catalog. Codex gets `config.toml` and
+`auth.json`; Claude Code gets `settings.json`, including the selected
+`effortLevel` and Hub-reviewed context values. See
+[ADR-013](adr/013-hub-model-catalog-and-claude-effort.md).
+
 ```text
 Browser UI (one selected run stream)
   | WSS /ws/chat?sid=<session>
@@ -121,8 +130,13 @@ or the existing cancellation timeout deletes the requested row by cascade.
 
 The Bridge keeps orchestration deterministic while preserving native CLI
 continuity. Each run persists a narrow `worker_pair`: `claude-codex` keeps the
-default Claude Code + Codex relay, while `codex-codex` runs two Codex
-participants in separate worker slots. For Claude + Codex runs, Bridge keeps
+default Claude Code + Codex relay, `codex-codex` runs `codex-a` and `codex-b`,
+and `claude-claude` runs `claude-a` and `claude-b` in separate worker slots. The
+new-run browser workflow explicitly snapshots an encrypted saved preset
+onto each active slot; Hub authorizes and persists ciphertext only, while
+Bridge decrypts it only to materialize a mode-0700 per-run/slot runtime home.
+Two Codex or Claude slots can therefore use distinct models without mutating
+global CLI state. For Claude + Codex runs, Bridge keeps
 one long-lived Codex app-server thread and one long-lived Claude Code
 stream-json session. For Codex + Codex runs, Bridge keeps independent
 `codex-a` and `codex-b` app-server threads so each participant has distinct
@@ -151,19 +165,29 @@ durable task attempt; compact evidence, rather than a prior attempt's native
 id, carries context into the next node. Older Bridges retain the serial relay behavior. See
 [ADR-008](adr/008-durable-orchestration-task-graph.md).
 Bridge persists the legacy
-Codex thread id, the `codex_thread_ids_json` slot map, and the stable Claude
-session id so follow-up prompts can resume native history after a Bridge
+Codex thread id, the `codex_thread_ids_json` slot map, the stable Claude
+session id, and the `claude_session_ids_json` / `claude_started_slots_json`
+slot maps so follow-up prompts can resume native history after a Bridge
 restart where the CLI supports it. Run-end data also carries direct native
 resume metadata for the participating CLIs: Codex exposes
 `codex resume <thread-id>` for each persisted Codex slot, and Claude exposes
 `claude --resume <session-id>` plus the project transcript path under
-`~/.claude/projects/<encoded-cwd>/`. After successful Claude turns,
+`~/.claude/projects/<encoded-cwd>/`. For isolated slots, the direct command
+retains the matching private `CODEX_HOME` or `CLAUDE_CONFIG_DIR`. Bridge copies
+only the Codex session JSONL or normalized Claude transcript into the ordinary
+picker location; it never copies a slot's configuration or credential files.
+Thus `/resume` can discover the conversation while direct resume still uses
+the model preset that created it. After successful Claude turns,
 Bridge updates only the current cwd entry in `~/.claude.json` so native Claude
 project metadata points at the Bridge session without touching unrelated
 projects, and materializes the same Claude-written transcript so Claude Code's
 interactive `/resume` picker can show it from the run cwd. It does not add
-hidden proof strategy gates,
-automatic verifier turns, or remediation turns. Formal-proof guidance is opt-in
+model-driven hidden proof strategy, verifier, or remediation turns. A local,
+deterministic three-checker quorum evaluates each successful structured
+handoff: handoff completeness, command/proof evidence, and an independent
+reviewer boundary must all pass. A visible `verifier.verdict` records every
+checker result and only a unanimous pass ends unused rounds with
+`verified-early`. Formal-proof guidance is opt-in
 through the persisted `profile=formal-proof` run setting selected in the
 orchestration UI; the default profile does not activate proof guidance based on
 prompt keywords. Under that profile, collaboration alternates a proof author
@@ -211,7 +235,7 @@ only calls the neutral registry boundary.
 
 Orchestration events use a typed contract in
 `internal/protocol/envelope.go:OrchestrationEventPayload`. `source`
-distinguishes `cli`, `bridge`, and `user` events; `severity` carries
+distinguishes `cli`, `bridge`, `user`, and deterministic `verifier` events; `severity` carries
 Bridge-internal log levels without overloading lifecycle `status`; command
 start/update/end,
 run-start, turn-start, run-end, Bridge-note, and final-conclusion details live
@@ -322,9 +346,9 @@ route renders before login bootstrap. Orchestration share sanitization in
 `internal/hub/share.go:publicOrchestrationEvents` drops severity events (except
 `turn.end`, whose lifecycle status stays public so failed turns close visibly),
 internal Bridge notes, `TurnStartData.PromptText`, `RunStartData.CWD`, and all
-of `RunEndData` except the worker pair — native resume commands, thread and
-session ids, transcript paths, and the run cwd never reach anonymous viewers —
-while preserving public run lifecycle and structured conclusion events.
+native-resume fields from `RunEndData`. The worker pair, safe terminal reason,
+and verifier verdict remain visible; native resume commands, thread and session
+ids, transcript paths, and the run cwd never reach anonymous viewers.
 
 ## Decisions
 
@@ -339,6 +363,8 @@ while preserving public run lifecycle and structured conclusion events.
 | ADR-007 | Public conversation share links | Anonymous readers can view sanitized transcripts without workspace access |
 | ADR-009 | Remote CLI configuration switcher | Hub stores encrypted presets; Bridge probes providers and updates native CLI configuration |
 | ADR-010 | User feature rollouts | Hub centrally evaluates account-level gray rollout policies and exposes enabled feature keys |
+| ADR-011 | Orchestration worker profiles and verdicts | Per-slot isolated CLI profiles and deterministic early-stop verification |
+| ADR-012 | Dual Claude workers and quorum verification | Independent Claude slots and a conservative multi-checker completion barrier |
 
 ## Protocol
 
@@ -405,8 +431,8 @@ Orchestration continuity:
    unless the request explicitly changes them.
 3. Hub compacts prior `orchestration_events` into context.
 4. Hub also restores native CLI state from `orchestration_runs`: the latest
-   legacy Codex thread id, Codex thread ids by worker slot, whether Claude
-   reached a successful turn, and the locked absolute run cwd reported by
+   legacy Codex thread id, Codex thread ids by worker slot, Claude session ids
+   and successful-turn markers by worker slot, and the locked absolute run cwd reported by
    Bridge. The persisted
    `native_context_compaction` setting is restored with the same run.
 5. Bridge receives the same `runID` with `Resume=true`, reuses any live
@@ -476,8 +502,11 @@ SQLite tables:
 - `enroll_tokens`
 - `orchestration_runs` (including persisted mode, `worker_pair`, `first_cli`,
   `profile`, cwd, max turns, status, native CLI continuity state,
-  `codex_thread_ids_json`, native context compaction preference, locked runtime
-  cwd, uploaded file metadata, and a durable cancel-before-delete intent)
+  `codex_thread_ids_json`, `claude_session_ids_json`,
+  `claude_started_slots_json`, native context compaction preference, locked
+  runtime cwd, uploaded file metadata, and a durable cancel-before-delete intent)
+- `orchestration_worker_profiles` (private per-run Bridge-targeted preset
+  ciphertext, excluded from run JSON, progress responses, and public shares)
 - `orchestration_events` (including `source`, `severity`, lifecycle status,
   and typed event payload JSON)
 - `orchestration_usage_syncs` and `orchestration_usage_events` (private native

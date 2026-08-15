@@ -459,6 +459,16 @@ func TestStoreOrchestrationRunEventFlow(t *testing.T) {
 	if loaded.CodexThreadIDs["codex"] != "thread_1" || loaded.CodexThreadIDs["codex-a"] != "thread_a" || loaded.CodexThreadIDs["codex-b"] != "thread_b" {
 		t.Fatalf("codex thread map not merged: %+v", loaded.CodexThreadIDs)
 	}
+	if err := st.UpdateOrchestrationRunSessionStateWithClaude(ctx, run.ID, "", nil, false, map[string]string{"claude-a": "session_a", "claude-b": "session_b"}, map[string]bool{"claude-a": true}, ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = st.OrchestrationRunByID(ctx, run.ID, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ClaudeSessionIDs["claude-a"] != "session_a" || loaded.ClaudeSessionIDs["claude-b"] != "session_b" || !loaded.ClaudeStartedSlots["claude-a"] || loaded.ClaudeStartedSlots["claude-b"] {
+		t.Fatalf("Claude slot state was not isolated: %+v", loaded)
+	}
 }
 
 func TestListOrchestrationEventsReturnsLatestWindowInAscendingOrder(t *testing.T) {

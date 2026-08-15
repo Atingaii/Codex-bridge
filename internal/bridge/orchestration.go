@@ -23,6 +23,7 @@ import (
 
 type OrchestrationManager struct {
 	cfg         *config.Config
+	cliConfig   *cliConfigManager
 	lifetime    context.Context
 	stop        context.CancelFunc
 	sendMu      sync.Mutex
@@ -76,6 +77,8 @@ type orchestrationSessionState struct {
 	CodexThreadIDs       map[string]string
 	ClaudeSessionID      string
 	ClaudeSessionStarted bool
+	ClaudeSessionIDs     map[string]string
+	ClaudeStartedSlots   map[string]bool
 	CodexResumeMode      string
 	CodexResumeModes     map[string]string
 	ClaudeResumeMode     string
@@ -89,7 +92,8 @@ type orchestrationNativeSession struct {
 	nativeContextCompaction string
 	mu                      sync.Mutex
 	codex                   map[string]*orchestrationCodexSession
-	claude                  *orchestrationClaudeSession
+	claude                  map[string]*orchestrationClaudeSession
+	profileRuntime          map[string]orchestrationWorkerRuntime
 }
 
 type workspaceSnapshot struct {
@@ -121,6 +125,9 @@ const (
 	orchestrationCodexDefaultSlot            = "codex"
 	orchestrationCodexSlotA                  = "codex-a"
 	orchestrationCodexSlotB                  = "codex-b"
+	orchestrationClaudeDefaultSlot           = "claude"
+	orchestrationClaudeSlotA                 = "claude-a"
+	orchestrationClaudeSlotB                 = "claude-b"
 )
 
 var defaultModelCapacityRetryWaits = []time.Duration{10 * time.Second, 30 * time.Second, time.Minute}
@@ -144,6 +151,12 @@ func NewOrchestrationManager(cfg *config.Config) *OrchestrationManager {
 		codexThreadBusyRetryWaits: append([]time.Duration(nil), defaultCodexThreadBusyRetryWaits...),
 		nativeUsage:               make(map[string][]orchestrationUsage),
 	}
+}
+
+func (m *OrchestrationManager) SetCLIConfigManager(manager *cliConfigManager) {
+	m.mu.Lock()
+	m.cliConfig = manager
+	m.mu.Unlock()
 }
 
 func (m *OrchestrationManager) AttachOut(out chan<- protocol.Envelope) {
@@ -343,7 +356,7 @@ func (m *OrchestrationManager) nativeSession(runID, cwd string) *orchestrationNa
 	}
 	session := m.sessions[runID]
 	if session == nil {
-		session = &orchestrationNativeSession{runID: runID, cwd: cwd, codex: map[string]*orchestrationCodexSession{}}
+		session = &orchestrationNativeSession{runID: runID, cwd: cwd, codex: map[string]*orchestrationCodexSession{}, claude: map[string]*orchestrationClaudeSession{}, profileRuntime: map[string]orchestrationWorkerRuntime{}}
 		m.sessions[runID] = session
 	} else if cwd != "" {
 		session.cwd = cwd
@@ -369,9 +382,19 @@ func (s *orchestrationNativeSession) close() {
 			codexSessions = append(codexSessions, codex)
 		}
 	}
-	claude := s.claude
+	claudeSessions := make([]*orchestrationClaudeSession, 0, len(s.claude))
+	for _, claude := range s.claude {
+		if claude != nil {
+			claudeSessions = append(claudeSessions, claude)
+		}
+	}
+	runtimes := make([]orchestrationWorkerRuntime, 0, len(s.profileRuntime))
+	for _, runtime := range s.profileRuntime {
+		runtimes = append(runtimes, runtime)
+	}
 	s.codex = nil
 	s.claude = nil
+	s.profileRuntime = nil
 	s.mu.Unlock()
 	for _, codex := range codexSessions {
 		if codex.client != nil {
@@ -379,7 +402,7 @@ func (s *orchestrationNativeSession) close() {
 			codex.client.close()
 		}
 	}
-	if claude != nil {
+	for _, claude := range claudeSessions {
 		_ = claude.stdin.Close()
 		if claude.cmd != nil && claude.cmd.Process != nil {
 			_ = terminateProcessGroup(claude.cmd.Process.Pid)
@@ -389,6 +412,119 @@ func (s *orchestrationNativeSession) close() {
 			claude.release()
 		}
 	}
+	for _, runtime := range runtimes {
+		runtime.retainResumeMetadata()
+	}
+}
+
+func normalizeClaudeWorkerSlot(slot string) string {
+	switch strings.TrimSpace(slot) {
+	case orchestrationClaudeSlotA:
+		return orchestrationClaudeSlotA
+	case orchestrationClaudeSlotB:
+		return orchestrationClaudeSlotB
+	default:
+		return orchestrationClaudeDefaultSlot
+	}
+}
+
+func (s *orchestrationNativeSession) claudeSessionLocked(workerSlot string) *orchestrationClaudeSession {
+	if s == nil {
+		return nil
+	}
+	return s.claude[normalizeClaudeWorkerSlot(workerSlot)]
+}
+
+func (s *orchestrationNativeSession) setClaudeSessionLocked(workerSlot string, claude *orchestrationClaudeSession) {
+	if s == nil {
+		return
+	}
+	if s.claude == nil {
+		s.claude = map[string]*orchestrationClaudeSession{}
+	}
+	slot := normalizeClaudeWorkerSlot(workerSlot)
+	if claude == nil {
+		delete(s.claude, slot)
+		return
+	}
+	s.claude[slot] = claude
+}
+
+func (s *orchestrationSessionState) claudeSessionID(workerSlot string) string {
+	if s == nil {
+		return ""
+	}
+	slot := normalizeClaudeWorkerSlot(workerSlot)
+	if id := strings.TrimSpace(s.ClaudeSessionIDs[slot]); id != "" {
+		return id
+	}
+	if slot == orchestrationClaudeDefaultSlot {
+		return s.ClaudeSessionID
+	}
+	return ""
+}
+
+func (s *orchestrationSessionState) claudeStarted(workerSlot string) bool {
+	if s == nil {
+		return false
+	}
+	slot := normalizeClaudeWorkerSlot(workerSlot)
+	if started, ok := s.ClaudeStartedSlots[slot]; ok {
+		return started
+	}
+	return slot == orchestrationClaudeDefaultSlot && s.ClaudeSessionStarted
+}
+
+func (s *orchestrationSessionState) setClaudeStarted(workerSlot string, started bool) {
+	if s == nil {
+		return
+	}
+	slot := normalizeClaudeWorkerSlot(workerSlot)
+	if s.ClaudeStartedSlots == nil {
+		s.ClaudeStartedSlots = map[string]bool{}
+	}
+	s.ClaudeStartedSlots[slot] = started
+	if slot == orchestrationClaudeDefaultSlot {
+		s.ClaudeSessionStarted = started
+	}
+}
+
+func (s *orchestrationSessionState) claudeSessionIDsCopy() map[string]string {
+	if s == nil {
+		return nil
+	}
+	out := map[string]string{}
+	for slot, id := range s.ClaudeSessionIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			out[slot] = id
+		}
+	}
+	if id := strings.TrimSpace(s.ClaudeSessionID); id != "" {
+		out[orchestrationClaudeDefaultSlot] = id
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (s *orchestrationSessionState) claudeStartedSlotsCopy() map[string]bool {
+	if s == nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for slot, started := range s.ClaudeStartedSlots {
+		if started {
+			out[normalizeClaudeWorkerSlot(slot)] = true
+		}
+	}
+	if s.ClaudeSessionStarted {
+		out[orchestrationClaudeDefaultSlot] = true
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (s *orchestrationNativeSession) codexSessionLocked(workerSlot string) *orchestrationCodexSession {
@@ -539,6 +675,19 @@ func cleanCodexThreadIDs(values map[string]string) map[string]string {
 	return out
 }
 
+func cleanClaudeStartedSlots(values map[string]bool) map[string]bool {
+	if len(values) == 0 {
+		return map[string]bool{}
+	}
+	out := map[string]bool{}
+	for slot, started := range values {
+		if started {
+			out[normalizeClaudeWorkerSlot(slot)] = true
+		}
+	}
+	return out
+}
+
 type orchestrationApprovalRequester struct {
 	manager *OrchestrationManager
 	runID   string
@@ -659,6 +808,8 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	firstCLI := normalizeRelayFirstCLI(payload.FirstCLI)
 	if workerPair == protocol.WorkerPairCodexCodex {
 		firstCLI = "codex"
+	} else if workerPair == protocol.WorkerPairClaudeClaude {
+		firstCLI = "claude"
 	}
 	maxTurns := payload.MaxTurns
 	if maxTurns <= 0 {
@@ -686,6 +837,8 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		CodexThreadIDs:      cleanCodexThreadIDs(payload.CodexThreadIDs),
 		CodexResumeModes:    map[string]string{},
 		ClaudeSessionID:     stableOrchestrationSessionID(payload.RunID, "claude"),
+		ClaudeSessionIDs:    cleanCodexThreadIDs(payload.ClaudeSessionIDs),
+		ClaudeStartedSlots:  cleanClaudeStartedSlots(payload.ClaudeStartedSlots),
 		NativeSession:       nativeSession,
 		CommandFingerprints: map[string]bridgeprofiles.CommandFingerprint{},
 	}
@@ -695,6 +848,25 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			sessionState.setCodexThreadID(orchestrationDefaultCodexSlot(workerPair), sessionState.CodexThreadID)
 		}
 		sessionState.ClaudeSessionStarted = payload.ClaudeStarted
+		if payload.ClaudeStarted {
+			sessionState.setClaudeStarted(orchestrationClaudeDefaultSlot, true)
+		}
+	}
+	if workerPair == protocol.WorkerPairClaudeClaude {
+		if sessionState.ClaudeSessionIDs[orchestrationClaudeSlotA] == "" {
+			sessionState.ClaudeSessionIDs[orchestrationClaudeSlotA] = stableOrchestrationSessionID(payload.RunID, orchestrationClaudeSlotA)
+		}
+		if sessionState.ClaudeSessionIDs[orchestrationClaudeSlotB] == "" {
+			sessionState.ClaudeSessionIDs[orchestrationClaudeSlotB] = stableOrchestrationSessionID(payload.RunID, orchestrationClaudeSlotB)
+		}
+		if payload.Resume {
+			// Legacy runs carry only one boolean. New runs retain each slot's
+			// actual transcript state so a never-started peer cannot resume.
+			if len(payload.ClaudeStartedSlots) == 0 && payload.ClaudeStarted {
+				sessionState.setClaudeStarted(orchestrationClaudeSlotA, true)
+				sessionState.setClaudeStarted(orchestrationClaudeSlotB, true)
+			}
+		}
 	}
 	if sessionState.CodexThreadID == "" {
 		sessionState.CodexThreadID = firstNonEmpty(sessionState.CodexThreadIDs[orchestrationCodexDefaultSlot], sessionState.CodexThreadIDs[orchestrationCodexSlotA])
@@ -751,6 +923,8 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	}
 
 	var history []orchestrationTurn
+	var terminalReason string
+	var verifierVerdict *protocol.VerifierVerdict
 	for turn := 1; turn <= maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
@@ -768,11 +942,13 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			switch task.WorkerSlot {
 			case orchestrationCodexDefaultSlot, orchestrationCodexSlotA, orchestrationCodexSlotB:
 				turnPlan.CLI = "codex"
-			case "claude":
+			case orchestrationClaudeDefaultSlot, orchestrationClaudeSlotA, orchestrationClaudeSlotB:
 				turnPlan.CLI = "claude"
 			}
 		}
 		role, cli, workerSlot := turnPlan.Role, turnPlan.CLI, turnPlan.WorkerSlot
+		binding, bound := workerProfileBinding(payload, workerSlot, cli)
+		turnModel := m.workerModelForPayload(payload, workerSlot, cli)
 		turnID := fmt.Sprintf("%s-%02d", payload.RunID, turn)
 		if payload.PromptSeq > 0 {
 			turnID = fmt.Sprintf("%s-p%03d-%02d", payload.RunID, payload.PromptSeq, turn)
@@ -796,6 +972,19 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 				StartedAt:  turnStartedAt.UnixMilli(),
 				CLI:        cli,
 				WorkerSlot: workerSlot,
+				PresetName: func() string {
+					if bound {
+						return binding.Name
+					}
+					return ""
+				}(),
+				Model: turnModel,
+				ReasoningEffort: func() string {
+					if bound {
+						return binding.ReasoningEffort
+					}
+					return ""
+				}(),
 				Turn:       turn,
 				MaxTurns:   maxTurns,
 				Round:      round,
@@ -808,6 +997,19 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 				"cwd":        m.cwd(payload),
 				"cli":        cli,
 				"workerSlot": workerSlot,
+				"model":      turnModel,
+				"presetName": func() string {
+					if bound {
+						return binding.Name
+					}
+					return ""
+				}(),
+				"reasoningEffort": func() string {
+					if bound {
+						return binding.ReasoningEffort
+					}
+					return ""
+				}(),
 				"turn":       turn,
 				"maxTurns":   maxTurns,
 				"promptText": prompt,
@@ -879,8 +1081,14 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			RunEndData:  m.relayRunEndData(cli, workerSlot, workerPair, sessionState, runCWD),
 			Data:        relayTurnEndData(cli, workerSlot, sessionState),
 		})
-		if turnStatus == "success" && relayCanConverge(mode, profile, history) {
-			break
+		if turnStatus == "success" {
+			verdict := evaluateOrchestrationVerdict(mode, profile, payload.TaskGraph != nil, history)
+			m.emit(payload.RunID, verifierVerdictEvent(turnID, record, verdict))
+			if verdict.Status == verifierVerdictPass {
+				terminalReason = "verified-early"
+				verifierVerdict = &verdict
+				break
+			}
 		}
 		if turn < maxTurns && turnStatus == "success" {
 			m.runPostTurnNativeMaintenance(ctx, payload.RunID, turnID, role, cli, workerSlot, &sessionState)
@@ -916,14 +1124,17 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			return
 		}
 	}
-	finalRunEndData := runEndDataWithNativeResume(&protocol.RunEndData{
+	finalRunEndData := m.runEndDataWithNativeResumeForSession(&protocol.RunEndData{
 		WorkerPair:         workerPair,
 		CodexThreadID:      sessionState.CodexThreadID,
 		CodexThreadIDs:     cleanCodexThreadIDs(sessionState.CodexThreadIDs),
 		ClaudeSessionID:    sessionState.ClaudeSessionID,
-		CodexNativeResume:  codexNativeResumeInfoForSlot(orchestrationDefaultCodexSlot(workerPair), sessionState.CodexThreadID, runCWD),
-		ClaudeNativeResume: m.claudeNativeResumeInfo(sessionState.ClaudeSessionID, runCWD),
-	}, runCWD)
+		ClaudeSessionIDs:   sessionState.claudeSessionIDsCopy(),
+		CodexNativeResume:  codexNativeResumeInfoForSlot(orchestrationDefaultCodexSlot(workerPair), sessionState.CodexThreadID, runCWD, codexWorkerRuntime(sessionState.NativeSession, orchestrationDefaultCodexSlot(workerPair))),
+		ClaudeNativeResume: m.claudeNativeResumeInfoForSlotWithRuntime(orchestrationClaudeDefaultSlot, sessionState.ClaudeSessionID, runCWD, claudeWorkerRuntime(sessionState.NativeSession, orchestrationClaudeDefaultSlot)),
+		TerminalReason:     terminalReason,
+		VerifierVerdict:    verifierVerdict,
+	}, runCWD, sessionState.NativeSession)
 	m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 		Kind:          "run.end",
 		Status:        store.OrchestrationCompleted,
@@ -936,9 +1147,13 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			"codexThreadId":      sessionState.CodexThreadID,
 			"codexThreadIds":     cleanCodexThreadIDs(sessionState.CodexThreadIDs),
 			"claudeSessionId":    sessionState.ClaudeSessionID,
+			"claudeSessionIds":   sessionState.claudeSessionIDsCopy(),
+			"claudeStartedSlots": sessionState.claudeStartedSlotsCopy(),
 			"codexNativeResume":  finalRunEndData.CodexNativeResume,
 			"claudeNativeResume": finalRunEndData.ClaudeNativeResume,
 			"nativeResume":       finalRunEndData.NativeResume,
+			"terminalReason":     finalRunEndData.TerminalReason,
+			"verifierVerdict":    finalRunEndData.VerifierVerdict,
 		},
 	})
 	m.runFinalNativeMaintenance(ctx, workerPair, mode, firstCLI, len(history), &sessionState)
@@ -1009,7 +1224,7 @@ func (m *OrchestrationManager) runRelayTurnWithContinuations(ctx context.Context
 			content, tools, callErr := m.runRelayCLIWithSubmissionRetries(ctx, payload, turnID, role, cli, workerSlot, callPrompt, state)
 			recordCommandFingerprints(state, runCWD, tools)
 			record := newOrchestrationTurnRecordWithSlot(turnID, role, cli, workerSlot, content, tools)
-			record.Usage = m.orchestrationUsageForTurn(turnID, cli, callPrompt, content)
+			record.Usage = m.orchestrationUsageForTurn(turnID, m.workerModelForPayload(payload, workerSlot, cli), callPrompt, content)
 			if callErr != nil {
 				record.Err = visibleCLIError(callErr)
 			}
@@ -1269,7 +1484,7 @@ func (m *OrchestrationManager) resetNativeInteractiveSessionForContinuation(cli,
 		}
 		session.setCodexSessionLocked(workerSlot, nil)
 	case "claude":
-		claude := session.claude
+		claude := session.claudeSessionLocked(workerSlot)
 		if claude == nil {
 			return
 		}
@@ -1281,7 +1496,7 @@ func (m *OrchestrationManager) resetNativeInteractiveSessionForContinuation(cli,
 		if claude.release != nil {
 			claude.release()
 		}
-		session.claude = nil
+		session.setClaudeSessionLocked(workerSlot, nil)
 	}
 }
 

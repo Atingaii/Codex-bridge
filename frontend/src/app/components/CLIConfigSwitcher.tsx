@@ -8,7 +8,7 @@ import { Button, Input } from './ui';
 
 type CLI = 'codex' | 'claude';
 
-export function CLIConfigSwitcher({ agent, t, close }: { agent: Agent; t: UIText; close: () => void }) {
+export function CLIConfigSwitcher({ agent, t, close, onPresetsChanged }: { agent: Agent; t: UIText; close: () => void; onPresetsChanged: () => Promise<void> | void }) {
 	const capability = agent.capabilities?.configSwitcher;
 	const [cli, setCLI] = useState<CLI>('codex');
 	const [presets, setPresets] = useState<CLIConfigPreset[]>([]);
@@ -16,6 +16,9 @@ export function CLIConfigSwitcher({ agent, t, close }: { agent: Agent; t: UIText
 	const [baseUrl, setBaseUrl] = useState('');
 	const [apiKey, setAPIKey] = useState('');
 	const [model, setModel] = useState('');
+	const [reasoningEffort, setReasoningEffort] = useState('');
+	const [reasoningLevels, setReasoningLevels] = useState<string[]>([]);
+	const [reasoningDefault, setReasoningDefault] = useState('');
 	const [models, setModels] = useState<string[]>([]);
 	const [modelSearch, setModelSearch] = useState('');
 	const [testedSecret, setTestedSecret] = useState<EncryptedSecret | null>(null);
@@ -45,6 +48,9 @@ export function CLIConfigSwitcher({ agent, t, close }: { agent: Agent; t: UIText
 		setBaseUrl('');
 		setAPIKey('');
 		setModel('');
+		setReasoningEffort('');
+		setReasoningLevels([]);
+		setReasoningDefault('');
 		setModels([]);
 		setModelSearch('');
 		setTested(false);
@@ -63,10 +69,15 @@ export function CLIConfigSwitcher({ agent, t, close }: { agent: Agent; t: UIText
 			const secret = apiKey.trim() ? await encryptForBridge(apiKey, capability.publicKey) : testedSecret || undefined;
 			const data = await api<{ result: CLIConfigResult }>(`/api/agents/${encodeURIComponent(agent.id)}/cli-config/test`, {
 				method: 'POST',
-				body: JSON.stringify({ cli, presetId: editingPresetId || undefined, baseUrl: baseUrl.trim(), model: model.trim(), secret, keyId: capability.keyId }),
+				body: JSON.stringify({ cli, presetId: editingPresetId || undefined, baseUrl: baseUrl.trim(), model: model.trim(), reasoningEffort, reasoningLevels, reasoningDefault, secret, keyId: capability.keyId }),
 			});
 			setBaseUrl(data.result.baseUrl || baseUrl.trim());
 			setModels(data.result.models || []);
+			const metadata = data.result.modelMetadata;
+			setReasoningLevels(metadata?.reviewed ? (metadata.supportedReasoningLevels || []) : []);
+			setReasoningDefault(metadata?.reviewed ? (metadata.defaultReasoningLevel || '') : '');
+			if (metadata?.reviewed && metadata.defaultReasoningLevel && !(metadata.supportedReasoningLevels || []).includes(reasoningEffort)) setReasoningEffort(metadata.defaultReasoningLevel);
+			if (!metadata?.reviewed) setReasoningEffort('');
 			setTestedSecret(secret || null);
 			setTested(true);
 			setAPIKey('');
@@ -91,9 +102,10 @@ export function CLIConfigSwitcher({ agent, t, close }: { agent: Agent; t: UIText
 				: `/api/agents/${encodeURIComponent(agent.id)}/cli-config/presets`;
 			await api(path, {
 				method: editing ? 'PUT' : 'POST',
-				body: JSON.stringify({ cli, name: name.trim(), baseUrl: baseUrl.trim(), model: model.trim(), secret: testedSecret || undefined, keyId: capability.keyId }),
+				body: JSON.stringify({ cli, name: name.trim(), baseUrl: baseUrl.trim(), model: model.trim(), reasoningEffort, reasoningLevels, reasoningDefault, secret: testedSecret || undefined, keyId: capability.keyId }),
 			});
 			await loadPresets();
+			await onPresetsChanged();
 			clearEditor();
 			setMessage(editing ? t.presetUpdated : t.presetSaved);
 		} catch (err) {
@@ -108,6 +120,9 @@ export function CLIConfigSwitcher({ agent, t, close }: { agent: Agent; t: UIText
 		setName(preset.name);
 		setBaseUrl(preset.baseUrl);
 		setModel(preset.model);
+		setReasoningEffort(preset.reasoningEffort || preset.reasoningDefault || '');
+		setReasoningLevels(preset.reasoningLevels || []);
+		setReasoningDefault(preset.reasoningDefault || '');
 		setAPIKey('');
 		setModels([]);
 		setModelSearch('');
@@ -123,25 +138,13 @@ export function CLIConfigSwitcher({ agent, t, close }: { agent: Agent; t: UIText
 		setBaseUrl('');
 		setAPIKey('');
 		setModel('');
+		setReasoningEffort('');
+		setReasoningLevels([]);
+		setReasoningDefault('');
 		setModels([]);
 		setModelSearch('');
 		setTested(false);
 		setTestedSecret(null);
-	};
-
-	const applyPreset = async (preset: CLIConfigPreset) => {
-		setBusy(`apply:${preset.id}`);
-		setError('');
-		setMessage('');
-		try {
-			await api(`/api/agents/${encodeURIComponent(agent.id)}/cli-config/presets/${encodeURIComponent(preset.id)}/apply`, { method: 'POST', body: '{}' });
-			await loadPresets();
-			setMessage(t.configurationApplied);
-		} catch (err) {
-			setError(err instanceof Error ? err.message : String(err));
-		} finally {
-			setBusy('');
-		}
 	};
 
 	const deletePreset = async (preset: CLIConfigPreset) => {
@@ -151,6 +154,7 @@ export function CLIConfigSwitcher({ agent, t, close }: { agent: Agent; t: UIText
 		try {
 			await api(`/api/agents/${encodeURIComponent(agent.id)}/cli-config/presets/${encodeURIComponent(preset.id)}`, { method: 'DELETE' });
 			await loadPresets();
+			await onPresetsChanged();
 			if (editingPresetId === preset.id) clearEditor();
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
@@ -198,11 +202,10 @@ export function CLIConfigSwitcher({ agent, t, close }: { agent: Agent; t: UIText
 							{filteredPresets.length ? filteredPresets.map((preset) => (
 								<div key={preset.id} className="flex flex-col gap-2 rounded-md border border-border px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3">
 									<div className="min-w-0 flex-1">
-										<div className="flex items-center gap-2"><span className="truncate text-sm font-medium">{preset.name}</span>{preset.active && <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">{t.activePreset}</span>}</div>
-										<div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">{preset.model} · {preset.baseUrl}</div>
+										<div className="flex items-center gap-2"><span className="truncate text-sm font-medium">{preset.name}</span></div>
+									<div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">{preset.model} · {preset.reasoningEffort || t.defaultReasoningEffort} · {preset.baseUrl}</div>
 									</div>
 									<div className="flex shrink-0 items-center gap-1.5">
-										<Button size="sm" variant="secondary" className="h-7" onClick={() => applyPreset(preset)} disabled={!!busy}>{busy === `apply:${preset.id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : t.applyPreset}</Button>
 										<Button size="sm" variant="ghost" className="h-7 gap-1.5 text-muted-foreground" onClick={() => editPreset(preset)} disabled={!!busy} aria-label={t.editPreset}><Pencil className="h-3.5 w-3.5" />{t.editPreset}</Button>
 										<Button size="icon" variant="ghost" className="h-7 w-7 rounded-md text-muted-foreground hover:text-destructive" onClick={() => deletePreset(preset)} disabled={!!busy} aria-label={t.deletePresetConfirm}><Trash2 className="h-3.5 w-3.5" /></Button>
 									</div>
@@ -216,17 +219,19 @@ export function CLIConfigSwitcher({ agent, t, close }: { agent: Agent; t: UIText
 								<Field label={t.providerName}><Input value={name} onChange={(event) => setName(event.target.value)} placeholder={cli === 'codex' ? 'DeepSeek Codex' : 'Claude proxy'} /></Field>
 									<Field label={t.baseUrl}><Input value={baseUrl} onChange={(event) => { setBaseUrl(event.target.value); setTested(false); }} placeholder="https://api.example.com/v1" /></Field>
 									<Field label={t.apiKey}><Input type="password" autoComplete="new-password" value={apiKey} onChange={(event) => { setAPIKey(event.target.value); setTested(false); setTestedSecret(null); }} placeholder={editingPresetId ? t.keepExistingAPIKey : 'sk-...'} /></Field>
-									<Field label={t.modelName}><Input value={model} onChange={(event) => { setModel(event.target.value); setTested(false); }} placeholder={cli === 'codex' ? 'model-name' : 'claude-compatible-model'} /></Field>
+									<Field label={t.modelName}><Input value={model} onChange={(event) => { setModel(event.target.value); setReasoningEffort(''); setReasoningLevels([]); setReasoningDefault(''); setTested(false); }} placeholder={cli === 'codex' ? 'model-name' : 'claude-compatible-model'} /></Field>
+									<Field label={t.reasoningEffort}><select value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value)} disabled={!reasoningLevels.length} className="flex h-9 w-full rounded-md border border-input bg-transparent px-2 py-1 text-xs"><option value="">{reasoningLevels.length ? t.defaultReasoningEffort : t.modelCatalogUnavailable}</option>{reasoningLevels.map((level) => <option key={level} value={level}>{level}{level === reasoningDefault ? ` (${t.defaultReasoningEffort})` : ''}</option>)}</select></Field>
 							</div>
 							<div className="flex items-start gap-2 text-[11px] leading-relaxed text-muted-foreground"><KeyRound className="mt-0.5 h-3.5 w-3.5 shrink-0" />{editingPresetId ? t.editAPIKeyHint : t.apiKeyEncryptedHint}</div>
 							<div className="flex flex-wrap gap-2">
 									<Button size="sm" variant="secondary" className="gap-1.5" onClick={testConnection} disabled={!!busy || (!apiKey.trim() && !testedSecret && !editingPresetId) || !baseUrl.trim()}>{busy === 'test' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ServerCog className="h-3.5 w-3.5" />}{busy === 'test' ? t.testingConnection : t.testConnection}</Button>
 								<Button size="sm" onClick={savePreset} disabled={!!busy || !tested || (!testedSecret && !editingPresetId) || !name.trim() || !model.trim()}>{busy === 'save' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : editingPresetId ? t.updatePreset : t.savePreset}</Button>
 							</div>
-							{tested && <div className="space-y-2 rounded-md border border-emerald-500/25 bg-emerald-500/5 p-3">
+								{tested && <div className="space-y-2 rounded-md border border-emerald-500/25 bg-emerald-500/5 p-3">
 								<div className="flex items-center gap-2 text-xs font-medium text-emerald-700 dark:text-emerald-300"><Check className="h-3.5 w-3.5" />{t.connectionPassed}</div>
 								<div className="truncate font-mono text-[11px] text-muted-foreground">{t.normalizedBaseUrl}: {baseUrl}</div>
-									{models.length ? <><div className="relative"><Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" /><Input className="pl-8" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder={t.searchModels} /></div><div className="max-h-36 overflow-y-auto rounded-md border border-border bg-background p-1 elegant-scrollbar">{filteredModels.slice(0, 200).map((item) => <button key={item} className={cn('block w-full truncate rounded px-2 py-1.5 text-left font-mono text-xs hover:bg-muted', model === item && 'bg-primary/10 text-primary')} onClick={() => { setModel(item); setTested(false); setMessage(''); }}>{item}</button>)}</div></> : <div className="text-xs text-muted-foreground">{t.modelListUnavailable}</div>}
+									{models.length ? <><div className="relative"><Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" /><Input className="pl-8" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder={t.searchModels} /></div><div className="max-h-36 overflow-y-auto rounded-md border border-border bg-background p-1 elegant-scrollbar">{filteredModels.slice(0, 200).map((item) => <button key={item} className={cn('block w-full truncate rounded px-2 py-1.5 text-left font-mono text-xs hover:bg-muted', model === item && 'bg-primary/10 text-primary')} onClick={() => { setModel(item); setReasoningEffort(''); setReasoningLevels([]); setReasoningDefault(''); setTested(false); setMessage(''); }}>{item}</button>)}</div></> : <div className="text-xs text-muted-foreground">{t.modelListUnavailable}</div>}
+									{tested && !reasoningLevels.length && <div className="text-[11px] text-muted-foreground">{t.modelCatalogUnavailable}</div>}
 							</div>}
 						</section>
 

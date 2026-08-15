@@ -115,6 +115,13 @@ func TestOrchestrationTaskSpecsAlwaysCreateCompleteRound(t *testing.T) {
 	}
 }
 
+func TestOrchestrationTaskSpecsUseIndependentClaudeSlots(t *testing.T) {
+	specs := orchestrationTaskSpecs("digest", protocol.WorkerPairClaudeClaude, "collaboration")
+	if len(specs) != 4 || specs[0].WorkerSlot != "claude-a" || specs[1].WorkerSlot != "claude-b" || specs[2].WorkerSlot != "claude-a" || specs[3].WorkerSlot != "claude-b" {
+		t.Fatalf("Claude pair task slots = %#v", specs)
+	}
+}
+
 func TestOrchestrationTaskSpecsPlanWorkspaceAddsReviewedPlanBarrier(t *testing.T) {
 	specs := orchestrationTaskSpecs("digest", protocol.WorkerPairCodexCodex, "collaboration", true)
 	wantNames := []string{"plan", "plan-review", "candidate-a", "candidate-b", "integrate", "review"}
@@ -342,6 +349,9 @@ func TestOrchestrationProgressRequiresRolloutAndOwnership(t *testing.T) {
 	}
 	run := createOrchestrationRun(t, st, adminID, agentID)
 	payload := protocol.OrchestrationStartPayload{RunID: run.ID, Mode: "collaboration", Prompt: "prove", MaxTurns: 1, PlanWorkspace: true}
+	payload.WorkerProfiles = map[string]protocol.WorkerProfileBinding{
+		"codex-a": {PresetID: "preset_private", CLI: "codex", Model: "private-model", Secret: protocol.EncryptedSecret{Ciphertext: "ciphertext-must-not-reach-browser"}},
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
@@ -362,6 +372,13 @@ func TestOrchestrationProgressRequiresRolloutAndOwnership(t *testing.T) {
 	}
 
 	body := getJSON(t, s, adminID, "/api/orchestrations/"+run.ID+"/progress", http.StatusOK)
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "ciphertext-must-not-reach-browser") {
+		t.Fatalf("progress response leaked worker profile ciphertext: %s", encoded)
+	}
 	if body["planWorkspace"] != true {
 		t.Fatalf("admin progress mode = %#v", body)
 	}
@@ -571,6 +588,60 @@ func TestDurableTaskGraphRunsEveryConfiguredRound(t *testing.T) {
 	}
 	if loaded.Status != store.OrchestrationCompleted {
 		t.Fatalf("final round did not complete run: %#v", loaded)
+	}
+}
+
+func TestDurableTaskGraphVerifiedEarlyDoesNotDispatchAnotherRound(t *testing.T) {
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	run := createOrchestrationRun(t, st, userID, agentID)
+	payload := protocol.OrchestrationStartPayload{
+		RunID: run.ID, Mode: "collaboration", WorkerPair: protocol.WorkerPairCodexCodex,
+		Prompt: "finish once independently verified", CWD: t.TempDir(), MaxTurns: 2, MaxTurnsRequested: 2,
+	}
+	conn := testBridgeConn(agentID, 8)
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+	if err := s.createAndDispatchTaskGraph(context.Background(), run, payload); err != nil {
+		t.Fatal(err)
+	}
+	for position := 0; position < 4; position++ {
+		dispatched := decodeTaskDispatchPayload(t, <-conn.send)
+		task := dispatched.TaskGraph.Tasks[0]
+		ref := protocol.TaskAttemptRef{GraphID: dispatched.TaskGraph.ID, TaskID: task.ID, AttemptID: task.AttemptID, Role: task.Role, WorkerSlot: task.WorkerSlot, PayloadDigest: task.PayloadDigest}
+		s.handleOrchestrationEvent(context.Background(), protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", protocol.OrchestrationEventPayload{
+			RunID: run.ID, Kind: "run.start", Task: &ref,
+		}))
+		end := protocol.OrchestrationEventPayload{RunID: run.ID, Kind: "run.end", Content: "independent review passed", Task: &ref}
+		if position == 3 {
+			end.RunConclusion = &protocol.RunConclusion{Outcome: "satisfied", Summary: "independent review passed"}
+			end.RunEndData = &protocol.RunEndData{TerminalReason: "verified-early", VerifierVerdict: &protocol.VerifierVerdict{Status: "pass", Reason: "independent reviewer confirmed the result"}}
+		}
+		s.handleOrchestrationEvent(context.Background(), protocol.MustEnvelope(protocol.TypeOrchestrationEvent, "", end))
+	}
+	loaded, err := st.OrchestrationRunByID(context.Background(), run.ID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != store.OrchestrationCompleted {
+		t.Fatalf("verified run status = %q", loaded.Status)
+	}
+	graph, err := st.TaskGraphByRun(context.Background(), run.ID)
+	if err != nil || graph.Generation != 1 || graph.Status != store.TaskGraphCompleted {
+		t.Fatalf("verified early unexpectedly advanced graph=%#v err=%v", graph, err)
+	}
+	select {
+	case next := <-conn.send:
+		t.Fatalf("verified early dispatched another round: %#v", next)
+	default:
+	}
+	events, err := st.ListOrchestrationEvents(context.Background(), run.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Task == nil && event.Kind == "run.end" && (event.RunEndData == nil || event.RunEndData.TerminalReason != "verified-early") {
+			t.Fatalf("public terminal event lost verifier result: %#v", event)
+		}
 	}
 }
 

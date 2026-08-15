@@ -1,3 +1,9 @@
+> **DEPRECATED - the custom model catalog and machine-wide orchestration assumptions were replaced**
+>
+> Current design: [ADR-013](013-hub-model-catalog-and-claude-effort.md) and
+> [ADR-011](011-orchestration-worker-profiles-and-verdicts.md). Historical only;
+> do not implement from this doc.
+
 # ADR-009: Remote CLI Configuration Switcher
 
 ## Status
@@ -47,7 +53,8 @@ starts nor impersonates an official authorization flow.
 - Hub cannot read stored API keys, although a fully compromised Hub capable of
   replacing both frontend code and Bridge public keys remains outside this
   threat model.
-- No Redis or per-task provider revision is introduced.
+- No Redis or per-task provider revision is introduced. Per-slot orchestration
+  pinning is separately defined by [ADR-011](011-orchestration-worker-profiles-and-verdicts.md).
 - A Bridge upgrade is required for this feature.
 - Switching with another native configuration tool remains last-writer-wins;
   Bridge-owned catalog files do not modify MCP, Skill, permission, or session

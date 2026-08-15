@@ -37,19 +37,23 @@ type codexScanResult struct {
 }
 
 func (m *OrchestrationManager) runCodex(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt string) (string, []RunnerToolEvent, error) {
-	content, tools, _, _, err := m.runCodexWithThread(ctx, payload, turnID, role, prompt, "")
+	content, tools, _, _, err := m.runCodexWithThread(ctx, payload, turnID, role, orchestrationCodexDefaultSlot, prompt, "")
 	return content, tools, err
 }
 
 func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, workerSlot, prompt string, state *orchestrationSessionState) (string, []RunnerToolEvent, string, string, error) {
 	if state == nil || state.NativeSession == nil {
-		return m.runCodexWithThread(ctx, payload, turnID, role, prompt, "")
+		return m.runCodexWithThread(ctx, payload, turnID, role, workerSlot, prompt, "")
 	}
 	workerSlot = normalizeCodexWorkerSlot(workerSlot)
 	session := state.NativeSession
+	runtime, err := m.workerRuntime(payload, workerSlot, "codex", session)
+	if err != nil {
+		return "", nil, state.codexThreadID(workerSlot), "codex-profile-error", err
+	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	codex, err := m.ensureCodexInteractiveSessionLocked(ctx, payload, workerSlot, state)
+	codex, err := m.ensureCodexInteractiveSessionLocked(ctx, payload, workerSlot, state, runtime)
 	if err != nil {
 		return "", nil, state.codexThreadID(workerSlot), "codex-interactive-error", err
 	}
@@ -60,6 +64,8 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 		RunID:          payload.RunID,
 		PromptID:       turnID,
 		CWD:            m.cwd(payload),
+		Env:            runtime.env,
+		Model:          runtime.model,
 		Approvals: orchestrationApprovalRequester{
 			manager: m,
 			runID:   payload.RunID,
@@ -125,7 +131,7 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 			return strings.TrimSpace(result.result.Content), snapshotTools(), codex.threadID, resumeMode, timeoutErr
 		}
 		if len(result.result.Usage) > 0 {
-			m.recordNativeUsage(turnID, "codex", codexBridgeModel(m.cfg), result.result.Usage)
+			m.recordNativeUsage(turnID, "codex", firstNonEmpty(runtime.model, codexBridgeModel(m.cfg)), result.result.Usage)
 		}
 		return strings.TrimSpace(result.result.Content), snapshotTools(), codex.threadID, resumeMode, result.err
 	case <-ctx.Done():
@@ -133,7 +139,7 @@ func (m *OrchestrationManager) runCodexInteractive(ctx context.Context, payload 
 	}
 }
 
-func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.Context, payload protocol.OrchestrationStartPayload, workerSlot string, state *orchestrationSessionState) (*orchestrationCodexSession, error) {
+func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.Context, payload protocol.OrchestrationStartPayload, workerSlot string, state *orchestrationSessionState, runtime orchestrationWorkerRuntime) (*orchestrationCodexSession, error) {
 	session := state.NativeSession
 	workerSlot = normalizeCodexWorkerSlot(workerSlot)
 	if codex := session.codexSessionLocked(workerSlot); codex != nil && codex.client != nil && codex.threadID != "" {
@@ -141,7 +147,7 @@ func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.C
 		if codex.client.isClosed() {
 			session.setCodexSessionLocked(workerSlot, nil)
 			state.setCodexThreadID(workerSlot, codex.threadID)
-			return m.ensureCodexInteractiveSessionLocked(ctx, payload, workerSlot, state)
+			return m.ensureCodexInteractiveSessionLocked(ctx, payload, workerSlot, state, runtime)
 		}
 		if codex.loaded {
 			return codex, nil
@@ -150,6 +156,7 @@ func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.C
 			RemoteThreadID: codex.threadID,
 			RunID:          payload.RunID,
 			CWD:            m.cwd(payload),
+			Model:          runtime.model,
 		})); err != nil {
 			codex.client.close()
 			session.setCodexSessionLocked(workerSlot, nil)
@@ -164,6 +171,8 @@ func (m *OrchestrationManager) ensureCodexInteractiveSessionLocked(ctx context.C
 		RemoteThreadID: state.codexThreadID(workerSlot),
 		RunID:          payload.RunID,
 		CWD:            m.cwd(payload),
+		Env:            runtime.env,
+		Model:          runtime.model,
 	}
 	client, err := runner.start(context.Background(), req)
 	if err != nil {
@@ -273,13 +282,14 @@ func waitForCodexNativeCompaction(ctx context.Context, client *appServerClient, 
 	}
 }
 
-func (m *OrchestrationManager) runCodexWithThread(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt, threadID string) (string, []RunnerToolEvent, string, string, error) {
+func (m *OrchestrationManager) runCodexWithThread(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, workerSlot, prompt, threadID string) (string, []RunnerToolEvent, string, string, error) {
+	workerSlot = normalizeCodexWorkerSlot(workerSlot)
 	if m.shouldRunCodexAppServer() {
-		return m.runCodexAppServerWithThread(ctx, payload, turnID, role, prompt, threadID)
+		return m.runCodexAppServerWithThread(ctx, payload, turnID, role, workerSlot, prompt, threadID)
 	}
-	attempt := m.runCodexExecAttempt(ctx, payload, turnID, role, prompt, threadID)
+	attempt := m.runCodexExecAttempt(ctx, payload, turnID, role, workerSlot, prompt, threadID)
 	if len(attempt.usage) > 0 {
-		m.recordNativeUsage(turnID, "codex", codexBridgeModel(m.cfg), attempt.usage)
+		m.recordNativeUsage(turnID, "codex", m.codexModelForPayload(payload, workerSlot), attempt.usage)
 	}
 	if threadID != "" {
 		if attempt.threadID != "" && attempt.threadID != threadID {
@@ -314,9 +324,9 @@ func (m *OrchestrationManager) runCodexWithThread(ctx context.Context, payload p
 					"relayOnly":        true,
 				},
 			})
-			fresh := m.runCodexExecAttempt(ctx, payload, turnID, role, prompt, "")
+			fresh := m.runCodexExecAttempt(ctx, payload, turnID, role, workerSlot, prompt, "")
 			if len(fresh.usage) > 0 {
-				m.recordNativeUsage(turnID, "codex", codexBridgeModel(m.cfg), fresh.usage)
+				m.recordNativeUsage(turnID, "codex", m.codexModelForPayload(payload, workerSlot), fresh.usage)
 			}
 			return fresh.content, fresh.tools, firstNonEmpty(fresh.threadID, attempt.threadID, threadID), "codex-fresh-after-resume-miss", fresh.err
 		}
@@ -340,15 +350,20 @@ type codexExecAttempt struct {
 	usage         json.RawMessage
 }
 
-func (m *OrchestrationManager) runCodexExecAttempt(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt, threadID string) codexExecAttempt {
+func (m *OrchestrationManager) runCodexExecAttempt(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, workerSlot, prompt, threadID string) codexExecAttempt {
 	prompt = sanitizePromptText(prompt)
 	cmdCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	args := m.codexOrchestrationArgs(payload, threadID)
+	args := m.codexOrchestrationArgs(payload, workerSlot, threadID)
 	cwd := m.cwd(payload)
 
 	cmd := exec.CommandContext(cmdCtx, m.codexPath(), args...)
 	configureManagedCommand(cmd)
+	runtime, runtimeErr := m.codexRuntime(payload, workerSlot)
+	if runtimeErr != nil {
+		return codexExecAttempt{threadID: threadID, err: runtimeErr}
+	}
+	applyWorkerRuntime(cmd, runtime)
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -434,10 +449,11 @@ func isCodexResumeMissingThreadError(err error) bool {
 	return false
 }
 
-func (m *OrchestrationManager) codexOrchestrationArgs(payload protocol.OrchestrationStartPayload, threadID string) []string {
+func (m *OrchestrationManager) codexOrchestrationArgs(payload protocol.OrchestrationStartPayload, workerSlot, threadID string) []string {
+	workerSlot = normalizeCodexWorkerSlot(workerSlot)
 	if threadID != "" {
 		args := []string{"exec", "resume", "--json", "--skip-git-repo-check"}
-		if model := codexBridgeModel(m.cfg); model != "" {
+		if model := m.codexModelForPayload(payload, workerSlot); model != "" {
 			args = append(args, "--model", model)
 		}
 		if codexBypassApprovalsAndSandbox(m.cfg) {
@@ -454,7 +470,7 @@ func (m *OrchestrationManager) codexOrchestrationArgs(payload protocol.Orchestra
 	}
 
 	args := []string{"exec", "--json", "--color", "never", "--skip-git-repo-check"}
-	if model := codexBridgeModel(m.cfg); model != "" {
+	if model := m.codexModelForPayload(payload, workerSlot); model != "" {
 		args = append(args, "--model", model)
 	}
 	if codexBypassApprovalsAndSandbox(m.cfg) {
@@ -472,7 +488,7 @@ func (m *OrchestrationManager) codexOrchestrationArgs(payload protocol.Orchestra
 	return append(args, "-")
 }
 
-func (m *OrchestrationManager) runCodexAppServerWithThread(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, prompt, threadID string) (string, []RunnerToolEvent, string, string, error) {
+func (m *OrchestrationManager) runCodexAppServerWithThread(ctx context.Context, payload protocol.OrchestrationStartPayload, turnID, role, workerSlot, prompt, threadID string) (string, []RunnerToolEvent, string, string, error) {
 	runner := NewCodexAppServerRunner(m.cfg)
 	defer runner.Close()
 	turnCtx, cancelTurn := context.WithCancel(ctx)
@@ -481,12 +497,18 @@ func (m *OrchestrationManager) runCodexAppServerWithThread(ctx context.Context, 
 	defer timeouts.Close()
 	var tools []RunnerToolEvent
 	toolStarts := make(map[string]time.Time)
+	runtime, runtimeErr := m.codexRuntime(payload, workerSlot)
+	if runtimeErr != nil {
+		return "", nil, threadID, "codex-profile-error", runtimeErr
+	}
 	result, err := runner.Prompt(turnCtx, RunnerRequest{
 		Content:        prompt,
 		RemoteThreadID: threadID,
 		RunID:          payload.RunID,
 		PromptID:       turnID,
 		CWD:            m.cwd(payload),
+		Env:            runtime.env,
+		Model:          runtime.model,
 		Approvals: orchestrationApprovalRequester{
 			manager: m,
 			runID:   payload.RunID,
@@ -520,7 +542,7 @@ func (m *OrchestrationManager) runCodexAppServerWithThread(ctx context.Context, 
 		mode = "codex-thread-resume"
 	}
 	if len(result.Usage) > 0 {
-		m.recordNativeUsage(turnID, "codex", codexBridgeModel(m.cfg), result.Usage)
+		m.recordNativeUsage(turnID, "codex", firstNonEmpty(runtime.model, codexBridgeModel(m.cfg)), result.Usage)
 	}
 	return strings.TrimSpace(result.Content), tools, firstNonEmpty(result.RemoteThreadID, threadID), mode, err
 }

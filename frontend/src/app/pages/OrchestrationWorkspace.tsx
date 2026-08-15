@@ -33,6 +33,7 @@ import type {
   Agent,
   ApprovalItemState,
   ApprovalRequest,
+  CLIConfigPreset,
   Envelope,
   NativeContextCompaction,
   OrchestrationEvent,
@@ -133,6 +134,10 @@ export function OrchestrationWorkspace({
   const [approvals, setApprovals] = useState<ApprovalItemState[]>([]);
   const [mode, setMode] = useState<'collaboration' | 'debate'>('collaboration');
   const [workerPair, setWorkerPair] = useState<WorkerPair>('claude-codex');
+  const [presets, setPresets] = useState<CLIConfigPreset[]>([]);
+  const [selectedWorkerProfiles, setSelectedWorkerProfiles] = useState<Record<string, string>>({});
+  const [selectedWorkerEfforts, setSelectedWorkerEfforts] = useState<Record<string, string>>({});
+  const [workerProfilesTouched, setWorkerProfilesTouched] = useState(false);
   const [firstCli, setFirstCli] = useState<'claude' | 'codex'>('claude');
   const [profile, setProfile] = useState<'default' | 'formal-proof'>('default');
   const [nativeContextCompaction, setNativeContextCompaction] = useState<NativeContextCompaction>('off');
@@ -259,6 +264,15 @@ export function OrchestrationWorkspace({
   const workingDirs = useMemo(() => {
     return Array.from(new Set((selectedAgent?.workingDirs || []).map((dir) => dir.trim()).filter(Boolean)));
   }, [selectedAgent]);
+  const workerProfileSlots = useMemo(() => workerPair === 'codex-codex'
+    ? [{ slot: 'codex-a', cli: 'codex' as const, label: 'Codex A' }, { slot: 'codex-b', cli: 'codex' as const, label: 'Codex B' }]
+    : workerPair === 'claude-claude'
+      ? [{ slot: 'claude-a', cli: 'claude' as const, label: 'Claude A' }, { slot: 'claude-b', cli: 'claude' as const, label: 'Claude B' }]
+      : [{ slot: 'claude', cli: 'claude' as const, label: 'Claude' }, { slot: 'codex', cli: 'codex' as const, label: 'Codex' }], [workerPair]);
+  const workerProfilesComplete = useMemo(
+    () => workerProfileSlots.every(({ slot }) => Boolean(selectedWorkerProfiles[slot])),
+    [selectedWorkerProfiles, workerProfileSlots],
+  );
 
   const loadAgents = useCallback(async () => {
     const data = await api<{ agents: Agent[] }>('/api/agents');
@@ -708,6 +722,30 @@ export function OrchestrationWorkspace({
     selectedAgentIdRef.current = selectedAgentId;
   }, [selectedAgentId]);
 
+	const refreshWorkerPresets = useCallback(async () => {
+		const agentId = selectedAgentIdRef.current;
+		if (!agentId) {
+			setPresets([]);
+			return;
+		}
+		const data = await api<{ presets: CLIConfigPreset[] }>(`/api/agents/${encodeURIComponent(agentId)}/cli-config/presets`);
+		if (selectedAgentIdRef.current === agentId) {
+			setPresets(Array.isArray(data.presets) ? data.presets : []);
+		}
+	}, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPresets([]);
+    setSelectedWorkerProfiles({});
+    setSelectedWorkerEfforts({});
+    setWorkerProfilesTouched(false);
+    if (!selectedAgentId) return () => { cancelled = true; };
+		void refreshWorkerPresets()
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [refreshWorkerPresets, selectedAgentId]);
+
   useEffect(() => {
     setSelectedPromptKey('initial');
     setOrchestrationProgress(null);
@@ -844,6 +882,10 @@ export function OrchestrationWorkspace({
   const startRun = async () => {
     const task = prompt.trim();
     if (!task || creating || isRunning) return;
+    if (!activeRun && !workerProfilesComplete) {
+      setError(t.workerPresetRequired);
+      return;
+    }
     if (capabilityProblems.length > 0) {
       setError(capabilityProblems.join(' '));
       return;
@@ -852,21 +894,29 @@ export function OrchestrationWorkspace({
     setError('');
     try {
       const endpoint = activeRun ? `/api/orchestrations/${encodeURIComponent(activeRun.id)}/prompts` : '/api/orchestrations';
+      const selectedProfiles = Object.fromEntries(Object.entries(selectedWorkerProfiles).filter(([, id]) => id));
+      const body: Record<string, unknown> = {
+        mode,
+        workerPair,
+        firstCli: workerPair === 'codex-codex' ? 'codex' : workerPair === 'claude-claude' ? 'claude' : firstCli,
+        profile,
+        nativeContextCompaction,
+        prompt: task,
+        title: titleFromPrompt(task, t),
+        cwd: cwd.trim(),
+        maxTurns,
+        agentId: selectedAgent?.id || '',
+        files: files.map(({ name, mimeType, size, data }) => ({ name, mimeType, size, data })),
+      };
+      if (!activeRun || workerProfilesTouched) {
+        body.workerProfilePresetIds = selectedProfiles;
+        body.workerProfileEfforts = Object.fromEntries(
+          Object.entries(selectedWorkerEfforts).filter(([, effort]) => effort),
+        );
+      }
       const data = await api<{ run: OrchestrationRun }>(endpoint, {
         method: 'POST',
-        body: JSON.stringify({
-          mode,
-          workerPair,
-          firstCli: workerPair === 'codex-codex' ? 'codex' : firstCli,
-          profile,
-          nativeContextCompaction,
-          prompt: task,
-          title: titleFromPrompt(task, t),
-          cwd: cwd.trim(),
-          maxTurns,
-          agentId: selectedAgent?.id || '',
-          files: files.map(({ name, mimeType, size, data }) => ({ name, mimeType, size, data })),
-        }),
+        body: JSON.stringify(body),
       });
       setRuns((current) => [data.run, ...current.filter((run) => run.id !== data.run.id)]);
       setPrompt('');
@@ -947,9 +997,67 @@ export function OrchestrationWorkspace({
 
   const selectWorkerPair = (nextWorkerPair: WorkerPair) => {
     setWorkerPair(nextWorkerPair);
+    setSelectedWorkerProfiles({});
+    setSelectedWorkerEfforts({});
+    setWorkerProfilesTouched(false);
     if (nextWorkerPair === 'codex-codex') {
       setFirstCli('codex');
+	} else if (nextWorkerPair === 'claude-claude') {
+	  setFirstCli('claude');
     }
+  };
+
+  const renderWorkerProfileSelectors = () => {
+    const disabled = creating || isRunning;
+    return (
+      <div className="space-y-2">
+        <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.workerModelProfiles}</label>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {workerProfileSlots.map(({ slot, cli, label }) => {
+            const options = presets.filter((preset) => preset.cli === cli);
+            const selectedPreset = options.find((preset) => preset.id === selectedWorkerProfiles[slot]);
+            const reasoningLevels = selectedPreset?.reasoningLevels || [];
+            const defaultEffort = selectedPreset?.reasoningEffort || selectedPreset?.reasoningDefault || '';
+            return (
+              <div key={slot} className="block min-w-0 space-y-1.5">
+                <span className="text-xs text-muted-foreground">{label}</span>
+                <select
+                  value={selectedWorkerProfiles[slot] || ''}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    const nextPreset = options.find((preset) => preset.id === value);
+                    const nextLevels = nextPreset?.reasoningLevels || [];
+                    const nextDefault = nextPreset?.reasoningEffort || nextPreset?.reasoningDefault || '';
+                    setSelectedWorkerProfiles((current) => ({ ...current, [slot]: value }));
+                    setSelectedWorkerEfforts((current) => ({ ...current, [slot]: nextLevels.includes(nextDefault) ? nextDefault : '' }));
+                    setWorkerProfilesTouched(true);
+                  }}
+                  disabled={disabled || !options.length}
+                  className="flex h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-2 py-1 text-xs shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label={`${label} ${t.workerModelProfiles}`}
+                >
+                  <option value="" disabled>{options.length ? t.selectPreset : t.noProviderPresets}</option>
+                  {options.map((preset) => <option key={preset.id} value={preset.id}>{preset.name} · {preset.model}</option>)}
+                </select>
+                <select
+                  value={selectedWorkerEfforts[slot] || ''}
+                  onChange={(event) => {
+                    setSelectedWorkerEfforts((current) => ({ ...current, [slot]: event.target.value }));
+                    setWorkerProfilesTouched(true);
+                  }}
+                  disabled={disabled || !selectedPreset || !reasoningLevels.length}
+                  className="flex h-8 w-full min-w-0 rounded-md border border-input bg-transparent px-2 py-1 text-[11px] shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label={`${label} ${t.reasoningEffort}`}
+                >
+                  <option value="">{selectedPreset ? (reasoningLevels.length ? t.defaultReasoningEffort : t.modelCatalogUnavailable) : t.selectPreset}</option>
+                  {reasoningLevels.map((level) => <option key={level} value={level}>{level}{level === selectedPreset?.reasoningDefault ? ` (${t.defaultReasoningEffort})` : ''}</option>)}
+                </select>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
   };
 
   const renderWorkerPairSelector = (placement: 'toolbar' | 'panel') => {
@@ -962,7 +1070,7 @@ export function OrchestrationWorkspace({
         ) : (
           <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.workerPair}</label>
         )}
-        <div className={cn("grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted p-1", isToolbar ? "w-[15rem]" : "w-full")}>
+        <div className={cn("grid grid-cols-3 gap-1 rounded-lg border border-border bg-muted p-1", isToolbar ? "w-[22rem]" : "w-full")}>
           <button
             className={cn("h-8 rounded-md px-2 text-xs font-medium", workerPair === 'claude-codex' ? "bg-background shadow-sm" : "text-muted-foreground")}
             onClick={() => selectWorkerPair('claude-codex')}
@@ -979,10 +1087,15 @@ export function OrchestrationWorkspace({
           >
             {t.workerPairCodexCodex}
           </button>
+		  <button
+			className={cn("h-8 rounded-md px-2 text-xs font-medium", workerPair === 'claude-claude' ? "bg-background shadow-sm" : "text-muted-foreground")}
+			onClick={() => selectWorkerPair('claude-claude')}
+			disabled={disabled}
+			aria-pressed={workerPair === 'claude-claude'}
+		  >
+			{t.workerPairClaudeClaude}
+		  </button>
         </div>
-		{!isToolbar && workerPair === 'codex-codex' && (
-			<p className="text-xs leading-relaxed text-muted-foreground">{t.codexSharedConfiguration}</p>
-		)}
       </div>
     );
   };
@@ -1217,7 +1330,6 @@ export function OrchestrationWorkspace({
             >
               <Workflow className="h-4 w-4 shrink-0 text-primary" />
               <span className="shrink-0 text-xs font-semibold">{t.planningWorkspace}</span>
-              <span className="hidden shrink-0 rounded border border-amber-500/25 bg-amber-500/[0.07] px-1.5 py-0.5 text-[9px] font-medium text-amber-700 dark:text-amber-300 sm:inline">{t.rolloutPreview}</span>
               <div className="h-1.5 min-w-[5rem] max-w-40 flex-1 overflow-hidden rounded-full bg-muted">
                 <div className="h-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${Math.max(0, Math.min(100, projectedPlan?.percent || 0))}%` }} />
               </div>
@@ -1305,10 +1417,11 @@ export function OrchestrationWorkspace({
                         )}
                         <OrchestrationProgressMap
                           tasks={(selectedAgentGraph?.tasks || []).map((task) => ({ ...task, name: orchestrationTaskDisplayName(task.name, language), dependencies: task.dependencies || [] }))}
-                          height={180}
+                          height={Math.max(320, Math.min(520, Math.ceil(Math.max(selectedAgentGraph?.tasks?.length || 0, 3) / 3) * 128))}
                           ariaLabel={language === 'zh' ? 'Agent 执行链' : 'Agent execution chain'}
                           emptyLabel={language === 'zh' ? '暂无执行节点。' : 'No execution nodes yet.'}
                           statusLabels={orchestrationStatusLabels(language, t)}
+						  interactive
                         />
                       </section>
                     </div>
@@ -1405,6 +1518,7 @@ export function OrchestrationWorkspace({
                 </div>
 
                 {renderWorkerPairSelector('panel')}
+                {renderWorkerProfileSelectors()}
 
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.firstCli}</label>
@@ -1412,7 +1526,7 @@ export function OrchestrationWorkspace({
                     <button className={cn("h-8 rounded-md text-xs font-medium", workerPair !== 'codex-codex' && firstCli === 'claude' ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setFirstCli('claude')} disabled={creating || isRunning || workerPair === 'codex-codex'}>
                       Claude
                     </button>
-                    <button className={cn("h-8 rounded-md text-xs font-medium", (workerPair === 'codex-codex' || firstCli === 'codex') ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setFirstCli('codex')} disabled={creating || isRunning}>
+                    <button className={cn("h-8 rounded-md text-xs font-medium", (workerPair === 'codex-codex' || firstCli === 'codex') ? "bg-background shadow-sm" : "text-muted-foreground")} onClick={() => setFirstCli('codex')} disabled={creating || isRunning || workerPair === 'claude-claude'}>
                       Codex
                     </button>
                   </div>
@@ -1568,7 +1682,7 @@ export function OrchestrationWorkspace({
                     {canCancelRun ? t.stopRun : t.stopping}
                   </Button>
                 ) : (
-                  <Button className="w-full gap-2" onClick={() => startRun()} disabled={!prompt.trim() || creating || !selectedAgent || capabilityProblems.length > 0}>
+                  <Button className="w-full gap-2" onClick={() => startRun()} disabled={!prompt.trim() || creating || !selectedAgent || capabilityProblems.length > 0 || (!activeRun && !workerProfilesComplete)}>
                     {creating ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                     {continuingRun ? t.continueRun : t.start}
                   </Button>
@@ -1620,6 +1734,7 @@ export function OrchestrationWorkspace({
           selectedAgentId={selectedAgentId}
           onSelectAgent={selectAgent}
           onAgentsChanged={async () => { await loadAgents(); }}
+		  onPresetsChanged={refreshWorkerPresets}
           onLogout={logout}
           isDarkMode={isDarkMode}
           setIsDarkMode={setIsDarkMode}

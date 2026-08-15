@@ -31,11 +31,10 @@ import (
 const cliConfigHKDFInfo = "codex-bridge-cli-config-v1"
 
 const (
-	maxDiscoveredModels  = 500
-	maxModelIDBytes      = 256
-	unknownContextWindow = 200_000
-	cliConfigProbeLimit  = 75 * time.Second
-	cliConfigCallLimit   = 30 * time.Second
+	maxDiscoveredModels = 500
+	maxModelIDBytes     = 256
+	cliConfigProbeLimit = 75 * time.Second
+	cliConfigCallLimit  = 30 * time.Second
 )
 
 var bridgeModelsMu sync.RWMutex
@@ -49,14 +48,19 @@ type cliConfigManager struct {
 }
 
 type cliConfigState struct {
-	CodexModel                string                     `json:"codexModel,omitempty"`
-	ClaudeModel               string                     `json:"claudeModel,omitempty"`
-	ClaudeOverrideKey         string                     `json:"claudeOverrideKey,omitempty"`
-	ClaudeOverridePrevious    string                     `json:"claudeOverridePrevious,omitempty"`
-	ClaudeOverrideHadPrevious bool                       `json:"claudeOverrideHadPrevious,omitempty"`
-	ClaudeConfigManaged       bool                       `json:"claudeConfigManaged,omitempty"`
-	ClaudeContextManaged      bool                       `json:"claudeContextManaged,omitempty"`
-	ClaudeContextPrevious     map[string]managedEnvValue `json:"claudeContextPrevious,omitempty"`
+	CodexModel                             string                     `json:"codexModel,omitempty"`
+	ClaudeModel                            string                     `json:"claudeModel,omitempty"`
+	ClaudeOverrideKey                      string                     `json:"claudeOverrideKey,omitempty"`
+	ClaudeOverridePrevious                 string                     `json:"claudeOverridePrevious,omitempty"`
+	ClaudeOverrideHadPrevious              bool                       `json:"claudeOverrideHadPrevious,omitempty"`
+	ClaudeConfigManaged                    bool                       `json:"claudeConfigManaged,omitempty"`
+	ClaudeContextManaged                   bool                       `json:"claudeContextManaged,omitempty"`
+	ClaudeContextPrevious                  map[string]managedEnvValue `json:"claudeContextPrevious,omitempty"`
+	ClaudeContextWindow                    int                        `json:"claudeContextWindow,omitempty"`
+	ClaudeContextDisableUnknownEnforcement bool                       `json:"claudeContextDisableUnknownEnforcement,omitempty"`
+	ClaudeEffortManaged                    bool                       `json:"claudeEffortManaged,omitempty"`
+	ClaudeEffortPrevious                   string                     `json:"claudeEffortPrevious,omitempty"`
+	ClaudeEffortHadPrevious                bool                       `json:"claudeEffortHadPrevious,omitempty"`
 }
 
 // managedEnvValue preserves a user setting when the Bridge temporarily owns it.
@@ -170,6 +174,11 @@ func (m *cliConfigManager) handle(ctx context.Context, typ string, req protocol.
 	res.Protocol = wireProtocol
 	res.Models = models
 	res.ModelsListed = listed
+	if strings.TrimSpace(req.ReasoningEffort) != "" && !workerProfileContains(req.ReasoningLevels, req.ReasoningEffort) {
+		res.OK = false
+		res.Error = "selected reasoning effort is not supported by the reviewed model catalog"
+		return res
+	}
 
 	if typ == protocol.TypeCLIConfigApply {
 		if strings.TrimSpace(req.Model) == "" {
@@ -177,7 +186,11 @@ func (m *cliConfigManager) handle(ctx context.Context, typ string, req protocol.
 			res.Error = "model is required"
 			return res
 		}
-		if err := m.apply(req.CLI, base, req.Model, string(key), models); err != nil {
+		if err := m.apply(req.CLI, base, req.Model, string(key), models, cliApplyOptions{
+			ReasoningEffort:                            req.ReasoningEffort,
+			ClaudeContextWindow:                        req.ClaudeContextWindow,
+			ClaudeDisableUnknownModelWindowEnforcement: req.ClaudeDisableUnknownModelWindowEnforcement,
+		}); err != nil {
 			res.OK = false
 			res.Error = "could not update native CLI configuration"
 			return res
@@ -423,7 +436,17 @@ func protocolForCLI(cli string) string {
 	return "openai-compatible"
 }
 
-func (m *cliConfigManager) apply(cli, base, model, key string, models []string) error {
+type cliApplyOptions struct {
+	ReasoningEffort                            string
+	ClaudeContextWindow                        int
+	ClaudeDisableUnknownModelWindowEnforcement bool
+}
+
+func (m *cliConfigManager) apply(cli, base, model, key string, models []string, options ...cliApplyOptions) error {
+	var opts cliApplyOptions
+	if len(options) > 0 {
+		opts = options[0]
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -438,11 +461,7 @@ func (m *cliConfigManager) apply(cli, base, model, key string, models []string) 
 		if err != nil {
 			return err
 		}
-		catalogPath := filepath.Join(m.root, "codex-model-catalog.json")
-		if err := writeCodexModelCatalog(catalogPath, model, models); err != nil {
-			return err
-		}
-		if err := backupAndWrite(configPath, []byte(updateCodexConfig(string(raw), base, model, catalogPath, false)), 0o600); err != nil {
+		if err := backupAndWrite(configPath, []byte(updateCodexConfig(string(raw), base, model, opts.ReasoningEffort, false)), 0o600); err != nil {
 			return err
 		}
 		authPath := filepath.Join(dir, "auth.json")
@@ -481,7 +500,8 @@ func (m *cliConfigManager) apply(cli, base, model, key string, models []string) 
 		delete(env, "ANTHROPIC_API_KEY")
 		settings["env"] = env
 		setClaudeModelFields(settings, model)
-		if err := m.configureClaudeContext(settings, model); err != nil {
+		m.setClaudeEffort(settings, opts.ReasoningEffort)
+		if err := m.configureClaudeContext(settings, opts.ClaudeContextWindow, opts.ClaudeDisableUnknownModelWindowEnforcement); err != nil {
 			return err
 		}
 		encoded, err := json.MarshalIndent(settings, "", "  ")
@@ -494,6 +514,8 @@ func (m *cliConfigManager) apply(cli, base, model, key string, models []string) 
 		codexModel, _ := bridgeModels(m.cfg)
 		setBridgeModels(m.cfg, codexModel, model)
 		m.state.ClaudeConfigManaged = true
+		m.state.ClaudeContextWindow = opts.ClaudeContextWindow
+		m.state.ClaudeContextDisableUnknownEnforcement = opts.ClaudeDisableUnknownModelWindowEnforcement
 	}
 	return m.writeState()
 }
@@ -565,6 +587,7 @@ func (m *cliConfigManager) reset(cli string) error {
 		if err := m.restoreClaudeModelOverride(settings); err != nil {
 			return err
 		}
+		m.restoreClaudeEffort(settings)
 		encoded, err := json.MarshalIndent(settings, "", "  ")
 		if err != nil {
 			return err
@@ -576,6 +599,8 @@ func (m *cliConfigManager) reset(cli string) error {
 		m.state.ClaudeOverridePrevious = ""
 		m.state.ClaudeOverrideHadPrevious = false
 		m.state.ClaudeConfigManaged = true
+		m.state.ClaudeContextWindow = 0
+		m.state.ClaudeContextDisableUnknownEnforcement = false
 		codexModel, _ := bridgeModels(m.cfg)
 		setBridgeModels(m.cfg, codexModel, "")
 	}
@@ -648,7 +673,12 @@ func (m *cliConfigManager) reconcileManagedClaudeContext(home string) error {
 	if err != nil {
 		return err
 	}
-	if err := m.configureClaudeContext(settings, m.state.ClaudeModel); err != nil {
+	// Older state files have no Hub snapshot. Leaving those settings untouched
+	// avoids reintroducing model inference on Bridge startup.
+	if m.state.ClaudeContextWindow <= 0 {
+		return nil
+	}
+	if err := m.configureClaudeContext(settings, m.state.ClaudeContextWindow, m.state.ClaudeContextDisableUnknownEnforcement); err != nil {
 		return err
 	}
 	after, err := json.Marshal(settings)
@@ -693,76 +723,35 @@ func setClaudeModelFields(settings map[string]any, model string) {
 	settings["model"] = model
 }
 
-type claudeContextProfile struct {
-	Window                    int
-	DisableUnknownEnforcement bool
-}
-
-// claudeContextProfileForModel uses a reviewed catalog of widely deployed
-// models. Providers' /models endpoints do not reliably expose a context-window
-// field, so an unknown provider model must retain Claude Code's conservative
-// behavior instead of inheriting an unrelated model's profile.
-func claudeContextProfileForModel(model string) (claudeContextProfile, bool) {
-	name := normalizedContextModelName(model)
-	if profile, ok := claudeContextProfiles[name]; ok {
-		return profile, true
+// setClaudeEffort persists the CLI effort choice. Claude Code documents this
+// top-level settings.json field; the command-line flag remains an explicit
+// per-process override for compatibility.
+func (m *cliConfigManager) setClaudeEffort(settings map[string]any, effort string) {
+	if !m.state.ClaudeEffortManaged {
+		previous, exists := settings["effortLevel"].(string)
+		m.state.ClaudeEffortPrevious = previous
+		m.state.ClaudeEffortHadPrevious = exists
+		m.state.ClaudeEffortManaged = true
 	}
-	return claudeContextProfile{}, false
-}
-
-var claudeContextProfiles = map[string]claudeContextProfile{
-	// Anthropic. These names are recognized by current Claude Code releases.
-	"claude-fable-5":    {Window: 1_000_000},
-	"claude-opus-5":     {Window: 1_000_000},
-	"claude-sonnet-5":   {Window: 1_000_000},
-	"claude-opus-4-6":   {Window: 1_000_000},
-	"claude-sonnet-4-6": {Window: 1_000_000},
-	"claude-opus-4-5":   {Window: 200_000},
-	"claude-sonnet-4-5": {Window: 200_000},
-	"claude-3-7-sonnet": {Window: 200_000},
-	"claude-3-5-sonnet": {Window: 200_000},
-	"claude-3-5-haiku":  {Window: 200_000},
-	"claude-haiku-4-5":  {Window: 200_000},
-	"claude-3-opus":     {Window: 200_000},
-	"claude-3-sonnet":   {Window: 200_000},
-	"claude-3-haiku":    {Window: 200_000},
-
-	// OpenAI/Codex models commonly exposed through Anthropic-compatible proxies.
-	"gpt-5.6":       {Window: 1_050_000, DisableUnknownEnforcement: true},
-	"gpt-5.6-sol":   {Window: 1_050_000, DisableUnknownEnforcement: true},
-	"gpt-5.6-terra": {Window: 1_050_000, DisableUnknownEnforcement: true},
-	"gpt-5.6-luna":  {Window: 1_050_000, DisableUnknownEnforcement: true},
-	"gpt-4.1":       {Window: 1_047_576, DisableUnknownEnforcement: true},
-	"gpt-4.1-mini":  {Window: 1_047_576, DisableUnknownEnforcement: true},
-	"gpt-4.1-nano":  {Window: 1_047_576, DisableUnknownEnforcement: true},
-	"gpt-4o":        {Window: 128_000, DisableUnknownEnforcement: true},
-	"gpt-4o-mini":   {Window: 128_000, DisableUnknownEnforcement: true},
-
-	// Frequently selected third-party models. Their exact names are intentional:
-	// an aggregator alias is not assumed to have the original model's limits.
-	"deepseek-v4-flash":      {Window: 1_000_000, DisableUnknownEnforcement: true},
-	"deepseek-chat":          {Window: 128_000, DisableUnknownEnforcement: true},
-	"deepseek-reasoner":      {Window: 128_000, DisableUnknownEnforcement: true},
-	"deepseek-v3":            {Window: 128_000, DisableUnknownEnforcement: true},
-	"deepseek-r1":            {Window: 128_000, DisableUnknownEnforcement: true},
-	"kimi-k2.5":              {Window: 262_144, DisableUnknownEnforcement: true},
-	"kimi-k3":                {Window: 1_000_000, DisableUnknownEnforcement: true},
-	"gemini-2.5-pro":         {Window: 1_048_576, DisableUnknownEnforcement: true},
-	"gemini-2.5-flash":       {Window: 1_048_576, DisableUnknownEnforcement: true},
-	"gemini-2.5-flash-lite":  {Window: 1_048_576, DisableUnknownEnforcement: true},
-	"gemini-2.0-flash":       {Window: 1_048_576, DisableUnknownEnforcement: true},
-	"llama-3.3-70b-instruct": {Window: 128_000, DisableUnknownEnforcement: true},
-	"mistral-large-latest":   {Window: 128_000, DisableUnknownEnforcement: true},
-}
-
-func normalizedContextModelName(model string) string {
-	name := strings.ToLower(strings.TrimSpace(model))
-	name = strings.TrimSuffix(name, "[1m]")
-	name = strings.TrimPrefix(name, "models/")
-	for _, prefix := range []string{"anthropic/", "openai/", "deepseek/", "moonshot/", "google/", "meta/", "mistral/"} {
-		name = strings.TrimPrefix(name, prefix)
+	if strings.TrimSpace(effort) == "" {
+		delete(settings, "effortLevel")
+	} else {
+		settings["effortLevel"] = strings.TrimSpace(effort)
 	}
-	return name
+}
+
+func (m *cliConfigManager) restoreClaudeEffort(settings map[string]any) {
+	if !m.state.ClaudeEffortManaged {
+		return
+	}
+	if m.state.ClaudeEffortHadPrevious {
+		settings["effortLevel"] = m.state.ClaudeEffortPrevious
+	} else {
+		delete(settings, "effortLevel")
+	}
+	m.state.ClaudeEffortManaged = false
+	m.state.ClaudeEffortPrevious = ""
+	m.state.ClaudeEffortHadPrevious = false
 }
 
 var claudeContextEnvironmentKeys = []string{
@@ -770,13 +759,31 @@ var claudeContextEnvironmentKeys = []string{
 	"CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",
 }
 
-func (m *cliConfigManager) configureClaudeContext(settings map[string]any, model string) error {
+// applyClaudeContextSettings materializes an immutable Hub-authorized snapshot.
+// Zero means that Claude Code keeps its native defaults.
+func applyClaudeContextSettings(settings map[string]any, contextWindow int, disableUnknownEnforcement bool) {
 	env, _ := settings["env"].(map[string]any)
 	if env == nil {
 		env = map[string]any{}
 	}
-	profile, known := claudeContextProfileForModel(model)
-	if !known {
+	for _, key := range claudeContextEnvironmentKeys {
+		delete(env, key)
+	}
+	if contextWindow > 0 {
+		env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = strconv.Itoa(contextWindow)
+		if disableUnknownEnforcement {
+			env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] = "1"
+		}
+	}
+	settings["env"] = env
+}
+
+func (m *cliConfigManager) configureClaudeContext(settings map[string]any, contextWindow int, disableUnknownEnforcement bool) error {
+	env, _ := settings["env"].(map[string]any)
+	if env == nil {
+		env = map[string]any{}
+	}
+	if contextWindow <= 0 {
 		return m.restoreClaudeContextSettings(settings)
 	}
 	if !m.state.ClaudeContextManaged {
@@ -788,8 +795,8 @@ func (m *cliConfigManager) configureClaudeContext(settings map[string]any, model
 		}
 		m.state.ClaudeContextManaged = true
 	}
-	env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = strconv.Itoa(profile.Window)
-	if profile.DisableUnknownEnforcement {
+	env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = strconv.Itoa(contextWindow)
+	if disableUnknownEnforcement {
 		env["CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"] = "1"
 	} else {
 		delete(env, "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT")
@@ -883,7 +890,7 @@ func setBridgeModels(cfg *config.Config, codexModel, claudeModel string) {
 	bridgeModelsMu.Unlock()
 }
 
-func updateCodexConfig(text, base, model, catalogPath string, official bool) string {
+func updateCodexConfig(text, base, model, effort string, official bool) string {
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	out := make([]string, 0, len(lines)+8)
 	section := ""
@@ -902,7 +909,7 @@ func updateCodexConfig(text, base, model, catalogPath string, official bool) str
 		}
 		if section == "" {
 			key := strings.Trim(strings.TrimSpace(strings.SplitN(trimmed, "=", 2)[0]), "\"'")
-			if key == "model" || key == "model_provider" || key == "model_catalog_json" || key == "forced_login_method" || key == "openai_base_url" || key == "chatgpt_base_url" {
+			if key == "model" || key == "model_reasoning_effort" || key == "model_provider" || key == "model_catalog_json" || key == "forced_login_method" || key == "openai_base_url" || key == "chatgpt_base_url" {
 				continue
 			}
 		}
@@ -914,74 +921,13 @@ func updateCodexConfig(text, base, model, catalogPath string, official bool) str
 	if official {
 		out = append([]string{"model_provider = \"openai\"", "forced_login_method = \"chatgpt\""}, out...)
 	} else {
-		out = append([]string{"model = " + strconv.Quote(model), "model_provider = \"custom\"", "model_catalog_json = " + strconv.Quote(catalogPath)}, out...)
+		out = append([]string{"model = " + strconv.Quote(model), "model_provider = \"custom\""}, out...)
+		if strings.TrimSpace(effort) != "" {
+			out = append([]string{"model_reasoning_effort = " + strconv.Quote(effort)}, out...)
+		}
 		out = append(out, "", "[model_providers.custom]", "name = \"custom\"", "base_url = "+strconv.Quote(strings.TrimRight(base, "/")), "wire_api = \"responses\"", "requires_openai_auth = true")
 	}
 	return strings.Join(out, "\n") + "\n"
-}
-
-type codexModelCatalog struct {
-	Models []codexModelCatalogEntry `json:"models"`
-}
-
-type codexModelCatalogEntry struct {
-	Slug                       string                `json:"slug"`
-	DisplayName                string                `json:"display_name"`
-	Description                string                `json:"description"`
-	DefaultReasoningLevel      string                `json:"default_reasoning_level"`
-	SupportedReasoningLevels   []codexReasoningLevel `json:"supported_reasoning_levels"`
-	ShellType                  string                `json:"shell_type"`
-	Visibility                 string                `json:"visibility"`
-	SupportedInAPI             bool                  `json:"supported_in_api"`
-	Priority                   int                   `json:"priority"`
-	SupportVerbosity           bool                  `json:"support_verbosity"`
-	TruncationPolicy           map[string]any        `json:"truncation_policy"`
-	SupportsParallelToolCalls  bool                  `json:"supports_parallel_tool_calls"`
-	ExperimentalSupportedTools []string              `json:"experimental_supported_tools"`
-	ContextWindow              int                   `json:"context_window"`
-	BaseInstructions           string                `json:"base_instructions"`
-}
-
-type codexReasoningLevel struct {
-	Effort      string `json:"effort"`
-	Description string `json:"description"`
-}
-
-func writeCodexModelCatalog(path, selected string, discovered []string) error {
-	models := make([]string, 0, len(discovered)+1)
-	seen := map[string]bool{}
-	for _, model := range append([]string{selected}, discovered...) {
-		model = strings.TrimSpace(model)
-		if model == "" || len(model) > maxModelIDBytes || seen[model] {
-			continue
-		}
-		seen[model] = true
-		models = append(models, model)
-	}
-	entries := make([]codexModelCatalogEntry, 0, len(models))
-	for priority, model := range models {
-		entries = append(entries, codexModelCatalogEntry{
-			Slug: model, DisplayName: model,
-			Description:                "Custom provider model managed by ProofBridge Hub.",
-			DefaultReasoningLevel:      "medium",
-			SupportedReasoningLevels:   []codexReasoningLevel{{Effort: "low", Description: "Faster response"}, {Effort: "medium", Description: "Balanced reasoning"}, {Effort: "high", Description: "Deeper reasoning"}},
-			ShellType:                  "shell_command",
-			Visibility:                 "list",
-			SupportedInAPI:             true,
-			Priority:                   priority + 1,
-			SupportVerbosity:           false,
-			TruncationPolicy:           map[string]any{"mode": "tokens", "limit": 10_000},
-			SupportsParallelToolCalls:  true,
-			ExperimentalSupportedTools: []string{},
-			ContextWindow:              unknownContextWindow,
-			BaseInstructions:           "You are a precise coding agent. Work directly in the user's workspace, follow repository instructions, make focused changes, and verify your work.",
-		})
-	}
-	encoded, err := json.MarshalIndent(codexModelCatalog{Models: entries}, "", "  ")
-	if err != nil {
-		return err
-	}
-	return atomicWrite(path, append(encoded, '\n'), 0o600)
 }
 
 func readOptional(path string) ([]byte, error) {

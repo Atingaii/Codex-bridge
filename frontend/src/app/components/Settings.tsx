@@ -15,6 +15,7 @@ export function SettingsModal({
   selectedAgentId,
   onSelectAgent,
   onAgentsChanged,
+	 onPresetsChanged,
   onLogout,
   isDarkMode,
   setIsDarkMode,
@@ -29,6 +30,7 @@ export function SettingsModal({
   selectedAgentId: string;
   onSelectAgent: (agentId: string) => void;
   onAgentsChanged: () => Promise<void>;
+	 onPresetsChanged: () => Promise<void> | void;
   onLogout: () => void;
   isDarkMode: boolean;
   setIsDarkMode: (value: boolean) => void;
@@ -481,7 +483,7 @@ export function SettingsModal({
           <Button size="sm" onClick={close}>{t.savePreferences}</Button>
         </div>
       </div>
-      {configAgent && <CLIConfigSwitcher agent={configAgent} t={t} close={() => setConfigAgent(null)} />}
+		{configAgent && <CLIConfigSwitcher agent={configAgent} t={t} onPresetsChanged={onPresetsChanged} close={() => setConfigAgent(null)} />}
     </div>
   );
 }

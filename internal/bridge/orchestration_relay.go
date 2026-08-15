@@ -86,10 +86,10 @@ func (m *OrchestrationManager) runRelayCLI(ctx context.Context, payload protocol
 		if state == nil {
 			return m.runClaude(ctx, payload, turnID, role, prompt)
 		}
-		content, tools, resumeMode, err := m.runClaudeInteractive(ctx, payload, turnID, role, prompt, state)
+		content, tools, resumeMode, err := m.runClaudeInteractiveSlot(ctx, payload, turnID, role, workerSlot, prompt, state)
 		state.ClaudeResumeMode = resumeMode
 		if err == nil {
-			state.ClaudeSessionStarted = true
+			state.setClaudeStarted(workerSlot, true)
 		}
 		return content, tools, err
 	default:
@@ -472,8 +472,8 @@ func relayTurnEndData(cli, workerSlot string, state orchestrationSessionState) m
 		if state.ClaudeResumeMode != "" {
 			data["resumeMode"] = state.ClaudeResumeMode
 		}
-		if state.ClaudeSessionID != "" {
-			data["sessionId"] = state.ClaudeSessionID
+		if sessionID := state.claudeSessionID(workerSlot); sessionID != "" {
+			data["sessionId"] = sessionID
 		}
 	}
 	return data
@@ -486,13 +486,15 @@ func (m *OrchestrationManager) relayRunEndData(cli, workerSlot, workerPair strin
 		workerSlot = normalizeCodexWorkerSlot(workerSlot)
 		data.CodexThreadID = state.codexThreadID(workerSlot)
 		data.CodexThreadIDs = state.codexThreadIDsCopy()
-		data.CodexNativeResume = codexNativeResumeInfoForSlot(workerSlot, data.CodexThreadID, cwd)
+		data.CodexNativeResume = codexNativeResumeInfoForSlot(workerSlot, data.CodexThreadID, cwd, codexWorkerRuntime(state.NativeSession, workerSlot))
 	case "claude":
-		data.ClaudeSessionID = state.ClaudeSessionID
-		data.ClaudeNativeResume = m.claudeNativeResumeInfo(state.ClaudeSessionID, cwd)
+		workerSlot = normalizeClaudeWorkerSlot(workerSlot)
+		data.ClaudeSessionID = state.claudeSessionID(workerSlot)
+		data.ClaudeSessionIDs = state.claudeSessionIDsCopy()
+		data.ClaudeNativeResume = m.claudeNativeResumeInfoForSlotWithRuntime(workerSlot, data.ClaudeSessionID, cwd, claudeWorkerRuntime(state.NativeSession, workerSlot))
 	}
-	data = runEndDataWithNativeResume(data, cwd)
-	if data.CodexThreadID == "" && len(data.CodexThreadIDs) == 0 && data.ClaudeSessionID == "" {
+	data = m.runEndDataWithNativeResumeForSession(data, cwd, state.NativeSession)
+	if data.CodexThreadID == "" && len(data.CodexThreadIDs) == 0 && data.ClaudeSessionID == "" && len(data.ClaudeSessionIDs) == 0 {
 		return nil
 	}
 	return data
@@ -507,8 +509,8 @@ func orchestrationTurnStartContent(cli, workerSlot string, state *orchestrationS
 	if role != "" {
 		label = cliDisplay(cli) + " " + role
 	}
-	if cli == "codex" && workerSlot != "" && normalizeCodexWorkerSlot(workerSlot) != orchestrationCodexDefaultSlot {
-		label = label + " (" + normalizeCodexWorkerSlot(workerSlot) + ")"
+	if (cli == "codex" && workerSlot != "" && normalizeCodexWorkerSlot(workerSlot) != orchestrationCodexDefaultSlot) || (cli == "claude" && normalizeClaudeWorkerSlot(workerSlot) != orchestrationClaudeDefaultSlot) {
+		label = label + " (" + workerSlot + ")"
 	}
 	if turn > 0 && maxTurns > 0 {
 		label = fmt.Sprintf("%s turn %d/%d", label, turn, maxTurns)
@@ -578,16 +580,21 @@ func plannedRelayResumeMode(cli, workerSlot string, state orchestrationSessionSt
 		if state.ClaudeResumeMode != "" {
 			return state.ClaudeResumeMode
 		}
-		if state.NativeSession != nil && state.NativeSession.claude != nil && state.NativeSession.claude.mode != "" {
-			return state.NativeSession.claude.mode
+		if state.NativeSession != nil {
+			state.NativeSession.mu.Lock()
+			claude := state.NativeSession.claudeSessionLocked(workerSlot)
+			state.NativeSession.mu.Unlock()
+			if claude != nil && claude.mode != "" {
+				return claude.mode
+			}
 		}
 		if state.NativeSession != nil {
-			if state.ClaudeSessionStarted {
+			if state.claudeStarted(workerSlot) {
 				return "claude-interactive-resume"
 			}
 			return "claude-interactive-session"
 		}
-		if state.ClaudeSessionStarted {
+		if state.claudeStarted(workerSlot) {
 			return "claude-resume"
 		}
 		return "claude-new"
@@ -597,7 +604,8 @@ func plannedRelayResumeMode(cli, workerSlot string, state orchestrationSessionSt
 }
 
 func roleForTurnWithWorkerPair(mode, workerPair, firstCLI string, turn int) orchestrationTurnAssignment {
-	if protocol.NormalizeOrchestrationWorkerPair(workerPair) == protocol.WorkerPairCodexCodex {
+	pair := protocol.NormalizeOrchestrationWorkerPair(workerPair)
+	if pair == protocol.WorkerPairCodexCodex {
 		if mode == "debate" {
 			if turn%2 == 1 {
 				return orchestrationTurnAssignment{Role: "proposer", CLI: "codex", WorkerSlot: orchestrationCodexSlotA}
@@ -608,6 +616,18 @@ func roleForTurnWithWorkerPair(mode, workerPair, firstCLI string, turn int) orch
 			return orchestrationTurnAssignment{Role: "implementer", CLI: "codex", WorkerSlot: orchestrationCodexSlotA}
 		}
 		return orchestrationTurnAssignment{Role: "reviewer", CLI: "codex", WorkerSlot: orchestrationCodexSlotB}
+	}
+	if pair == protocol.WorkerPairClaudeClaude {
+		if mode == "debate" {
+			if turn%2 == 1 {
+				return orchestrationTurnAssignment{Role: "proposer", CLI: "claude", WorkerSlot: orchestrationClaudeSlotA}
+			}
+			return orchestrationTurnAssignment{Role: "critic", CLI: "claude", WorkerSlot: orchestrationClaudeSlotB}
+		}
+		if turn%2 == 1 {
+			return orchestrationTurnAssignment{Role: "implementer", CLI: "claude", WorkerSlot: orchestrationClaudeSlotA}
+		}
+		return orchestrationTurnAssignment{Role: "reviewer", CLI: "claude", WorkerSlot: orchestrationClaudeSlotB}
 	}
 	role, cli := roleForTurnWithFirstCLI(mode, firstCLI, turn)
 	return orchestrationTurnAssignment{Role: role, CLI: cli, WorkerSlot: workerSlotForCLI(cli)}
@@ -1132,24 +1152,7 @@ func formatRelayPriorTurn(item orchestrationTurn) string {
 }
 
 func relayCanConverge(mode, profile string, history []orchestrationTurn) bool {
-	if len(history) == 0 {
-		return false
-	}
-	record := history[len(history)-1]
-	if len(history) > 1 && ((mode == "collaboration" && record.Role != "reviewer") || (mode == "debate" && record.Role != "critic")) {
-		return false
-	}
-	packet := record.Relay
-	if !packet.Structured || packet.Status != "resolved" || packet.To != "user" || packet.Intent != "final" || !machineExplicitNone(packet.Next) || !machineExplicitNone(packet.Risks) {
-		return false
-	}
-	if len(history) > 1 && (relayParticipantCount(history) < 2 || (machineNone(packet.Verified) && !relayHasSuccessfulCommand(record.Tools))) {
-		return false
-	}
-	if normalizeOrchestrationProfile(profile) == "formal-proof" {
-		return relayHasSuccessfulFormalCheck(record.Tools)
-	}
-	return true
+	return evaluateOrchestrationVerdict(mode, profile, false, history).Status == verifierVerdictPass
 }
 
 func machineNone(value string) bool {

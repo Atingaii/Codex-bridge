@@ -84,6 +84,9 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("REGISTRATION_ENABLED"); v != "" {
 		cfg.Auth.Registration.Enabled = parseBool(v, cfg.Auth.Registration.Enabled)
 	}
+	if v := os.Getenv("REGISTRATION_REQUIRE_TURNSTILE"); v != "" {
+		cfg.Auth.Registration.RequireTurnstile = parseBool(v, cfg.Auth.Registration.RequireTurnstile)
+	}
 	if v := os.Getenv("TURNSTILE_SITE_KEY"); v != "" {
 		cfg.Auth.Registration.TurnstileSiteKey = v
 	}

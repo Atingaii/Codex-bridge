@@ -97,6 +97,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 			FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_cli_config_presets_agent_cli ON cli_config_presets(user_id, agent_id, cli, updated_at DESC);`,
+		`ALTER TABLE cli_config_presets ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE cli_config_presets ADD COLUMN reasoning_levels_json TEXT NOT NULL DEFAULT '[]';`,
+		`ALTER TABLE cli_config_presets ADD COLUMN reasoning_default TEXT NOT NULL DEFAULT '';`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
 			agent_id TEXT NOT NULL,
@@ -153,7 +156,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			agent_id TEXT NOT NULL,
 			title TEXT NOT NULL,
 			mode TEXT NOT NULL CHECK(mode IN ('collaboration','debate')),
-			worker_pair TEXT NOT NULL DEFAULT 'claude-codex' CHECK(worker_pair IN ('claude-codex','codex-codex')),
+			worker_pair TEXT NOT NULL DEFAULT 'claude-codex' CHECK(worker_pair IN ('claude-codex','codex-codex','claude-claude')),
 			first_cli TEXT CHECK(first_cli IN ('claude','codex')),
 			profile TEXT NOT NULL DEFAULT 'default',
 			prompt TEXT NOT NULL,
@@ -162,6 +165,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 			codex_thread_id TEXT DEFAULT '',
 			codex_thread_ids_json TEXT DEFAULT '{}',
 			claude_started INTEGER NOT NULL DEFAULT 0,
+			claude_session_ids_json TEXT DEFAULT '{}',
+			claude_started_slots_json TEXT DEFAULT '{}',
 			native_context_compaction TEXT NOT NULL DEFAULT 'off',
 			max_turns INTEGER NOT NULL,
 			status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','canceled','canceling')),
@@ -181,10 +186,18 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE orchestration_runs ADD COLUMN codex_thread_id TEXT DEFAULT '';`,
 		`ALTER TABLE orchestration_runs ADD COLUMN codex_thread_ids_json TEXT DEFAULT '{}';`,
 		`ALTER TABLE orchestration_runs ADD COLUMN claude_started INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE orchestration_runs ADD COLUMN claude_session_ids_json TEXT DEFAULT '{}';`,
+		`ALTER TABLE orchestration_runs ADD COLUMN claude_started_slots_json TEXT DEFAULT '{}';`,
 		`ALTER TABLE orchestration_runs ADD COLUMN native_context_compaction TEXT NOT NULL DEFAULT 'off';`,
 		`ALTER TABLE orchestration_runs ADD COLUMN delete_requested INTEGER NOT NULL DEFAULT 0;`,
 		`CREATE INDEX IF NOT EXISTS idx_orchestration_runs_user_updated ON orchestration_runs(user_id, updated_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_orchestration_runs_user_agent_updated ON orchestration_runs(user_id, agent_id, updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS orchestration_worker_profiles (
+			run_id TEXT PRIMARY KEY,
+			profiles_json TEXT NOT NULL,
+			updated_at INTEGER NOT NULL,
+			FOREIGN KEY (run_id) REFERENCES orchestration_runs(id) ON DELETE CASCADE
+		);`,
 		`CREATE TABLE IF NOT EXISTS orchestration_events (
 			id TEXT PRIMARY KEY,
 			run_id TEXT NOT NULL,
@@ -327,7 +340,61 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	if err := s.migrateOrchestrationWorkerPairs(ctx); err != nil {
+		return err
+	}
 	return s.migrateOrchestrationTaskRoles(ctx)
+}
+
+// SQLite cannot change a CHECK constraint in place, so widen the legacy pair
+// constraint transactionally while preserving every existing orchestration.
+func (s *Store) migrateOrchestrationWorkerPairs(ctx context.Context) error {
+	var schema string
+	if err := s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'orchestration_runs'`).Scan(&schema); err != nil {
+		return err
+	}
+	if strings.Contains(schema, "'claude-claude'") {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() { _, _ = s.db.ExecContext(context.Background(), `PRAGMA foreign_keys = ON`) }()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`CREATE TABLE orchestration_runs_new (
+			id TEXT PRIMARY KEY, user_id TEXT NOT NULL, agent_id TEXT NOT NULL, title TEXT NOT NULL,
+			mode TEXT NOT NULL CHECK(mode IN ('collaboration','debate')),
+			worker_pair TEXT NOT NULL DEFAULT 'claude-codex' CHECK(worker_pair IN ('claude-codex','codex-codex','claude-claude')),
+			first_cli TEXT CHECK(first_cli IN ('claude','codex')), profile TEXT NOT NULL DEFAULT 'default', prompt TEXT NOT NULL,
+			cwd TEXT, run_cwd TEXT DEFAULT '', codex_thread_id TEXT DEFAULT '', codex_thread_ids_json TEXT DEFAULT '{}',
+			claude_started INTEGER NOT NULL DEFAULT 0, claude_session_ids_json TEXT DEFAULT '{}', claude_started_slots_json TEXT DEFAULT '{}',
+			native_context_compaction TEXT NOT NULL DEFAULT 'off', max_turns INTEGER NOT NULL,
+			status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','canceled','canceling')),
+			error TEXT, files_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER,
+			delete_requested INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (agent_id) REFERENCES agents(id)
+		);`,
+		`INSERT INTO orchestration_runs_new
+			SELECT id, user_id, agent_id, title, mode, worker_pair, first_cli, profile, prompt, cwd, run_cwd,
+			codex_thread_id, codex_thread_ids_json, claude_started,
+			COALESCE(claude_session_ids_json,'{}'), COALESCE(claude_started_slots_json,'{}'),
+			native_context_compaction, max_turns, status, error, files_json, created_at, updated_at, finished_at, delete_requested
+			FROM orchestration_runs;`,
+		`DROP TABLE orchestration_runs;`,
+		`ALTER TABLE orchestration_runs_new RENAME TO orchestration_runs;`,
+		`CREATE INDEX idx_orchestration_runs_user_updated ON orchestration_runs(user_id, updated_at DESC);`,
+		`CREATE INDEX idx_orchestration_runs_user_agent_updated ON orchestration_runs(user_id, agent_id, updated_at DESC);`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migrate orchestration worker pairs: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) migrateOrchestrationTaskRoles(ctx context.Context) error {
@@ -404,18 +471,21 @@ func (s *Store) migrateOrchestrationTaskRoles(ctx context.Context) error {
 }
 
 type CLIConfigPreset struct {
-	ID        string                   `json:"id"`
-	UserID    string                   `json:"-"`
-	AgentID   string                   `json:"agentId"`
-	CLI       string                   `json:"cli"`
-	Name      string                   `json:"name"`
-	BaseURL   string                   `json:"baseUrl"`
-	Model     string                   `json:"model"`
-	Secret    protocol.EncryptedSecret `json:"-"`
-	KeyHint   string                   `json:"keyHint,omitempty"`
-	Active    bool                     `json:"active"`
-	CreatedAt int64                    `json:"createdAt"`
-	UpdatedAt int64                    `json:"updatedAt"`
+	ID               string                   `json:"id"`
+	UserID           string                   `json:"-"`
+	AgentID          string                   `json:"agentId"`
+	CLI              string                   `json:"cli"`
+	Name             string                   `json:"name"`
+	BaseURL          string                   `json:"baseUrl"`
+	Model            string                   `json:"model"`
+	ReasoningEffort  string                   `json:"reasoningEffort,omitempty"`
+	ReasoningLevels  []string                 `json:"reasoningLevels,omitempty"`
+	ReasoningDefault string                   `json:"reasoningDefault,omitempty"`
+	Secret           protocol.EncryptedSecret `json:"-"`
+	KeyHint          string                   `json:"keyHint,omitempty"`
+	Active           bool                     `json:"active"`
+	CreatedAt        int64                    `json:"createdAt"`
+	UpdatedAt        int64                    `json:"updatedAt"`
 }
 
 func (s *Store) CreateCLIConfigPreset(ctx context.Context, preset CLIConfigPreset) (CLIConfigPreset, error) {
@@ -428,10 +498,11 @@ func (s *Store) CreateCLIConfigPreset(ctx context.Context, preset CLIConfigPrese
 	if err != nil {
 		return CLIConfigPreset{}, err
 	}
+	levels, _ := json.Marshal(preset.ReasoningLevels)
 	_, err = s.db.ExecContext(ctx, `INSERT INTO cli_config_presets
-		(id,user_id,agent_id,cli,name,base_url,model,secret_json,key_hint,active,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, preset.ID, preset.UserID, preset.AgentID, preset.CLI,
-		preset.Name, preset.BaseURL, preset.Model, string(raw), preset.KeyHint, boolInt(preset.Active), now, now)
+		(id,user_id,agent_id,cli,name,base_url,model,reasoning_effort,reasoning_levels_json,reasoning_default,secret_json,key_hint,active,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, preset.ID, preset.UserID, preset.AgentID, preset.CLI,
+		preset.Name, preset.BaseURL, preset.Model, preset.ReasoningEffort, string(levels), preset.ReasoningDefault, string(raw), preset.KeyHint, boolInt(preset.Active), now, now)
 	return preset, err
 }
 
@@ -441,8 +512,9 @@ func (s *Store) UpdateCLIConfigPreset(ctx context.Context, preset CLIConfigPrese
 		return CLIConfigPreset{}, err
 	}
 	now := time.Now().Unix()
-	res, err := s.db.ExecContext(ctx, `UPDATE cli_config_presets SET name=?,base_url=?,model=?,secret_json=?,key_hint=?,active=?,updated_at=?
-		WHERE id=? AND user_id=? AND agent_id=? AND cli=?`, preset.Name, preset.BaseURL, preset.Model, string(raw), preset.KeyHint,
+	levels, _ := json.Marshal(preset.ReasoningLevels)
+	res, err := s.db.ExecContext(ctx, `UPDATE cli_config_presets SET name=?,base_url=?,model=?,reasoning_effort=?,reasoning_levels_json=?,reasoning_default=?,secret_json=?,key_hint=?,active=?,updated_at=?
+		WHERE id=? AND user_id=? AND agent_id=? AND cli=?`, preset.Name, preset.BaseURL, preset.Model, preset.ReasoningEffort, string(levels), preset.ReasoningDefault, string(raw), preset.KeyHint,
 		boolInt(active), now, preset.ID, preset.UserID, preset.AgentID, preset.CLI)
 	if err != nil {
 		return CLIConfigPreset{}, err
@@ -454,7 +526,7 @@ func (s *Store) UpdateCLIConfigPreset(ctx context.Context, preset CLIConfigPrese
 }
 
 func (s *Store) ListCLIConfigPresets(ctx context.Context, userID, agentID string) ([]CLIConfigPreset, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,user_id,agent_id,cli,name,base_url,model,secret_json,COALESCE(key_hint,''),active,created_at,updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id,user_id,agent_id,cli,name,base_url,model,COALESCE(reasoning_effort,''),COALESCE(reasoning_levels_json,'[]'),COALESCE(reasoning_default,''),secret_json,COALESCE(key_hint,''),active,created_at,updated_at
 		FROM cli_config_presets WHERE user_id=? AND agent_id=? ORDER BY cli,name,updated_at DESC`, userID, agentID)
 	if err != nil {
 		return nil, err
@@ -465,9 +537,11 @@ func (s *Store) ListCLIConfigPresets(ctx context.Context, userID, agentID string
 		var p CLIConfigPreset
 		var raw string
 		var active int
-		if err := rows.Scan(&p.ID, &p.UserID, &p.AgentID, &p.CLI, &p.Name, &p.BaseURL, &p.Model, &raw, &p.KeyHint, &active, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		var levels string
+		if err := rows.Scan(&p.ID, &p.UserID, &p.AgentID, &p.CLI, &p.Name, &p.BaseURL, &p.Model, &p.ReasoningEffort, &levels, &p.ReasoningDefault, &raw, &p.KeyHint, &active, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
+		_ = json.Unmarshal([]byte(levels), &p.ReasoningLevels)
 		if err := json.Unmarshal([]byte(raw), &p.Secret); err != nil {
 			return nil, err
 		}
@@ -480,15 +554,17 @@ func (s *Store) ListCLIConfigPresets(ctx context.Context, userID, agentID string
 func (s *Store) CLIConfigPresetByID(ctx context.Context, id, userID, agentID string) (CLIConfigPreset, error) {
 	var p CLIConfigPreset
 	var raw string
+	var levels string
 	var active int
-	err := s.db.QueryRowContext(ctx, `SELECT id,user_id,agent_id,cli,name,base_url,model,secret_json,COALESCE(key_hint,''),active,created_at,updated_at
-		FROM cli_config_presets WHERE id=? AND user_id=? AND agent_id=?`, id, userID, agentID).Scan(&p.ID, &p.UserID, &p.AgentID, &p.CLI, &p.Name, &p.BaseURL, &p.Model, &raw, &p.KeyHint, &active, &p.CreatedAt, &p.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id,user_id,agent_id,cli,name,base_url,model,COALESCE(reasoning_effort,''),COALESCE(reasoning_levels_json,'[]'),COALESCE(reasoning_default,''),secret_json,COALESCE(key_hint,''),active,created_at,updated_at
+		FROM cli_config_presets WHERE id=? AND user_id=? AND agent_id=?`, id, userID, agentID).Scan(&p.ID, &p.UserID, &p.AgentID, &p.CLI, &p.Name, &p.BaseURL, &p.Model, &p.ReasoningEffort, &levels, &p.ReasoningDefault, &raw, &p.KeyHint, &active, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CLIConfigPreset{}, ErrNotFound
 	}
 	if err != nil {
 		return CLIConfigPreset{}, err
 	}
+	_ = json.Unmarshal([]byte(levels), &p.ReasoningLevels)
 	if err := json.Unmarshal([]byte(raw), &p.Secret); err != nil {
 		return CLIConfigPreset{}, err
 	}
@@ -690,7 +766,7 @@ func (s *Store) markActiveOrchestrationRunsFailed(ctx context.Context, agentID, 
 	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0), COALESCE(claude_session_ids_json,'{}'), COALESCE(claude_started_slots_json,'{}'),
 			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
 		WHERE `+where+`
@@ -1616,6 +1692,8 @@ type OrchestrationRun struct {
 	CodexThreadID           string              `json:"codexThreadId,omitempty"`
 	CodexThreadIDs          map[string]string   `json:"codexThreadIds,omitempty"`
 	ClaudeStarted           bool                `json:"claudeStarted,omitempty"`
+	ClaudeSessionIDs        map[string]string   `json:"claudeSessionIds,omitempty"`
+	ClaudeStartedSlots      map[string]bool     `json:"claudeStartedSlots,omitempty"`
 	NativeContextCompaction string              `json:"nativeContextCompaction,omitempty"`
 	MaxTurns                int                 `json:"maxTurns"`
 	Status                  string              `json:"status"`
@@ -1666,6 +1744,7 @@ type CreateOrchestrationRunParams struct {
 	NativeContextCompaction string
 	MaxTurns                int
 	Files                   []OrchestrationFile
+	WorkerProfiles          map[string]protocol.WorkerProfileBinding
 }
 
 func (s *Store) CreateRun(ctx context.Context, sessionID, promptID string) (Run, error) {
@@ -1828,13 +1907,63 @@ func (s *Store) CreateOrchestrationRun(ctx context.Context, params CreateOrchest
 	if err != nil {
 		return OrchestrationRun{}, err
 	}
+	if err := s.SetOrchestrationWorkerProfiles(ctx, run.ID, params.WorkerProfiles); err != nil {
+		return OrchestrationRun{}, err
+	}
 	return run, nil
+}
+
+// OrchestrationWorkerProfiles returns the private encrypted worker bindings for
+// a run. They are intentionally excluded from OrchestrationRun so run-list and
+// public-share serialization cannot disclose credential ciphertext.
+func (s *Store) OrchestrationWorkerProfiles(ctx context.Context, runID string) (map[string]protocol.WorkerProfileBinding, error) {
+	if runID == "" {
+		return nil, errors.New("run id is required")
+	}
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT profiles_json FROM orchestration_worker_profiles WHERE run_id = ?`, runID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	profiles := map[string]protocol.WorkerProfileBinding{}
+	if err := json.Unmarshal([]byte(raw), &profiles); err != nil {
+		return nil, fmt.Errorf("decode orchestration worker profiles: %w", err)
+	}
+	if len(profiles) == 0 {
+		return nil, nil
+	}
+	return profiles, nil
+}
+
+// SetOrchestrationWorkerProfiles replaces a run's private encrypted bindings.
+// An empty map deliberately clears prior bindings for an explicit reset.
+func (s *Store) SetOrchestrationWorkerProfiles(ctx context.Context, runID string, profiles map[string]protocol.WorkerProfileBinding) error {
+	if runID == "" {
+		return errors.New("run id is required")
+	}
+	if len(profiles) == 0 {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM orchestration_worker_profiles WHERE run_id = ?`, runID)
+		return err
+	}
+	raw, err := json.Marshal(profiles)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO orchestration_worker_profiles (run_id, profiles_json, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(run_id) DO UPDATE SET profiles_json = excluded.profiles_json, updated_at = excluded.updated_at
+	`, runID, string(raw), time.Now().Unix())
+	return err
 }
 
 func (s *Store) OrchestrationRunByID(ctx context.Context, id, userID string) (OrchestrationRun, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0), COALESCE(claude_session_ids_json,'{}'), COALESCE(claude_started_slots_json,'{}'),
 			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
 		WHERE id = ? AND user_id = ? AND delete_requested = 0
@@ -1845,7 +1974,7 @@ func (s *Store) OrchestrationRunByID(ctx context.Context, id, userID string) (Or
 func (s *Store) OrchestrationRunByIDAnyUser(ctx context.Context, id string) (OrchestrationRun, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0), COALESCE(claude_session_ids_json,'{}'), COALESCE(claude_started_slots_json,'{}'),
 			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
 		WHERE id = ?
@@ -1870,7 +1999,7 @@ func (s *Store) RequestDeleteOrchestrationRun(ctx context.Context, id, userID st
 	defer tx.Rollback()
 	row := tx.QueryRowContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0), COALESCE(claude_session_ids_json,'{}'), COALESCE(claude_started_slots_json,'{}'),
 			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs WHERE id = ? AND user_id = ?
 	`, id, userID)
@@ -1969,7 +2098,7 @@ func (s *Store) ListOrchestrationRuns(ctx context.Context, userID string, limit 
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0), COALESCE(claude_session_ids_json,'{}'), COALESCE(claude_started_slots_json,'{}'),
 			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
 		WHERE user_id = ? AND delete_requested = 0
@@ -1998,7 +2127,7 @@ func (s *Store) ListOrchestrationRunsByAgent(ctx context.Context, userID, agentI
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, agent_id, title, mode, COALESCE(worker_pair,'claude-codex'), COALESCE(first_cli,''), COALESCE(profile,'default'), prompt, COALESCE(cwd,''),
-			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0),
+			COALESCE(run_cwd,''), COALESCE(codex_thread_id,''), COALESCE(codex_thread_ids_json,'{}'), COALESCE(claude_started,0), COALESCE(claude_session_ids_json,'{}'), COALESCE(claude_started_slots_json,'{}'),
 			COALESCE(native_context_compaction,'off'), max_turns, status, COALESCE(error,''), COALESCE(files_json,'[]'), created_at, updated_at, COALESCE(finished_at,0), COALESCE(delete_requested,0)
 		FROM orchestration_runs
 		WHERE user_id = ? AND agent_id = ? AND delete_requested = 0
@@ -2215,10 +2344,19 @@ func (s *Store) UpdateOrchestrationRunSession(ctx context.Context, id, codexThre
 }
 
 func (s *Store) UpdateOrchestrationRunSessionState(ctx context.Context, id, codexThreadID string, codexThreadIDs map[string]string, claudeStarted bool, runCWD string) error {
+	return s.UpdateOrchestrationRunSessionStateWithClaude(ctx, id, codexThreadID, codexThreadIDs, claudeStarted, nil, nil, runCWD)
+}
+
+// UpdateOrchestrationRunSessionStateWithClaude merges native resume state by
+// worker slot. Slots are independent so a resumed claude-a never implies that
+// claude-b has a usable transcript.
+func (s *Store) UpdateOrchestrationRunSessionStateWithClaude(ctx context.Context, id, codexThreadID string, codexThreadIDs map[string]string, claudeStarted bool, claudeSessionIDs map[string]string, claudeStartedSlots map[string]bool, runCWD string) error {
 	if id == "" {
 		return errors.New("run id is required")
 	}
 	codexThreadIDs = cleanStringMap(codexThreadIDs)
+	claudeSessionIDs = cleanStringMap(claudeSessionIDs)
+	claudeStartedSlots = cleanBoolMap(claudeStartedSlots)
 	if codexThreadID != "" && len(codexThreadIDs) == 0 {
 		codexThreadIDs["codex"] = codexThreadID
 	}
@@ -2228,6 +2366,8 @@ func (s *Store) UpdateOrchestrationRunSessionState(ctx context.Context, id, code
 	}
 	defer tx.Rollback()
 	var codexThreadIDsJSON string
+	var claudeSessionIDsJSON string
+	var claudeStartedSlotsJSON string
 	if len(codexThreadIDs) > 0 {
 		var currentJSON string
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(codex_thread_ids_json,'{}') FROM orchestration_runs WHERE id = ?`, id).Scan(&currentJSON); err != nil {
@@ -2251,14 +2391,45 @@ func (s *Store) UpdateOrchestrationRunSessionState(ctx context.Context, id, code
 			codexThreadID = firstNonEmpty(merged["codex"], merged["codex-a"], merged["codex-b"])
 		}
 	}
+	if len(claudeSessionIDs) > 0 || len(claudeStartedSlots) > 0 {
+		var currentIDsJSON, currentStartedJSON string
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(claude_session_ids_json,'{}'), COALESCE(claude_started_slots_json,'{}') FROM orchestration_runs WHERE id = ?`, id).Scan(&currentIDsJSON, &currentStartedJSON); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		currentIDs := map[string]string{}
+		currentStarted := map[string]bool{}
+		_ = json.Unmarshal([]byte(currentIDsJSON), &currentIDs)
+		_ = json.Unmarshal([]byte(currentStartedJSON), &currentStarted)
+		for key, value := range claudeSessionIDs {
+			currentIDs[key] = value
+		}
+		for key, value := range claudeStartedSlots {
+			currentStarted[key] = value
+		}
+		raw, err := json.Marshal(cleanStringMap(currentIDs))
+		if err != nil {
+			return err
+		}
+		claudeSessionIDsJSON = string(raw)
+		raw, err = json.Marshal(cleanBoolMap(currentStarted))
+		if err != nil {
+			return err
+		}
+		claudeStartedSlotsJSON = string(raw)
+	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE orchestration_runs
 		SET codex_thread_id = CASE WHEN ? <> '' THEN ? ELSE codex_thread_id END,
 			codex_thread_ids_json = CASE WHEN ? <> '' THEN ? ELSE codex_thread_ids_json END,
 			claude_started = CASE WHEN ? = 1 THEN 1 ELSE claude_started END,
+			claude_session_ids_json = CASE WHEN ? <> '' THEN ? ELSE claude_session_ids_json END,
+			claude_started_slots_json = CASE WHEN ? <> '' THEN ? ELSE claude_started_slots_json END,
 			run_cwd = CASE WHEN ? <> '' AND run_cwd = '' THEN ? ELSE run_cwd END
 		WHERE id = ?
-	`, codexThreadID, codexThreadID, codexThreadIDsJSON, codexThreadIDsJSON, boolInt(claudeStarted), runCWD, runCWD, id); err != nil {
+	`, codexThreadID, codexThreadID, codexThreadIDsJSON, codexThreadIDsJSON, boolInt(claudeStarted), claudeSessionIDsJSON, claudeSessionIDsJSON, claudeStartedSlotsJSON, claudeStartedSlotsJSON, runCWD, runCWD, id); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -2467,10 +2638,12 @@ func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (Orchestrati
 	var run OrchestrationRun
 	var filesJSON string
 	var codexThreadIDsJSON string
+	var claudeSessionIDsJSON string
+	var claudeStartedSlotsJSON string
 	var claudeStarted int
 	var deleteRequested int
 	if err := row.Scan(&run.ID, &run.UserID, &run.AgentID, &run.Title, &run.Mode, &run.WorkerPair, &run.FirstCLI, &run.Profile, &run.Prompt, &run.CWD,
-		&run.RunCWD, &run.CodexThreadID, &codexThreadIDsJSON, &claudeStarted, &run.NativeContextCompaction, &run.MaxTurns, &run.Status, &run.Error, &filesJSON, &run.CreatedAt, &run.UpdatedAt, &run.FinishedAt, &deleteRequested); err != nil {
+		&run.RunCWD, &run.CodexThreadID, &codexThreadIDsJSON, &claudeStarted, &claudeSessionIDsJSON, &claudeStartedSlotsJSON, &run.NativeContextCompaction, &run.MaxTurns, &run.Status, &run.Error, &filesJSON, &run.CreatedAt, &run.UpdatedAt, &run.FinishedAt, &deleteRequested); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return OrchestrationRun{}, ErrNotFound
 		}
@@ -2482,7 +2655,15 @@ func scanOrchestrationRun(row interface{ Scan(dest ...any) error }) (Orchestrati
 	if strings.TrimSpace(codexThreadIDsJSON) != "" {
 		_ = json.Unmarshal([]byte(codexThreadIDsJSON), &run.CodexThreadIDs)
 	}
+	if strings.TrimSpace(claudeSessionIDsJSON) != "" {
+		_ = json.Unmarshal([]byte(claudeSessionIDsJSON), &run.ClaudeSessionIDs)
+	}
+	if strings.TrimSpace(claudeStartedSlotsJSON) != "" {
+		_ = json.Unmarshal([]byte(claudeStartedSlotsJSON), &run.ClaudeStartedSlots)
+	}
 	run.CodexThreadIDs = cleanStringMap(run.CodexThreadIDs)
+	run.ClaudeSessionIDs = cleanStringMap(run.ClaudeSessionIDs)
+	run.ClaudeStartedSlots = cleanBoolMap(run.ClaudeStartedSlots)
 	if run.CodexThreadID != "" && len(run.CodexThreadIDs) == 0 {
 		run.CodexThreadIDs = map[string]string{"codex": run.CodexThreadID}
 	}
@@ -2510,6 +2691,19 @@ func cleanStringMap(values map[string]string) map[string]string {
 			continue
 		}
 		out[key] = value
+	}
+	return out
+}
+
+func cleanBoolMap(values map[string]bool) map[string]bool {
+	if len(values) == 0 {
+		return map[string]bool{}
+	}
+	out := make(map[string]bool, len(values))
+	for key, value := range values {
+		if key = strings.TrimSpace(key); key != "" && value {
+			out[key] = true
+		}
 	}
 	return out
 }

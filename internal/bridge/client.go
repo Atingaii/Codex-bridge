@@ -156,7 +156,7 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 	}
 	slog.Info("[bridge] connecting", "hub", c.cfg.Bridge.HubURL, "name", c.cfg.Bridge.Name, "machine_id", c.machineID)
 	header := http.Header{}
-	ws, resp, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
+	ws, resp, err := dialHubWebSocket(ctx, wsURL, header)
 	if err != nil {
 		if resp != nil {
 			return fmt.Errorf("%w: %s", err, resp.Status)
@@ -288,6 +288,28 @@ func (c *Client) connectOnce(ctx context.Context, token string) error {
 			}
 		}
 	}
+}
+
+// dialHubWebSocket keeps proxy support for installations that require it. A
+// few proxy configurations return plaintext HTTP to a CONNECT/TLS request;
+// retry the Hub control channel directly only for that unambiguous failure.
+// CLI provider requests retain their inherited proxy environment.
+func dialHubWebSocket(ctx context.Context, wsURL string, header http.Header) (*websocket.Conn, *http.Response, error) {
+	ws, resp, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
+	if err == nil || !hubProxyReturnedPlaintextTLS(err) {
+		return ws, resp, err
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	slog.Warn("[bridge] Hub proxy returned plaintext during TLS handshake; retrying Hub connection directly")
+	directDialer := *websocket.DefaultDialer
+	directDialer.Proxy = nil
+	return directDialer.DialContext(ctx, wsURL, header)
+}
+
+func hubProxyReturnedPlaintextTLS(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "first record does not look like a tls handshake")
 }
 
 func bridgeHeartbeatInterval(configured time.Duration) time.Duration {

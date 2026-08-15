@@ -35,6 +35,25 @@ func TestBridgeCapabilitiesCheckCLIPaths(t *testing.T) {
 	}
 }
 
+func TestHubProxyReturnedPlaintextTLS(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "plaintext TLS response", err: fmt.Errorf("tls: first record does not look like a TLS handshake"), want: true},
+		{name: "wrapped plaintext TLS response", err: fmt.Errorf("websocket: %w", fmt.Errorf("tls: first record does not look like a TLS handshake")), want: true},
+		{name: "ordinary connection refusal", err: fmt.Errorf("dial tcp: connection refused"), want: false},
+		{name: "nil", err: nil, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hubProxyReturnedPlaintextTLS(tt.err); got != tt.want {
+				t.Fatalf("hubProxyReturnedPlaintextTLS(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBridgeCapabilitiesKeepPermissionProfilesIsolated(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {

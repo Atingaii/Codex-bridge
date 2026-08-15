@@ -114,6 +114,12 @@ func (s *Server) handleCreateOrchestration(w http.ResponseWriter, r *http.Reques
 		serverutil.WriteError(w, http.StatusConflict, "ORCHESTRATION_CAPABILITY_UNAVAILABLE", err.Error())
 		return
 	}
+	if len(req.WorkerProfilePresetIDs) > 0 {
+		if err := s.validateIsolatedWorkerProfileCapability(agentID); err != nil {
+			serverutil.WriteError(w, http.StatusConflict, "ORCHESTRATION_CAPABILITY_UNAVAILABLE", err.Error())
+			return
+		}
+	}
 	profiles, err := s.resolveWorkerProfiles(r.Context(), uid, agentID, normalized.WorkerPair, req.WorkerProfilePresetIDs, req.WorkerProfileEfforts)
 	if err != nil {
 		serverutil.WriteError(w, http.StatusBadRequest, "BAD_WORKER_PROFILE", err.Error())
@@ -253,6 +259,12 @@ func (s *Server) handleContinueOrchestration(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		normalized.WorkerProfiles = profiles
+	}
+	if len(normalized.WorkerProfiles) > 0 {
+		if err := s.validateIsolatedWorkerProfileCapability(agentID); err != nil {
+			serverutil.WriteError(w, http.StatusConflict, "ORCHESTRATION_CAPABILITY_UNAVAILABLE", err.Error())
+			return
+		}
 	}
 	normalized.AgentID = agentID
 	files := mergeOrchestrationFiles(run.Files, orchestrationFileMeta(normalized.Files))
@@ -1338,6 +1350,17 @@ func (s *Server) validateOrchestrationCapabilities(agentID, workerPair string) e
 	missing := missingOrchestrationBrowserApproval(caps, required)
 	if len(missing) > 0 {
 		return fmt.Errorf("review-required orchestration needs browser approval for %s; reconnect the endpoint with a review-required bridge that supports app-server orchestration", strings.Join(missing, " and "))
+	}
+	return nil
+}
+
+// validateIsolatedWorkerProfileCapability rejects Bridges that predate the
+// per-slot native-home contract. Accepting a profile payload on those clients
+// would silently revive the retired model_catalog_json path.
+func (s *Server) validateIsolatedWorkerProfileCapability(agentID string) error {
+	connection, ok := s.pool.AgentConnectionInfo(agentID)
+	if !ok || connection.Capabilities == nil || !connection.Capabilities.IsolatedWorkerProfiles {
+		return errors.New("selected CLI endpoint must update its Bridge before using per-worker model presets; reconnect the upgraded Bridge and try again")
 	}
 	return nil
 }

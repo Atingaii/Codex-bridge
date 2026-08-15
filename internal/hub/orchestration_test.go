@@ -1321,8 +1321,9 @@ func TestOrchestrationWorkerProfilesPersistAcrossFollowUpAndCanClear(t *testing.
 	conn := &BridgeConn{
 		agentID: agentID,
 		capabilities: &protocol.BridgeCapabilities{
-			ConfigSwitcher: &protocol.CLIConfigSwitcherCapability{Version: 1, KeyID: "bridge-key", CLIs: []string{"codex"}},
-			Orchestration:  map[string]protocol.BridgeCLICapability{"codex": {Available: true, BrowserApproval: true}},
+			ConfigSwitcher:         &protocol.CLIConfigSwitcherCapability{Version: 1, KeyID: "bridge-key", CLIs: []string{"codex"}},
+			IsolatedWorkerProfiles: true,
+			Orchestration:          map[string]protocol.BridgeCLICapability{"codex": {Available: true, BrowserApproval: true}},
 		},
 		wsSender: wsSender{send: make(chan protocol.Envelope, 4), done: make(chan struct{})},
 	}
@@ -1400,8 +1401,9 @@ func TestOrchestrationWorkerProfilesRejectUnsupportedReasoningEffort(t *testing.
 	s, st, userID, agentID := newOrchestrationTestServer(t)
 	ctx := context.Background()
 	conn := &BridgeConn{agentID: agentID, capabilities: &protocol.BridgeCapabilities{
-		ConfigSwitcher: &protocol.CLIConfigSwitcherCapability{Version: 1, KeyID: "bridge-key", CLIs: []string{"codex"}},
-		Orchestration:  map[string]protocol.BridgeCLICapability{"codex": {Available: true, BrowserApproval: true}},
+		ConfigSwitcher:         &protocol.CLIConfigSwitcherCapability{Version: 1, KeyID: "bridge-key", CLIs: []string{"codex"}},
+		IsolatedWorkerProfiles: true,
+		Orchestration:          map[string]protocol.BridgeCLICapability{"codex": {Available: true, BrowserApproval: true}},
 	}, wsSender: wsSender{send: make(chan protocol.Envelope, 1), done: make(chan struct{})}}
 	s.pool.RegisterAgent(conn)
 	defer s.pool.UnregisterAgent(agentID, conn)
@@ -1420,12 +1422,33 @@ func TestOrchestrationWorkerProfilesRejectUnsupportedReasoningEffort(t *testing.
 	}, http.StatusBadRequest)
 }
 
+func TestOrchestrationWorkerProfilesRequireIsolatedBridgeCapability(t *testing.T) {
+	s, _, userID, agentID := newOrchestrationTestServer(t)
+	conn := &BridgeConn{agentID: agentID, capabilities: &protocol.BridgeCapabilities{
+		ConfigSwitcher: &protocol.CLIConfigSwitcherCapability{Version: 1, KeyID: "legacy-bridge-key", CLIs: []string{"codex"}},
+		Orchestration:  map[string]protocol.BridgeCLICapability{"codex": {Available: true, BrowserApproval: true}},
+	}, wsSender: wsSender{send: make(chan protocol.Envelope, 1), done: make(chan struct{})}}
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId": agentID, "prompt": "must reject the legacy profile path", "workerPair": "codex-codex", "maxTurns": 1,
+		"workerProfilePresetIds": map[string]string{"codex-a": "preset-a"},
+	}, http.StatusConflict)
+	select {
+	case env := <-conn.send:
+		t.Fatalf("legacy Bridge received profile payload: %#v", env)
+	default:
+	}
+}
+
 func TestClaudeClaudeWorkerProfilesBindIndependentModelsAndEfforts(t *testing.T) {
 	s, st, userID, agentID := newOrchestrationTestServer(t)
 	ctx := context.Background()
 	conn := &BridgeConn{agentID: agentID, capabilities: &protocol.BridgeCapabilities{
-		ConfigSwitcher: &protocol.CLIConfigSwitcherCapability{Version: 1, KeyID: "bridge-key", CLIs: []string{"claude"}},
-		Orchestration:  map[string]protocol.BridgeCLICapability{"claude": {Available: true, BrowserApproval: true}},
+		ConfigSwitcher:         &protocol.CLIConfigSwitcherCapability{Version: 1, KeyID: "bridge-key", CLIs: []string{"claude"}},
+		IsolatedWorkerProfiles: true,
+		Orchestration:          map[string]protocol.BridgeCLICapability{"claude": {Available: true, BrowserApproval: true}},
 	}, wsSender: wsSender{send: make(chan protocol.Envelope, 1), done: make(chan struct{})}}
 	s.pool.RegisterAgent(conn)
 	defer s.pool.UnregisterAgent(agentID, conn)

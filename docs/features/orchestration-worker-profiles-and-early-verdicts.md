@@ -65,6 +65,10 @@ The `claude-claude` pair and unanimous checker quorum extend this design in
 - Bridge emits `verifier.verdict` with a safe verdict, evidence summary, and
   early-stop marker. Existing event persistence and frontend reducers consume
   it as an ordinary orchestration event.
+- Bridge registration advertises `isolatedWorkerProfiles`. Hub rejects a new
+  or continued run with bound profiles when the selected endpoint has not
+  advertised it, rather than allowing an older Bridge to interpret the payload
+  through its retired `model_catalog_json` path.
 
 ## Implementation Steps
 

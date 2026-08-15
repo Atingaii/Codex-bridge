@@ -104,6 +104,10 @@ type BridgeCapabilities struct {
 	DurableTaskGraph bool                           `json:"durableTaskGraph,omitempty"`
 	UsageLedger      bool                           `json:"usageLedger,omitempty"`
 	ConfigSwitcher   *CLIConfigSwitcherCapability   `json:"configSwitcher,omitempty"`
+	// IsolatedWorkerProfiles confirms that this Bridge materializes orchestration
+	// slot presets into private native CLI homes. Older Bridges accepted the
+	// payload but used their legacy global configuration path instead.
+	IsolatedWorkerProfiles bool `json:"isolatedWorkerProfiles,omitempty"`
 }
 
 type CLIConfigSwitcherCapability struct {

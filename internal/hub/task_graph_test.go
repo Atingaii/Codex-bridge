@@ -231,6 +231,28 @@ func TestReduceOrchestrationPlanReviewBoundaryDoesNotMixDraftItems(t *testing.T)
 	}
 }
 
+func TestMergeOrchestrationProgressEventsRetainsHistoricalPlanMarkers(t *testing.T) {
+	ref := func(graphID, name string) *protocol.TaskAttemptRef {
+		return &protocol.TaskAttemptRef{GraphID: graphID, Name: name}
+	}
+	live := []store.OrchestrationEvent{
+		{Seq: 10001, Kind: "turn.delta", Content: "latest output"},
+		{Seq: 10002, Kind: "turn.end", Content: "latest completion"},
+	}
+	plan := []store.OrchestrationEvent{
+		{Seq: 5, Kind: "run.end", Task: ref("otg_current", "plan-review"), Content: "[PLAN_GOAL] 完成证明\n[PLAN_ITEM id=\"P1\" status=\"pending\"] 验证引理"},
+		live[1],
+	}
+	merged := mergeOrchestrationProgressEvents(live, plan)
+	if len(merged) != 3 || merged[0].Seq != 5 || merged[1].Seq != 10001 || merged[2].Seq != 10002 {
+		t.Fatalf("merged events = %#v", merged)
+	}
+	progress := reduceOrchestrationPlan(merged)
+	if progress.Goal != "完成证明" || progress.Total != 1 || progress.Items[0].Title != "验证引理" {
+		t.Fatalf("historical plan was lost: %#v", progress)
+	}
+}
+
 func TestGroupOrchestrationProgressGraphsKeepsRoundsUnderTheirPrompt(t *testing.T) {
 	payloadJSON := func(prompt string, promptSeq int64) string {
 		raw, err := json.Marshal(protocol.OrchestrationStartPayload{Prompt: prompt, PromptSeq: promptSeq})

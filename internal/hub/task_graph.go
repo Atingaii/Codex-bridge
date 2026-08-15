@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/tencent/codex-bridge/internal/protocol"
@@ -353,6 +355,35 @@ func groupOrchestrationProgressGraphs(graphs []store.OrchestrationTaskGraph, eve
 	return groups
 }
 
+// mergeOrchestrationProgressEvents preserves the bounded live-event query for
+// transcript responsiveness while retaining the durable plan marker ledger.
+// The same event can appear in both lists, so sequence is the stable identity.
+func mergeOrchestrationProgressEvents(live, plan []store.OrchestrationEvent) []store.OrchestrationEvent {
+	if len(plan) == 0 {
+		return live
+	}
+	merged := make([]store.OrchestrationEvent, 0, len(live)+len(plan))
+	seen := make(map[int64]struct{}, len(live)+len(plan))
+	for _, event := range live {
+		if _, exists := seen[event.Seq]; exists {
+			continue
+		}
+		seen[event.Seq] = struct{}{}
+		merged = append(merged, event)
+	}
+	for _, event := range plan {
+		if _, exists := seen[event.Seq]; exists {
+			continue
+		}
+		seen[event.Seq] = struct{}{}
+		merged = append(merged, event)
+	}
+	slices.SortFunc(merged, func(left, right store.OrchestrationEvent) int {
+		return cmp.Compare(left.Seq, right.Seq)
+	})
+	return merged
+}
+
 func sameOrchestrationUserTask(previous protocol.OrchestrationStartPayload, previousValid bool, current protocol.OrchestrationStartPayload, currentValid bool) bool {
 	if !previousValid || !currentValid {
 		return false
@@ -395,6 +426,12 @@ func (s *Server) handleOrchestrationProgress(w http.ResponseWriter, r *http.Requ
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration progress events")
 		return
 	}
+	planEvents, err := s.store.ListOrchestrationPlanEvents(r.Context(), runID)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load orchestration plan events")
+		return
+	}
+	events = mergeOrchestrationProgressEvents(events, planEvents)
 	tasks := groupOrchestrationProgressGraphs(graphs, events)
 	latestTask := tasks[len(tasks)-1]
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{

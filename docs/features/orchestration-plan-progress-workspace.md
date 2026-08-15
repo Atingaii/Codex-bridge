@@ -118,8 +118,10 @@ layout.
   percentage, current focus, and dependency readiness from that same event
   ledger. The browser does not maintain a second copy of plan state.
 - Checklist state is reconstructed from persisted orchestration events. The
-  durable task graph remains the scheduling source of truth and no schema is
-  added for presentation state.
+  endpoint merges its bounded live-event window with the complete, compact
+  `[PLAN_*]` marker ledger, so a long streaming task cannot age its reviewed
+  plan out of the displayed progress state. The durable task graph remains the
+  scheduling source of truth and no schema is added for presentation state.
 
 ## State And Compatibility
 

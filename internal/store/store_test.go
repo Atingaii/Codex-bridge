@@ -483,23 +483,33 @@ func TestListOrchestrationEventsReturnsLatestWindowInAscendingOrder(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "run.end", Content: "[PLAN_ITEM id=\"P1\" status=\"pending\"] historical plan"}); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 5; i++ {
 		if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "turn.delta", Content: "event"}); err != nil {
 			t.Fatal(err)
 		}
 	}
+	planEvents, err := st.ListOrchestrationPlanEvents(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(planEvents) != 1 || planEvents[0].Content != "[PLAN_ITEM id=\"P1\" status=\"pending\"] historical plan" {
+		t.Fatalf("unexpected plan events: %+v", planEvents)
+	}
 	events, err := st.ListOrchestrationEvents(ctx, run.ID, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 3 || events[0].Seq != 3 || events[1].Seq != 4 || events[2].Seq != 5 {
+	if len(events) != 3 || events[0].Seq != 4 || events[1].Seq != 5 || events[2].Seq != 6 {
 		t.Fatalf("unexpected latest window: %+v", events)
 	}
-	events, err = st.ListOrchestrationEventsAfter(ctx, run.ID, 3, 10)
+	events, err = st.ListOrchestrationEventsAfter(ctx, run.ID, 4, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 2 || events[0].Seq != 4 || events[1].Seq != 5 {
+	if len(events) != 2 || events[0].Seq != 5 || events[1].Seq != 6 {
 		t.Fatalf("unexpected after-seq window: %+v", events)
 	}
 	if _, err := st.AddOrchestrationEvent(ctx, OrchestrationEvent{RunID: run.ID, Kind: "run.start", Data: map[string]any{"round": 1}}); err != nil {
@@ -512,28 +522,28 @@ func TestListOrchestrationEventsReturnsLatestWindowInAscendingOrder(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(usageTimeline) != 2 || usageTimeline[0].Kind != "run.start" || usageTimeline[1].Kind != "turn.usage" {
+	if len(usageTimeline) != 3 || usageTimeline[0].Kind != "run.end" || usageTimeline[1].Kind != "run.start" || usageTimeline[2].Kind != "turn.usage" {
 		t.Fatalf("unexpected usage timeline: %+v", usageTimeline)
 	}
-	events, err = st.ListOrchestrationEventsAfter(ctx, run.ID, 3, 1)
+	events, err = st.ListOrchestrationEventsAfter(ctx, run.ID, 4, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Seq != 4 {
+	if len(events) != 1 || events[0].Seq != 5 {
 		t.Fatalf("unexpected limited after-seq window: %+v", events)
 	}
-	events, err = st.ListOrchestrationEventsBefore(ctx, run.ID, 4, 10)
+	events, err = st.ListOrchestrationEventsBefore(ctx, run.ID, 5, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 3 || events[0].Seq != 1 || events[1].Seq != 2 || events[2].Seq != 3 {
+	if len(events) != 4 || events[0].Seq != 1 || events[1].Seq != 2 || events[2].Seq != 3 || events[3].Seq != 4 {
 		t.Fatalf("unexpected before-seq window: %+v", events)
 	}
-	events, err = st.ListOrchestrationEventsBefore(ctx, run.ID, 4, 2)
+	events, err = st.ListOrchestrationEventsBefore(ctx, run.ID, 5, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 2 || events[0].Seq != 2 || events[1].Seq != 3 {
+	if len(events) != 2 || events[0].Seq != 3 || events[1].Seq != 4 {
 		t.Fatalf("unexpected limited before-seq window: %+v", events)
 	}
 }

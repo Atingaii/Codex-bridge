@@ -2287,6 +2287,33 @@ func (s *Store) ListOrchestrationEvents(ctx context.Context, runID string, limit
 	return out, rows.Err()
 }
 
+// ListOrchestrationPlanEvents returns the small, complete history needed to
+// reconstruct a task's reviewed checklist. Unlike the live transcript window,
+// these markers must not be discarded when a long-running CLI emits more than
+// 10,000 subsequent events.
+func (s *Store) ListOrchestrationPlanEvents(ctx context.Context, runID string) ([]OrchestrationEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, run_id, seq, kind, COALESCE(source,''), COALESCE(severity,''), COALESCE(role,''), COALESCE(cli,''), COALESCE(turn_id,''),
+			COALESCE(content,''), COALESCE(status,''), COALESCE(error,''), COALESCE(data_json,''), created_at
+		FROM orchestration_events
+		WHERE run_id = ? AND content LIKE '%[PLAN_%'
+		ORDER BY seq ASC
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OrchestrationEvent
+	for rows.Next() {
+		event, err := scanOrchestrationEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
 // ListOrchestrationUsageTimeline returns the complete, compact subset needed
 // for usage aggregation and native-session discovery. It intentionally omits
 // high-volume delta and command events so long runs do not lose early rounds.

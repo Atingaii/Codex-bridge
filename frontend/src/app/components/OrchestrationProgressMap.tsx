@@ -156,14 +156,14 @@ export function OrchestrationProgressMap({
           zoomOnDoubleClick={interactive}
           preventScrolling={interactive}
           fitView
-          fitViewOptions={{ padding: 0.12, minZoom: 0.25, maxZoom: 1 }}
+          fitViewOptions={{ padding: 0.12, minZoom: 0.25, maxZoom: interactive ? 1.35 : 1 }}
           minZoom={0.25}
           maxZoom={interactive ? 2.5 : 1}
           proOptions={{ hideAttribution: true }}
           disableKeyboardA11y
           className="bg-[radial-gradient(circle_at_center,color-mix(in_oklab,var(--muted-foreground)_11%,transparent)_0.7px,transparent_0.8px)] bg-[length:14px_14px]"
         >
-          <FitFlowToContainer layoutKey={layoutKey} />
+          <FitFlowToContainer layoutKey={layoutKey} maxZoom={interactive ? 1.35 : 1} />
           {interactive ? <FlowViewportControls /> : null}
         </ReactFlow>
       ) : (
@@ -233,17 +233,17 @@ function ProgressNodeCard({ data }: NodeProps<ProgressNode>) {
   );
 }
 
-function FitFlowToContainer({ layoutKey }: { layoutKey: string }) {
+function FitFlowToContainer({ layoutKey, maxZoom }: { layoutKey: string; maxZoom: number }) {
   const nodesInitialized = useNodesInitialized();
   const { fitView } = useReactFlow();
 
   useEffect(() => {
     if (!nodesInitialized) return undefined;
     const frame = window.requestAnimationFrame(() => {
-      void fitView({ padding: 0.12, minZoom: 0.25, maxZoom: 1, duration: 180 });
+      void fitView({ padding: 0.12, minZoom: 0.25, maxZoom, duration: 180 });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [fitView, layoutKey, nodesInitialized]);
+  }, [fitView, layoutKey, maxZoom, nodesInitialized]);
 
   return null;
 }

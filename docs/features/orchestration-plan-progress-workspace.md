@@ -41,9 +41,12 @@ height or width. The work area contains two responsive information rails:
    `turn.start` prompts. The selected prompt is read-only.
 2. The progress rail starts with an overall Chinese goal and completion
 summary. Its primary map is a proof-task dependency graph whose nodes show
-   difficulty, priority, status, and recommended order. A synchronized local
-   checklist lists active, ready, dependency-blocked, and completed proof
-   obligations with rationale and evidence.
+   difficulty, priority, status, and recommended order. The inline map has a
+   larger reading height plus pan, wheel/pinch zoom, and viewport controls. A
+   dedicated expand action opens a bounded large panel rather than a full-screen
+   takeover. A synchronized local checklist lists active, ready,
+   dependency-blocked, and completed proof obligations with rationale and
+   evidence.
 3. The six durable Agent nodes remain visible as a compact secondary execution
    chain. They explain where the orchestration runtime is, but do not masquerade
    as proof completion. The compact chain can be opened in a large dialog with

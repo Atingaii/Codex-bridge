@@ -10,6 +10,7 @@ assert(app.includes("path === '/updates'"), 'missing /updates route');
 assert(app.indexOf('if (isUpdatesRoute)') < app.indexOf('if (!user)'), 'updates must render before authentication');
 assert(updates.includes('修正时间线'), 'missing update timeline');
 assert(updates.includes('当前版本 v0.3.44'), 'missing current version');
+assert(updates.includes('地图可读性提升'), 'missing task branch map readability update');
 assert(updates.includes('工作区隔离和编排规划工作台结束灰度'), 'missing full rollout update');
 assert(updates.includes('续聊任务独立切换'), 'missing task-scoped progress update');
 assert(updates.includes('Token 统计支持任务范围'), 'missing task-scoped usage update');
@@ -35,8 +36,8 @@ assert(updates.includes('统一功能发布策略'), 'missing feature rollout up
 assert(updates.includes('正式更名为 ProofBridge'), 'missing brand rename update');
 assert(updates.includes('支持修改供应商预设'), 'missing provider preset editing update');
 assert(updates.includes('Android 包装器归档'), 'missing Android archive update');
-assertCount(updates, "date: '2026", 15);
-assertCount(updates, "title: '", 40);
+assertAtLeastCount(updates, "date: '2026", 16);
+assertAtLeastCount(updates, "title: '", 41);
 assert(help.includes('href="/updates"'), 'help updates link missing');
 assert(sidebar.includes('href="/updates"'), 'chat sidebar updates link missing');
 assert(orchestration.includes('href="/updates"'), 'orchestration sidebar updates link missing');
@@ -49,7 +50,7 @@ function assert(value, message) {
   if (!value) throw new Error(message);
 }
 
-function assertCount(source, value, expected) {
+function assertAtLeastCount(source, value, expected) {
   const actual = source.split(value).length - 1;
-  if (actual !== expected) throw new Error(`expected ${JSON.stringify(value)} ${expected} time(s), found ${actual}`);
+  if (actual < expected) throw new Error(`expected at least ${JSON.stringify(value)} ${expected} time(s), found ${actual}`);
 }

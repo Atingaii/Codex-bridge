@@ -36,6 +36,14 @@ type UpdateItem = {
 
 const releases: Array<{ date: string; version: string; summary: string; items: UpdateItem[] }> = [
   {
+    date: '2026 年 8 月 15 日',
+    version: 'v0.3.48',
+    summary: '任务分支地图扩大阅读空间，并提供局部展开与直接缩放。',
+    items: [
+      { icon: Network, category: '规划进度', title: '地图可读性提升', detail: '主地图获得更大画布、拖动与滚轮或双指缩放，并提供适配视图控件；展开后使用受限的大阅读面板，不会占满整个应用。' },
+    ],
+  },
+  {
     date: '2026 年 8 月 14 日',
     version: 'v0.3.44',
     summary: '工作区隔离和编排规划工作台结束灰度，现已向所有用户开放。',

@@ -151,6 +151,7 @@ export function OrchestrationWorkspace({
   const [orchestrationProgress, setOrchestrationProgress] = useState<OrchestrationProgress | null>(null);
   const [selectedProgressTaskNumber, setSelectedProgressTaskNumber] = useState<number | null>(null);
   const [selectedProgressGraphId, setSelectedProgressGraphId] = useState('');
+  const [taskMapExpanded, setTaskMapExpanded] = useState(false);
   const [agentGraphExpanded, setAgentGraphExpanded] = useState(false);
   const [selectedPromptKey, setSelectedPromptKey] = useState('initial');
   const [connectionStatus, setConnectionStatus] = useState(t.disconnected);
@@ -1255,7 +1256,7 @@ export function OrchestrationWorkspace({
                     })}
                   </div>
                 )}
-                <div className="grid gap-3 xl:grid-cols-[minmax(16rem,0.5fr)_minmax(34rem,1.5fr)]">
+                <div className="grid gap-3 xl:grid-cols-[minmax(15rem,0.42fr)_minmax(38rem,1.58fr)]">
                   <aside className="min-w-0 overflow-hidden rounded-md border border-border bg-background">
                     <div className="flex items-center gap-2 border-b border-border px-3 py-2.5 text-xs font-semibold text-muted-foreground"><BookOpen className="h-3.5 w-3.5" />{t.promptNavigator}</div>
                     <div className="flex max-h-28 gap-1 overflow-auto border-b border-border p-2 elegant-scrollbar xl:flex-col">
@@ -1270,16 +1271,20 @@ export function OrchestrationWorkspace({
                     <section className="min-w-0 rounded-md border border-border bg-background p-3">
                       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                         <div><div className="flex items-center gap-2 text-sm font-semibold"><Workflow className="h-4 w-4 text-primary" />{language === 'zh' ? '任务分支地图' : 'Task branch map'}</div><p className="mt-1 text-[11px] text-muted-foreground">{language === 'zh' ? '整体路线、局部进度、依赖与推荐顺序。' : 'Overall route, local progress, dependencies, and recommended order.'}</p></div>
-                        {currentPlanItem && <span className="rounded border border-sky-500/20 bg-sky-500/[0.06] px-2 py-1 text-[10px] text-sky-700 dark:text-sky-300">{language === 'zh' ? '当前' : 'Focus'} · {currentPlanItem.title}</span>}
+                        <div className="flex min-w-0 items-center gap-2">
+                          {currentPlanItem && <span className="max-w-[20rem] truncate rounded border border-sky-500/20 bg-sky-500/[0.06] px-2 py-1 text-[10px] text-sky-700 dark:text-sky-300">{language === 'zh' ? '当前' : 'Focus'} · {currentPlanItem.title}</span>}
+                          <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 rounded" onClick={() => setTaskMapExpanded(true)} disabled={!projectedPlanItems.length} aria-label={language === 'zh' ? '展开任务分支地图' : 'Expand task branch map'} title={language === 'zh' ? '展开任务分支地图' : 'Expand task branch map'}><Maximize2 className="h-3.5 w-3.5" /></Button>
+                        </div>
                       </div>
                       <OrchestrationProgressMap
                         tasks={projectedPlanItems.map((item, index) => ({ id: item.id, name: item.title, role: item.branch || item.kind, status: item.status, position: item.priority || index + 1, dependencies: item.dependsOn || [], detail: item.evidence || item.rationale }))}
                         activeTaskId={projectedPlan?.currentFocus}
-                        height={Math.max(220, Math.min(400, Math.ceil(Math.max(projectedPlanItems.length, 3) / 3) * 96))}
+                        height={Math.max(320, Math.min(520, Math.ceil(Math.max(projectedPlanItems.length, 3) / 3) * 128))}
                         ariaLabel={language === 'zh' ? '任务分支地图' : 'Task branch map'}
                         emptyLabel={isRunning ? (language === 'zh' ? '正在生成整个任务的中文计划…' : 'Generating the structured whole-task plan...') : (language === 'zh' ? '本次任务没有可用的结构化计划。' : 'No structured task plan is available for this run.')}
                         statusLabels={orchestrationStatusLabels(language, t)}
                         inferSequentialDependencies={false}
+                        interactive
                       />
                     </section>
 
@@ -1583,6 +1588,27 @@ export function OrchestrationWorkspace({
           {(selectedProgressTask?.graphs?.length || 0) > 1 && <div className="flex shrink-0 gap-1 overflow-x-auto rounded-md border border-border bg-muted/20 p-1 elegant-scrollbar">{selectedProgressTask?.graphs.map((graph, index) => <button key={graph.id} type="button" onClick={() => setSelectedProgressGraphId(graph.id)} className={cn('h-7 shrink-0 rounded px-2.5 text-xs transition-colors', selectedAgentGraph?.id === graph.id ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}>{language === 'zh' ? `第 ${index + 1} 轮` : `Round ${index + 1}`}</button>)}</div>}
           <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border">
             <OrchestrationProgressMap tasks={(selectedAgentGraph?.tasks || []).map((task) => ({ ...task, name: orchestrationTaskDisplayName(task.name, language), dependencies: task.dependencies || [] }))} height="100%" interactive ariaLabel={language === 'zh' ? '可缩放的 Agent 执行链' : 'Interactive Agent execution chain'} emptyLabel={language === 'zh' ? '暂无执行节点。' : 'No execution nodes yet.'} statusLabels={orchestrationStatusLabels(language, t)} />
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={taskMapExpanded} onOpenChange={setTaskMapExpanded}>
+        <DialogContent className="flex h-[min(44rem,calc(100vh-5rem))] w-[min(68rem,calc(100vw-2rem))] max-w-none flex-col gap-3 overflow-hidden p-4 md:p-5">
+          <DialogHeader className="shrink-0 pr-10">
+            <DialogTitle className="flex items-center gap-2 text-base"><Workflow className="h-4 w-4 text-primary" />{language === 'zh' ? `任务 ${selectedProgressTask?.taskNumber || 1} · 任务分支地图` : `Task ${selectedProgressTask?.taskNumber || 1} · Task branch map`}</DialogTitle>
+            <DialogDescription>{language === 'zh' ? '拖动画布，滚轮或双指缩放；使用右下角控件调整视图。' : 'Drag to pan, scroll or pinch to zoom, and use the lower-right controls to adjust the view.'}</DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border">
+            <OrchestrationProgressMap
+              tasks={projectedPlanItems.map((item, index) => ({ id: item.id, name: item.title, role: item.branch || item.kind, status: item.status, position: item.priority || index + 1, dependencies: item.dependsOn || [], detail: item.evidence || item.rationale }))}
+              activeTaskId={projectedPlan?.currentFocus}
+              height="100%"
+              interactive
+              ariaLabel={language === 'zh' ? '可缩放的任务分支地图' : 'Interactive task branch map'}
+              emptyLabel={language === 'zh' ? '本次任务没有可用的结构化计划。' : 'No structured task plan is available for this run.'}
+              statusLabels={orchestrationStatusLabels(language, t)}
+              inferSequentialDependencies={false}
+            />
           </div>
         </DialogContent>
       </Dialog>

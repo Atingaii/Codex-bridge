@@ -76,6 +76,10 @@ Let a single user talk from any browser to Codex CLI running on a private machin
 
 ## Maintenance Log
 
+- 2026-08-15: Delayed durable task recovery until the existing bounded Bridge
+  reconnect window after Hub startup, so a brief Hub-only reload preserves
+  active attempt identity and buffered terminal evidence; only endpoints still
+  offline after that window are conservatively recovered.
 - 2026-08-14: Made Bridge installation endpoint-neutral. `/install.sh` now
   atomically replaces only the local binary; the following directory-scoped
   `link` starts or restarts only the selected endpoint, so linking another

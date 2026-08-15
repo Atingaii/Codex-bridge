@@ -598,19 +598,65 @@ func refreshGraphStatusTx(ctx context.Context, tx *sql.Tx, graphID string, now i
 // RecoverTaskGraphs marks delivery-ambiguous work unknown and blocks its
 // dependants. It deliberately does not create a retry attempt.
 func (s *Store) RecoverTaskGraphs(ctx context.Context) (int64, error) {
+	return s.recoverTaskGraphs(ctx, "")
+}
+
+// RecoverTaskGraphsForAgent performs the same conservative recovery for one
+// offline Bridge endpoint. It is used after Hub startup's reconnect grace so a
+// different endpoint that has already reconnected keeps its active attempt.
+func (s *Store) RecoverTaskGraphsForAgent(ctx context.Context, agentID string) (int64, error) {
+	if agentID == "" {
+		return 0, errors.New("agent id is required")
+	}
+	return s.recoverTaskGraphs(ctx, agentID)
+}
+
+func (s *Store) recoverTaskGraphs(ctx context.Context, agentID string) (int64, error) {
 	now := time.Now().Unix()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE orchestration_task_attempts SET status = 'unknown', error = 'hub restarted before terminal evidence was recorded' WHERE status IN ('dispatching','running')`)
+	activeTaskFilter := ""
+	args := []any{}
+	if agentID != "" {
+		activeTaskFilter = ` AND task_id IN (
+			SELECT t.id
+			FROM orchestration_tasks t
+			JOIN orchestration_task_graphs g ON g.id = t.graph_id
+			JOIN orchestration_runs r ON r.id = g.run_id
+			WHERE r.agent_id = ?
+		)`
+		args = append(args, agentID)
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE orchestration_task_attempts SET status = 'unknown', error = 'hub restarted before terminal evidence was recorded' WHERE status IN ('dispatching','running')`+activeTaskFilter, args...)
 	if err != nil {
 		return 0, err
 	}
 	count, _ := res.RowsAffected()
-	if _, err := tx.ExecContext(ctx, `UPDATE orchestration_tasks SET status = 'unknown', error = 'hub restarted before terminal evidence was recorded', updated_at = ? WHERE status IN ('dispatching','running')`, now); err != nil {
+	taskFilter := ""
+	taskArgs := []any{now}
+	if agentID != "" {
+		taskFilter = ` AND graph_id IN (
+			SELECT g.id FROM orchestration_task_graphs g
+			JOIN orchestration_runs r ON r.id = g.run_id
+			WHERE r.agent_id = ?
+		)`
+		taskArgs = append(taskArgs, agentID)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE orchestration_tasks SET status = 'unknown', error = 'hub restarted before terminal evidence was recorded', updated_at = ? WHERE status IN ('dispatching','running')`+taskFilter, taskArgs...); err != nil {
 		return 0, err
+	}
+	descendantFilter := ""
+	descendantArgs := []any{now, now}
+	if agentID != "" {
+		descendantFilter = ` AND graph_id IN (
+			SELECT g.id FROM orchestration_task_graphs g
+			JOIN orchestration_runs r ON r.id = g.run_id
+			WHERE r.agent_id = ?
+		)`
+		descendantArgs = append(descendantArgs, agentID)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		WITH RECURSIVE descendants(id) AS (
@@ -619,11 +665,17 @@ func (s *Store) RecoverTaskGraphs(ctx context.Context) (int64, error) {
 			SELECT d.task_id FROM orchestration_task_dependencies d JOIN descendants p ON d.depends_on_task_id = p.id
 		)
 		UPDATE orchestration_tasks SET status = 'blocked', error = 'dependency state is unknown', updated_at = ?, finished_at = ?
-		WHERE status IN ('pending','ready') AND id IN (SELECT id FROM descendants)
-	`, now, now); err != nil {
+		WHERE status IN ('pending','ready') AND id IN (SELECT id FROM descendants)`+descendantFilter+`
+	`, descendantArgs...); err != nil {
 		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE orchestration_task_graphs SET status = 'unknown', updated_at = ? WHERE status = 'running' AND id IN (SELECT graph_id FROM orchestration_tasks WHERE status = 'unknown')`, now); err != nil {
+	graphFilter := ""
+	graphArgs := []any{now}
+	if agentID != "" {
+		graphFilter = ` AND id IN (SELECT g.id FROM orchestration_task_graphs g JOIN orchestration_runs r ON r.id = g.run_id WHERE r.agent_id = ?)`
+		graphArgs = append(graphArgs, agentID)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE orchestration_task_graphs SET status = 'unknown', updated_at = ? WHERE status = 'running' AND id IN (SELECT graph_id FROM orchestration_tasks WHERE status = 'unknown')`+graphFilter, graphArgs...); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {

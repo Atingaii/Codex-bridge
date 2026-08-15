@@ -577,6 +577,67 @@ func (s *Store) MarkActiveOrchestrationRunsForAgentFailed(ctx context.Context, a
 	return s.markActiveOrchestrationRunsFailed(ctx, agentID, reason)
 }
 
+// SettleCancelingOrchestrationRunsForAgent preserves cancellation convergence
+// after a Hub restart for an endpoint that did not return during grace.
+func (s *Store) SettleCancelingOrchestrationRunsForAgent(ctx context.Context, agentID, reason string) error {
+	if agentID == "" {
+		return errors.New("agent id is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM orchestration_runs WHERE agent_id = ? AND status = ?`, agentID, OrchestrationCanceling)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, _, err := s.CancelOrchestrationRunIfStillCanceling(ctx, id, reason); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// InterruptedAgentIDs returns the endpoints that own active chat or
+// orchestration work. Hub startup uses this after its bounded reconnect grace
+// to recover only endpoints which did not return.
+func (s *Store) InterruptedAgentIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT agent_id FROM (
+			SELECT se.agent_id AS agent_id
+			FROM runs ru
+			JOIN sessions se ON se.id = ru.session_id
+			WHERE ru.status IN ('queued','running')
+			UNION
+			SELECT agent_id
+			FROM orchestration_runs
+			WHERE status IN ('queued','running','canceling')
+		) WHERE agent_id <> ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // MarkUnfinishedOrchestrationRunsFailed closes out every orchestration run left
 // in a non-terminal state, regardless of agent. It runs once at Hub startup so
 // runs interrupted by a Hub restart cannot stay "running" forever; canceling

@@ -1562,6 +1562,41 @@ func TestRecoverInterruptedRunsAtBoot(t *testing.T) {
 	}
 }
 
+func TestRecoverInterruptedRunsPreservesReconnectedDurableAttempt(t *testing.T) {
+	t.Parallel()
+
+	s, st, userID, agentID := newOrchestrationTestServer(t)
+	ctx := context.Background()
+	run := createOrchestrationRun(t, st, userID, agentID)
+	if err := st.UpdateOrchestrationRunStatus(ctx, run.ID, store.OrchestrationRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+	graph := createHubTaskGraph(t, st, run)
+	if _, _, claimed, err := st.ClaimReadyTask(ctx, graph.Tasks[0].ID, ""); err != nil || !claimed {
+		t.Fatalf("claim graph task: claimed=%v err=%v", claimed, err)
+	}
+	conn := testBridgeConn(agentID, 1)
+	s.pool.RegisterAgent(conn)
+	defer s.pool.UnregisterAgent(agentID, conn)
+
+	s.recoverInterruptedRuns(ctx)
+
+	updatedGraph, err := st.TaskGraphByRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedGraph.Status != store.TaskGraphRunning || updatedGraph.Tasks[0].Status != store.TaskDispatching {
+		t.Fatalf("reconnected graph was recovered: %#v", updatedGraph)
+	}
+	updatedRun, err := st.OrchestrationRunByID(ctx, run.ID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedRun.Status != store.OrchestrationRunning || updatedRun.FinishedAt != 0 {
+		t.Fatalf("reconnected run was recovered: %#v", updatedRun)
+	}
+}
+
 func TestContinueOrchestrationRejectsConcurrentClaims(t *testing.T) {
 	t.Parallel()
 

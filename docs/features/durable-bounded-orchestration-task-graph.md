@@ -219,7 +219,10 @@ run cannot report completion.
 
 ## Recovery And Retry
 
-At Hub startup:
+At Hub startup, the Hub first listens and waits one bounded Bridge reconnect
+grace period. Endpoints that reconnect within that window keep their active
+attempt identity and may flush buffered events. After the grace, for each
+endpoint that is still offline:
 
 1. `pending`, `ready`, and never-dispatched queued work is retained.
 2. `dispatching` becomes `unknown` because delivery may have succeeded.
@@ -230,6 +233,9 @@ At Hub startup:
    events after its graph becomes `unknown`; it must not remain visually
    `running` after the execution authority was lost.
 7. Only unambiguous `ready` work may be dispatched after Bridges reconnect.
+
+The detailed startup grace contract is in
+[durable-task-graph-startup-reconnect-grace.md](durable-task-graph-startup-reconnect-grace.md).
 
 An explicit retry never edits the old attempt. It creates a new attempt with a
 new id and digest plus `retry_of_attempt_id`. Retrying an unknown task is a user

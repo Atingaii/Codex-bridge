@@ -19,7 +19,13 @@ func createTestTaskGraph(t *testing.T, st *Store) OrchestrationTaskGraph {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := createTestOrchestrationRun(t, st, user.ID, agent.ID, "graph")
+	return createTestTaskGraphForAgent(t, st, user.ID, agent.ID, "graph")
+}
+
+func createTestTaskGraphForAgent(t *testing.T, st *Store, userID, agentID, title string) OrchestrationTaskGraph {
+	t.Helper()
+	ctx := context.Background()
+	run := createTestOrchestrationRun(t, st, userID, agentID, title)
 	specs := []CreateTaskSpec{
 		{Name: "a", Role: TaskRoleWorker, PayloadJSON: `{}`, PayloadDigest: "a"},
 		{Name: "b", Role: TaskRoleWorker, PayloadJSON: `{}`, PayloadDigest: "b"},
@@ -170,6 +176,47 @@ func TestRecoverTaskGraphsMarksAmbiguousAttemptUnknown(t *testing.T) {
 	}
 	if updated.Tasks[2].Status != TaskBlocked || updated.Tasks[3].Status != TaskBlocked {
 		t.Fatalf("unknown dependency did not recursively block descendants: %#v", updated.Tasks)
+	}
+}
+
+func TestRecoverTaskGraphsForAgentOnlyTouchesOfflineEndpoint(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	first := createTestTaskGraph(t, st)
+	user, err := st.UpsertUser(ctx, "second-graph-user", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgent(ctx, "second-graph-agent", "second-graph-machine", "host", "instance", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := createTestTaskGraphForAgent(t, st, user.ID, agent.ID, "second-graph")
+	firstRun, err := st.OrchestrationRunByIDAnyUser(ctx, first.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRun, err := st.OrchestrationRunByIDAnyUser(ctx, second.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, claimed, err := st.ClaimReadyTask(ctx, first.Tasks[0].ID, ""); err != nil || !claimed {
+		t.Fatalf("claim first: %v %v", claimed, err)
+	}
+	if _, _, claimed, err := st.ClaimReadyTask(ctx, second.Tasks[0].ID, ""); err != nil || !claimed {
+		t.Fatalf("claim second: %v %v", claimed, err)
+	}
+	count, err := st.RecoverTaskGraphsForAgent(ctx, firstRun.AgentID)
+	if err != nil || count != 1 {
+		t.Fatalf("recover first agent count=%d err=%v", count, err)
+	}
+	updatedFirst, err := st.TaskGraphByRun(ctx, first.RunID)
+	if err != nil || updatedFirst.Tasks[0].Status != TaskUnknown {
+		t.Fatalf("first graph = %#v err=%v", updatedFirst, err)
+	}
+	updatedSecond, err := st.TaskGraphByRun(ctx, second.RunID)
+	if err != nil || updatedSecond.Tasks[0].Status != TaskDispatching || secondRun.AgentID == firstRun.AgentID {
+		t.Fatalf("second graph changed or fixture endpoint not isolated: %#v err=%v", updatedSecond, err)
 	}
 }
 

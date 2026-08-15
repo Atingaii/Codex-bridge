@@ -159,15 +159,22 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	s.recoverInterruptedRuns(ctx)
-
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(quit)
+
+	listener, err := net.Listen("tcp", s.httpSrv.Addr)
+	if err != nil {
+		return err
+	}
+	// Bridge reconnects can begin as soon as the listener is bound. Do not
+	// terminally recover active work before they get that bounded opportunity.
+	go s.recoverInterruptedRunsAfterGrace(ctx)
 
 	errc := make(chan error, 1)
 	go func() {
-		slog.Info("[hub] listening", "addr", s.httpSrv.Addr)
-		if err := s.httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Info("[hub] listening", "addr", listener.Addr().String())
+		if err := s.httpSrv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errc <- err
 			return
 		}
@@ -187,30 +194,57 @@ func (s *Server) Run(ctx context.Context) error {
 	return s.httpSrv.Shutdown(shutdownCtx)
 }
 
-// recoverInterruptedRuns settles every chat run and orchestration run that the
-// previous Hub process left in a non-terminal state. Without this boot sweep a
-// Hub restart strands those rows as "running" forever: the disconnect sweeps in
-// ws_bridge.go only fire while the Hub stays alive.
+func (s *Server) recoverInterruptedRunsAfterGrace(ctx context.Context) {
+	grace := s.bridgeReconnectGrace()
+	slog.Info("[hub] waiting for Bridge reconnects before startup recovery", "grace", grace)
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+		s.recoverInterruptedRuns(ctx)
+	}
+}
+
+// recoverInterruptedRuns settles work only for endpoints that were still
+// offline after the startup reconnect grace. Ready graph nodes stay ready;
+// active delivery is made unknown without automatic replay.
 func (s *Server) recoverInterruptedRuns(ctx context.Context) {
 	sweepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if n, err := s.store.RecoverTaskGraphs(sweepCtx); err != nil {
-		slog.Error("[hub] durable task graph recovery failed", "error", err)
-	} else if n > 0 {
-		slog.Warn("[hub] marked ambiguous durable task attempts unknown", "count", n)
-	}
-	if n, err := s.store.MarkUnfinishedRunsFailed(sweepCtx, "hub restarted while run was active"); err != nil {
-		slog.Error("[hub] boot sweep for chat runs failed", "error", err)
-	} else if n > 0 {
-		slog.Warn("[hub] marked interrupted chat runs failed at startup", "count", n)
-	}
-	runs, err := s.store.MarkUnfinishedOrchestrationRunsFailed(sweepCtx, "hub restarted while orchestration run was active")
+	agentIDs, err := s.store.InterruptedAgentIDs(sweepCtx)
 	if err != nil {
-		slog.Error("[hub] boot sweep for orchestration runs failed", "error", err)
+		slog.Error("[hub] startup recovery endpoint lookup failed", "error", err)
 		return
 	}
-	if len(runs) > 0 {
-		slog.Warn("[hub] marked interrupted orchestration runs failed at startup", "count", len(runs))
+	for _, agentID := range agentIDs {
+		if s.pool.AgentOnline(agentID) {
+			slog.Info("[hub] preserved active work for reconnected Bridge", "agent_id", agentID)
+			continue
+		}
+		if n, err := s.store.RecoverTaskGraphsForAgent(sweepCtx, agentID); err != nil {
+			slog.Error("[hub] durable task graph recovery failed", "agent_id", agentID, "error", err)
+			continue
+		} else if n > 0 {
+			slog.Warn("[hub] marked ambiguous durable task attempts unknown", "agent_id", agentID, "count", n)
+		}
+		if n, err := s.store.MarkActiveRunsForAgentFailed(sweepCtx, agentID, "Hub restarted and Bridge did not reconnect within the recovery grace"); err != nil {
+			slog.Error("[hub] startup chat recovery failed", "agent_id", agentID, "error", err)
+		} else if n > 0 {
+			slog.Warn("[hub] marked interrupted chat runs failed at startup", "agent_id", agentID, "count", n)
+		}
+		if err := s.store.SettleCancelingOrchestrationRunsForAgent(sweepCtx, agentID, "Hub restarted and Bridge did not reconnect within the recovery grace"); err != nil {
+			slog.Error("[hub] startup cancellation recovery failed", "agent_id", agentID, "error", err)
+		}
+		runs, err := s.store.MarkActiveOrchestrationRunsForAgentFailed(sweepCtx, agentID, "Hub restarted and Bridge did not reconnect within the recovery grace")
+		if err != nil {
+			slog.Error("[hub] startup orchestration recovery failed", "agent_id", agentID, "error", err)
+			continue
+		}
+		if len(runs) > 0 {
+			slog.Warn("[hub] marked interrupted orchestration runs failed at startup", "agent_id", agentID, "count", len(runs))
+		}
 	}
 	if n, deleteErr := s.store.DeleteSettledRequestedOrchestrationRuns(sweepCtx); deleteErr != nil {
 		slog.Error("[hub] boot sweep for requested orchestration deletions failed", "error", deleteErr)

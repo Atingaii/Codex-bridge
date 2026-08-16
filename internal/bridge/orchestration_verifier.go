@@ -98,6 +98,9 @@ func evaluateOrchestrationVerdict(mode, profile string, durable bool, history []
 
 func (m *OrchestrationManager) evaluateAgentVerifierQuorum(ctx context.Context, payload protocol.OrchestrationStartPayload, mode, profile, workerPair, firstCLI string, history []orchestrationTurn) (protocol.VerifierVerdict, []agentVerifierResult) {
 	local := evaluateOrchestrationVerdict(mode, profile, payload.TaskGraph != nil, history)
+	if local.Status != verifierVerdictPass {
+		return localVerifierContinuation(local), nil
+	}
 	assignments := verifierAssignments(mode, workerPair, firstCLI)
 	results := make([]agentVerifierResult, len(assignments))
 	prompt := composeAgentVerifierPrompt(payload, mode, profile, history)
@@ -113,6 +116,20 @@ func (m *OrchestrationManager) evaluateAgentVerifierQuorum(ctx context.Context, 
 	}
 	wg.Wait()
 	return aggregateAgentVerifierQuorum(local, results), results
+}
+
+func localVerifierContinuation(local protocol.VerifierVerdict) protocol.VerifierVerdict {
+	checks := make([]protocol.VerifierCheck, len(local.Checkers))
+	for index, check := range local.Checkers {
+		check.Name = "local/" + check.Name
+		checks[index] = check
+	}
+	return protocol.VerifierVerdict{
+		Status:   verifierVerdictContinue,
+		Reason:   "local hard evidence gates require continuation before Agent Verifier review",
+		Evidence: local.Evidence,
+		Checkers: checks,
+	}
 }
 
 func aggregateAgentVerifierQuorum(local protocol.VerifierVerdict, results []agentVerifierResult) protocol.VerifierVerdict {

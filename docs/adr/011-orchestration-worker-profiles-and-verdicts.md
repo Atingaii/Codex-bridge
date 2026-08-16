@@ -44,9 +44,10 @@ window flags. Bridge validates snapshot self-consistency, decrypts the secret,
 and writes native files; it does not infer model capabilities or generate a
 Codex model catalog.
 
-After every successful relay turn, Bridge starts up to two bounded Agent
-Verifier calls: one with worker role 1's bound model preset and one with worker
-role 2's. The calls use fresh native sessions, so they reuse each role's
+After every successful relay turn, Bridge first applies deterministic local
+hard evidence gates. When those gates identify a completion candidate, Bridge
+starts two bounded Agent Verifier calls: one with worker role 1's bound model
+preset and one with worker role 2's. The calls use fresh native sessions, so they reuse each role's
 authorized provider, model, reasoning effort, and credential snapshot without
 entering either worker's conversation history or seeing the other verifier's
 answer. Legacy runs without bound presets still start both role slots with each

@@ -4089,6 +4089,21 @@ func TestAgentVerifierQuorumRequiresTwoAgentsAndLocalGate(t *testing.T) {
 	}
 }
 
+func TestLocalVerifierContinuationDefersAgentReview(t *testing.T) {
+	local := verifierQuorum("missing evidence", []protocol.VerifierCheck{
+		{Name: "handoff", Status: verifierVerdictPass, Reason: "resolved"},
+		verifierCheckContinue("evidence", "missing command"),
+		{Name: "independence", Status: verifierVerdictPass, Reason: "reviewed"},
+	})
+	verdict := localVerifierContinuation(local)
+	if verdict.Status != verifierVerdictContinue || verdict.Reason != "local hard evidence gates require continuation before Agent Verifier review" {
+		t.Fatalf("local continuation = %#v", verdict)
+	}
+	if len(verdict.Checkers) != 3 || verdict.Checkers[1].Name != "local/evidence" {
+		t.Fatalf("local checks were not source-qualified: %#v", verdict.Checkers)
+	}
+}
+
 func TestVerifierAssignmentsUseBothWorkerSlots(t *testing.T) {
 	for pair, want := range map[string][]string{
 		protocol.WorkerPairClaudeCodex:  {"claude", "codex"},
@@ -4912,6 +4927,12 @@ import sys
 prompt_path = ` + string(promptPathRaw) + `
 argv_path = ` + string(argvPathRaw) + `
 text = ` + string(textRaw) + `
+if any("PROOFBRIDGE_AGENT_VERIFIER_V1" in arg for arg in sys.argv):
+    verdict = {"status":"pass","reason":"independent evidence is complete","checks":[{"name":"handoff","status":"pass","reason":"resolved final handoff"},{"name":"evidence","status":"pass","reason":"successful command recorded"},{"name":"independence","status":"pass","reason":"independent reviewer present"}]}
+    rendered = json.dumps(verdict, separators=(",", ":"))
+    print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":rendered}]}}), flush=True)
+    print(json.dumps({"type":"result","result":rendered}), flush=True)
+    raise SystemExit(0)
 with open(prompt_path, "w", encoding="utf-8") as f:
     if "--input-format=stream-json" in sys.argv:
         line = sys.stdin.readline()
@@ -5056,9 +5077,9 @@ import sys
 prompt_path = ` + string(promptPathRaw) + `
 argv_path = ` + string(argvPathRaw) + `
 text = ` + string(textRaw) + `
-with open(argv_path, "w", encoding="utf-8") as f:
-    json.dump(sys.argv[1:], f)
 if len(sys.argv) >= 2 and sys.argv[1] == "app-server":
+    with open(argv_path, "w", encoding="utf-8") as f:
+        json.dump(sys.argv[1:], f)
     for line in sys.stdin:
         msg = json.loads(line)
         method = msg.get("method")
@@ -5088,6 +5109,10 @@ if len(sys.argv) < 2 or sys.argv[1] != "exec":
     print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
     sys.exit(1)
 prompt = sys.stdin.read()
+if "PROOFBRIDGE_AGENT_VERIFIER_V1" in prompt:
+    verdict = {"status":"pass","reason":"independent evidence is complete","checks":[{"name":"handoff","status":"pass","reason":"resolved final handoff"},{"name":"evidence","status":"pass","reason":"successful command recorded"},{"name":"independence","status":"pass","reason":"independent reviewer present"}]}
+    print(json.dumps({"type":"item.agent_message.delta","delta":json.dumps(verdict, separators=(",", ":"))}), flush=True)
+    raise SystemExit(0)
 with open(prompt_path, "w", encoding="utf-8") as f:
     f.write(prompt)
 print(json.dumps({"type":"thread.started","thread_id":"thread_relay_1"}), flush=True)

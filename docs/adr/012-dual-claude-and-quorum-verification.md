@@ -60,5 +60,5 @@ untouched.
   activity. It deliberately does not import its daemon, mailbox, or extra
   model runtime.
 - The checker quorum remains conservative and bounded for the 2-core, 4-GB
-  host. It now spends up to two additional model calls after each successful
-  worker turn, while preserving local hard-evidence enforcement.
+  host. It spends two additional model calls only when local hard gates identify
+  a successful worker turn as a completion candidate.

@@ -128,8 +128,9 @@ context in the same `runID`.
   receive lightweight, browser-visible proof workflow reminders up front so the
   CLI records target obligations, build/scan/audit evidence, and blockers in
   its normal result.
-- After every successful relay turn, Bridge runs two fresh Agent Verifiers with
-  role 1 and role 2's bound presets. Each independently evaluates handoff
+- After every successful relay turn, Bridge first applies local hard evidence
+  gates. For a completion candidate, it runs two fresh Agent Verifiers with role
+  1 and role 2's bound presets. Each independently evaluates handoff
   completeness, command/proof evidence, and the reviewer boundary; neither can
   see the other's answer or enter the worker's native session. Local hard
   evidence gates remain authoritative. Bridge emits a visible
@@ -303,9 +304,9 @@ endpoints' runs before the user switches to them.
 30. Preserve compatible worker-profile bindings across create, refresh, and
     continue, while stripping encrypted snapshots from progress APIs and public
     shares.
-31. Evaluate successful turns with two isolated Agent Verifiers and local hard
-    gates, render every checker result, and stop the remaining schedule only
-    for a unanimous pass.
+31. Evaluate successful turns with local hard gates and, for completion
+    candidates, two isolated Agent Verifiers; render every checker result and
+    stop the remaining schedule only for a unanimous pass.
 
 ## Exit Gates
 

@@ -87,10 +87,10 @@ The `claude-claude` pair and unanimous checker quorum extend this design in
    native resume and remove it after the session exits. Synchronize only native
    session/transcript records into ordinary `/resume` picker locations; never
    copy isolated configuration or credentials.
-4. Run two fresh Agent Verifiers after each successful turn using role 1 and
-   role 2's bound presets. Validate their JSON decisions, apply local hard
-   evidence gates, emit the quorum before choosing the next turn, and stop only
-   on a two-Agent and local unanimous pass.
+4. Apply local hard evidence gates after each successful turn. For completion
+   candidates, run two fresh Agent Verifiers using role 1 and role 2's bound
+   presets, validate their JSON decisions, emit the quorum before choosing the
+   next turn, and stop only on a two-Agent and local unanimous pass.
 5. Add compact required preset selectors to the existing orchestration form,
    refresh their candidates after Settings changes, and render
    verdict/terminal-reason data in the existing progress surfaces.

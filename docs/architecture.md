@@ -183,7 +183,8 @@ project metadata points at the Bridge session without touching unrelated
 projects, and materializes the same Claude-written transcript so Claude Code's
 interactive `/resume` picker can show it from the run cwd. It does not add
 model-driven proof strategy or remediation turns. After each successful worker
-turn, Bridge starts two fresh, isolated Agent Verifier calls using role 1 and
+turn, Bridge first applies local hard evidence gates. For a completion
+candidate, it starts two fresh, isolated Agent Verifier calls using role 1 and
 role 2's bound presets. They independently judge handoff completeness,
 command/proof evidence, and the reviewer boundary without seeing one another's
 answer or entering the worker sessions. The two model verdicts and local hard

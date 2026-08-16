@@ -14,7 +14,7 @@
 ## Non-Goals
 
 - Do not run an unbounded judge pool; use exactly the two configured role
-  presets after each successful turn.
+  presets when local hard gates identify a completion candidate.
 - Do not migrate or write to the live `sparkon.cn` database.
 - Do not alter global Codex or Claude configuration.
 
@@ -43,8 +43,9 @@ runtime.
 2. Change Bridge native Claude state to be keyed by worker slot, including
    private runtime, interactive process, resume ID, transcript lookup, and
    cleanup.
-3. Run role 1 and role 2's presets in fresh, mutually isolated verifier
-   sessions. Validate their handoff, evidence, and independence results, then
+3. Apply local hard gates after a successful worker turn, then run role 1 and
+   role 2's presets in fresh, mutually isolated verifier sessions for completion
+   candidates. Validate their handoff, evidence, and independence results, then
    require both models and local hard gates to pass for early termination.
 4. Add compact UI selection and safe rendering for the new pair and checker
    details; rebuild embedded UI.

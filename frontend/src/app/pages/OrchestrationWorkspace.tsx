@@ -102,6 +102,13 @@ type OrchestrationEventsPage = {
   hasMoreBefore?: boolean;
 };
 
+function selectedWorkerSlotValues(slots: Array<{ slot: string }>, values: Record<string, string>) {
+  return Object.fromEntries(slots.flatMap(({ slot }) => {
+    const value = values[slot]?.trim();
+    return value ? [[slot, value]] : [];
+  }));
+}
+
 export function OrchestrationWorkspace({
   user,
   onLogout,
@@ -894,7 +901,7 @@ export function OrchestrationWorkspace({
     setError('');
     try {
       const endpoint = activeRun ? `/api/orchestrations/${encodeURIComponent(activeRun.id)}/prompts` : '/api/orchestrations';
-      const selectedProfiles = Object.fromEntries(Object.entries(selectedWorkerProfiles).filter(([, id]) => id));
+      const selectedProfiles = selectedWorkerSlotValues(workerProfileSlots, selectedWorkerProfiles);
       const body: Record<string, unknown> = {
         mode,
         workerPair,
@@ -910,9 +917,7 @@ export function OrchestrationWorkspace({
       };
       if (!activeRun || workerProfilesTouched) {
         body.workerProfilePresetIds = selectedProfiles;
-        body.workerProfileEfforts = Object.fromEntries(
-          Object.entries(selectedWorkerEfforts).filter(([, effort]) => effort),
-        );
+        body.workerProfileEfforts = selectedWorkerSlotValues(workerProfileSlots, selectedWorkerEfforts);
       }
       const data = await api<{ run: OrchestrationRun }>(endpoint, {
         method: 'POST',

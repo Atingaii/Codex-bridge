@@ -326,30 +326,49 @@ func (s *Server) resolveWorkerProfiles(ctx context.Context, userID, agentID, wor
 	case protocol.WorkerPairClaudeClaude:
 		expected = map[string]string{"claude-a": "claude", "claude-b": "claude"}
 	}
-	if len(requested) != len(expected) {
-		return nil, fmt.Errorf("select exactly one saved preset for every %s worker", protocol.NormalizeOrchestrationWorkerPair(workerPair))
-	}
-	for slot := range expected {
-		if strings.TrimSpace(requested[slot]) == "" {
-			return nil, fmt.Errorf("worker slot %q requires a saved preset", slot)
-		}
-	}
-	connection, online := s.pool.AgentConnectionInfo(agentID)
-	if !online || connection.Capabilities == nil || connection.Capabilities.ConfigSwitcher == nil {
-		return nil, errors.New("selected CLI endpoint does not support encrypted model profiles")
-	}
-	keyID := connection.Capabilities.ConfigSwitcher.KeyID
-	profiles := make(map[string]protocol.WorkerProfileBinding, len(requested))
+	selectedPresets := make(map[string]string, len(requested))
 	for rawSlot, rawPresetID := range requested {
 		slot := strings.TrimSpace(rawSlot)
 		presetID := strings.TrimSpace(rawPresetID)
 		if slot == "" || presetID == "" {
 			return nil, errors.New("worker profile slot and preset id are required")
 		}
-		wantCLI, ok := expected[slot]
-		if !ok {
+		if _, ok := expected[slot]; !ok {
 			return nil, fmt.Errorf("worker slot %q is not available for %s", slot, protocol.NormalizeOrchestrationWorkerPair(workerPair))
 		}
+		if _, exists := selectedPresets[slot]; exists {
+			return nil, fmt.Errorf("worker slot %q has more than one saved preset", slot)
+		}
+		selectedPresets[slot] = presetID
+	}
+	for slot := range expected {
+		if selectedPresets[slot] == "" {
+			return nil, fmt.Errorf("worker slot %q requires a saved preset", slot)
+		}
+	}
+	selectedEfforts := make(map[string]string, len(requestedEfforts))
+	for rawSlot, rawEffort := range requestedEfforts {
+		slot := strings.TrimSpace(rawSlot)
+		effort := strings.TrimSpace(rawEffort)
+		if effort == "" {
+			continue
+		}
+		if _, ok := expected[slot]; !ok {
+			return nil, fmt.Errorf("reasoning effort slot %q is not available for %s", slot, protocol.NormalizeOrchestrationWorkerPair(workerPair))
+		}
+		if _, exists := selectedEfforts[slot]; exists {
+			return nil, fmt.Errorf("worker slot %q has more than one reasoning effort", slot)
+		}
+		selectedEfforts[slot] = effort
+	}
+	connection, online := s.pool.AgentConnectionInfo(agentID)
+	if !online || connection.Capabilities == nil || connection.Capabilities.ConfigSwitcher == nil {
+		return nil, errors.New("selected CLI endpoint does not support encrypted model profiles")
+	}
+	keyID := connection.Capabilities.ConfigSwitcher.KeyID
+	profiles := make(map[string]protocol.WorkerProfileBinding, len(selectedPresets))
+	for slot, presetID := range selectedPresets {
+		wantCLI := expected[slot]
 		preset, err := s.store.CLIConfigPresetByID(ctx, presetID, userID, agentID)
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, fmt.Errorf("model preset %q was not found for the selected endpoint", presetID)
@@ -365,8 +384,8 @@ func (s *Server) resolveWorkerProfiles(ctx context.Context, userID, agentID, wor
 			return nil, fmt.Errorf("model preset %q was encrypted for an earlier Bridge key; update its API key first", preset.Name)
 		}
 		effort := preset.ReasoningEffort
-		if requestedEfforts != nil {
-			if selected := strings.TrimSpace(requestedEfforts[slot]); selected != "" {
+		if selectedEfforts != nil {
+			if selected := selectedEfforts[slot]; selected != "" {
 				if len(preset.ReasoningLevels) == 0 || !containsString(preset.ReasoningLevels, selected) {
 					return nil, fmt.Errorf("worker slot %q selects unsupported reasoning effort %q for preset %q", slot, selected, preset.Name)
 				}

@@ -29,6 +29,10 @@ assert.doesNotMatch(switcher, /t\.activePreset|t\.applyPreset|t\.configurationAp
 assert.match(orchestrationWorkspace, /const refreshWorkerPresets = useCallback/);
 assert.match(orchestrationWorkspace, /onPresetsChanged=\{refreshWorkerPresets\}/);
 assert.match(orchestrationWorkspace, /selectedPreset\?\.reasoningLevels/);
+assert.match(orchestrationWorkspace, /function selectedWorkerSlotValues\(slots:/);
+assert.match(orchestrationWorkspace, /selectedWorkerSlotValues\(workerProfileSlots, selectedWorkerProfiles\)/);
+assert.match(orchestrationWorkspace, /selectedWorkerSlotValues\(workerProfileSlots, selectedWorkerEfforts\)/);
+assert.doesNotMatch(orchestrationWorkspace, /Object\.entries\(selectedWorkerProfiles\)/);
 assert.doesNotMatch(orchestrationWorkspace, /rolloutPreview|Admin 灰度|Admin preview/);
 assert.match(capabilityMatrix, /approvalMode === 'auto-execute' \|\| approvalMode === 'strict-workspace'/);
 assert.match(capabilityMatrix, /approvalMode === 'strict-workspace' \? t\.strictWorkspace/);

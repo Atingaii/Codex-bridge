@@ -44,6 +44,9 @@ context in the same `runID`.
   binding for its endpoint and worker CLI, while Bridge materializes its
   encrypted snapshot only inside a run- and slot-private CLI home; no bound
   orchestration turn changes the operator's global CLI configuration.
+- New-run requests include only the saved-preset and reasoning-effort slots for
+  the currently selected worker pair. Hub reports a missing or stale slot by
+  name instead of presenting an already selected pair as incomplete.
 - Follow-up prompts restore native CLI continuity where possible. Hub persists
   the legacy Codex thread id and the Codex thread id map reported by Bridge
   because app-server thread ids are non-deterministic. Claude + Codex runs use
@@ -404,6 +407,8 @@ endpoints' runs before the user switches to them.
 - Omitted worker-profile selections retain the run's saved bindings; an
   explicit empty selection clears them. Ciphertext never appears in progress
   APIs or public shares.
+- Switching worker pairs cannot leak a stale preset or reasoning-effort slot
+  into the new run request, and direct requests receive a slot-specific error.
 - A passing two-Agent plus local-hard-gate quorum is visible in the timeline
   and terminates remaining turns with `verified-early`; any model disagreement,
   invalid verdict, missing handoff condition, evidence, reviewer boundary,

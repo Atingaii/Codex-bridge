@@ -1342,10 +1342,20 @@ func TestOrchestrationWorkerProfilesPersistAcrossFollowUpAndCanClear(t *testing.
 	}
 	first := newPreset("first", "gpt-5.6-sol")
 	second := newPreset("second", "gpt-5.6-terra")
-	createOrchestrationHTTP(t, s, userID, map[string]any{
+	partial := createOrchestrationHTTP(t, s, userID, map[string]any{
 		"agentId": agentID, "prompt": "reject partial isolated profiles", "workerPair": "codex-codex", "maxTurns": 2,
 		"workerProfilePresetIds": map[string]string{"codex-a": first.ID},
 	}, http.StatusBadRequest)
+	if partial["message"] != `worker slot "codex-b" requires a saved preset` {
+		t.Fatalf("partial profile error = %#v", partial)
+	}
+	extra := createOrchestrationHTTP(t, s, userID, map[string]any{
+		"agentId": agentID, "prompt": "reject stale worker slot", "workerPair": "codex-codex", "maxTurns": 2,
+		"workerProfilePresetIds": map[string]string{"codex-a": first.ID, "codex-b": second.ID, "claude": first.ID},
+	}, http.StatusBadRequest)
+	if extra["message"] != `worker slot "claude" is not available for codex-codex` {
+		t.Fatalf("stale worker profile error = %#v", extra)
+	}
 	body := createOrchestrationHTTP(t, s, userID, map[string]any{
 		"agentId": agentID, "prompt": "use isolated profiles", "workerPair": "codex-codex", "maxTurns": 2,
 		"workerProfilePresetIds": map[string]string{"codex-a": first.ID, "codex-b": second.ID},

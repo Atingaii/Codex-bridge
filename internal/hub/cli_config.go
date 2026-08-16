@@ -37,8 +37,225 @@ type cliConfigInput struct {
 	ReasoningEffort  string                   `json:"reasoningEffort,omitempty"`
 	ReasoningLevels  []string                 `json:"reasoningLevels,omitempty"`
 	ReasoningDefault string                   `json:"reasoningDefault,omitempty"`
+	APIKey           string                   `json:"apiKey,omitempty"`
 	Secret           protocol.EncryptedSecret `json:"secret"`
 	KeyID            string                   `json:"keyId"`
+}
+
+// Account-library endpoints intentionally have no agentID. They are usable
+// before a user enrolls a machine; credentials stay sealed in Hub until a task
+// needs one materialized for its selected Bridge.
+func (s *Server) handleTestUserCLIConfig(w http.ResponseWriter, r *http.Request, uid string) {
+	if !s.allowAuthAttempt(r, "cli-config:user", uid, cliConfigRateLimit, cliConfigRateWindow) {
+		serverutil.WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many model configuration requests; try again shortly")
+		return
+	}
+	var input cliConfigInput
+	if err := serverutil.DecodeJSON(r, &input, 32<<10); err != nil {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid model configuration")
+		return
+	}
+	if !s.validateUserCLIConfigInput(w, input, false, input.PresetID == "") {
+		return
+	}
+	key, err := s.userCLIConfigTestKey(r.Context(), uid, input)
+	if err != nil {
+		s.writeCLIConfigVaultError(w, err)
+		return
+	}
+	defer clear(key)
+	base, wireProtocol, models, listed, err := s.probeCLIConfigProvider(r.Context(), input.CLI, input.BaseURL, input.Model, string(key))
+	if err != nil {
+		serverutil.WriteError(w, http.StatusBadGateway, "TEST_FAILED", err.Error())
+		return
+	}
+	input.BaseURL = base
+	if !applyReviewedReasoning(w, &input) {
+		return
+	}
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"result": protocol.CLIConfigResult{OK: true, CLI: input.CLI, BaseURL: base, Protocol: wireProtocol, Models: models, ModelsListed: listed, ModelMetadata: reviewedModelMetadata(input.CLI, input.Model)}})
+}
+
+func (s *Server) handleCreateUserCLIConfigPreset(w http.ResponseWriter, r *http.Request, uid string) {
+	var input cliConfigInput
+	if err := serverutil.DecodeJSON(r, &input, 32<<10); err != nil {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid model preset")
+		return
+	}
+	if !s.validateUserCLIConfigInput(w, input, true, true) {
+		return
+	}
+	key := []byte(strings.TrimSpace(input.APIKey))
+	defer clear(key)
+	base, _, _, _, err := s.probeCLIConfigProvider(r.Context(), input.CLI, input.BaseURL, input.Model, string(key))
+	if err != nil {
+		serverutil.WriteError(w, http.StatusBadGateway, "TEST_FAILED", err.Error())
+		return
+	}
+	input.BaseURL = base
+	if !applyReviewedReasoning(w, &input) {
+		return
+	}
+	vaultSecret, err := s.sealCLIConfigVaultSecret(key)
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "VAULT_ERROR", "failed to encrypt API Key")
+		return
+	}
+	preset, err := s.store.CreateCLIConfigPreset(r.Context(), store.CLIConfigPreset{UserID: uid, CLI: input.CLI, Name: strings.TrimSpace(input.Name), BaseURL: strings.TrimRight(strings.TrimSpace(input.BaseURL), "/"), Model: strings.TrimSpace(input.Model), ReasoningEffort: strings.TrimSpace(input.ReasoningEffort), ReasoningLevels: append([]string(nil), input.ReasoningLevels...), ReasoningDefault: strings.TrimSpace(input.ReasoningDefault), VaultSecret: vaultSecret})
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to save model preset")
+		return
+	}
+	normalizeReviewedPreset(&preset)
+	serverutil.WriteJSON(w, http.StatusCreated, map[string]any{"preset": preset})
+}
+
+func (s *Server) handleUpdateUserCLIConfigPreset(w http.ResponseWriter, r *http.Request, uid string) {
+	var input cliConfigInput
+	if err := serverutil.DecodeJSON(r, &input, 32<<10); err != nil {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid model preset")
+		return
+	}
+	if !s.validateUserCLIConfigInput(w, input, true, false) {
+		return
+	}
+	existing, err := s.store.CLIConfigPresetByID(r.Context(), r.PathValue("presetID"), uid, "")
+	if errors.Is(err, store.ErrNotFound) {
+		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "model preset not found")
+		return
+	}
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load model preset")
+		return
+	}
+	if existing.CLI != input.CLI {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_CLI", "preset CLI cannot be changed")
+		return
+	}
+	key, credentialChanged := []byte(strings.TrimSpace(input.APIKey)), strings.TrimSpace(input.APIKey) != ""
+	if !credentialChanged {
+		if existing.VaultSecret == "" {
+			serverutil.WriteError(w, http.StatusConflict, "CREDENTIAL_UNAVAILABLE", "saved API key is not yet available in the user model library; enter the API key once")
+			return
+		}
+		key, err = s.openCLIConfigVaultSecret(existing.VaultSecret)
+		if err != nil {
+			serverutil.WriteError(w, http.StatusInternalServerError, "VAULT_ERROR", "failed to open saved API Key")
+			return
+		}
+	}
+	defer clear(key)
+	base, _, _, _, err := s.probeCLIConfigProvider(r.Context(), input.CLI, input.BaseURL, input.Model, string(key))
+	if err != nil {
+		serverutil.WriteError(w, http.StatusBadGateway, "TEST_FAILED", err.Error())
+		return
+	}
+	input.BaseURL = base
+	if !applyReviewedReasoning(w, &input) {
+		return
+	}
+	vaultSecret := existing.VaultSecret
+	if credentialChanged {
+		vaultSecret, err = s.sealCLIConfigVaultSecret(key)
+		if err != nil {
+			serverutil.WriteError(w, http.StatusInternalServerError, "VAULT_ERROR", "failed to encrypt API Key")
+			return
+		}
+	}
+	baseURL, model := strings.TrimRight(strings.TrimSpace(input.BaseURL), "/"), strings.TrimSpace(input.Model)
+	preset, err := s.store.UpdateCLIConfigPreset(r.Context(), store.CLIConfigPreset{ID: existing.ID, UserID: uid, CLI: input.CLI, Name: strings.TrimSpace(input.Name), BaseURL: baseURL, Model: model, ReasoningEffort: strings.TrimSpace(input.ReasoningEffort), ReasoningLevels: append([]string(nil), input.ReasoningLevels...), ReasoningDefault: strings.TrimSpace(input.ReasoningDefault), VaultSecret: vaultSecret, ReplaceCredentials: credentialChanged}, existing.BaseURL == baseURL && existing.Model == model && existing.ReasoningEffort == strings.TrimSpace(input.ReasoningEffort) && !credentialChanged)
+	if errors.Is(err, store.ErrNotFound) {
+		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "model preset not found")
+		return
+	}
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to update model preset")
+		return
+	}
+	normalizeReviewedPreset(&preset)
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"preset": preset})
+}
+
+func (s *Server) handleDeleteUserCLIConfigPreset(w http.ResponseWriter, r *http.Request, uid string) {
+	if err := s.store.DeleteCLIConfigPreset(r.Context(), r.PathValue("presetID"), uid, ""); errors.Is(err, store.ErrNotFound) {
+		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "model preset not found")
+	} else if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to delete model preset")
+	} else {
+		serverutil.WriteJSON(w, http.StatusOK, map[string]any{"deleted": true})
+	}
+}
+
+func (s *Server) userCLIConfigTestKey(ctx context.Context, uid string, input cliConfigInput) ([]byte, error) {
+	if key := strings.TrimSpace(input.APIKey); key != "" {
+		return []byte(key), nil
+	}
+	preset, err := s.store.CLIConfigPresetByID(ctx, input.PresetID, uid, "")
+	if err != nil {
+		return nil, err
+	}
+	if preset.CLI != input.CLI {
+		return nil, errors.New("preset does not belong to the selected CLI")
+	}
+	if preset.VaultSecret == "" {
+		return nil, errors.New("saved API key is not yet available in the user model library; enter the API key once")
+	}
+	return s.openCLIConfigVaultSecret(preset.VaultSecret)
+}
+
+func (s *Server) validateUserCLIConfigInput(w http.ResponseWriter, input cliConfigInput, requireName, requireAPIKey bool) bool {
+	if input.CLI != "codex" && input.CLI != "claude" {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_CLI", "CLI must be codex or claude")
+		return false
+	}
+	if name := strings.TrimSpace(input.Name); requireName && (name == "" || len(name) > maxCLIConfigNameBytes) {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_NAME", "preset name is required and must be at most 80 bytes")
+		return false
+	}
+	if model := strings.TrimSpace(input.Model); len(model) > maxCLIConfigModelBytes || requireName && model == "" {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_MODEL", "model is required and must be at most 160 bytes")
+		return false
+	}
+	baseURL, parsedErr := strings.TrimSpace(input.BaseURL), error(nil)
+	if _, parsedErr = url.Parse(baseURL); parsedErr != nil || len(baseURL) > maxCLIConfigURLBytes {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_BASE_URL", "Base URL must be an http:// or https:// URL")
+		return false
+	}
+	if requireAPIKey && strings.TrimSpace(input.APIKey) == "" {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_SECRET", "API Key is required")
+		return false
+	}
+	if len(input.APIKey) > maxCLIConfigAPIKeyBytes {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_SECRET", "API Key is too large")
+		return false
+	}
+	return true
+}
+
+func applyReviewedReasoning(w http.ResponseWriter, input *cliConfigInput) bool {
+	metadata := reviewedModelMetadata(input.CLI, input.Model)
+	if metadata == nil || !metadata.Reviewed || len(metadata.SupportedReasoningLevels) == 0 {
+		if strings.TrimSpace(input.ReasoningEffort) != "" {
+			serverutil.WriteError(w, http.StatusBadRequest, "BAD_REASONING_EFFORT", "selected model has no reviewed reasoning levels")
+			return false
+		}
+		input.ReasoningLevels, input.ReasoningDefault = nil, ""
+		return true
+	}
+	if effort := strings.TrimSpace(input.ReasoningEffort); effort != "" && !containsString(metadata.SupportedReasoningLevels, effort) {
+		serverutil.WriteError(w, http.StatusBadRequest, "BAD_REASONING_EFFORT", "selected reasoning effort is not supported by the reviewed model catalog")
+		return false
+	}
+	input.ReasoningLevels, input.ReasoningDefault = append([]string(nil), metadata.SupportedReasoningLevels...), strings.TrimSpace(metadata.DefaultReasoningLevel)
+	return true
+}
+
+func (s *Server) writeCLIConfigVaultError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "model preset not found")
+	} else {
+		serverutil.WriteError(w, http.StatusConflict, "CREDENTIAL_UNAVAILABLE", err.Error())
+	}
 }
 
 type cliConfigResetInput struct {

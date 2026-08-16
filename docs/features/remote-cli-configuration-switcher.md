@@ -9,9 +9,9 @@
   base URL, and API key as an account-level model library.
 - Edit saved presets without exposing their encrypted API keys to the browser;
   a blank key keeps the saved credential and a newly entered key replaces it.
-- Test through an automatically selected eligible Bridge, normalize common
-  `/v1` and terminal endpoint suffixes, and return a selectable model list
-  when available. The user does not select a machine for this operation.
+- Test directly from Hub, normalize common `/v1` and terminal endpoint suffixes,
+  and return a selectable model list when available. The user does not select a
+  machine for this operation, including before enrolling one.
 - Materialize a saved preset only when a task selects it for its target Bridge;
   the model library has no direct "apply to this machine" action.
 - Restore official-login-compatible defaults only through explicit local CLI
@@ -34,10 +34,12 @@
 
 ## Implementation
 
-Bridge derives a small candidate set from the submitted URL, strips known
+Hub derives a small candidate set from the submitted URL, strips known
 `/models`, `/chat/completions`, and `/responses` suffixes, and probes candidates
-serially. Each upstream call has a 30-second bound, the complete Bridge probe
-has a 75-second bound, and the Hub relay allows 90 seconds. These budgets cover
+serially. Each upstream call has a 30-second bound and the complete Hub probe
+has a 75-second bound. Hub permits public HTTPS targets in production, validates
+DNS answers before dialing, denies loopback/private/link-local/metadata
+addresses, disables redirects, and limits response bodies. These budgets cover
 slow inference providers without adding parallel load or leaving unbounded
 requests. A successful models endpoint returns sorted, deduplicated IDs;
 unsupported model listing can fall back to a minimal request when a model was
@@ -69,10 +71,11 @@ Existing Bridge-managed Claude settings with a versioned Base URL are
 normalized on the next Bridge start; active CLI processes are not interrupted.
 
 Preset updates are ownership-scoped by user and preset ID. The Settings model
-library always lists the account-owned presets, including when every Bridge is
-offline. An eligible upgraded Bridge is automatically chosen for secure
-testing, saving, editing, and deleting when one is needed; task pages retain
-their existing target-machine availability checks. Machine-specific credentials
+library always lists, tests, saves, edits, and deletes account-owned presets,
+including when no Bridge has ever been enrolled. Hub accepts a submitted API
+key over the authenticated HTTPS request, probes the upstream itself, and seals
+the value into its user vault. Task pages retain their existing target-machine
+availability checks. Machine-specific credentials
 and activation remain private implementation state, and the Hub never
 serializes either Bridge envelopes or vault ciphertext to the browser. Editing
 does not implicitly apply a preset. Changing an active preset's URL, model, or
@@ -88,7 +91,8 @@ configuration.
 - [x] Saved presets can be edited while a blank API Key retains the encrypted
   credential without returning it to the browser.
 - [x] URL normalization and model discovery are covered by tests.
-- [x] Slow inference providers have bounded end-to-end probe budgets.
+- [x] Slow inference providers have bounded end-to-end probe budgets and Hub
+  probing rejects non-public production destinations.
 - [x] Apply/reset preserves unrelated TOML/JSON configuration.
 - [x] Claude custom models remain selectable without a versioned Anthropic
   model dependency, including after a Claude Code model catalog update.

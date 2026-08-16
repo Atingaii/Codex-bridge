@@ -83,6 +83,22 @@ func TestListUserCLIConfigPresetsDoesNotRequireBridge(t *testing.T) {
 	}
 }
 
+func TestUserCLIConfigTestDoesNotRequireBridge(t *testing.T) {
+	s, st := newAuthTestServer(t)
+	ctx := context.Background()
+	_, err := st.UpsertUser(ctx, "library-probe-owner", "abc1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, s, map[string]string{"username": "library-probe-owner", "password": "abc1234567"})
+	request := authJSONRequestWithCookie(t, s, http.MethodPost, "/api/cli-config/test", cookie, map[string]string{
+		"cli": "codex", "baseUrl": "https://127.0.0.1/v1", "apiKey": "must-not-be-stored-or-relayed",
+	}, http.StatusBadGateway)
+	if strings.Contains(toJSON(request), "AGENT_OFFLINE") || strings.Contains(toJSON(request), "BRIDGE") {
+		t.Fatalf("account-level probe required a Bridge: %#v", request)
+	}
+}
+
 func TestUserVaultMaterializesPresetForAnotherBridge(t *testing.T) {
 	s, st := newAuthTestServer(t)
 	ctx := context.Background()

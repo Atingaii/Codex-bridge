@@ -4,8 +4,8 @@
 
 - Add `claude-claude`, with independently selected `claude-a` and `claude-b`
   presets and native Claude sessions.
-- Replace the sole early-stop verifier decision with three visible,
-  deterministic checker results that must all pass.
+- Replace the sole early-stop verifier decision with two independent Agent
+  Verifiers plus visible local hard evidence gates that must all pass.
 - Deploy the new behavior at `https://proofbridge.sparkon.cn` using an
   independent Cloudflare-routed Hub and SQLite database.
 - Preserve the existing browser workflow, task graph, plan, branch map, and
@@ -13,7 +13,8 @@
 
 ## Non-Goals
 
-- Do not run three additional LLM calls after each turn.
+- Do not run an unbounded judge pool; use exactly the two configured role
+  presets after each successful turn.
 - Do not migrate or write to the live `sparkon.cn` database.
 - Do not alter global Codex or Claude configuration.
 
@@ -42,8 +43,9 @@ runtime.
 2. Change Bridge native Claude state to be keyed by worker slot, including
    private runtime, interactive process, resume ID, transcript lookup, and
    cleanup.
-3. Add the handoff, evidence, and independence checker results and require a
-   unanimous pass for early termination.
+3. Run role 1 and role 2's presets in fresh, mutually isolated verifier
+   sessions. Validate their handoff, evidence, and independence results, then
+   require both models and local hard gates to pass for early termination.
 4. Add compact UI selection and safe rendering for the new pair and checker
    details; rebuild embedded UI.
 5. Add fake-CLI tests for separate Claude runtime/session state, Hub payload
@@ -64,10 +66,9 @@ runtime.
 
 ## Reviewer Q&A
 
-**Are three deterministic checkers really multiple agents?**
+**Are the Verifiers independent agents?**
 
-They are independent adjudication roles, not LLM agents. That distinction is
-intentional: it avoids tripling provider load on a 2-core, 4-GB host. Their
-inputs and decisions are durable and auditable. A future heterogeneous
-model-verifier pool can attach to this verdict contract without changing the
-run lifecycle.
+Yes. Bridge starts two fresh native CLI calls using the two role-bound presets;
+neither receives the other's result or reuses a worker conversation. Their
+validated JSON checks are durable and auditable, while local command and proof
+evidence remains a non-bypassable gate.

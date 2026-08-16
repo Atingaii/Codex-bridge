@@ -44,14 +44,25 @@ window flags. Bridge validates snapshot self-consistency, decrypts the secret,
 and writes native files; it does not infer model capabilities or generate a
 Codex model catalog.
 
-After every successful relay turn, Bridge runs deterministic checker roles. A
-verdict can pass only when every checker accepts a structured `resolved` final claim
-and recorded successful command evidence. Formal-proof runs additionally
-require a successful proof checker command and no unresolved handoff risks.
-Bridge emits a durable `verifier.verdict` event. A passed verdict ends the
-remaining relay budget early with terminal reason `verified-early`; all other
-verdicts leave the scheduled process unchanged. Verifier execution is serial,
-local, and does not start another model process in the default profile.
+After every successful relay turn, Bridge starts up to two bounded Agent
+Verifier calls: one with worker role 1's bound model preset and one with worker
+role 2's. The calls use fresh native sessions, so they reuse each role's
+authorized provider, model, reasoning effort, and credential snapshot without
+entering either worker's conversation history or seeing the other verifier's
+answer. Legacy runs without bound presets still start both role slots with each
+CLI's configured machine default; they do not degrade to a single judge. Each
+verifier receives the task, compact turn evidence, and an explicit JSON verdict
+contract; embedded worker text is evidence, not instructions.
+
+Each Agent Verifier judges handoff completeness, evidence sufficiency, and
+independence. Bridge validates both structured responses and retains local hard
+gates for successful command evidence and recognized formal-proof checker
+evidence. Every check from every invoked verifier must pass. A model error,
+malformed response, disagreement, missing hard evidence, or any `continue`
+check conservatively continues the scheduled run. Bridge emits the same
+durable `verifier.verdict` event with per-agent slot/model decisions. A
+unanimous passed verdict ends the remaining relay budget early with terminal
+reason `verified-early`.
 
 ## Consequences
 
@@ -65,8 +76,11 @@ local, and does not start another model process in the default profile.
   profile selectors and a visible verifier outcome in the existing timeline,
   plan, and branch-map event data.
 - The checker quorum is intentionally conservative. A successful command
-  alone is insufficient, and a verifier may decline to terminate when evidence
-  is incomplete.
+  alone is insufficient, and the model evaluator may decline to terminate when
+  evidence is incomplete. Each successful worker turn adds up to two bounded
+  model calls until the run ends.
+- Verifier execution requires an updated Bridge binary. Hub remains protocol
+  compatible because the existing verdict event and terminal reason are reused.
 - This does not add a general arbitrary-command verifier or an unbounded
   multi-agent scheduler. Those would require a separate security and capacity
   design.

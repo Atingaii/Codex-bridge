@@ -4040,6 +4040,68 @@ func TestVerifierQuorumRequiresEveryChecker(t *testing.T) {
 	}
 }
 
+func TestAgentVerifierResponseValidation(t *testing.T) {
+	valid := `before {"status":"pass","reason":"complete","checks":[{"name":"handoff","status":"pass","reason":"resolved"},{"name":"evidence","status":"pass","reason":"commands passed"},{"name":"independence","status":"pass","reason":"reviewed"}]} after`
+	response, err := parseAgentVerifierResponse(valid)
+	if err != nil || response.Status != verifierVerdictPass {
+		t.Fatalf("valid verifier response = %#v, %v", response, err)
+	}
+	downgraded := `{"status":"pass","reason":"complete","checks":[{"name":"handoff","status":"pass","reason":"resolved"},{"name":"evidence","status":"continue","reason":"missing command"},{"name":"independence","status":"pass","reason":"reviewed"}]}`
+	response, err = parseAgentVerifierResponse(downgraded)
+	if err != nil || response.Status != verifierVerdictContinue {
+		t.Fatalf("mixed verifier response was not downgraded: %#v, %v", response, err)
+	}
+	if _, err := parseAgentVerifierResponse(`{"status":"pass","reason":"complete","checks":[]}`); err == nil {
+		t.Fatal("incomplete verifier response was accepted")
+	}
+	if _, err := parseAgentVerifierResponse(`{"status":"pass","reason":"stale","checks":[{"name":"handoff","status":"pass","reason":"resolved"},{"name":"evidence","status":"pass","reason":"passed"},{"name":"independence","status":"pass","reason":"reviewed"}],"broken":} {"status":"pass"}`); err == nil {
+		t.Fatal("fields from invalid JSON leaked into a later partial object")
+	}
+}
+
+func TestAgentVerifierQuorumRequiresTwoAgentsAndLocalGate(t *testing.T) {
+	passChecks := []protocol.VerifierCheck{
+		{Name: "handoff", Status: verifierVerdictPass, Reason: "resolved"},
+		{Name: "evidence", Status: verifierVerdictPass, Reason: "commands passed"},
+		{Name: "independence", Status: verifierVerdictPass, Reason: "reviewed"},
+	}
+	local := verifierQuorum("local pass", passChecks)
+	passingAgent := func(name string) agentVerifierResult {
+		return agentVerifierResult{Agent: name, Slot: name, CLI: "codex", Model: "model", Status: verifierVerdictPass, Reason: "pass", Checks: append([]protocol.VerifierCheck(nil), passChecks...)}
+	}
+	if verdict := aggregateAgentVerifierQuorum(local, []agentVerifierResult{passingAgent("agent-1"), passingAgent("agent-2")}); verdict.Status != verifierVerdictPass {
+		t.Fatalf("unanimous quorum = %#v", verdict)
+	}
+	disagreement := passingAgent("agent-2")
+	disagreement.Status = verifierVerdictContinue
+	disagreement.Checks[1] = verifierCheckContinue("evidence", "insufficient")
+	if verdict := aggregateAgentVerifierQuorum(local, []agentVerifierResult{passingAgent("agent-1"), disagreement}); verdict.Status != verifierVerdictContinue {
+		t.Fatalf("disagreement incorrectly passed: %#v", verdict)
+	}
+	if verdict := aggregateAgentVerifierQuorum(local, []agentVerifierResult{passingAgent("agent-1")}); verdict.Status != verifierVerdictContinue {
+		t.Fatalf("single verifier incorrectly passed: %#v", verdict)
+	}
+	blockedLocal := local
+	blockedLocal.Status = verifierVerdictContinue
+	blockedLocal.Checkers[1] = verifierCheckContinue("evidence", "missing hard evidence")
+	if verdict := aggregateAgentVerifierQuorum(blockedLocal, []agentVerifierResult{passingAgent("agent-1"), passingAgent("agent-2")}); verdict.Status != verifierVerdictContinue {
+		t.Fatalf("agents overrode local hard gate: %#v", verdict)
+	}
+}
+
+func TestVerifierAssignmentsUseBothWorkerSlots(t *testing.T) {
+	for pair, want := range map[string][]string{
+		protocol.WorkerPairClaudeCodex:  {"claude", "codex"},
+		protocol.WorkerPairCodexCodex:   {orchestrationCodexSlotA, orchestrationCodexSlotB},
+		protocol.WorkerPairClaudeClaude: {orchestrationClaudeSlotA, orchestrationClaudeSlotB},
+	} {
+		assignments := verifierAssignments("collaboration", pair, "claude")
+		if len(assignments) != 2 || assignments[0].WorkerSlot != want[0] || assignments[1].WorkerSlot != want[1] {
+			t.Fatalf("%s assignments = %#v, want slots %#v", pair, assignments, want)
+		}
+	}
+}
+
 func TestFormalProofConvergenceRequiresReviewingCheckerCommand(t *testing.T) {
 	exit := 0
 	first := newOrchestrationTurnRecordWithSlot(
@@ -4560,6 +4622,12 @@ import json
 import sys
 
 text = ` + string(raw) + `
+verdict = {"status":"pass","reason":"independent evidence is complete","checks":[{"name":"handoff","status":"pass","reason":"resolved final handoff"},{"name":"evidence","status":"pass","reason":"successful command recorded"},{"name":"independence","status":"pass","reason":"independent reviewer present"}]}
+if any("PROOFBRIDGE_AGENT_VERIFIER_V1" in arg for arg in sys.argv):
+    rendered = json.dumps(verdict, separators=(",", ":"))
+    print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":rendered}]}}), flush=True)
+    print(json.dumps({"type":"result","result":rendered}), flush=True)
+    raise SystemExit(0)
 if "--input-format=stream-json" in sys.argv:
     for line in sys.stdin:
         print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}), flush=True)
@@ -4930,6 +4998,11 @@ if len(sys.argv) >= 2 and sys.argv[1] == "app-server":
 if len(sys.argv) < 2 or sys.argv[1] != "exec":
     print("unexpected command: " + " ".join(sys.argv[1:]), file=sys.stderr)
     sys.exit(1)
+prompt = sys.stdin.read()
+if "PROOFBRIDGE_AGENT_VERIFIER_V1" in prompt:
+    verdict = {"status":"pass","reason":"independent evidence is complete","checks":[{"name":"handoff","status":"pass","reason":"resolved final handoff"},{"name":"evidence","status":"pass","reason":"successful command recorded"},{"name":"independence","status":"pass","reason":"independent reviewer present"}]}
+    print(json.dumps({"type":"item.agent_message.delta","delta":json.dumps(verdict, separators=(",", ":"))}), flush=True)
+    raise SystemExit(0)
 print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
 `
 }
@@ -4962,6 +5035,11 @@ if len(sys.argv) >= 2 and sys.argv[1] == "app-server":
             print(json.dumps({"method":"item/completed","params":{"threadId":thread_id,"turnId":turn_id,"item":{"id":"cmd_verified","type":"commandExecution","command":"go test ./...","exitCode":0,"status":"completed"}}}), flush=True)
             print(json.dumps({"method":"item/agentMessage/delta","params":{"threadId":thread_id,"turnId":turn_id,"delta":text}}), flush=True)
             print(json.dumps({"method":"turn/completed","params":{"threadId":thread_id,"turn":{"id":turn_id,"status":"completed"}}}), flush=True)
+    raise SystemExit(0)
+prompt = sys.stdin.read()
+if "PROOFBRIDGE_AGENT_VERIFIER_V1" in prompt:
+    verdict = {"status":"pass","reason":"independent evidence is complete","checks":[{"name":"handoff","status":"pass","reason":"resolved final handoff"},{"name":"evidence","status":"pass","reason":"successful command recorded"},{"name":"independence","status":"pass","reason":"independent reviewer present"}]}
+    print(json.dumps({"type":"item.agent_message.delta","delta":json.dumps(verdict, separators=(",", ":"))}), flush=True)
     raise SystemExit(0)
 print(json.dumps({"type":"item.agent_message.delta","delta":text}), flush=True)
 `

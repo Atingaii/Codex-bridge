@@ -61,10 +61,11 @@ Let a single user talk from any browser to Codex CLI running on a private machin
   session per run, Codex + Codex runs keep independent `codex-a` and `codex-b`
   app-server threads, and Claude + Claude runs keep independent `claude-a` and
   `claude-b` sessions. Native sessions are reused across turns so the
-  user can `resume` them from the workspace. The Bridge only relays output and
-  turn context; it does not inject model verifier/remediation/assessment turns.
-  A bounded local three-checker quorum observes successful turns and can end a
-  run early only after a structured, independently evidenced final handoff.
+  user can `resume` them from the workspace. The Bridge only relays worker
+  output and turn context; it does not inject remediation into worker sessions.
+  Two fresh Agent Verifiers use the role presets after successful turns, and a
+  run ends early only when both models and local evidence gates accept the
+  structured, independently evidenced final handoff.
   Saved CLI presets can be pinned independently to `claude`, `codex-a`,
   `codex-b`, `claude-a`, and `claude-b` worker slots without changing
   machine-wide configuration.

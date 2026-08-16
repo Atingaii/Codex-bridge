@@ -128,11 +128,12 @@ context in the same `runID`.
   receive lightweight, browser-visible proof workflow reminders up front so the
   CLI records target obligations, build/scan/audit evidence, and blockers in
   its normal result.
-- After every successful relay turn, Bridge runs three local deterministic
-  checker roles over the recorded handoff and command lifecycle: handoff
-  completeness, command/proof evidence, and independent reviewer boundary.
-  It emits a visible `verifier.verdict` event without invoking another model or
-  command. Only a unanimous pass may set
+- After every successful relay turn, Bridge runs two fresh Agent Verifiers with
+  role 1 and role 2's bound presets. Each independently evaluates handoff
+  completeness, command/proof evidence, and the reviewer boundary; neither can
+  see the other's answer or enter the worker's native session. Local hard
+  evidence gates remain authoritative. Bridge emits a visible
+  `verifier.verdict`; only a two-Agent and local unanimous pass may set
   `run.end.data.terminalReason=verified-early` and end unused scheduled turns;
   every other verdict leaves the relay schedule unchanged.
 - Uploaded orchestration file contents are sent to the Bridge with the current
@@ -217,11 +218,11 @@ CLI answer after command events instead of visually ending on the last
 `command.end` card. Bridge only emits a successful relay `turn.end` after the
 CLI has supplied a final conclusion or handoff summary; progress-only text such
 as "next I will..." is retried in the same turn first. Bridge does not append
-proof-specific acceptance summaries or model-generated verifier conclusions.
-Its local deterministic verifier may append an explicit safe
-`verifier.verdict` event derived only from the structured handoff and recorded
-command evidence; if a CLI response is sparse, the browser still shows the
-recorded command events and relay terminal message.
+proof-specific acceptance summaries. Two isolated Agent Verifiers may append
+an explicit safe `verifier.verdict` event derived from the structured handoff,
+recorded command evidence, and local hard gates. The event contains only bounded
+structured verdicts, not hidden model prose; if a CLI response is sparse, the
+browser still shows the recorded command events and relay terminal message.
 The browser event stream is only kept open for active runs. Completed, failed,
 or canceled runs are read from persisted Hub events and show the stream as idle,
 so the stream indicator cannot be confused with the selected worker's online
@@ -267,9 +268,9 @@ endpoints' runs before the user switches to them.
 15. Emit successful `turn.end` content and render contentful turn-end events as
     final answer cards after command events.
 16. Preserve CLI-provided turn-end and run-end content without adding hidden
-    proof assessment, model-generated verifier, or remediation conclusions;
-    permit only the explicit deterministic `verifier.verdict` event and a
-    passing `verified-early` terminal reason.
+    proof or remediation conclusions; permit only the explicit structured
+    `verifier.verdict` quorum event and a passing `verified-early` terminal
+    reason.
 17. Only open `/ws/orchestrations` for active runs; terminal runs should use
     persisted events and show an idle event stream.
 18. Manage CLI subprocess groups and detect idle direct-Codex JSONL turns after
@@ -302,8 +303,9 @@ endpoints' runs before the user switches to them.
 30. Preserve compatible worker-profile bindings across create, refresh, and
     continue, while stripping encrypted snapshots from progress APIs and public
     shares.
-31. Evaluate successful turns with the three-checker quorum, render every
-    checker result, and stop the remaining schedule only for a unanimous pass.
+31. Evaluate successful turns with two isolated Agent Verifiers and local hard
+    gates, render every checker result, and stop the remaining schedule only
+    for a unanimous pass.
 
 ## Exit Gates
 
@@ -401,10 +403,10 @@ endpoints' runs before the user switches to them.
 - Omitted worker-profile selections retain the run's saved bindings; an
   explicit empty selection clears them. Ciphertext never appears in progress
   APIs or public shares.
-- A passing three-checker quorum is visible in the timeline and terminates
-  remaining turns with `verified-early`; any missing handoff condition,
-  evidence, reviewer boundary, failed command, or unresolved formal-proof work
-  continues the normal schedule.
+- A passing two-Agent plus local-hard-gate quorum is visible in the timeline
+  and terminates remaining turns with `verified-early`; any model disagreement,
+  invalid verdict, missing handoff condition, evidence, reviewer boundary,
+  failed command, or unresolved formal-proof work continues the normal schedule.
 - `turn.start.content` does not contain the full relay prompt or compacted
   context; the full prompt is carried only in typed `TurnStartData.PromptText`
   for authenticated local diagnostics and is stripped from public shares.

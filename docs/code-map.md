@@ -19,7 +19,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | Orchestration transport recovery | `internal/bridge/client.go:connectOnce`, `internal/bridge/orchestration_events.go:send`, `internal/hub/ws_bridge.go:bridgeReconnectGrace` |
 | Orchestration transient CLI recovery | `internal/bridge/appserver_runner.go:readEvents`, `internal/bridge/orchestration_relay.go:isRecoverableCLITransportError`, `internal/bridge/orchestration.go:runRelayTurnWithContinuations`, `docs/features/orchestration-transient-cli-recovery.md` |
 | Browser/Bridge connection pools | `internal/hub/pool.go` |
-| Orchestration HTTP/WS, profiles, verdicts, event history, run navigation, and turn timing | `internal/hub/orchestration.go:resolveWorkerProfiles`, `internal/hub/task_graph.go:handleTaskGraphEvent`, `internal/bridge/orchestration_worker_profiles.go:workerRuntime`, `internal/bridge/orchestration_verifier.go:evaluateOrchestrationVerdict`, `frontend/src/app/pages/OrchestrationWorkspace.tsx`, `frontend/src/app/lib/utils.ts:visibleOrchestrationEvents` |
+| Orchestration HTTP/WS, profiles, verdicts, event history, run navigation, and turn timing | `internal/hub/orchestration.go:resolveWorkerProfiles`, `internal/hub/task_graph.go:handleTaskGraphEvent`, `internal/bridge/orchestration_worker_profiles.go:workerRuntime`, `internal/bridge/orchestration_verifier.go:evaluateAgentVerifierQuorum`, `frontend/src/app/pages/OrchestrationWorkspace.tsx`, `frontend/src/app/lib/utils.ts:visibleOrchestrationEvents` |
 | Orchestration plan/progress workspace | `internal/hub/task_graph.go:handleOrchestrationProgress`, `internal/hub/task_graph.go:reduceOrchestrationPlan`, `frontend/src/app/components/OrchestrationProofProgress.tsx:OrchestrationProofProgress`, `frontend/src/app/components/OrchestrationProgressMap.tsx:OrchestrationProgressMap`, `frontend/src/app/pages/OrchestrationWorkspace.tsx` |
 | Orchestration cancel-before-delete state machine | `internal/store/store.go:RequestDeleteOrchestrationRun`, `internal/store/store.go:UpdateOrchestrationRunStatusIfAllowed`, `internal/store/task_graph.go:CreateNextOrchestrationTaskGraph`, `internal/hub/orchestration.go:handleDeleteOrchestration` |
 | Orchestration runtime/usage statistics | `internal/hub/orchestration.go:handleOrchestrationStats`, `internal/bridge/usage_ledger.go:scanOrchestrationUsage`, `internal/store/orchestration_usage.go:ReplaceOrchestrationUsage`, `internal/usagepricing/catalog.go:EstimateNormalized`, `frontend/src/app/pages/OrchestrationStatsPage.tsx` |
@@ -339,8 +339,10 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    compatibility fallback; and
    `internal/bridge/orchestration_relay.go:relayCanConverge` permits only an
    evidenced reviewer/critic turn to finish below the configured turn ceiling.
+   `internal/bridge/orchestration_verifier.go:evaluateAgentVerifierQuorum`
+   runs two isolated role-preset judgments, combines them with
    `internal/bridge/orchestration_verifier.go:evaluateOrchestrationVerdict`
-   independently checks this evidence and emits the visible early-stop verdict.
+   local hard gates, and emits the visible early-stop verdict.
 9. `internal/bridge/orchestration_relay.go:runRelayCLI`,
    `internal/bridge/orchestration_codex.go:runCodexInteractive`, and
    `internal/bridge/orchestration_claude.go:runClaudeInteractive` preserve the

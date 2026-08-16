@@ -1082,8 +1082,19 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			Data:        relayTurnEndData(cli, workerSlot, sessionState),
 		})
 		if turnStatus == "success" {
-			verdict := evaluateOrchestrationVerdict(mode, profile, payload.TaskGraph != nil, history)
-			m.emit(payload.RunID, verifierVerdictEvent(turnID, record, verdict))
+			verdict, verifierAgents := m.evaluateAgentVerifierQuorum(ctx, payload, mode, profile, workerPair, firstCLI, history)
+			m.emit(payload.RunID, verifierVerdictEvent(turnID, record, verdict, verifierAgents))
+			for _, agent := range verifierAgents {
+				if agent.Usage.Model == "" {
+					continue
+				}
+				m.emitTurnUsage(payload.RunID, orchestrationTurn{
+					TurnID: turnID + "-" + agent.Agent,
+					Role:   "verifier",
+					CLI:    agent.CLI,
+					Usage:  agent.Usage,
+				})
+			}
 			if verdict.Status == verifierVerdictPass {
 				terminalReason = "verified-early"
 				verifierVerdict = &verdict

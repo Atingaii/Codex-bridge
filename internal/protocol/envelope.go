@@ -501,8 +501,8 @@ type VerifierVerdict struct {
 	Checkers []VerifierCheck `json:"checkers,omitempty"`
 }
 
-// VerifierCheck is one bounded deterministic adjudication role. A passed
-// verdict requires every checker to pass.
+// VerifierCheck is one bounded model or local adjudication result. A passed
+// verdict requires every invoked Agent Verifier and local hard gate to pass.
 type VerifierCheck struct {
 	Name   string `json:"name"`
 	Status string `json:"status"`

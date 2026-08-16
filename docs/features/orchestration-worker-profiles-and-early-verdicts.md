@@ -87,8 +87,10 @@ The `claude-claude` pair and unanimous checker quorum extend this design in
    native resume and remove it after the session exits. Synchronize only native
    session/transcript records into ordinary `/resume` picker locations; never
    copy isolated configuration or credentials.
-4. Run the deterministic verifier once after each successful turn. Emit its
-   verdict before choosing the next turn; stop only on an unambiguous pass.
+4. Run two fresh Agent Verifiers after each successful turn using role 1 and
+   role 2's bound presets. Validate their JSON decisions, apply local hard
+   evidence gates, emit the quorum before choosing the next turn, and stop only
+   on a two-Agent and local unanimous pass.
 5. Add compact required preset selectors to the existing orchestration form,
    refresh their candidates after Settings changes, and render
    verdict/terminal-reason data in the existing progress surfaces.
@@ -109,8 +111,8 @@ The `claude-claude` pair and unanimous checker quorum extend this design in
   context-window override.
 - A profile secret is absent from Hub API responses, events, logs, prompts,
   task-graph public shares, and runtime artifacts after cleanup.
-- A resolved turn with independent command evidence produces a visible passing
-  verifier verdict and ends before unused turns.
+- A resolved turn with independent command evidence ends before unused turns
+  only when both isolated Agent Verifiers and the local hard gates pass.
 - Missing evidence, unresolved formal-proof obligations, verifier error, or a
   failed command never causes early termination.
 - Existing plans, branch maps, follow-up continuity, Claude and Codex runner
@@ -118,11 +120,12 @@ The `claude-claude` pair and unanimous checker quorum extend this design in
 
 ## Reviewer Q&A
 
-**Why not run another model as verifier by default?**
+**Why use both worker presets as Verifiers?**
 
-The Bridge is intentionally constrained to a 2-core, 4 GB machine. A serial
-deterministic verifier is cheap, auditable, and cannot consume another model
-quota. A future model verifier can be opt-in behind this verdict event contract.
+The two configured roles may use different providers, models, and reasoning
+strengths. Fresh, concurrent sessions give two independent completion judgments
+without contaminating worker history. Any error, malformed JSON, disagreement,
+or missing local evidence conservatively continues the scheduled run.
 
 **Why snapshot ciphertext in private run storage and the start payload?**
 
@@ -134,6 +137,7 @@ protocol and make reconnect recovery ambiguous.
 
 **Can a successful test incorrectly finish a task?**
 
-Not by itself. The verifier also requires a structured final resolution from
-the relevant worker, no outstanding risks/next work, and for formal proofs a
-recognized proof checker command.
+Not by itself. Both Agent Verifiers must accept a structured final resolution
+from the relevant worker with no outstanding risks/next work, and local gates
+still require successful command evidence plus a recognized proof checker for
+formal proofs.

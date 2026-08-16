@@ -12,8 +12,10 @@ who need two separately configured Claude workers. Its single native session
 would also make two nominal workers share history and provider state.
 
 A single completion checker is likewise too weak as the authority for ending a
-proof run early. The constrained Bridge host cannot safely run several extra
-model processes for every turn.
+proof run early. The initial implementation therefore used three local checks;
+ADR-011 now supersedes that execution detail with two independent bounded Agent
+Verifier calls whose structured results still pass through the same
+three-check quorum.
 
 ## Decision
 
@@ -23,8 +25,8 @@ Claude process, deterministic native session id, transcript lookup, and
 resume-mode state. Claude + Codex retains the legacy `claude` and `codex`
 slots for compatibility.
 
-Early completion uses a serial, deterministic checker quorum rather than one
-opaque verifier. The three independently named checks are:
+Early completion uses a serial, visible checker quorum. Two bounded Agent
+Verifiers independently evaluate the three named checks:
 
 1. **handoff checker**: requires a machine-readable resolved final handoff
    with no next action or risk;
@@ -35,8 +37,10 @@ opaque verifier. The three independently named checks are:
    independent reviewer boundary).
 
 Every check result is included in the persisted verdict. A run ends early
-only when every checker passes. A rejection, an incomplete check, or a checker
-error is a continue verdict and consumes no extra model capacity.
+only when every checker passes. A rejection, an incomplete check, a malformed
+model response, verifier disagreement, or a verifier execution error is a
+continue verdict. Bridge uses both worker presets in fresh native sessions and
+keeps local command/formal-check evidence gates.
 
 The isolated production surface is `proofbridge.sparkon.cn`. It has a separate
 Hub service, configuration directory, SQLite file, JWT secret, administrator,
@@ -55,5 +59,6 @@ untouched.
   explicit responsibility, durable state, dependency boundaries, and visible
   activity. It deliberately does not import its daemon, mailbox, or extra
   model runtime.
-- The checker quorum is conservative, deterministic, and bounded for the
-  2-core, 4-GB host. Model-based adjudicators remain an opt-in future design.
+- The checker quorum remains conservative and bounded for the 2-core, 4-GB
+  host. It now spends up to two additional model calls after each successful
+  worker turn, while preserving local hard-evidence enforcement.

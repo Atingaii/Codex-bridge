@@ -853,6 +853,12 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		}
 	}
 	if workerPair == protocol.WorkerPairClaudeClaude {
+		// A fresh durable Claude+Claude task has no persisted session IDs yet.
+		// cleanCodexThreadIDs intentionally returns nil for an empty payload, so
+		// initialize the map before assigning the deterministic slot IDs below.
+		if sessionState.ClaudeSessionIDs == nil {
+			sessionState.ClaudeSessionIDs = map[string]string{}
+		}
 		if sessionState.ClaudeSessionIDs[orchestrationClaudeSlotA] == "" {
 			sessionState.ClaudeSessionIDs[orchestrationClaudeSlotA] = stableOrchestrationSessionID(payload.RunID, orchestrationClaudeSlotA)
 		}

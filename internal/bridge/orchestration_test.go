@@ -1762,6 +1762,45 @@ func TestDurableClaudeAttemptsCreateTheirOwnSessions(t *testing.T) {
 	}
 }
 
+func TestDurableClaudeClaudeTaskInitializesEmptySlotSessionIDs(t *testing.T) {
+	tmp := t.TempDir()
+	claudePath := filepath.Join(tmp, "claude")
+	logPath := filepath.Join(tmp, "claude-claude-log.jsonl")
+	if err := os.WriteFile(claudePath, []byte(fakeClaudeInteractiveRelayScript(logPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Bridge.ClaudePath = claudePath
+	cfg.Bridge.CWD = tmp
+	manager := NewOrchestrationManager(&cfg)
+	defer manager.CloseAll()
+	out := make(chan protocol.Envelope, 64)
+	manager.AttachOut(out)
+
+	// Durable graph dispatch deliberately clears native session IDs before the
+	// first worker starts. Claude+Claude must recreate both slot IDs from that
+	// empty payload without crashing the Bridge.
+	manager.run(context.Background(), protocol.OrchestrationStartPayload{
+		RunID: "orc_durable_claude_pair:ota_first", Mode: "collaboration", WorkerPair: protocol.WorkerPairClaudeClaude,
+		Prompt: "complete the first Claude pair node", MaxTurns: 1, CWD: tmp,
+		TaskGraph: &protocol.TaskGraphPayload{ID: "otg_claude_pair", Generation: 1, Round: 1, MaxRounds: 1, Tasks: []protocol.TaskPayload{{
+			ID: "otk_claude_pair", AttemptID: "ota_first", Role: store.TaskRolePlanner, WorkerSlot: orchestrationClaudeSlotA, PayloadDigest: "digest",
+		}}},
+	})
+
+	events := drainOrchestrationEvents(t, out)
+	var runStart protocol.OrchestrationEventPayload
+	for _, event := range events {
+		if event.Kind == "run.start" {
+			runStart = event
+			break
+		}
+	}
+	if runStart.RunStartData == nil || runStart.RunStartData.WorkerPair != protocol.WorkerPairClaudeClaude {
+		t.Fatalf("durable Claude+Claude run did not start: %#v", events)
+	}
+}
+
 func TestOrchestrationCodexActiveWriterRetryWaitHonorsCancellation(t *testing.T) {
 	tmp := t.TempDir()
 	codexPath := filepath.Join(tmp, "codex")

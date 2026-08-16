@@ -340,9 +340,10 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
    `internal/bridge/orchestration_relay.go:relayCanConverge` permits only an
    evidenced reviewer/critic turn to finish below the configured turn ceiling.
    `internal/bridge/orchestration_verifier.go:evaluateAgentVerifierQuorum`
-   runs two isolated role-preset judgments, combines them with
-   `internal/bridge/orchestration_verifier.go:evaluateOrchestrationVerdict`
-   local hard gates, and emits the visible early-stop verdict.
+   runs two isolated role-preset judgments after recording
+   `internal/bridge/orchestration_verifier.go:collectOrchestrationVerifierFacts`;
+   the facts are visible evidence rather than a local completion gate, and the
+   quorum emits the visible early-stop verdict.
 9. `internal/bridge/orchestration_relay.go:runRelayCLI`,
    `internal/bridge/orchestration_codex.go:runCodexInteractive`, and
    `internal/bridge/orchestration_claude.go:runClaudeInteractive` preserve the

@@ -589,6 +589,7 @@ export type OrchestrationTurnInfo = {
   ordinal?: number;
   total?: number;
   verifier?: boolean;
+  stage?: 'planning' | 'plan-review';
 };
 
 export type ToolEvent = {

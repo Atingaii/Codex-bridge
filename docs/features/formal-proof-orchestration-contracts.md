@@ -19,7 +19,9 @@
 - No frontend, HTTP, WebSocket, SQLite, or protocol shape changes.
 - No new proof engine dependency and no direct integration with LeanDojo,
   Pantograph, miniF2F, Lean, Rocq, Isabelle, or another prover.
-- No hidden verifier/remediation turns or Bridge-owned semantic proof verdict.
+- No Bridge-owned semantic proof verdict. Agent Verifiers may review recorded
+  evidence after a final reviewer; a missing checker is a continuing fact for
+  them to assess, not an early Bridge termination.
 - No requirement that default-profile software tasks use formal-proof roles.
 
 ## Open-Source Inputs

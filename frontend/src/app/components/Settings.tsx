@@ -71,7 +71,6 @@ export function SettingsModal({
   const permissionOptions: Array<{ id: PermissionProfileId; title: string; description: string }> = [
     { id: 'review-required', title: t.reviewRequired, description: t.reviewRequiredDescription },
     ...(user.features?.includes('strict-workspace') ? [{ id: 'strict-workspace' as const, title: t.strictWorkspace, description: t.strictWorkspaceDescription }] : []),
-    { id: 'auto-execute', title: t.autoExecute, description: t.autoExecuteDescription },
   ];
   const profileCommand = (profileId: PermissionProfileId) =>
     tokenInfo?.permissionProfiles?.find((profile) => profile.id === profileId)?.setupCommand || '';

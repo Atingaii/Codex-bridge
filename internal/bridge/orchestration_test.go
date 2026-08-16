@@ -4049,7 +4049,7 @@ func TestClaudeWorkerProfileUnknownModelUsesNativeContextDefault(t *testing.T) {
 	manager.closeNativeSession(payload.RunID)
 }
 
-func TestVerifierQuorumRequiresEveryChecker(t *testing.T) {
+func TestRecordedVerifierFactsCaptureEveryMissingRequirement(t *testing.T) {
 	exit := 0
 	base := orchestrationTurn{
 		Role: "reviewer", CLI: "codex", WorkerSlot: "codex", Tools: []RunnerToolEvent{{Status: "completed", ExitCode: &exit}},
@@ -4067,15 +4067,15 @@ func TestVerifierQuorumRequiresEveryChecker(t *testing.T) {
 			if len(history) > 1 {
 				history[len(history)-1] = turn
 			}
-			verdict := evaluateOrchestrationVerdict("collaboration", "default", false, history)
-			if verdict.Status != verifierVerdictContinue || len(verdict.Checkers) != 3 {
-				t.Fatalf("%s checker incorrectly allowed early completion: %#v", name, verdict)
+			facts := collectOrchestrationVerifierFacts("collaboration", "default", false, history)
+			if facts.Status != verifierVerdictContinue || len(facts.Checkers) != 3 {
+				t.Fatalf("%s missing fact was not recorded: %#v", name, facts)
 			}
 		})
 	}
-	verdict := evaluateOrchestrationVerdict("collaboration", "default", false, []orchestrationTurn{{Role: "implementer", CLI: "claude", WorkerSlot: "claude"}, base})
-	if verdict.Status != verifierVerdictPass || len(verdict.Checkers) != 3 {
-		t.Fatalf("unanimous checker quorum = %#v", verdict)
+	facts := collectOrchestrationVerifierFacts("collaboration", "default", false, []orchestrationTurn{{Role: "implementer", CLI: "claude", WorkerSlot: "claude"}, base})
+	if facts.Status != verifierVerdictPass || len(facts.Checkers) != 3 {
+		t.Fatalf("complete recorded facts = %#v", facts)
 	}
 }
 
@@ -4098,7 +4098,7 @@ func TestAgentVerifierResponseValidation(t *testing.T) {
 	}
 }
 
-func TestAgentVerifierQuorumRequiresTwoAgentsAndLocalGate(t *testing.T) {
+func TestAgentVerifierQuorumRequiresTwoAgentsButRecordsLocalFacts(t *testing.T) {
 	passChecks := []protocol.VerifierCheck{
 		{Name: "handoff", Status: verifierVerdictPass, Reason: "resolved"},
 		{Name: "evidence", Status: verifierVerdictPass, Reason: "commands passed"},
@@ -4120,26 +4120,13 @@ func TestAgentVerifierQuorumRequiresTwoAgentsAndLocalGate(t *testing.T) {
 	if verdict := aggregateAgentVerifierQuorum(local, []agentVerifierResult{passingAgent("agent-1")}); verdict.Status != verifierVerdictContinue {
 		t.Fatalf("single verifier incorrectly passed: %#v", verdict)
 	}
-	blockedLocal := local
-	blockedLocal.Status = verifierVerdictContinue
-	blockedLocal.Checkers[1] = verifierCheckContinue("evidence", "missing hard evidence")
-	if verdict := aggregateAgentVerifierQuorum(blockedLocal, []agentVerifierResult{passingAgent("agent-1"), passingAgent("agent-2")}); verdict.Status != verifierVerdictContinue {
-		t.Fatalf("agents overrode local hard gate: %#v", verdict)
-	}
-}
-
-func TestLocalVerifierContinuationDefersAgentReview(t *testing.T) {
-	local := verifierQuorum("missing evidence", []protocol.VerifierCheck{
-		{Name: "handoff", Status: verifierVerdictPass, Reason: "resolved"},
-		verifierCheckContinue("evidence", "missing command"),
-		{Name: "independence", Status: verifierVerdictPass, Reason: "reviewed"},
-	})
-	verdict := localVerifierContinuation(local)
-	if verdict.Status != verifierVerdictContinue || verdict.Reason != "local hard evidence gates require continuation before Agent Verifier review" {
-		t.Fatalf("local continuation = %#v", verdict)
-	}
-	if len(verdict.Checkers) != 3 || verdict.Checkers[1].Name != "local/evidence" {
-		t.Fatalf("local checks were not source-qualified: %#v", verdict.Checkers)
+	missingRecordedFact := local
+	missingRecordedFact.Status = verifierVerdictContinue
+	missingRecordedFact.Checkers[1] = verifierCheckContinue("evidence", "missing recorded evidence")
+	if verdict := aggregateAgentVerifierQuorum(missingRecordedFact, []agentVerifierResult{passingAgent("agent-1"), passingAgent("agent-2")}); verdict.Status != verifierVerdictPass {
+		t.Fatalf("recorded facts incorrectly blocked unanimous agents: %#v", verdict)
+	} else if len(verdict.Checkers) < 3 || verdict.Checkers[len(verdict.Checkers)-3].Name != "recorded/handoff" {
+		t.Fatalf("recorded facts were not retained: %#v", verdict)
 	}
 }
 

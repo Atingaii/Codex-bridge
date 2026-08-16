@@ -182,14 +182,15 @@ Bridge updates only the current cwd entry in `~/.claude.json` so native Claude
 project metadata points at the Bridge session without touching unrelated
 projects, and materializes the same Claude-written transcript so Claude Code's
 interactive `/resume` picker can show it from the run cwd. It does not add
-model-driven proof strategy or remediation turns. After each successful worker
-turn, Bridge first applies local hard evidence gates. For a completion
-candidate, it starts two fresh, isolated Agent Verifier calls using role 1 and
-role 2's bound presets. They independently judge handoff completeness,
-command/proof evidence, and the reviewer boundary without seeing one another's
-answer or entering the worker sessions. The two model verdicts and local hard
-evidence gates must all pass. A visible `verifier.verdict` records the quorum,
-and only a unanimous pass ends unused rounds with `verified-early`.
+model-driven proof strategy or remediation turns. After the durable graph's
+final reviewer, Bridge records local handoff, command, proof-checker, and
+reviewer-boundary facts, then starts two fresh, isolated Agent Verifier calls
+using role 1 and role 2's bound presets. They independently judge handoff
+completeness, command/proof evidence, and the reviewer boundary without seeing
+one another's answer or entering the worker sessions. Recorded facts are
+evidence, not a Bridge-owned completion verdict. A visible `verifier.verdict`
+records the quorum; only unanimous Agent Verifier passes end unused rounds with
+`verified-early`, otherwise the Hub dispatches the next configured round.
 Formal-proof guidance is opt-in
 through the persisted `profile=formal-proof` run setting selected in the
 orchestration UI; the default profile does not activate proof guidance based on

@@ -1152,7 +1152,7 @@ func formatRelayPriorTurn(item orchestrationTurn) string {
 }
 
 func relayCanConverge(mode, profile string, history []orchestrationTurn) bool {
-	return evaluateOrchestrationVerdict(mode, profile, false, history).Status == verifierVerdictPass
+	return collectOrchestrationVerifierFacts(mode, profile, false, history).Status == verifierVerdictPass
 }
 
 func machineNone(value string) bool {

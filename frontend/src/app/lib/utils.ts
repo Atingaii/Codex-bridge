@@ -629,6 +629,8 @@ export function orchestrationTurnInfoFromEvents(events: OrchestrationEvent[], ru
 
 export function orchestrationTurnLabel(info: OrchestrationTurnInfo, t: UIText) {
   if (info.verifier) return t.verifierTurn;
+  if (info.stage === 'planning') return t.turnPrefix === '第' ? '计划阶段' : 'Planning stage';
+  if (info.stage === 'plan-review') return t.turnPrefix === '第' ? '计划审核' : 'Plan review';
   if (typeof info.ordinal !== 'number') return '';
   const suffix = info.total ? `/${info.total}` : '';
   if (t.turnPrefix === '第') return `${t.turnPrefix}${info.ordinal}${suffix}${t.turnSuffix}`;
@@ -842,12 +844,19 @@ function isInternalOrchestrationBootstrapEvent(event: OrchestrationEvent) {
 }
 
 function orchestrationVisibleTaskMeta(event: OrchestrationEvent) {
+  const role = event.task?.role || event.role;
+  const taskName = event.task?.name;
+  const stage = role === 'planner' || taskName === 'plan'
+    ? 'planning'
+    : role === 'plan-reviewer' || taskName === 'plan-review'
+      ? 'plan-review'
+      : undefined;
   const round = firstNumber(event.task?.round, event.turnStartData?.round, event.runStartData?.round, numberFromRecord(event.data, 'round'));
   const maxRounds = firstNumber(event.task?.maxRounds, event.turnStartData?.maxRounds, event.runStartData?.maxRounds, numberFromRecord(event.data, 'maxRounds'));
   return {
     taskName: event.task?.name,
     workerSlot: event.task?.workerSlot || event.turnStartData?.workerSlot,
-    turnInfo: hasNumber(round) ? { ordinal: round, ...(hasNumber(maxRounds) ? { total: maxRounds } : {}) } : undefined,
+    turnInfo: stage ? { stage } : hasNumber(round) ? { ordinal: round, ...(hasNumber(maxRounds) ? { total: maxRounds } : {}) } : undefined,
   };
 }
 

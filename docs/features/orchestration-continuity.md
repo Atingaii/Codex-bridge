@@ -131,13 +131,12 @@ context in the same `runID`.
   receive lightweight, browser-visible proof workflow reminders up front so the
   CLI records target obligations, build/scan/audit evidence, and blockers in
   its normal result.
-- After every successful relay turn, Bridge first applies local hard evidence
-  gates. For a completion candidate, it runs two fresh Agent Verifiers with role
-  1 and role 2's bound presets. Each independently evaluates handoff
-  completeness, command/proof evidence, and the reviewer boundary; neither can
-  see the other's answer or enter the worker's native session. Local hard
-  evidence gates remain authoritative. Bridge emits a visible
-  `verifier.verdict`; only a two-Agent and local unanimous pass may set
+- After a durable final reviewer, Bridge records local evidence facts and runs
+  two fresh Agent Verifiers with role 1 and role 2's bound presets. Each
+  independently evaluates handoff completeness, command/proof evidence, and
+  the reviewer boundary; neither can see the other's answer or enter the
+  worker's native session. Bridge emits a visible `verifier.verdict`; only a
+  two-Agent unanimous pass may set
   `run.end.data.terminalReason=verified-early` and end unused scheduled turns;
   every other verdict leaves the relay schedule unchanged.
 - Uploaded orchestration file contents are sent to the Bridge with the current
@@ -224,7 +223,7 @@ CLI has supplied a final conclusion or handoff summary; progress-only text such
 as "next I will..." is retried in the same turn first. Bridge does not append
 proof-specific acceptance summaries. Two isolated Agent Verifiers may append
 an explicit safe `verifier.verdict` event derived from the structured handoff,
-recorded command evidence, and local hard gates. The event contains only bounded
+recorded command evidence, and recorded local evidence facts. The event contains only bounded
 structured verdicts, not hidden model prose; if a CLI response is sparse, the
 browser still shows the recorded command events and relay terminal message.
 The browser event stream is only kept open for active runs. Completed, failed,
@@ -307,9 +306,9 @@ endpoints' runs before the user switches to them.
 30. Preserve compatible worker-profile bindings across create, refresh, and
     continue, while stripping encrypted snapshots from progress APIs and public
     shares.
-31. Evaluate successful turns with local hard gates and, for completion
-    candidates, two isolated Agent Verifiers; render every checker result and
-    stop the remaining schedule only for a unanimous pass.
+31. After durable reviewer turns, record local facts and run two isolated Agent
+    Verifiers; render every checker result and stop the remaining schedule only
+    for a unanimous pass.
 
 ## Exit Gates
 

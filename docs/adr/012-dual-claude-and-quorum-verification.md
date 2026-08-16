@@ -1,3 +1,10 @@
+> **DEPRECATED - the early-completion execution detail was replaced by Agent
+> Verifier round continuation.**
+>
+> Current design: [Agent-Verifier Round Continuation](../features/agent-verifier-round-continuation.md).
+> This ADR remains historical context for `claude-claude` isolation; do not
+> implement its former local-hard-gate verifier behavior.
+
 # ADR-012: Dual Claude Workers And Quorum Verification
 
 ## Status
@@ -39,8 +46,9 @@ Verifiers independently evaluate the three named checks:
 Every check result is included in the persisted verdict. A run ends early
 only when every checker passes. A rejection, an incomplete check, a malformed
 model response, verifier disagreement, or a verifier execution error is a
-continue verdict. Bridge uses both worker presets in fresh native sessions and
-keeps local command/formal-check evidence gates.
+continue verdict. Bridge uses both worker presets in fresh native sessions.
+The former local command/formal-check execution gates are superseded by
+recorded facts supplied to both verifiers under the current continuation design.
 
 The isolated production surface is `proofbridge.sparkon.cn`. It has a separate
 Hub service, configuration directory, SQLite file, JWT secret, administrator,
@@ -60,5 +68,5 @@ untouched.
   activity. It deliberately does not import its daemon, mailbox, or extra
   model runtime.
 - The checker quorum remains conservative and bounded for the 2-core, 4-GB
-  host. It spends two additional model calls only when local hard gates identify
-  a successful worker turn as a completion candidate.
+  host. Under the current design it spends two additional model calls after
+  every successful durable reviewer node.

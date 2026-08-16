@@ -48,8 +48,10 @@ summary. Its primary map is a proof-task dependency graph whose nodes show
    dependency-blocked, and completed proof obligations with rationale and
    evidence.
 3. The six durable Agent nodes remain visible as a compact secondary execution
-   chain. They explain where the orchestration runtime is, but do not masquerade
-   as proof completion. The compact chain can be opened in a large dialog with
+   chain. Planning and plan review are labelled as pre-collaboration stages;
+   only candidate, integration, and review work carries a collaboration round
+   number. They explain where the orchestration runtime is, but do not
+   masquerade as proof completion. The compact chain can be opened in a large dialog with
    pan, wheel/pinch zoom, zoom controls, and fit-to-view.
 4. Continuing the same run creates another task segment without losing native
    conversation context. A task selector groups durable graph generations by

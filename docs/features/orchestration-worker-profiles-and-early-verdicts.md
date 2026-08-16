@@ -87,10 +87,10 @@ The `claude-claude` pair and unanimous checker quorum extend this design in
    native resume and remove it after the session exits. Synchronize only native
    session/transcript records into ordinary `/resume` picker locations; never
    copy isolated configuration or credentials.
-4. Apply local hard evidence gates after each successful turn. For completion
-   candidates, run two fresh Agent Verifiers using role 1 and role 2's bound
-   presets, validate their JSON decisions, emit the quorum before choosing the
-   next turn, and stop only on a two-Agent and local unanimous pass.
+4. After the durable final reviewer, record local evidence facts and run two
+   fresh Agent Verifiers using role 1 and role 2's bound presets. Validate
+   their JSON decisions, emit the quorum before choosing the next round, and
+   stop only on a two-Agent unanimous pass.
 5. Add compact required preset selectors to the existing orchestration form,
    refresh their candidates after Settings changes, and render
    verdict/terminal-reason data in the existing progress surfaces.
@@ -112,7 +112,8 @@ The `claude-claude` pair and unanimous checker quorum extend this design in
 - A profile secret is absent from Hub API responses, events, logs, prompts,
   task-graph public shares, and runtime artifacts after cleanup.
 - A resolved turn with independent command evidence ends before unused turns
-  only when both isolated Agent Verifiers and the local hard gates pass.
+  only when both isolated Agent Verifiers pass after reviewing the recorded
+  local evidence.
 - Missing evidence, unresolved formal-proof obligations, verifier error, or a
   failed command never causes early termination.
 - Existing plans, branch maps, follow-up continuity, Claude and Codex runner

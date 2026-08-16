@@ -1,3 +1,10 @@
+> **DEPRECATED - the early-completion execution detail was replaced by Agent
+> Verifier round continuation.**
+>
+> Current design: [Agent-Verifier Round Continuation](../features/agent-verifier-round-continuation.md).
+> This ADR remains historical context for worker-profile isolation; do not
+> implement its former local-hard-gate verifier behavior.
+
 # ADR-011: Orchestration Worker Profiles And Verifier Verdicts
 
 ## Status
@@ -44,26 +51,12 @@ window flags. Bridge validates snapshot self-consistency, decrypts the secret,
 and writes native files; it does not infer model capabilities or generate a
 Codex model catalog.
 
-After every successful relay turn, Bridge first applies deterministic local
-hard evidence gates. When those gates identify a completion candidate, Bridge
-starts two bounded Agent Verifier calls: one with worker role 1's bound model
-preset and one with worker role 2's. The calls use fresh native sessions, so they reuse each role's
-authorized provider, model, reasoning effort, and credential snapshot without
-entering either worker's conversation history or seeing the other verifier's
-answer. Legacy runs without bound presets still start both role slots with each
-CLI's configured machine default; they do not degrade to a single judge. Each
-verifier receives the task, compact turn evidence, and an explicit JSON verdict
-contract; embedded worker text is evidence, not instructions.
-
-Each Agent Verifier judges handoff completeness, evidence sufficiency, and
-independence. Bridge validates both structured responses and retains local hard
-gates for successful command evidence and recognized formal-proof checker
-evidence. Every check from every invoked verifier must pass. A model error,
-malformed response, disagreement, missing hard evidence, or any `continue`
-check conservatively continues the scheduled run. Bridge emits the same
-durable `verifier.verdict` event with per-agent slot/model decisions. A
-unanimous passed verdict ends the remaining relay budget early with terminal
-reason `verified-early`.
+The former design applied deterministic local hard-evidence gates before Agent
+Verifier calls. That sub-decision is superseded: durable reviewer nodes now
+always invoke two bounded Agent Verifiers, using role 1 and role 2's presets in
+fresh native sessions. Local command, handoff, and proof-checker observations
+are supplied as recorded facts, not as an execution gate. See the current
+feature design for the complete continuation and terminal-round semantics.
 
 ## Consequences
 

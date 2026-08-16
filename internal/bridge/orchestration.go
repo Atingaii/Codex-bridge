@@ -1087,8 +1087,10 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			RunEndData:  m.relayRunEndData(cli, workerSlot, workerPair, sessionState, runCWD),
 			Data:        relayTurnEndData(cli, workerSlot, sessionState),
 		})
-		if turnStatus == "success" {
+		shouldRunVerifier := turnStatus == "success" && shouldRunAgentVerifier(payload)
+		if shouldRunVerifier {
 			verdict, verifierAgents := m.evaluateAgentVerifierQuorum(ctx, payload, mode, profile, workerPair, firstCLI, history)
+			verifierVerdict = &verdict
 			m.emit(payload.RunID, verifierVerdictEvent(turnID, record, verdict, verifierAgents))
 			for _, agent := range verifierAgents {
 				if agent.Usage.Model == "" {
@@ -1103,9 +1105,16 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 			}
 			if verdict.Status == verifierVerdictPass {
 				terminalReason = "verified-early"
-				verifierVerdict = &verdict
 				break
 			}
+		} else if payload.TaskGraph == nil && turnStatus == "success" && relayCanConverge(mode, profile, history) {
+			// Retain the legacy in-process relay's documented reviewer/critic
+			// convergence behavior. Durable graphs use the Agent Verifier quorum.
+			terminalReason = "verified-early"
+			legacyVerdict := collectOrchestrationVerifierFacts(mode, profile, false, history)
+			verifierVerdict = &legacyVerdict
+			m.emit(payload.RunID, verifierVerdictEvent(turnID, record, legacyVerdict, nil))
+			break
 		}
 		if turn < maxTurns && turnStatus == "success" {
 			m.runPostTurnNativeMaintenance(ctx, payload.RunID, turnID, role, cli, workerSlot, &sessionState)
@@ -1115,22 +1124,11 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 	if payload.TaskGraph != nil && len(payload.TaskGraph.Tasks) == 1 {
 		task := payload.TaskGraph.Tasks[0]
 		finalRound := payload.TaskGraph.MaxRounds <= 0 || payload.TaskGraph.Round >= payload.TaskGraph.MaxRounds
-		if task.Role == store.TaskRoleReviewer && !durableReviewerCanAdvance(profile, history) {
-			reason := "reviewer did not return a resolved structured handoff with independent command evidence"
-			if profile == bridgeprofiles.Formal() && !durableTaskHasFormalCheck(history) {
-				reason = "formal-proof reviewer did not record a successful checker command"
+		if task.Role == store.TaskRoleReviewer && finalRound && terminalReason != "verified-early" {
+			reason := fmt.Sprintf("configured collaboration rounds exhausted after round %d; Agent Verifiers did not unanimously confirm completion", payload.TaskGraph.Round)
+			if verifierVerdict != nil && verifierVerdict.Reason != "" {
+				reason += ": " + verifierVerdict.Reason
 			}
-			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
-				Kind:          "run.error",
-				Status:        store.OrchestrationFailed,
-				Error:         reason,
-				Content:       finalContent,
-				RunConclusion: runConclusionForStatus(store.OrchestrationFailed, reason, history),
-			})
-			return
-		}
-		if task.Role == store.TaskRoleReviewer && finalRound && !durableReviewerCanComplete(profile, history) {
-			reason := fmt.Sprintf("configured collaboration rounds exhausted after round %d with unresolved obligations", payload.TaskGraph.Round)
 			m.emit(payload.RunID, protocol.OrchestrationEventPayload{
 				Kind:          "run.error",
 				Status:        store.OrchestrationFailed,
@@ -1174,6 +1172,10 @@ func (m *OrchestrationManager) run(ctx context.Context, payload protocol.Orchest
 		},
 	})
 	m.runFinalNativeMaintenance(ctx, workerPair, mode, firstCLI, len(history), &sessionState)
+}
+
+func shouldRunAgentVerifier(payload protocol.OrchestrationStartPayload) bool {
+	return payload.TaskGraph != nil && len(payload.TaskGraph.Tasks) == 1 && payload.TaskGraph.Tasks[0].Role == store.TaskRoleReviewer
 }
 
 func durableTaskHasFormalCheck(history []orchestrationTurn) bool {

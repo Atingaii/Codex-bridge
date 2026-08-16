@@ -37,6 +37,7 @@ import type {
   Envelope,
   NativeContextCompaction,
   OrchestrationEvent,
+  OrchestrationTaskGraph,
   OrchestrationProgress,
   OrchestrationRun,
   ShareInfo,
@@ -1411,13 +1412,13 @@ export function OrchestrationWorkspace({
                         <div className="mb-2 flex items-start justify-between gap-3">
                           <div><div className="flex items-center gap-2 text-xs font-semibold"><Activity className="h-3.5 w-3.5 text-muted-foreground" />{language === 'zh' ? 'Agent 执行链（次级）' : 'Agent execution chain (secondary)'}</div><p className="mt-1 text-[10px] text-muted-foreground">{language === 'zh' ? '仅用于诊断运行阶段，不作为任务计划。' : 'Runtime diagnostics only; not the task plan.'}</p></div>
                           <div className="flex shrink-0 items-center gap-1">
-                            {selectedAgentGraph && <span className="px-1 text-[10px] text-muted-foreground">{language === 'zh' ? `第 ${Math.max(1, (selectedProgressTask?.graphs || []).findIndex((graph) => graph.id === selectedAgentGraph.id) + 1)}/${Math.max(1, selectedProgressTask?.graphs?.length || 1)} 轮` : `Round ${Math.max(1, (selectedProgressTask?.graphs || []).findIndex((graph) => graph.id === selectedAgentGraph.id) + 1)}/${Math.max(1, selectedProgressTask?.graphs?.length || 1)}`}</span>}
+                            {selectedAgentGraph && <span className="px-1 text-[10px] text-muted-foreground">{orchestrationGraphLabel(selectedAgentGraph, selectedProgressTask?.graphs || [], language)}</span>}
                             <Button variant="ghost" size="icon" className="h-7 w-7 rounded" onClick={() => setAgentGraphExpanded(true)} disabled={!selectedAgentGraph} aria-label={language === 'zh' ? '放大执行链' : 'Expand execution chain'} title={language === 'zh' ? '放大执行链' : 'Expand execution chain'}><Maximize2 className="h-3.5 w-3.5" /></Button>
                           </div>
                         </div>
                         {(selectedProgressTask?.graphs?.length || 0) > 1 && (
                           <div className="mb-2 flex max-w-full gap-1 overflow-x-auto rounded border border-border bg-muted/20 p-1 elegant-scrollbar">
-                            {selectedProgressTask?.graphs.map((graph, index) => <button key={graph.id} type="button" onClick={() => setSelectedProgressGraphId(graph.id)} className={cn('h-6 shrink-0 rounded px-2 text-[10px] transition-colors', selectedAgentGraph?.id === graph.id ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}>{language === 'zh' ? `第 ${index + 1} 轮` : `Round ${index + 1}`}</button>)}
+                            {selectedProgressTask?.graphs.map((graph) => <button key={graph.id} type="button" onClick={() => setSelectedProgressGraphId(graph.id)} className={cn('h-6 shrink-0 rounded px-2 text-[10px] transition-colors', selectedAgentGraph?.id === graph.id ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}>{orchestrationGraphLabel(graph, selectedProgressTask?.graphs || [], language)}</button>)}
                           </div>
                         )}
                         <OrchestrationProgressMap
@@ -1702,9 +1703,9 @@ export function OrchestrationWorkspace({
         <DialogContent className="flex h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-none flex-col gap-3 overflow-hidden p-4 sm:max-w-none md:p-5">
           <DialogHeader className="shrink-0 pr-10">
             <DialogTitle className="text-base">{language === 'zh' ? `任务 ${selectedProgressTask?.taskNumber || 1} · Agent 执行链` : `Task ${selectedProgressTask?.taskNumber || 1} · Agent execution chain`}</DialogTitle>
-            <DialogDescription>{language === 'zh' ? `第 ${Math.max(1, (selectedProgressTask?.graphs || []).findIndex((graph) => graph.id === selectedAgentGraph?.id) + 1)}/${Math.max(1, selectedProgressTask?.graphs?.length || 1)} 轮 · 拖动画布，滚轮或双指缩放。` : `Round ${Math.max(1, (selectedProgressTask?.graphs || []).findIndex((graph) => graph.id === selectedAgentGraph?.id) + 1)}/${Math.max(1, selectedProgressTask?.graphs?.length || 1)} · Drag to pan and scroll or pinch to zoom.`}</DialogDescription>
+            <DialogDescription>{`${orchestrationGraphLabel(selectedAgentGraph, selectedProgressTask?.graphs || [], language)} · ${language === 'zh' ? '拖动画布，滚轮或双指缩放。' : 'Drag to pan and scroll or pinch to zoom.'}`}</DialogDescription>
           </DialogHeader>
-          {(selectedProgressTask?.graphs?.length || 0) > 1 && <div className="flex shrink-0 gap-1 overflow-x-auto rounded-md border border-border bg-muted/20 p-1 elegant-scrollbar">{selectedProgressTask?.graphs.map((graph, index) => <button key={graph.id} type="button" onClick={() => setSelectedProgressGraphId(graph.id)} className={cn('h-7 shrink-0 rounded px-2.5 text-xs transition-colors', selectedAgentGraph?.id === graph.id ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}>{language === 'zh' ? `第 ${index + 1} 轮` : `Round ${index + 1}`}</button>)}</div>}
+          {(selectedProgressTask?.graphs?.length || 0) > 1 && <div className="flex shrink-0 gap-1 overflow-x-auto rounded-md border border-border bg-muted/20 p-1 elegant-scrollbar">{selectedProgressTask?.graphs.map((graph) => <button key={graph.id} type="button" onClick={() => setSelectedProgressGraphId(graph.id)} className={cn('h-7 shrink-0 rounded px-2.5 text-xs transition-colors', selectedAgentGraph?.id === graph.id ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}>{orchestrationGraphLabel(graph, selectedProgressTask?.graphs || [], language)}</button>)}</div>}
           <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border">
             <OrchestrationProgressMap tasks={(selectedAgentGraph?.tasks || []).map((task) => ({ ...task, name: orchestrationTaskDisplayName(task.name, language), dependencies: task.dependencies || [] }))} height="100%" interactive ariaLabel={language === 'zh' ? '可缩放的 Agent 执行链' : 'Interactive Agent execution chain'} emptyLabel={language === 'zh' ? '暂无执行节点。' : 'No execution nodes yet.'} statusLabels={orchestrationStatusLabels(language, t)} />
           </div>
@@ -1774,6 +1775,12 @@ function orchestrationTaskDisplayName(name: string, language: Language) {
     review: '独立复核',
   };
   return labels[name] || name;
+}
+
+function orchestrationGraphLabel(graph: OrchestrationTaskGraph | null | undefined, graphs: OrchestrationTaskGraph[], language: Language) {
+  const ordinal = Math.max(1, graphs.findIndex((item) => item.id === graph?.id) + 1);
+  const total = Math.max(1, graphs.length);
+  return language === 'zh' ? `第 ${ordinal}/${total} 轮` : `Round ${ordinal}/${total}`;
 }
 
 function orchestrationStatusLabels(language: Language, t: UIText) {

@@ -12,15 +12,16 @@
   final configured round.
 - Present planning and plan review as pre-collaboration stages, not as
   collaboration round numbers.
-- Remove the `auto-execute` option from the browser's new-endpoint selector
-  without changing server support or existing endpoint behavior.
+- Remove the `strict-workspace` (automatic execution limited to the workspace)
+  option from the browser's new-endpoint selector without changing server
+  support or existing endpoint behavior.
 
 ## Non-Goals
 
 - Do not add a third worker, change the `candidate-a -> candidate-b ->
   integrate -> review` topology, or alter worker-slot ownership.
 - Do not change protocol frames, persisted schema, main-site deployment, or
-  existing `auto-execute` endpoint compatibility.
+  existing endpoint compatibility.
 - Do not let an Agent Verifier claim completion without the recorded evidence
   it needs to substantiate that claim.
 
@@ -43,8 +44,8 @@
    emit an unresolved terminal result only after the verifier quorum continues.
 4. Hide collaboration round metadata on `planner` and `plan-reviewer` timeline
    events and label graph navigation from actual round-bearing work graphs.
-5. Hide `auto-execute` in the frontend selection list while preserving repair
-   commands and status visibility for endpoints that already use it.
+5. Hide `strict-workspace` in the frontend selection list while preserving
+   repair commands and status visibility for endpoints that already use it.
 
 ## Exit Gates
 

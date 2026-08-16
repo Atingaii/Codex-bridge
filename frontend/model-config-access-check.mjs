@@ -7,7 +7,8 @@ const capabilityMatrix = readFileSync(new URL('./src/app/components/Orchestratio
 const orchestrationWorkspace = readFileSync(new URL('./src/app/pages/OrchestrationWorkspace.tsx', import.meta.url), 'utf8');
 
 assert.match(settings, /onClick=\{\(\) => generateRepairToken\(agent\)\}/);
-assert.match(settings, /user\.features\?\.includes\('strict-workspace'\) \? \[\{ id: 'strict-workspace' as const, title: t\.strictWorkspace, description: t\.strictWorkspaceDescription \}\] : \[\]/);
+assert.match(settings, /\{ id: 'auto-execute', title: t\.autoExecute, description: t\.autoExecuteDescription \}/);
+assert.doesNotMatch(settings, /permissionOptions[\s\S]{0,480}strict-workspace/);
 assert.match(settings, /mode === 'auto-execute' \|\| mode === 'strict-workspace' \? mode : 'review-required'/);
 assert.match(settings, /orchestrationApprovalMode\(agent\) === 'strict-workspace' \? t\.strictWorkspace/);
 assert.match(settings, /setModelLibraryOpen\(true\)/);

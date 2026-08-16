@@ -24,6 +24,65 @@ func TestCLIConfigRelayBudgetExceedsBridgeProbeBudget(t *testing.T) {
 	}
 }
 
+func TestListUserCLIConfigPresetsDoesNotRequireBridge(t *testing.T) {
+	s, st := newAuthTestServer(t)
+	ctx := context.Background()
+	owner, err := st.UpsertUser(ctx, "library-owner", "abc1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.UpsertUser(ctx, "library-other", "abc1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.CreateCLIConfigPreset(ctx, store.CLIConfigPreset{
+		UserID: owner.ID, CLI: "codex", Name: "shared provider", BaseURL: "https://provider.example/v1", Model: "gpt-5.6-terra",
+		VaultSecret: "vault-ciphertext-must-not-leak",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerCookie := loginCookie(t, s, map[string]string{"username": "library-owner", "password": "abc1234567"})
+	request := httptest.NewRequest(http.MethodGet, "/api/cli-config/presets", nil)
+	request.AddCookie(ownerCookie)
+	recorder := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "vault-ciphertext-must-not-leak") || strings.Contains(recorder.Body.String(), "secret") {
+		t.Fatalf("account library response exposed credential material: %s", recorder.Body.String())
+	}
+	var response struct {
+		Presets []store.CLIConfigPreset `json:"presets"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Presets) != 1 || response.Presets[0].Name != "shared provider" || response.Presets[0].Model != "gpt-5.6-terra" {
+		t.Fatalf("account library response = %#v", response.Presets)
+	}
+
+	otherCookie := loginCookie(t, s, map[string]string{"username": "library-other", "password": "abc1234567"})
+	otherRequest := httptest.NewRequest(http.MethodGet, "/api/cli-config/presets", nil)
+	otherRequest.AddCookie(otherCookie)
+	otherRecorder := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(otherRecorder, otherRequest)
+	if otherRecorder.Code != http.StatusOK {
+		t.Fatalf("other-user list status = %d, body = %s", otherRecorder.Code, otherRecorder.Body.String())
+	}
+	var otherResponse struct {
+		Presets []store.CLIConfigPreset `json:"presets"`
+	}
+	if err := json.Unmarshal(otherRecorder.Body.Bytes(), &otherResponse); err != nil {
+		t.Fatal(err)
+	}
+	if len(otherResponse.Presets) != 0 {
+		t.Fatalf("other user received presets: %#v", otherResponse.Presets)
+	}
+}
+
 func TestUserVaultMaterializesPresetForAnotherBridge(t *testing.T) {
 	s, st := newAuthTestServer(t)
 	ctx := context.Background()

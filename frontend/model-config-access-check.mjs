@@ -6,17 +6,20 @@ const switcher = readFileSync(new URL('./src/app/components/CLIConfigSwitcher.ts
 const capabilityMatrix = readFileSync(new URL('./src/app/components/OrchestrationComponents.tsx', import.meta.url), 'utf8');
 const orchestrationWorkspace = readFileSync(new URL('./src/app/pages/OrchestrationWorkspace.tsx', import.meta.url), 'utf8');
 
-assert.match(settings, /const openModelConfiguration = \(agent: Agent\) =>/);
-assert.match(settings, /if \(agent\.capabilities\?\.configSwitcher\) \{\s*setConfigAgent\(agent\);/);
-assert.match(settings, /setModelUpgradeAgentId\(agent\.id\);/);
-assert.match(settings, /generateRepairToken\(agent\)\.catch/);
+assert.match(settings, /onClick=\{\(\) => generateRepairToken\(agent\)\}/);
 assert.match(settings, /user\.features\?\.includes\('strict-workspace'\) \? \[\{ id: 'strict-workspace' as const, title: t\.strictWorkspace, description: t\.strictWorkspaceDescription \}\] : \[\]/);
 assert.match(settings, /mode === 'auto-execute' \|\| mode === 'strict-workspace' \? mode : 'review-required'/);
 assert.match(settings, /orchestrationApprovalMode\(agent\) === 'strict-workspace' \? t\.strictWorkspace/);
-assert.match(settings, /onClick=\{\(\) => openModelConfiguration\(agent\)\}/);
-assert.match(settings, /disabled=\{!agent\.online\}/);
-assert.doesNotMatch(settings, /disabled=\{!agent\.online \|\| !agent\.capabilities\?\.configSwitcher\}/);
+assert.match(settings, /setModelLibraryOpen\(true\)/);
+assert.match(settings, /<CLIConfigSwitcher agents=\{agents\} preferredAgentId=\{selectedAgentId\}/);
+assert.doesNotMatch(settings, /openModelConfiguration|configAgent|modelUpgradeAgentId/);
 assert.match(switcher, /const editPreset = \(preset: CLIConfigPreset\) =>/);
+assert.match(switcher, /api<\{ presets: CLIConfigPreset\[\] \}>\('\/api\/cli-config\/presets'\)/);
+assert.match(switcher, /const relayAgent = useMemo/);
+assert.match(switcher, /modelLibraryNativeMaintenance/);
+assert.match(switcher, /const \[resetAgentId, setResetAgentId\] = useState/);
+assert.match(switcher, /official-reset/, 'official reset remains an explicit machine-maintenance operation');
+assert.match(switcher, /encodeURIComponent\(resetAgent\.id\)/);
 assert.match(switcher, /method: editing \? 'PUT' : 'POST'/);
 assert.match(switcher, /presetId: editingPresetId \|\| undefined/);
 assert.match(switcher, /t\.keepExistingAPIKey/);

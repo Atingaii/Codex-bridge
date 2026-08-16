@@ -8,8 +8,14 @@ import { Button, Input } from './ui';
 
 type CLI = 'codex' | 'claude';
 
-export function CLIConfigSwitcher({ agent, t, close, onPresetsChanged }: { agent: Agent; t: UIText; close: () => void; onPresetsChanged: () => Promise<void> | void }) {
-	const capability = agent.capabilities?.configSwitcher;
+export function CLIConfigSwitcher({ agents, preferredAgentId, t, close, onPresetsChanged }: { agents: Agent[]; preferredAgentId: string; t: UIText; close: () => void; onPresetsChanged: () => Promise<void> | void }) {
+	const relayAgent = useMemo(() => {
+		const eligible = agents.filter((agent) => agent.online && agent.capabilities?.configSwitcher && agent.capabilities.configSwitcher.version >= 2 && agent.capabilities.configSwitcher.publicKey);
+		return eligible.find((agent) => agent.id === preferredAgentId) || eligible[0];
+	}, [agents, preferredAgentId]);
+	const capability = relayAgent?.capabilities?.configSwitcher;
+	const resetAgents = useMemo(() => agents.filter((agent) => agent.online && agent.capabilities?.configSwitcher), [agents]);
+	const [resetAgentId, setResetAgentId] = useState('');
 	const [cli, setCLI] = useState<CLI>('codex');
 	const [presets, setPresets] = useState<CLIConfigPreset[]>([]);
 	const [name, setName] = useState('');
@@ -35,13 +41,18 @@ export function CLIConfigSwitcher({ agent, t, close, onPresetsChanged }: { agent
 	}, [modelSearch, models]);
 
 	const loadPresets = async () => {
-		const data = await api<{ presets: CLIConfigPreset[] }>(`/api/agents/${encodeURIComponent(agent.id)}/cli-config/presets`);
+		const data = await api<{ presets: CLIConfigPreset[] }>('/api/cli-config/presets');
 		setPresets(data.presets || []);
 	};
 
 	useEffect(() => {
 		loadPresets().catch((err) => setError(err instanceof Error ? err.message : String(err)));
-	}, [agent.id]);
+	}, []);
+
+	useEffect(() => {
+		if (resetAgents.some((agent) => agent.id === resetAgentId)) return;
+		setResetAgentId(resetAgents.find((agent) => agent.id === preferredAgentId)?.id || resetAgents[0]?.id || '');
+	}, [preferredAgentId, resetAgentId, resetAgents]);
 
 	useEffect(() => {
 		setName('');
@@ -61,13 +72,16 @@ export function CLIConfigSwitcher({ agent, t, close, onPresetsChanged }: { agent
 	}, [cli]);
 
 	const testConnection = async () => {
-		if (!capability || (!apiKey.trim() && !testedSecret && !editingPresetId) || !baseUrl.trim()) return;
+		if (!relayAgent || !capability || (!apiKey.trim() && !testedSecret && !editingPresetId) || !baseUrl.trim()) {
+			setError(t.modelLibraryBridgeRequired);
+			return;
+		}
 		setBusy('test');
 		setError('');
 		setMessage('');
 		try {
 			const secret = apiKey.trim() ? await encryptForBridge(apiKey, capability.publicKey) : testedSecret || undefined;
-			const data = await api<{ result: CLIConfigResult }>(`/api/agents/${encodeURIComponent(agent.id)}/cli-config/test`, {
+			const data = await api<{ result: CLIConfigResult }>(`/api/agents/${encodeURIComponent(relayAgent.id)}/cli-config/test`, {
 				method: 'POST',
 				body: JSON.stringify({ cli, presetId: editingPresetId || undefined, baseUrl: baseUrl.trim(), model: model.trim(), reasoningEffort, reasoningLevels, reasoningDefault, secret, keyId: capability.keyId }),
 			});
@@ -92,14 +106,17 @@ export function CLIConfigSwitcher({ agent, t, close, onPresetsChanged }: { agent
 	};
 
 	const savePreset = async () => {
-		if (!capability || (!testedSecret && !editingPresetId) || !tested || !name.trim() || !model.trim()) return;
+		if (!relayAgent || !capability || (!testedSecret && !editingPresetId) || !tested || !name.trim() || !model.trim()) {
+			setError(t.modelLibraryBridgeRequired);
+			return;
+		}
 		setBusy('save');
 		setError('');
 		try {
 			const editing = !!editingPresetId;
 			const path = editing
-				? `/api/agents/${encodeURIComponent(agent.id)}/cli-config/presets/${encodeURIComponent(editingPresetId)}`
-				: `/api/agents/${encodeURIComponent(agent.id)}/cli-config/presets`;
+				? `/api/agents/${encodeURIComponent(relayAgent.id)}/cli-config/presets/${encodeURIComponent(editingPresetId)}`
+				: `/api/agents/${encodeURIComponent(relayAgent.id)}/cli-config/presets`;
 			await api(path, {
 				method: editing ? 'PUT' : 'POST',
 				body: JSON.stringify({ cli, name: name.trim(), baseUrl: baseUrl.trim(), model: model.trim(), reasoningEffort, reasoningLevels, reasoningDefault, secret: testedSecret || undefined, keyId: capability.keyId }),
@@ -149,10 +166,14 @@ export function CLIConfigSwitcher({ agent, t, close, onPresetsChanged }: { agent
 
 	const deletePreset = async (preset: CLIConfigPreset) => {
 		if (!window.confirm(t.deletePresetConfirm)) return;
+		if (!relayAgent) {
+			setError(t.modelLibraryBridgeRequired);
+			return;
+		}
 		setBusy(`delete:${preset.id}`);
 		setError('');
 		try {
-			await api(`/api/agents/${encodeURIComponent(agent.id)}/cli-config/presets/${encodeURIComponent(preset.id)}`, { method: 'DELETE' });
+			await api(`/api/agents/${encodeURIComponent(relayAgent.id)}/cli-config/presets/${encodeURIComponent(preset.id)}`, { method: 'DELETE' });
 			await loadPresets();
 			await onPresetsChanged();
 			if (editingPresetId === preset.id) clearEditor();
@@ -165,11 +186,16 @@ export function CLIConfigSwitcher({ agent, t, close, onPresetsChanged }: { agent
 
 	const resetOfficial = async () => {
 		if (!window.confirm(t.resetOfficialConfirm)) return;
+		const resetAgent = resetAgents.find((agent) => agent.id === resetAgentId);
+		if (!resetAgent) {
+			setError(t.modelLibraryNoResetTarget);
+			return;
+		}
 		setBusy('reset');
 		setError('');
 		setMessage('');
 		try {
-			await api(`/api/agents/${encodeURIComponent(agent.id)}/cli-config/official-reset`, { method: 'POST', body: JSON.stringify({ cli }) });
+			await api(`/api/agents/${encodeURIComponent(resetAgent.id)}/cli-config/official-reset`, { method: 'POST', body: JSON.stringify({ cli }) });
 			await loadPresets();
 			setMessage(t.officialSettingsRestored);
 		} catch (err) {
@@ -184,8 +210,8 @@ export function CLIConfigSwitcher({ agent, t, close, onPresetsChanged }: { agent
 			<div className="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl">
 				<div className="flex items-center justify-between border-b border-border px-4 py-3">
 					<div className="min-w-0">
-						<h2 className="text-sm font-semibold">{t.modelConfiguration}</h2>
-						<p className="truncate text-xs text-muted-foreground">{agent.name} · {t.modelConfigurationHint}</p>
+						<h2 className="text-sm font-semibold">{t.modelLibrary}</h2>
+						<p className="text-xs text-muted-foreground">{t.modelLibraryHint}</p>
 					</div>
 					<Button variant="ghost" size="icon" className="h-7 w-7 rounded-md" onClick={close} aria-label={t.cancel}><X className="h-4 w-4" /></Button>
 				</div>
@@ -235,10 +261,15 @@ export function CLIConfigSwitcher({ agent, t, close, onPresetsChanged }: { agent
 							</div>}
 						</section>
 
-						<section className="flex items-center justify-between gap-3 border-t border-border pt-4">
-							<div className="min-w-0"><div className="text-sm font-medium">{t.officialLogin}</div><p className="text-xs leading-relaxed text-muted-foreground">{t.officialLoginHint}</p></div>
-							<Button size="sm" variant="secondary" className="shrink-0" onClick={resetOfficial} disabled={!!busy}>{busy === 'reset' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : t.officialLogin}</Button>
-						</section>
+							<section className="space-y-3 border-t border-border pt-4">
+								<div className="min-w-0"><div className="text-sm font-medium">{t.modelLibraryNativeMaintenance}</div><p className="text-xs leading-relaxed text-muted-foreground">{t.modelLibraryNativeMaintenanceHint}</p></div>
+								<div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+									<select value={resetAgentId} onChange={(event) => setResetAgentId(event.target.value)} disabled={!resetAgents.length || !!busy} className="h-8 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2 text-xs">
+										{resetAgents.length ? resetAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>) : <option value="">{t.modelLibraryNoResetTarget}</option>}
+									</select>
+									<Button size="sm" variant="secondary" className="shrink-0" onClick={resetOfficial} disabled={!!busy || !resetAgentId}>{busy === 'reset' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : t.officialLogin}</Button>
+								</div>
+							</section>
 						{error && <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive"><AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</div>}
 						{message && <div className="flex items-start gap-2 rounded-md border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />{message}</div>}
 					</div>

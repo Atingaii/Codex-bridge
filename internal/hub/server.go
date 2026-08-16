@@ -109,6 +109,7 @@ func NewServer(cfg *config.Config, st *store.Store, build BuildInfo) *Server {
 	mux.HandleFunc("GET /api/agents", s.withAuth(s.handleAgents))
 	mux.HandleFunc("DELETE /api/agents/{agentID}", s.withAuth(s.handleDeleteAgent))
 	mux.HandleFunc("POST /api/agents/{agentID}/repair-token", s.withAuth(s.handleCreateAgentRepairToken))
+	mux.HandleFunc("GET /api/cli-config/presets", s.withAuth(s.handleListUserCLIConfigPresets))
 	mux.HandleFunc("GET /api/agents/{agentID}/cli-config/presets", s.withAuth(s.handleListCLIConfigPresets))
 	mux.HandleFunc("POST /api/agents/{agentID}/cli-config/test", s.withAuth(s.handleTestCLIConfig))
 	mux.HandleFunc("POST /api/agents/{agentID}/cli-config/presets", s.withAuth(s.handleCreateCLIConfigPreset))

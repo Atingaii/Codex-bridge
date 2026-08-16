@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertCircle, Check, ChevronDown, Edit2, LogOut, Plus, RefreshCw, ServerCog, Trash2, Wrench, X } from 'lucide-react';
+import { AlertCircle, Check, ChevronDown, Edit2, Library, LogOut, Plus, RefreshCw, Trash2, Wrench, X } from 'lucide-react';
 import { api } from '../lib/api';
 import type { Agent, BridgeTokenResponse, PermissionProfileId, UserAccount } from '../lib/types';
 import type { Language, UIText } from '../lib/i18n';
@@ -50,10 +50,8 @@ export function SettingsModal({
   const [repairingAgentId, setRepairingAgentId] = useState('');
   const [repairTokens, setRepairTokens] = useState<Record<string, BridgeTokenResponse>>({});
   const [repairErrorByAgent, setRepairErrorByAgent] = useState<Record<string, string>>({});
-  const [modelUpgradeAgentId, setModelUpgradeAgentId] = useState('');
   const [copiedCommand, setCopiedCommand] = useState('');
-  const [configAgent, setConfigAgent] = useState<Agent | null>(null);
-  const cliSectionRef = useRef<HTMLDivElement | null>(null);
+  const [modelLibraryOpen, setModelLibraryOpen] = useState(false);
   const generateToken = async () => {
     setGeneratingToken(true);
     setTokenError('');
@@ -146,20 +144,9 @@ export function SettingsModal({
       setRepairingAgentId('');
     }
   };
-  const openModelConfiguration = (agent: Agent) => {
-    if (agent.capabilities?.configSwitcher) {
-      setConfigAgent(agent);
-      return;
-    }
-    setModelUpgradeAgentId(agent.id);
-    if (!repairTokens[agent.id] && repairingAgentId !== agent.id) {
-      generateRepairToken(agent).catch(() => undefined);
-    }
-  };
-
   useEffect(() => {
     if (initialFocus !== 'cli') return;
-    const id = window.setTimeout(() => cliSectionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0);
+    const id = window.setTimeout(() => setModelLibraryOpen(true), 0);
     return () => window.clearTimeout(id);
   }, [initialFocus]);
 
@@ -235,6 +222,18 @@ export function SettingsModal({
 
           <div className="space-y-3">
             <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{t.agentsRuntime}</h3>
+            <div className="rounded-lg border border-border bg-muted/20 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium">{t.modelLibrary}</div>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t.modelLibraryHint}</p>
+                </div>
+                <Button size="sm" variant="secondary" className="h-8 shrink-0 gap-1.5" onClick={() => setModelLibraryOpen(true)}>
+                  <Library className="h-3.5 w-3.5" />
+                  {t.modelLibrary}
+                </Button>
+              </div>
+            </div>
             <div className="space-y-2">
               {agents.length ? agents.map((agent) => {
                 const expanded = expandedAgentId === agent.id;
@@ -317,17 +316,6 @@ export function SettingsModal({
                               size="sm"
                               variant="secondary"
                               className="h-8 gap-1.5"
-                              onClick={() => openModelConfiguration(agent)}
-                              disabled={!agent.online}
-                              title={!agent.online ? t.modelConfigurationOffline : agent.capabilities?.configSwitcher ? t.modelConfigurationHint : t.bridgeUpgradeForModels}
-                            >
-                              <ServerCog className="h-3.5 w-3.5" />
-                              {t.modelConfiguration}
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              className="h-8 gap-1.5"
                               onClick={() => generateRepairToken(agent)}
                               disabled={repairingAgentId === agent.id}
                             >
@@ -348,12 +336,6 @@ export function SettingsModal({
                             {deletingAgentId === agent.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
                           </Button>
                         </div>
-                        {modelUpgradeAgentId === agent.id && !agent.capabilities?.configSwitcher && (
-                          <div className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-                            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                            <span>{t.bridgeUpgradeForModels}</span>
-                          </div>
-                        )}
                         {repairErrorByAgent[agent.id] && (
                           <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                             <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -393,7 +375,7 @@ export function SettingsModal({
                 <div className="text-sm text-muted-foreground p-2.5 rounded-lg border border-border bg-muted/20">{t.noAgentsEnrolled}</div>
               )}
             </div>
-            <div ref={cliSectionRef} className="rounded-lg border border-border bg-muted/20 p-3 space-y-3">
+            <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">
                   <div className="text-sm font-medium">{t.addCliEndpoint}</div>
@@ -483,7 +465,7 @@ export function SettingsModal({
           <Button size="sm" onClick={close}>{t.savePreferences}</Button>
         </div>
       </div>
-		{configAgent && <CLIConfigSwitcher agent={configAgent} t={t} onPresetsChanged={onPresetsChanged} close={() => setConfigAgent(null)} />}
+		{modelLibraryOpen && <CLIConfigSwitcher agents={agents} preferredAgentId={selectedAgentId} t={t} onPresetsChanged={onPresetsChanged} close={() => setModelLibraryOpen(false)} />}
     </div>
   );
 }

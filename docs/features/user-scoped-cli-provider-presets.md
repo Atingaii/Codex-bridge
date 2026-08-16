@@ -17,6 +17,9 @@
 - Do not make one machine's active native configuration a user-wide default.
 - Do not require all of a user's Bridges to be online merely to list preset
   metadata.
+- Do not expose a native apply action in the account model library; task pages
+  choose a saved preset for their own target Bridge. Keep official-login reset
+  as an explicitly machine-scoped maintenance action.
 - Do not interrupt active chat or orchestration processes.
 
 ## Data And Protocol Impact
@@ -35,6 +38,9 @@
 - Existing agent-oriented HTTP paths remain stable. Their `agentID` identifies
   the Bridge used to test, apply, edit, or materialize a credential, while list
   and ownership checks operate at user scope.
+- `GET /api/cli-config/presets` lists the account-owned model library without a
+  Bridge. The settings UI automatically uses an eligible online Bridge as the
+  encrypted probe and vault-capture channel, so users do not select a machine.
 
 ## Implementation Steps
 
@@ -46,8 +52,9 @@
    whose advertised key ID matches its stored legacy envelope.
 4. Lazily materialize a target credential when applying, editing with a blank
    API key, testing an existing preset, or binding orchestration workers.
-5. Show the same user preset list on every eligible machine and explain when a
-   credential must be re-entered because no source Bridge can rewrap it.
+5. Show one account-level model library in Settings. Use an eligible online
+   Bridge automatically for test/save/edit relay operations; task pages retain
+   endpoint-specific availability checks.
 
 ## Exit Gates
 
@@ -60,6 +67,8 @@
 - Deleting an agent does not delete user presets.
 - Existing preset rows migrate without loss and remain usable on their original
   machines.
+- The model library can be browsed while all Bridges are offline; saving or
+  probing requires one eligible Bridge but never asks the user to select it.
 - Focused store, Hub, Bridge, frontend, and full Go tests pass.
 
 ## Reviewer Q&A
@@ -83,3 +92,12 @@ to the vault; newly saved presets are vault-backed immediately.
 Activation edits native files under that machine's CLI home. Making it global
 would falsely imply that all machines changed together and could overwrite
 different local login choices.
+
+**Why does API-key testing not ask me to select a machine?**
+
+The account-level library selects one eligible online Bridge automatically as
+an encrypted relay. The browser encrypts the submitted key to that Bridge; the
+Bridge probes the provider and captures the value for the Hub vault. The relay
+does not own the preset, and task pages still select the saved preset for their
+own target Bridge. An explicit machine choice is retained only for official
+login reset because that operation changes local CLI files on that machine.

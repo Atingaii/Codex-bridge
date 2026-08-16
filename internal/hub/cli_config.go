@@ -61,6 +61,21 @@ func (s *Server) handleListCLIConfigPresets(w http.ResponseWriter, r *http.Reque
 	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"presets": presets})
 }
 
+// handleListUserCLIConfigPresets lists account-owned presets without requiring
+// a specific Bridge to be online. Endpoint-specific listing remains available
+// to task pages that need local credential and activation state.
+func (s *Server) handleListUserCLIConfigPresets(w http.ResponseWriter, r *http.Request, uid string) {
+	presets, err := s.store.ListCLIConfigPresets(r.Context(), uid, "")
+	if err != nil {
+		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to list model presets")
+		return
+	}
+	for i := range presets {
+		normalizeReviewedPreset(&presets[i])
+	}
+	serverutil.WriteJSON(w, http.StatusOK, map[string]any{"presets": presets})
+}
+
 func (s *Server) handleTestCLIConfig(w http.ResponseWriter, r *http.Request, uid string) {
 	agentID := r.PathValue("agentID")
 	if !s.allowAuthAttempt(r, "cli-config:"+agentID, uid, cliConfigRateLimit, cliConfigRateWindow) {

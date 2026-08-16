@@ -130,7 +130,7 @@ func (m *cliConfigManager) capability() *protocol.CLIConfigSwitcherCapability {
 	pub := m.private.PublicKey().Bytes()
 	sum := sha256.Sum256(pub)
 	return &protocol.CLIConfigSwitcherCapability{
-		Version:   1,
+		Version:   2,
 		PublicKey: base64.RawStdEncoding.EncodeToString(pub),
 		KeyID:     base64.RawURLEncoding.EncodeToString(sum[:9]),
 		CLIs:      []string{"codex", "claude"},
@@ -164,6 +164,16 @@ func (m *cliConfigManager) handle(ctx context.Context, typ string, req protocol.
 		return res
 	}
 	defer clear(key)
+	if typ == protocol.TypeCLIConfigExport {
+		secret, err := encryptCLIConfigSecret(req.RecipientPublicKey, key)
+		if err != nil {
+			res.Error = "could not export encrypted API key"
+			return res
+		}
+		res.OK = true
+		res.Secret = secret
+		return res
+	}
 	base, wireProtocol, models, listed, err := probeProvider(ctx, req.CLI, req.BaseURL, req.Model, string(key))
 	if err != nil {
 		res.Error = err.Error()
@@ -200,6 +210,52 @@ func (m *cliConfigManager) handle(ctx context.Context, typ string, req protocol.
 		res.Message = "configuration applied; new CLI processes will use it"
 	}
 	return res
+}
+
+func encryptCLIConfigSecret(recipientPublicKey string, plaintext []byte) (protocol.EncryptedSecret, error) {
+	recipientRaw, err := base64.RawStdEncoding.DecodeString(recipientPublicKey)
+	if err != nil {
+		return protocol.EncryptedSecret{}, err
+	}
+	recipient, err := ecdh.P256().NewPublicKey(recipientRaw)
+	if err != nil {
+		return protocol.EncryptedSecret{}, err
+	}
+	ephemeral, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return protocol.EncryptedSecret{}, err
+	}
+	shared, err := ephemeral.ECDH(recipient)
+	if err != nil {
+		return protocol.EncryptedSecret{}, err
+	}
+	salt := make([]byte, 16)
+	iv := make([]byte, 12)
+	if _, err := rand.Read(salt); err != nil {
+		return protocol.EncryptedSecret{}, err
+	}
+	if _, err := rand.Read(iv); err != nil {
+		return protocol.EncryptedSecret{}, err
+	}
+	derived := make([]byte, 32)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, shared, salt, []byte(cliConfigHKDFInfo)), derived); err != nil {
+		return protocol.EncryptedSecret{}, err
+	}
+	block, err := aes.NewCipher(derived)
+	clear(derived)
+	if err != nil {
+		return protocol.EncryptedSecret{}, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return protocol.EncryptedSecret{}, err
+	}
+	ciphertext := aead.Seal(nil, iv, plaintext, nil)
+	return protocol.EncryptedSecret{
+		EphemeralPublicKey: base64.RawStdEncoding.EncodeToString(ephemeral.PublicKey().Bytes()),
+		Salt:               base64.RawStdEncoding.EncodeToString(salt), IV: base64.RawStdEncoding.EncodeToString(iv),
+		Ciphertext: base64.RawStdEncoding.EncodeToString(ciphertext),
+	}, nil
 }
 
 func (m *cliConfigManager) decrypt(secret protocol.EncryptedSecret) ([]byte, error) {

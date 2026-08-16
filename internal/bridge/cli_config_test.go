@@ -75,6 +75,31 @@ func TestCLIConfigDecryptRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCLIConfigExportRewrapsSecretForRecipient(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	manager, err := newCLIConfigManager(&config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.CLIConfigRequest{
+		CLI:                "codex",
+		Secret:             encryptCLIConfigSecretForTest(t, manager.private.PublicKey(), []byte("shared-user-key")),
+		RecipientPublicKey: base64.RawStdEncoding.EncodeToString(recipient.PublicKey().Bytes()),
+	}
+	result := manager.handle(context.Background(), protocol.TypeCLIConfigExport, request)
+	if !result.OK || result.Secret.Ciphertext == "" {
+		t.Fatalf("export result = %#v", result)
+	}
+	got := decryptCLIConfigSecretForTest(t, recipient, result.Secret)
+	if string(got) != "shared-user-key" {
+		t.Fatalf("exported secret = %q", got)
+	}
+}
+
 func TestClaudeEffortIsPersistedAndRestored(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -485,6 +510,42 @@ func encryptCLIConfigSecretForTest(t *testing.T, recipient *ecdh.PublicKey, plai
 		EphemeralPublicKey: encode(ephemeral.PublicKey().Bytes()),
 		Salt:               encode(salt), IV: encode(iv), Ciphertext: encode(gcm.Seal(nil, iv, plaintext, nil)),
 	}
+}
+
+func decryptCLIConfigSecretForTest(t *testing.T, recipient *ecdh.PrivateKey, secret protocol.EncryptedSecret) []byte {
+	t.Helper()
+	decode := func(value string) []byte {
+		decoded, err := base64.RawStdEncoding.DecodeString(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return decoded
+	}
+	public, err := ecdh.P256().NewPublicKey(decode(secret.EphemeralPublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, err := recipient.ECDH(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived := make([]byte, 32)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, shared, decode(secret.Salt), []byte(cliConfigHKDFInfo)), derived); err != nil {
+		t.Fatal(err)
+	}
+	block, err := aes.NewCipher(derived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := aead.Open(nil, decode(secret.IV), decode(secret.Ciphertext), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plaintext
 }
 
 func readTestFile(t *testing.T, path string) string {

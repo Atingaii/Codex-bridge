@@ -3,6 +3,9 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +21,64 @@ import (
 func TestCLIConfigRelayBudgetExceedsBridgeProbeBudget(t *testing.T) {
 	if cliConfigRequestTimeout < 90*time.Second {
 		t.Fatalf("relay budget = %s, want at least 90s for slow provider probes", cliConfigRequestTimeout)
+	}
+}
+
+func TestUserVaultMaterializesPresetForAnotherBridge(t *testing.T) {
+	s, st := newAuthTestServer(t)
+	ctx := context.Background()
+	user, err := st.UpsertUser(ctx, "vault-owner", "abc1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := st.UpsertAgentForUser(ctx, user.ID, "vault-target", "vault-machine", "host", "instance", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetPrivate, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey := base64.RawStdEncoding.EncodeToString(targetPrivate.PublicKey().Bytes())
+	connection := &BridgeConn{
+		agentID: agent.ID,
+		capabilities: &protocol.BridgeCapabilities{ConfigSwitcher: &protocol.CLIConfigSwitcherCapability{
+			Version: 2, PublicKey: publicKey, KeyID: "target-key", CLIs: []string{"codex"},
+		}},
+		wsSender: wsSender{send: make(chan protocol.Envelope, 1), done: make(chan struct{})},
+	}
+	s.pool.RegisterAgent(connection)
+	t.Cleanup(func() { connection.Close() })
+	vaultSecret, err := s.sealCLIConfigVaultSecret([]byte("user-level-api-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preset, err := st.CreateCLIConfigPreset(ctx, store.CLIConfigPreset{
+		UserID: user.ID, CLI: "codex", Name: "shared", BaseURL: "https://provider.example/v1", Model: "gpt-5.6-terra", VaultSecret: vaultSecret,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := st.CLIConfigPresetByID(ctx, preset.ID, user.ID, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.materializeCLIConfigPresetCredential(ctx, user.ID, agent.ID, &loaded); err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := decryptCLIConfigEnvelope(targetPrivate, loaded.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(plaintext) != "user-level-api-key" || loaded.KeyHint != "target-key" {
+		t.Fatalf("materialized preset = %#v, plaintext = %q", loaded, plaintext)
+	}
+	serialized, err := json.Marshal(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(serialized), vaultSecret) || strings.Contains(string(serialized), "user-level-api-key") {
+		t.Fatalf("preset response exposed vault material: %s", serialized)
 	}
 }
 
@@ -115,7 +176,7 @@ func TestUpdateCLIConfigPresetKeepsSecretPrivateAndTracksActiveState(t *testing.
 	conn := &BridgeConn{
 		agentID: agent.ID,
 		capabilities: &protocol.BridgeCapabilities{ConfigSwitcher: &protocol.CLIConfigSwitcherCapability{
-			Version: 1, KeyID: "bridge-key", CLIs: []string{"codex", "claude"},
+			Version: 2, KeyID: "bridge-key", CLIs: []string{"codex", "claude"},
 		}},
 		wsSender: wsSender{send: make(chan protocol.Envelope, 1), done: make(chan struct{})},
 	}
@@ -130,6 +191,16 @@ func TestUpdateCLIConfigPresetKeepsSecretPrivateAndTracksActiveState(t *testing.
 				request, err := protocol.Decode[protocol.CLIConfigRequest](env)
 				if err != nil {
 					return
+				}
+				if env.Type == protocol.TypeCLIConfigExport {
+					secret, err := encryptCLIConfigForPublicKey(request.RecipientPublicKey, []byte("test-provider-key"))
+					if err != nil {
+						return
+					}
+					s.handleCLIConfigResult(agent.ID, protocol.MustEnvelope(protocol.TypeCLIConfigResult, "", protocol.CLIConfigResult{
+						RequestID: request.RequestID, CLI: request.CLI, OK: true, Secret: secret,
+					}))
+					continue
 				}
 				s.handleCLIConfigResult(agent.ID, protocol.MustEnvelope(protocol.TypeCLIConfigResult, "", protocol.CLIConfigResult{
 					RequestID: request.RequestID, CLI: request.CLI, OK: true, BaseURL: "https://provider.example/v1",

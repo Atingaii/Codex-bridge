@@ -10,7 +10,7 @@ This is the detailed "I want to change X, where do I edit?" source. Keep
 | CLI entry and subcommands | `main.go` |
 | Config structs/load | `internal/config/config.go`, `internal/config/load.go`, `internal/config/duration.go` |
 | User feature rollouts | `internal/rollout/rollout.go:Evaluator`, `internal/hub/server.go:featureEnabled`, `internal/hub/server.go:decorateUser` |
-| Remote CLI provider switcher and reviewed reasoning catalog | `internal/hub/model_catalog.go`, `internal/hub/cli_config.go`, `internal/bridge/cli_config.go`, `frontend/src/app/components/CLIConfigSwitcher.tsx` |
+| User-scoped CLI provider library, credential vault, and reviewed reasoning catalog | `internal/hub/model_catalog.go`, `internal/hub/cli_config.go`, `internal/hub/cli_config_vault.go`, `internal/bridge/cli_config.go`, `internal/store/store.go:CLIConfigPreset`, `frontend/src/app/components/CLIConfigSwitcher.tsx` |
 | Isolated native resume visibility | `internal/bridge/orchestration_native.go:materializeCodexPickerVisibility`, `internal/bridge/orchestration_native.go:materializeClaudePickerVisibility`, `internal/protocol/envelope.go:NativeResumeInfo` |
 | Hub routes, auth, static serving | `internal/hub/server.go`, `internal/hub/registration.go` |
 | Public conversation shares | `internal/hub/share.go` |

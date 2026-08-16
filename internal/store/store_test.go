@@ -795,14 +795,19 @@ func TestCLIConfigPresetCRUDIsScopedAndSecretIsNotSerialized(t *testing.T) {
 	if err != nil || len(listed) != 1 || listed[0].Secret.Ciphertext != "cipher" {
 		t.Fatalf("unexpected preset list: %#v, err=%v", listed, err)
 	}
-	for _, scope := range [][2]string{{"user-b", agent.ID}, {user.ID, "agent-b"}} {
-		other, err := st.ListCLIConfigPresets(ctx, scope[0], scope[1])
-		if err != nil || len(other) != 0 {
-			t.Fatalf("preset leaked into scope %#v: %#v, err=%v", scope, other, err)
-		}
-		if _, err := st.CLIConfigPresetByID(ctx, preset.ID, scope[0], scope[1]); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("cross-scope preset lookup error = %v", err)
-		}
+	other, err := st.ListCLIConfigPresets(ctx, "user-b", agent.ID)
+	if err != nil || len(other) != 0 {
+		t.Fatalf("preset leaked to another user: %#v, err=%v", other, err)
+	}
+	if _, err := st.CLIConfigPresetByID(ctx, preset.ID, "user-b", agent.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-user preset lookup error = %v", err)
+	}
+	other, err = st.ListCLIConfigPresets(ctx, user.ID, "agent-b")
+	if err != nil || len(other) != 1 || other[0].CredentialAvailable || other[0].Secret.Ciphertext != "" {
+		t.Fatalf("user preset was not shared safely with another agent: %#v, err=%v", other, err)
+	}
+	if loadedOnOther, err := st.CLIConfigPresetByID(ctx, preset.ID, user.ID, "agent-b"); err != nil || loadedOnOther.ID != preset.ID || loadedOnOther.CredentialAvailable {
+		t.Fatalf("cross-agent user preset lookup = %#v, err=%v", loadedOnOther, err)
 	}
 	if err := st.ActivateCLIConfigPreset(ctx, preset.ID, user.ID, agent.ID, "codex"); err != nil {
 		t.Fatal(err)
@@ -833,6 +838,46 @@ func TestCLIConfigPresetCRUDIsScopedAndSecretIsNotSerialized(t *testing.T) {
 	}
 	if _, err := st.CLIConfigPresetByID(ctx, preset.ID, user.ID, agent.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted preset lookup error = %v", err)
+	}
+}
+
+func TestMigrateCLIConfigPresetsToUserScope(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(t.TempDir() + "/legacy.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	for _, statement := range []string{
+		`CREATE TABLE users (id TEXT PRIMARY KEY,username TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at INTEGER NOT NULL);`,
+		`CREATE TABLE agents (id TEXT PRIMARY KEY,user_id TEXT,name TEXT NOT NULL,machine_id TEXT UNIQUE NOT NULL,hostname TEXT,instance TEXT,working_dirs_json TEXT,deleted_at INTEGER,last_seen_at INTEGER NOT NULL);`,
+		`CREATE TABLE cli_config_presets (
+			id TEXT PRIMARY KEY,user_id TEXT NOT NULL,agent_id TEXT NOT NULL,cli TEXT NOT NULL,name TEXT NOT NULL,
+			base_url TEXT NOT NULL,model TEXT NOT NULL,secret_json TEXT NOT NULL,key_hint TEXT,active INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,reasoning_effort TEXT NOT NULL DEFAULT '',
+			reasoning_levels_json TEXT NOT NULL DEFAULT '[]',reasoning_default TEXT NOT NULL DEFAULT '');`,
+		`INSERT INTO users VALUES('user-a','owner','hash',1);`,
+		`INSERT INTO agents VALUES('agent-a','user-a','machine-a','machine-a','host','instance','[]',NULL,1);`,
+		`INSERT INTO agents VALUES('agent-b','user-a','machine-b','machine-b','host','instance','[]',NULL,1);`,
+		`INSERT INTO cli_config_presets VALUES('preset-a','user-a','agent-a','codex','shared','https://provider.example/v1','gpt-5.6-terra','{"ephemeralPublicKey":"pub","salt":"salt","iv":"iv","ciphertext":"cipher"}','key-a',1,1,2,'high','["low","high"]','high');`,
+	} {
+		if _, err := st.db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	original, err := st.CLIConfigPresetByID(ctx, "preset-a", "user-a", "agent-a")
+	if err != nil || !original.Active || !original.CredentialAvailable || original.Secret.Ciphertext != "cipher" {
+		t.Fatalf("migrated original preset = %#v, err=%v", original, err)
+	}
+	shared, err := st.CLIConfigPresetByID(ctx, "preset-a", "user-a", "agent-b")
+	if err != nil || shared.Name != "shared" || shared.Active || shared.CredentialAvailable || shared.Secret.Ciphertext != "" {
+		t.Fatalf("migrated shared preset = %#v, err=%v", shared, err)
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("second migration: %v", err)
 	}
 }
 

@@ -524,7 +524,7 @@ func (c *Client) handleEnvelope(ctx context.Context, env protocol.Envelope, out 
 			result := scanOrchestrationUsage(payload)
 			send(out, protocol.MustEnvelope(protocol.TypeOrchestrationUsageSyncResult, "", result))
 		}()
-	case protocol.TypeCLIConfigTest, protocol.TypeCLIConfigApply, protocol.TypeCLIConfigReset:
+	case protocol.TypeCLIConfigTest, protocol.TypeCLIConfigApply, protocol.TypeCLIConfigReset, protocol.TypeCLIConfigExport:
 		payload, err := protocol.Decode[protocol.CLIConfigRequest](env)
 		if err != nil || payload.RequestID == "" {
 			return

@@ -27,6 +27,7 @@ const (
 	TypeCLIConfigTest                 = "cli_config_test"
 	TypeCLIConfigApply                = "cli_config_apply"
 	TypeCLIConfigReset                = "cli_config_reset"
+	TypeCLIConfigExport               = "cli_config_export"
 	TypeCLIConfigResult               = "cli_config_result"
 	TypeAgentShutdown                 = "agent_shutdown"
 	TypeError                         = "error"
@@ -138,6 +139,7 @@ type CLIConfigRequest struct {
 	ClaudeContextWindow                        int             `json:"claudeContextWindow,omitempty"`
 	ClaudeDisableUnknownModelWindowEnforcement bool            `json:"claudeDisableUnknownModelWindowEnforcement,omitempty"`
 	Secret                                     EncryptedSecret `json:"secret,omitempty"`
+	RecipientPublicKey                         string          `json:"recipientPublicKey,omitempty"`
 }
 
 type CLIConfigResult struct {
@@ -153,6 +155,7 @@ type CLIConfigResult struct {
 	Message       string            `json:"message,omitempty"`
 	Error         string            `json:"error,omitempty"`
 	ConfigChanged bool              `json:"configChanged,omitempty"`
+	Secret        EncryptedSecret   `json:"secret,omitempty"`
 }
 
 // CLIModelMetadata is sourced only from the Hub's reviewed model catalog.

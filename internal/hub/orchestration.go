@@ -379,6 +379,9 @@ func (s *Server) resolveWorkerProfiles(ctx context.Context, userID, agentID, wor
 		if preset.CLI != wantCLI {
 			return nil, fmt.Errorf("worker slot %q requires a %s preset", slot, wantCLI)
 		}
+		if err := s.materializeCLIConfigPresetCredential(ctx, userID, agentID, &preset); err != nil {
+			return nil, fmt.Errorf("prepare model preset %q for the selected endpoint: %w", preset.Name, err)
+		}
 		normalizeReviewedPreset(&preset)
 		if preset.KeyHint == "" || preset.KeyHint != keyID {
 			return nil, fmt.Errorf("model preset %q was encrypted for an earlier Bridge key; update its API key first", preset.Name)

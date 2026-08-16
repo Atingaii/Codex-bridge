@@ -519,11 +519,16 @@ SQLite tables:
   (bounded scheduling, dependency state, planner/plan-reviewer/worker roles,
   identity, retry lineage, and evidence)
 - `conversation_shares`
-- `cli_config_presets` (machine- and CLI-scoped preset metadata plus an API-key
-  ciphertext encrypted directly to the target Bridge public key)
+- `cli_config_presets` (user-scoped provider metadata plus an encrypted-at-rest
+  credential vault value)
+- `cli_config_preset_credentials` (per-Bridge API-key envelopes materialized
+  from the vault or retained from legacy machine-scoped presets)
+- `cli_config_active_presets` (machine-scoped native CLI activation pointers)
 
-Hub stores browser auth, chat history, and only Bridge-targeted API-key
-ciphertext. Bridge stores its generated `machine_id`, persistent configuration
+Hub stores browser auth, chat history, and encrypted-at-rest user model
+credentials. Bridge stores its generated `machine_id`, persistent configuration
 switcher decryption key/state, and writes native Codex/Claude credentials on the
-private machine. Configuration test/apply/reset frames are capability-gated and
-request-correlated; older Bridges continue without exposing this workflow.
+private machine. Configuration test/apply/reset/export frames are
+capability-gated and request-correlated; export wraps a key to Hub's vault
+receiver and requires Bridge capability version 2. Older Bridges retain their
+existing machine credential behavior until upgraded.

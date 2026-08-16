@@ -83,23 +83,46 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS cli_config_presets (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
-			agent_id TEXT NOT NULL,
 			cli TEXT NOT NULL CHECK(cli IN ('codex','claude')),
 			name TEXT NOT NULL,
 			base_url TEXT NOT NULL,
 			model TEXT NOT NULL,
-			secret_json TEXT NOT NULL,
-			key_hint TEXT,
-			active INTEGER NOT NULL DEFAULT 0,
+			reasoning_effort TEXT NOT NULL DEFAULT '',
+			reasoning_levels_json TEXT NOT NULL DEFAULT '[]',
+			reasoning_default TEXT NOT NULL DEFAULT '',
+			vault_secret TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL,
-			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-			FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_cli_config_presets_agent_cli ON cli_config_presets(user_id, agent_id, cli, updated_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_cli_config_presets_user_cli ON cli_config_presets(user_id, cli, updated_at DESC);`,
 		`ALTER TABLE cli_config_presets ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE cli_config_presets ADD COLUMN reasoning_levels_json TEXT NOT NULL DEFAULT '[]';`,
 		`ALTER TABLE cli_config_presets ADD COLUMN reasoning_default TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE cli_config_presets ADD COLUMN vault_secret TEXT NOT NULL DEFAULT '';`,
+		`CREATE TABLE IF NOT EXISTS cli_config_preset_credentials (
+			preset_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			secret_json TEXT NOT NULL,
+			key_hint TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (preset_id, agent_id),
+			FOREIGN KEY (preset_id) REFERENCES cli_config_presets(id) ON DELETE CASCADE,
+			FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_cli_config_preset_credentials_agent ON cli_config_preset_credentials(agent_id, updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS cli_config_active_presets (
+			user_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			cli TEXT NOT NULL CHECK(cli IN ('codex','claude')),
+			preset_id TEXT NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (user_id, agent_id, cli),
+			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+			FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+			FOREIGN KEY (preset_id) REFERENCES cli_config_presets(id) ON DELETE CASCADE
+		);`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
 			agent_id TEXT NOT NULL,
@@ -343,7 +366,88 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.migrateOrchestrationWorkerPairs(ctx); err != nil {
 		return err
 	}
-	return s.migrateOrchestrationTaskRoles(ctx)
+	if err := s.migrateOrchestrationTaskRoles(ctx); err != nil {
+		return err
+	}
+	return s.migrateUserScopedCLIConfigPresets(ctx)
+}
+
+func (s *Store) migrateUserScopedCLIConfigPresets(ctx context.Context) error {
+	var schema string
+	if err := s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'cli_config_presets'`).Scan(&schema); err != nil {
+		return err
+	}
+	if !strings.Contains(schema, "agent_id") {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() { _, _ = s.db.ExecContext(context.Background(), `PRAGMA foreign_keys = ON`) }()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`DROP TABLE IF EXISTS cli_config_preset_credentials;`,
+		`DROP TABLE IF EXISTS cli_config_active_presets;`,
+		`CREATE TABLE cli_config_presets_new (
+			id TEXT PRIMARY KEY, user_id TEXT NOT NULL, cli TEXT NOT NULL CHECK(cli IN ('codex','claude')),
+			name TEXT NOT NULL, base_url TEXT NOT NULL, model TEXT NOT NULL,
+			reasoning_effort TEXT NOT NULL DEFAULT '', reasoning_levels_json TEXT NOT NULL DEFAULT '[]',
+			reasoning_default TEXT NOT NULL DEFAULT '', vault_secret TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		);`,
+		`INSERT INTO cli_config_presets_new
+			(id,user_id,cli,name,base_url,model,reasoning_effort,reasoning_levels_json,reasoning_default,vault_secret,created_at,updated_at)
+		 SELECT id,user_id,cli,name,base_url,model,COALESCE(reasoning_effort,''),COALESCE(reasoning_levels_json,'[]'),
+			COALESCE(reasoning_default,''),COALESCE(vault_secret,''),created_at,updated_at FROM cli_config_presets;`,
+		`CREATE TABLE cli_config_preset_credentials_new (
+			preset_id TEXT NOT NULL, agent_id TEXT NOT NULL, secret_json TEXT NOT NULL, key_hint TEXT NOT NULL,
+			created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (preset_id,agent_id),
+			FOREIGN KEY (preset_id) REFERENCES cli_config_presets(id) ON DELETE CASCADE,
+			FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+		);`,
+		`INSERT INTO cli_config_preset_credentials_new
+			(preset_id,agent_id,secret_json,key_hint,created_at,updated_at)
+		 SELECT id,agent_id,secret_json,COALESCE(key_hint,''),created_at,updated_at FROM cli_config_presets;`,
+		`CREATE TABLE cli_config_active_presets_new (
+			user_id TEXT NOT NULL, agent_id TEXT NOT NULL, cli TEXT NOT NULL CHECK(cli IN ('codex','claude')),
+			preset_id TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id,agent_id,cli),
+			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+			FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+			FOREIGN KEY (preset_id) REFERENCES cli_config_presets(id) ON DELETE CASCADE
+		);`,
+		`INSERT INTO cli_config_active_presets_new (user_id,agent_id,cli,preset_id,updated_at)
+		 SELECT user_id,agent_id,cli,id,updated_at FROM cli_config_presets WHERE active != 0;`,
+		`DROP TABLE cli_config_presets;`,
+		`ALTER TABLE cli_config_presets_new RENAME TO cli_config_presets;`,
+		`ALTER TABLE cli_config_preset_credentials_new RENAME TO cli_config_preset_credentials;`,
+		`ALTER TABLE cli_config_active_presets_new RENAME TO cli_config_active_presets;`,
+		`CREATE INDEX idx_cli_config_presets_user_cli ON cli_config_presets(user_id,cli,updated_at DESC);`,
+		`CREATE INDEX idx_cli_config_preset_credentials_agent ON cli_config_preset_credentials(agent_id,updated_at DESC);`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migrate user-scoped CLI presets: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		return err
+	}
+	rows, err := s.db.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return errors.New("migrate user-scoped CLI presets: foreign key violation")
+	}
+	return rows.Err()
 }
 
 // SQLite cannot change a CHECK constraint in place, so widen the legacy pair
@@ -471,21 +575,24 @@ func (s *Store) migrateOrchestrationTaskRoles(ctx context.Context) error {
 }
 
 type CLIConfigPreset struct {
-	ID               string                   `json:"id"`
-	UserID           string                   `json:"-"`
-	AgentID          string                   `json:"agentId"`
-	CLI              string                   `json:"cli"`
-	Name             string                   `json:"name"`
-	BaseURL          string                   `json:"baseUrl"`
-	Model            string                   `json:"model"`
-	ReasoningEffort  string                   `json:"reasoningEffort,omitempty"`
-	ReasoningLevels  []string                 `json:"reasoningLevels,omitempty"`
-	ReasoningDefault string                   `json:"reasoningDefault,omitempty"`
-	Secret           protocol.EncryptedSecret `json:"-"`
-	KeyHint          string                   `json:"keyHint,omitempty"`
-	Active           bool                     `json:"active"`
-	CreatedAt        int64                    `json:"createdAt"`
-	UpdatedAt        int64                    `json:"updatedAt"`
+	ID                  string                   `json:"id"`
+	UserID              string                   `json:"-"`
+	AgentID             string                   `json:"-"`
+	CLI                 string                   `json:"cli"`
+	Name                string                   `json:"name"`
+	BaseURL             string                   `json:"baseUrl"`
+	Model               string                   `json:"model"`
+	ReasoningEffort     string                   `json:"reasoningEffort,omitempty"`
+	ReasoningLevels     []string                 `json:"reasoningLevels,omitempty"`
+	ReasoningDefault    string                   `json:"reasoningDefault,omitempty"`
+	VaultSecret         string                   `json:"-"`
+	Secret              protocol.EncryptedSecret `json:"-"`
+	KeyHint             string                   `json:"keyHint,omitempty"`
+	CredentialAvailable bool                     `json:"credentialAvailable"`
+	ReplaceCredentials  bool                     `json:"-"`
+	Active              bool                     `json:"active"`
+	CreatedAt           int64                    `json:"createdAt"`
+	UpdatedAt           int64                    `json:"updatedAt"`
 }
 
 func (s *Store) CreateCLIConfigPreset(ctx context.Context, preset CLIConfigPreset) (CLIConfigPreset, error) {
@@ -499,35 +606,84 @@ func (s *Store) CreateCLIConfigPreset(ctx context.Context, preset CLIConfigPrese
 		return CLIConfigPreset{}, err
 	}
 	levels, _ := json.Marshal(preset.ReasoningLevels)
-	_, err = s.db.ExecContext(ctx, `INSERT INTO cli_config_presets
-		(id,user_id,agent_id,cli,name,base_url,model,reasoning_effort,reasoning_levels_json,reasoning_default,secret_json,key_hint,active,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, preset.ID, preset.UserID, preset.AgentID, preset.CLI,
-		preset.Name, preset.BaseURL, preset.Model, preset.ReasoningEffort, string(levels), preset.ReasoningDefault, string(raw), preset.KeyHint, boolInt(preset.Active), now, now)
-	return preset, err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return CLIConfigPreset{}, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO cli_config_presets
+		(id,user_id,cli,name,base_url,model,reasoning_effort,reasoning_levels_json,reasoning_default,vault_secret,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, preset.ID, preset.UserID, preset.CLI, preset.Name, preset.BaseURL, preset.Model,
+		preset.ReasoningEffort, string(levels), preset.ReasoningDefault, preset.VaultSecret, now, now); err != nil {
+		return CLIConfigPreset{}, err
+	}
+	if preset.AgentID != "" && encryptedSecretStored(preset.Secret) {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO cli_config_preset_credentials
+			(preset_id,agent_id,secret_json,key_hint,created_at,updated_at) VALUES(?,?,?,?,?,?)`,
+			preset.ID, preset.AgentID, string(raw), preset.KeyHint, now, now); err != nil {
+			return CLIConfigPreset{}, err
+		}
+		preset.CredentialAvailable = true
+	}
+	if err := tx.Commit(); err != nil {
+		return CLIConfigPreset{}, err
+	}
+	return preset, nil
 }
 
-func (s *Store) UpdateCLIConfigPreset(ctx context.Context, preset CLIConfigPreset, active bool) (CLIConfigPreset, error) {
+func (s *Store) UpdateCLIConfigPreset(ctx context.Context, preset CLIConfigPreset, preserveActive bool) (CLIConfigPreset, error) {
 	raw, err := json.Marshal(preset.Secret)
 	if err != nil {
 		return CLIConfigPreset{}, err
 	}
 	now := time.Now().Unix()
 	levels, _ := json.Marshal(preset.ReasoningLevels)
-	res, err := s.db.ExecContext(ctx, `UPDATE cli_config_presets SET name=?,base_url=?,model=?,reasoning_effort=?,reasoning_levels_json=?,reasoning_default=?,secret_json=?,key_hint=?,active=?,updated_at=?
-		WHERE id=? AND user_id=? AND agent_id=? AND cli=?`, preset.Name, preset.BaseURL, preset.Model, preset.ReasoningEffort, string(levels), preset.ReasoningDefault, string(raw), preset.KeyHint,
-		boolInt(active), now, preset.ID, preset.UserID, preset.AgentID, preset.CLI)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return CLIConfigPreset{}, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE cli_config_presets SET name=?,base_url=?,model=?,reasoning_effort=?,reasoning_levels_json=?,reasoning_default=?,vault_secret=?,updated_at=?
+		WHERE id=? AND user_id=? AND cli=?`, preset.Name, preset.BaseURL, preset.Model, preset.ReasoningEffort, string(levels), preset.ReasoningDefault, preset.VaultSecret,
+		now, preset.ID, preset.UserID, preset.CLI)
 	if err != nil {
 		return CLIConfigPreset{}, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return CLIConfigPreset{}, ErrNotFound
 	}
+	if preset.ReplaceCredentials {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM cli_config_preset_credentials WHERE preset_id=?`, preset.ID); err != nil {
+			return CLIConfigPreset{}, err
+		}
+	}
+	if preset.AgentID != "" && encryptedSecretStored(preset.Secret) {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO cli_config_preset_credentials
+			(preset_id,agent_id,secret_json,key_hint,created_at,updated_at) VALUES(?,?,?,?,?,?)
+			ON CONFLICT(preset_id,agent_id) DO UPDATE SET secret_json=excluded.secret_json,key_hint=excluded.key_hint,updated_at=excluded.updated_at`,
+			preset.ID, preset.AgentID, string(raw), preset.KeyHint, now, now); err != nil {
+			return CLIConfigPreset{}, err
+		}
+	}
+	if !preserveActive {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM cli_config_active_presets WHERE user_id=? AND preset_id=?`, preset.UserID, preset.ID); err != nil {
+			return CLIConfigPreset{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return CLIConfigPreset{}, err
+	}
 	return s.CLIConfigPresetByID(ctx, preset.ID, preset.UserID, preset.AgentID)
 }
 
 func (s *Store) ListCLIConfigPresets(ctx context.Context, userID, agentID string) ([]CLIConfigPreset, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,user_id,agent_id,cli,name,base_url,model,COALESCE(reasoning_effort,''),COALESCE(reasoning_levels_json,'[]'),COALESCE(reasoning_default,''),secret_json,COALESCE(key_hint,''),active,created_at,updated_at
-		FROM cli_config_presets WHERE user_id=? AND agent_id=? ORDER BY cli,name,updated_at DESC`, userID, agentID)
+	rows, err := s.db.QueryContext(ctx, `SELECT p.id,p.user_id,p.cli,p.name,p.base_url,p.model,COALESCE(p.reasoning_effort,''),COALESCE(p.reasoning_levels_json,'[]'),COALESCE(p.reasoning_default,''),COALESCE(p.vault_secret,''),
+		COALESCE(c.secret_json,''),COALESCE(c.key_hint,''),CASE WHEN c.preset_id IS NULL THEN 0 ELSE 1 END,
+		CASE WHEN a.preset_id=p.id THEN 1 ELSE 0 END,p.created_at,p.updated_at
+		FROM cli_config_presets p
+		LEFT JOIN cli_config_preset_credentials c ON c.preset_id=p.id AND c.agent_id=?
+		LEFT JOIN cli_config_active_presets a ON a.user_id=p.user_id AND a.agent_id=? AND a.cli=p.cli
+		WHERE p.user_id=? ORDER BY p.cli,p.name,p.updated_at DESC`, agentID, agentID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -536,15 +692,20 @@ func (s *Store) ListCLIConfigPresets(ctx context.Context, userID, agentID string
 	for rows.Next() {
 		var p CLIConfigPreset
 		var raw string
+		var credentialAvailable int
 		var active int
 		var levels string
-		if err := rows.Scan(&p.ID, &p.UserID, &p.AgentID, &p.CLI, &p.Name, &p.BaseURL, &p.Model, &p.ReasoningEffort, &levels, &p.ReasoningDefault, &raw, &p.KeyHint, &active, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.CLI, &p.Name, &p.BaseURL, &p.Model, &p.ReasoningEffort, &levels, &p.ReasoningDefault, &p.VaultSecret, &raw, &p.KeyHint, &credentialAvailable, &active, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
+		p.AgentID = agentID
 		_ = json.Unmarshal([]byte(levels), &p.ReasoningLevels)
-		if err := json.Unmarshal([]byte(raw), &p.Secret); err != nil {
-			return nil, err
+		if raw != "" {
+			if err := json.Unmarshal([]byte(raw), &p.Secret); err != nil {
+				return nil, err
+			}
 		}
+		p.CredentialAvailable = p.VaultSecret != "" || credentialAvailable != 0
 		p.Active = active != 0
 		out = append(out, p)
 	}
@@ -555,21 +716,83 @@ func (s *Store) CLIConfigPresetByID(ctx context.Context, id, userID, agentID str
 	var p CLIConfigPreset
 	var raw string
 	var levels string
+	var credentialAvailable int
 	var active int
-	err := s.db.QueryRowContext(ctx, `SELECT id,user_id,agent_id,cli,name,base_url,model,COALESCE(reasoning_effort,''),COALESCE(reasoning_levels_json,'[]'),COALESCE(reasoning_default,''),secret_json,COALESCE(key_hint,''),active,created_at,updated_at
-		FROM cli_config_presets WHERE id=? AND user_id=? AND agent_id=?`, id, userID, agentID).Scan(&p.ID, &p.UserID, &p.AgentID, &p.CLI, &p.Name, &p.BaseURL, &p.Model, &p.ReasoningEffort, &levels, &p.ReasoningDefault, &raw, &p.KeyHint, &active, &p.CreatedAt, &p.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT p.id,p.user_id,p.cli,p.name,p.base_url,p.model,COALESCE(p.reasoning_effort,''),COALESCE(p.reasoning_levels_json,'[]'),COALESCE(p.reasoning_default,''),COALESCE(p.vault_secret,''),
+		COALESCE(c.secret_json,''),COALESCE(c.key_hint,''),CASE WHEN c.preset_id IS NULL THEN 0 ELSE 1 END,
+		CASE WHEN a.preset_id=p.id THEN 1 ELSE 0 END,p.created_at,p.updated_at
+		FROM cli_config_presets p
+		LEFT JOIN cli_config_preset_credentials c ON c.preset_id=p.id AND c.agent_id=?
+		LEFT JOIN cli_config_active_presets a ON a.user_id=p.user_id AND a.agent_id=? AND a.cli=p.cli
+		WHERE p.id=? AND p.user_id=?`, agentID, agentID, id, userID).Scan(&p.ID, &p.UserID, &p.CLI, &p.Name, &p.BaseURL, &p.Model, &p.ReasoningEffort, &levels, &p.ReasoningDefault, &p.VaultSecret, &raw, &p.KeyHint, &credentialAvailable, &active, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CLIConfigPreset{}, ErrNotFound
 	}
 	if err != nil {
 		return CLIConfigPreset{}, err
 	}
+	p.AgentID = agentID
 	_ = json.Unmarshal([]byte(levels), &p.ReasoningLevels)
-	if err := json.Unmarshal([]byte(raw), &p.Secret); err != nil {
-		return CLIConfigPreset{}, err
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &p.Secret); err != nil {
+			return CLIConfigPreset{}, err
+		}
 	}
+	p.CredentialAvailable = p.VaultSecret != "" || credentialAvailable != 0
 	p.Active = active != 0
 	return p, nil
+}
+
+func (s *Store) ListCLIConfigPresetCredentials(ctx context.Context, id, userID string) ([]CLIConfigPreset, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT p.id,p.user_id,c.agent_id,p.cli,p.name,p.base_url,p.model,COALESCE(p.reasoning_effort,''),COALESCE(p.reasoning_levels_json,'[]'),COALESCE(p.reasoning_default,''),c.secret_json,c.key_hint,p.created_at,p.updated_at
+		FROM cli_config_presets p JOIN cli_config_preset_credentials c ON c.preset_id=p.id WHERE p.id=? AND p.user_id=? ORDER BY c.updated_at DESC`, id, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CLIConfigPreset
+	for rows.Next() {
+		var p CLIConfigPreset
+		var raw, levels string
+		if err := rows.Scan(&p.ID, &p.UserID, &p.AgentID, &p.CLI, &p.Name, &p.BaseURL, &p.Model, &p.ReasoningEffort, &levels, &p.ReasoningDefault, &raw, &p.KeyHint, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(levels), &p.ReasoningLevels)
+		if err := json.Unmarshal([]byte(raw), &p.Secret); err != nil {
+			return nil, err
+		}
+		p.CredentialAvailable = true
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) PutCLIConfigPresetCredential(ctx context.Context, id, userID, agentID, keyHint string, secret protocol.EncryptedSecret) error {
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM cli_config_presets WHERE id=? AND user_id=?`, id, userID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(secret)
+	if err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	_, err = s.db.ExecContext(ctx, `INSERT INTO cli_config_preset_credentials (preset_id,agent_id,secret_json,key_hint,created_at,updated_at) VALUES(?,?,?,?,?,?)
+		ON CONFLICT(preset_id,agent_id) DO UPDATE SET secret_json=excluded.secret_json,key_hint=excluded.key_hint,updated_at=excluded.updated_at`, id, agentID, string(raw), keyHint, now, now)
+	return err
+}
+
+func (s *Store) PutCLIConfigPresetVaultSecret(ctx context.Context, id, userID, vaultSecret string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE cli_config_presets SET vault_secret=?,updated_at=? WHERE id=? AND user_id=?`, vaultSecret, time.Now().Unix(), id, userID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) ActivateCLIConfigPreset(ctx context.Context, id, userID, agentID, cli string) error {
@@ -578,26 +801,29 @@ func (s *Store) ActivateCLIConfigPreset(ctx context.Context, id, userID, agentID
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `UPDATE cli_config_presets SET active=0 WHERE user_id=? AND agent_id=? AND cli=?`, userID, agentID, cli); err != nil {
-		return err
+	var exists int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM cli_config_presets p JOIN cli_config_preset_credentials c ON c.preset_id=p.id AND c.agent_id=? WHERE p.id=? AND p.user_id=? AND p.cli=?`, agentID, id, userID, cli).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE cli_config_presets SET active=1,updated_at=? WHERE id=? AND user_id=? AND agent_id=? AND cli=?`, time.Now().Unix(), id, userID, agentID, cli)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+	_, err = tx.ExecContext(ctx, `INSERT INTO cli_config_active_presets (user_id,agent_id,cli,preset_id,updated_at) VALUES(?,?,?,?,?)
+		ON CONFLICT(user_id,agent_id,cli) DO UPDATE SET preset_id=excluded.preset_id,updated_at=excluded.updated_at`, userID, agentID, cli, id, time.Now().Unix())
+	if err != nil {
+		return err
 	}
 	return tx.Commit()
 }
 
 func (s *Store) ClearActiveCLIConfigPreset(ctx context.Context, userID, agentID, cli string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE cli_config_presets SET active=0 WHERE user_id=? AND agent_id=? AND cli=?`, userID, agentID, cli)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM cli_config_active_presets WHERE user_id=? AND agent_id=? AND cli=?`, userID, agentID, cli)
 	return err
 }
 
 func (s *Store) DeleteCLIConfigPreset(ctx context.Context, id, userID, agentID string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM cli_config_presets WHERE id=? AND user_id=? AND agent_id=?`, id, userID, agentID)
+	res, err := s.db.ExecContext(ctx, `DELETE FROM cli_config_presets WHERE id=? AND user_id=?`, id, userID)
 	if err != nil {
 		return err
 	}
@@ -605,6 +831,10 @@ func (s *Store) DeleteCLIConfigPreset(ctx context.Context, id, userID, agentID s
 		return ErrNotFound
 	}
 	return nil
+}
+
+func encryptedSecretStored(secret protocol.EncryptedSecret) bool {
+	return secret.EphemeralPublicKey != "" && secret.Salt != "" && secret.IV != "" && secret.Ciphertext != ""
 }
 
 func (s *Store) MarkUnfinishedRunsFailed(ctx context.Context, reason string) (int64, error) {

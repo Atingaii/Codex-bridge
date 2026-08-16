@@ -1,5 +1,8 @@
 # Remote CLI Configuration Switcher
 
+> Provider preset ownership and cross-machine credential materialization are
+> extended by [user-scoped-cli-provider-presets.md](user-scoped-cli-provider-presets.md).
+
 ## Goals
 
 - Manage remembered Codex and Claude Code presets from Hub using a name, model,
@@ -60,15 +63,17 @@ restores the prior slot value and migrates the active preset at startup.
 Existing Bridge-managed Claude settings with a versioned Base URL are
 normalized on the next Bridge start; active CLI processes are not interrupted.
 
-Preset updates are ownership-scoped by user, agent, and preset ID. The Hub can
-reuse the existing Bridge-encrypted secret for connection testing and saving,
-but never serializes that secret to the browser. Editing does not implicitly
-apply a preset. Changing an active preset's URL, model, or credential clears its
-active marker until the user applies it again; renaming alone preserves it.
+Preset updates are ownership-scoped by user and preset ID. Machine-specific
+credentials and activation remain private implementation state, and the Hub
+never serializes either Bridge envelopes or vault ciphertext to the browser.
+Editing does not implicitly apply a preset. Changing an active preset's URL,
+model, or credential clears its active marker until the user applies it again;
+renaming alone preserves it.
 
 ## Exit Gates
 
-- [x] Hub never receives plaintext API keys.
+- [x] API keys are encrypted at rest and absent from browser responses, logs,
+  events, prompts, and public shares.
 - [x] Saved presets can be edited while a blank API Key retains the encrypted
   credential without returning it to the browser.
 - [x] URL normalization and model discovery are covered by tests.

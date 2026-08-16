@@ -14,7 +14,7 @@ override.
   provider preset, including different presets for `codex-a` and `codex-b`.
 - Require an explicit, matching saved preset for every worker before a new
   orchestration can start; do not expose machine-global endpoint defaults.
-- Refresh the current machine's slot-preset candidates immediately after a
+- Refresh the user's slot-preset candidates immediately after a
   preset is saved, edited, or deleted in Settings; no browser reload is needed.
 - Keep the selected workspace shared while isolating credentials, provider
   settings, model selection, and CLI home state per run/slot.
@@ -33,8 +33,8 @@ override.
   profile.
 - Do not infer a Claude context window from an unreviewed provider alias or
   copy context settings from the machine-wide Claude configuration.
-- Do not expose plaintext credentials to Hub, browser, event logs, task graphs,
-  public shares, generated prompts, or retained post-run runtime state.
+- Do not expose plaintext credentials to browser responses, event logs, task
+  graphs, public shares, generated prompts, or retained post-run runtime state.
 - Do not add a default extra model turn, arbitrary shell hook, or concurrent
   verifier workload on a low-capacity Bridge.
 - Do not change an existing run's profile bindings implicitly during a
@@ -59,7 +59,7 @@ The `claude-claude` pair and unanimous checker quorum extend this design in
 - `protocol.RunStartData` records safe slot label/model metadata. `RunEndData`
   records the terminal reason and verifier verdict.
 - Hub creates, continues, validates, and snapshots bindings from its
-  owner-scoped preset store. The private `orchestration_worker_profiles` table
+  user-scoped preset store. The private `orchestration_worker_profiles` table
   is the continuation source for every run; a task-graph start payload carries
   the same snapshot for dispatch recovery.
 - Bridge emits `verifier.verdict` with a safe verdict, evidence summary, and

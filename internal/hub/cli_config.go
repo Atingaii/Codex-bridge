@@ -92,8 +92,8 @@ func (s *Server) handleTestCLIConfig(w http.ResponseWriter, r *http.Request, uid
 			return
 		}
 		if !encryptedSecretPresent(secret) {
-			if preset.KeyHint == "" || preset.KeyHint != capability.KeyID {
-				serverutil.WriteError(w, http.StatusConflict, "KEY_CHANGED", "Bridge encryption key changed; enter the API Key again")
+			if err := s.materializeCLIConfigPresetCredential(r.Context(), uid, agentID, &preset); err != nil {
+				serverutil.WriteError(w, http.StatusConflict, "CREDENTIAL_UNAVAILABLE", err.Error())
 				return
 			}
 			secret = preset.Secret
@@ -140,15 +140,28 @@ func (s *Server) handleCreateCLIConfigPreset(w http.ResponseWriter, r *http.Requ
 	if !ok || !s.validateCLIConfigInput(w, input, capability, true, true) {
 		return
 	}
+	if capability.Version < 2 {
+		serverutil.WriteError(w, http.StatusConflict, "BRIDGE_UPDATE_REQUIRED", "upgrade Bridge before saving a user-level model configuration")
+		return
+	}
 	if !s.authorizeReviewedReasoning(w, r.Context(), agentID, &input, input.Secret) {
 		return
+	}
+	var vaultSecret string
+	if capability.Version >= 2 {
+		var err error
+		vaultSecret, err = s.captureCLIConfigVaultSecret(r.Context(), agentID, input.CLI, input.Secret)
+		if err != nil {
+			s.writeCLIConfigRelayError(w, err)
+			return
+		}
 	}
 	preset, err := s.store.CreateCLIConfigPreset(r.Context(), store.CLIConfigPreset{
 		UserID: uid, AgentID: agentID, CLI: input.CLI, Name: strings.TrimSpace(input.Name),
 		BaseURL: strings.TrimRight(strings.TrimSpace(input.BaseURL), "/"), Model: strings.TrimSpace(input.Model),
 		ReasoningEffort: strings.TrimSpace(input.ReasoningEffort),
 		ReasoningLevels: append([]string(nil), input.ReasoningLevels...), ReasoningDefault: strings.TrimSpace(input.ReasoningDefault),
-		Secret: input.Secret, KeyHint: input.KeyID,
+		Secret: input.Secret, KeyHint: input.KeyID, VaultSecret: vaultSecret,
 	})
 	if err != nil {
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to save model preset")
@@ -183,27 +196,42 @@ func (s *Server) handleUpdateCLIConfigPreset(w http.ResponseWriter, r *http.Requ
 	}
 	secret, keyHint := existing.Secret, existing.KeyHint
 	credentialChanged := encryptedSecretPresent(input.Secret)
+	if credentialChanged && capability.Version < 2 {
+		serverutil.WriteError(w, http.StatusConflict, "BRIDGE_UPDATE_REQUIRED", "upgrade Bridge before replacing a user-level model credential")
+		return
+	}
 	if credentialChanged {
 		if !validEncryptedSecret(w, input.Secret) {
 			return
 		}
 		secret, keyHint = input.Secret, input.KeyID
-	} else if keyHint == "" || keyHint != capability.KeyID {
-		serverutil.WriteError(w, http.StatusConflict, "KEY_CHANGED", "Bridge encryption key changed; enter the API Key again")
-		return
+	} else {
+		if err := s.materializeCLIConfigPresetCredential(r.Context(), uid, agentID, &existing); err != nil {
+			serverutil.WriteError(w, http.StatusConflict, "CREDENTIAL_UNAVAILABLE", err.Error())
+			return
+		}
+		secret, keyHint = existing.Secret, existing.KeyHint
 	}
 	if !s.authorizeReviewedReasoning(w, r.Context(), agentID, &input, secret) {
 		return
 	}
 	baseURL := strings.TrimRight(strings.TrimSpace(input.BaseURL), "/")
 	model := strings.TrimSpace(input.Model)
+	vaultSecret := existing.VaultSecret
+	if credentialChanged && capability.Version >= 2 {
+		vaultSecret, err = s.captureCLIConfigVaultSecret(r.Context(), agentID, input.CLI, secret)
+		if err != nil {
+			s.writeCLIConfigRelayError(w, err)
+			return
+		}
+	}
 	preset, err := s.store.UpdateCLIConfigPreset(r.Context(), store.CLIConfigPreset{
 		ID: existing.ID, UserID: uid, AgentID: agentID, CLI: input.CLI,
 		Name: strings.TrimSpace(input.Name), BaseURL: baseURL, Model: model,
 		ReasoningEffort: strings.TrimSpace(input.ReasoningEffort),
 		ReasoningLevels: append([]string(nil), input.ReasoningLevels...), ReasoningDefault: strings.TrimSpace(input.ReasoningDefault),
-		Secret: secret, KeyHint: keyHint,
-	}, existing.Active && existing.BaseURL == baseURL && existing.Model == model && existing.ReasoningEffort == strings.TrimSpace(input.ReasoningEffort) && !credentialChanged)
+		Secret: secret, KeyHint: keyHint, VaultSecret: vaultSecret, ReplaceCredentials: credentialChanged,
+	}, existing.BaseURL == baseURL && existing.Model == model && existing.ReasoningEffort == strings.TrimSpace(input.ReasoningEffort) && !credentialChanged)
 	if errors.Is(err, store.ErrNotFound) {
 		serverutil.WriteError(w, http.StatusNotFound, "NOT_FOUND", "model preset not found")
 		return
@@ -221,7 +249,7 @@ func (s *Server) handleApplyCLIConfigPreset(w http.ResponseWriter, r *http.Reque
 		serverutil.WriteError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many model configuration requests; try again shortly")
 		return
 	}
-	capability, ok := s.requireCLIConfigAgent(w, r, uid, agentID, "")
+	_, ok := s.requireCLIConfigAgent(w, r, uid, agentID, "")
 	if !ok {
 		return
 	}
@@ -234,8 +262,8 @@ func (s *Server) handleApplyCLIConfigPreset(w http.ResponseWriter, r *http.Reque
 		serverutil.WriteError(w, http.StatusInternalServerError, "STORE_ERROR", "failed to load model preset")
 		return
 	}
-	if preset.KeyHint == "" || preset.KeyHint != capability.KeyID {
-		serverutil.WriteError(w, http.StatusConflict, "KEY_CHANGED", "Bridge encryption key changed; delete this preset and enter the API Key again")
+	if err := s.materializeCLIConfigPresetCredential(r.Context(), uid, agentID, &preset); err != nil {
+		serverutil.WriteError(w, http.StatusConflict, "CREDENTIAL_UNAVAILABLE", err.Error())
 		return
 	}
 	normalizeReviewedPreset(&preset)
@@ -318,7 +346,7 @@ func (s *Server) requireCLIConfigAgent(w http.ResponseWriter, r *http.Request, u
 		return nil, false
 	}
 	capability := connection.Capabilities
-	if capability == nil || capability.ConfigSwitcher == nil || capability.ConfigSwitcher.Version != 1 {
+	if capability == nil || capability.ConfigSwitcher == nil || capability.ConfigSwitcher.Version < 1 {
 		serverutil.WriteError(w, http.StatusConflict, "BRIDGE_UPDATE_REQUIRED", "upgrade Bridge before managing model configuration")
 		return nil, false
 	}

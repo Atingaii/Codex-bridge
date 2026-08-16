@@ -50,7 +50,7 @@ export type EncryptedSecret = {
 
 export type CLIConfigPreset = {
 	id: string;
-	agentId: string;
+	agentId?: string;
 	cli: 'codex' | 'claude';
 	name: string;
 	baseUrl: string;
@@ -59,6 +59,7 @@ export type CLIConfigPreset = {
 	reasoningLevels?: string[];
 	reasoningDefault?: string;
 	keyHint?: string;
+	credentialAvailable?: boolean;
 	active: boolean;
 	createdAt: number;
 	updatedAt: number;

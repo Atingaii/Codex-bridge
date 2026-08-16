@@ -4,6 +4,9 @@
 
 - Keep the reviewed model and reasoning-level directory in the Hub so the UI
   does not depend on a private Bridge filesystem.
+- Persist and display the exact provider Base URL that the Bridge successfully
+  probes, including a discovered `/v1` prefix, instead of the browser's raw
+  convenience input.
 - Cover only model/CLI pairs whose documented native effort levels and
   defaults have been reviewed; do not equate provider thinking parameters
   with Codex or Claude effort fields.
@@ -20,13 +23,17 @@
 
 No wire or SQLite schema changes. Existing `reasoningLevels`,
 `reasoningDefault`, and `reasoningEffort` fields are normalized by the Hub.
+`internal/hub/cli_config.go:authorizeReviewedReasoning` also replaces the
+submitted Base URL with `protocol.CLIConfigResult.BaseURL` after a successful
+Bridge probe, so create and update persist the endpoint that actually passed.
 Stale generic metadata saved by an earlier experimental build is removed on
 read/bind for models absent from the reviewed catalog.
 
 ## Implementation and exit gates
 
 1. Add the Hub catalog and normalization helpers.
-2. Apply catalog metadata while listing, saving, and binding presets.
+2. Apply catalog metadata and the probed canonical Base URL while saving and
+   binding presets.
 3. Materialize Claude `effortLevel` in global and isolated settings files.
 4. Verify family coverage, legacy refresh, Claude reset, and low-parallelism Go
    tests.
@@ -36,6 +43,9 @@ read/bind for models absent from the reviewed catalog.
 The Hub catalog is the only capability approval authority. Bridge is limited
 to credential decryption and native-file materialization from the immutable
 snapshot. It has no fallback catalog and never writes `model_catalog_json`.
+The Bridge remains the endpoint probe authority: users may enter a root or
+versioned URL, but only the successful candidate returned by the Bridge is
+stored and shown in later preset and orchestration views.
 
 Provider-native thinking switches and token budgets are not interchangeable
 with `model_reasoning_effort` or Claude Code `effortLevel`. Therefore an

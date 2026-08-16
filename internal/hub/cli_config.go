@@ -382,6 +382,9 @@ func (s *Server) authorizeReviewedReasoning(w http.ResponseWriter, ctx context.C
 		serverutil.WriteError(w, http.StatusBadGateway, "TEST_FAILED", result.Error)
 		return false
 	}
+	if baseURL := strings.TrimRight(strings.TrimSpace(result.BaseURL), "/"); baseURL != "" {
+		input.BaseURL = baseURL
+	}
 	// The Hub catalog is the approval authority. Bridge metadata remains useful
 	// for runtime observability but is not trusted to approve browser input.
 	metadata := reviewedModelMetadata(input.CLI, input.Model)

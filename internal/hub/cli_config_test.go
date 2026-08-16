@@ -1,9 +1,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -104,7 +106,7 @@ func TestUpdateCLIConfigPresetKeepsSecretPrivateAndTracksActiveState(t *testing.
 					return
 				}
 				s.handleCLIConfigResult(agent.ID, protocol.MustEnvelope(protocol.TypeCLIConfigResult, "", protocol.CLIConfigResult{
-					RequestID: request.RequestID, CLI: request.CLI, OK: true,
+					RequestID: request.RequestID, CLI: request.CLI, OK: true, BaseURL: "https://provider.example/v1",
 				}))
 			}
 		}
@@ -125,23 +127,52 @@ func TestUpdateCLIConfigPresetKeepsSecretPrivateAndTracksActiveState(t *testing.
 	path := "/api/agents/" + agent.ID + "/cli-config/presets/" + preset.ID
 
 	rename := authJSONRequestWithCookie(t, s, http.MethodPut, path, cookie, map[string]string{
-		"cli": "codex", "name": "renamed", "baseUrl": preset.BaseURL, "model": preset.Model, "keyId": "bridge-key",
+		"cli": "codex", "name": "renamed", "baseUrl": "https://provider.example", "model": preset.Model, "keyId": "bridge-key",
 	}, http.StatusOK)
 	if strings.Contains(toJSON(rename), "private-ciphertext") || strings.Contains(toJSON(rename), "secret") {
 		t.Fatalf("update response exposed encrypted secret: %#v", rename)
 	}
 	loaded, err := st.CLIConfigPresetByID(ctx, preset.ID, user.ID, agent.ID)
-	if err != nil || loaded.Name != "renamed" || !loaded.Active || loaded.Secret.Ciphertext != "private-ciphertext" {
+	if err != nil || loaded.Name != "renamed" || loaded.BaseURL != "https://provider.example/v1" || !loaded.Active || loaded.Secret.Ciphertext != "private-ciphertext" {
 		t.Fatalf("rename update = %#v, err=%v", loaded, err)
 	}
 
 	authJSONRequestWithCookie(t, s, http.MethodPut, path, cookie, map[string]string{
-		"cli": "codex", "name": "renamed", "baseUrl": preset.BaseURL, "model": "model-b", "keyId": "bridge-key",
+		"cli": "codex", "name": "renamed", "baseUrl": "https://provider.example", "model": "model-b", "keyId": "bridge-key",
 	}, http.StatusOK)
 	loaded, err = st.CLIConfigPresetByID(ctx, preset.ID, user.ID, agent.ID)
 	if err != nil || loaded.Model != "model-b" || loaded.Active || loaded.Secret.Ciphertext != "private-ciphertext" {
 		t.Fatalf("model update = %#v, err=%v", loaded, err)
 	}
+
+	createBody, err := json.Marshal(map[string]any{
+		"cli": "codex", "name": "secondary", "baseUrl": "https://provider.example", "model": "model-c", "keyId": "bridge-key",
+		"secret": map[string]string{"ephemeralPublicKey": "pub", "salt": "salt", "iv": "iv", "ciphertext": "secondary-ciphertext"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/cli-config/presets", bytes.NewReader(createBody))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+	s.httpSrv.Handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create preset status = %d, want %d, body = %s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	presets, err := st.ListCLIConfigPresets(ctx, user.ID, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range presets {
+		if candidate.Name == "secondary" {
+			if candidate.BaseURL != "https://provider.example/v1" {
+				t.Fatalf("created preset BaseURL = %q, want probed canonical URL", candidate.BaseURL)
+			}
+			return
+		}
+	}
+	t.Fatal("created preset not found")
 }
 
 func toJSON(value any) string {

@@ -1,0 +1,49 @@
+name: Linux Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: make test
+
+      - name: Build release assets
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          make portable-package
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -ldflags "-s -w -X main.Version=${VERSION} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o dist/codex-bridge-linux-amd64 .
+          (cd dist && sha256sum codex-bridge-linux-amd64 > codex-bridge-linux-amd64.sha256)
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ProofBridge ${{ github.ref_name }}
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            dist/codex-bridge-linux-amd64
+            dist/codex-bridge-linux-amd64.sha256
+            dist/codex-bridge-${{ github.ref_name }}-linux-amd64.tar.gz
+            dist/codex-bridge-${{ github.ref_name }}-linux-amd64.tar.gz.sha256

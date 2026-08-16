@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/Atingaii/ProofBridge/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/Atingaii/ProofBridge/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push" alt="main 分支 CI 状态" /></a>
+  <a href="https://github.com/Atingaii/ProofBridge/releases/latest"><img src="https://img.shields.io/github/v/release/Atingaii/ProofBridge" alt="最新 Release" /></a>
   <a href="go.mod"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25+" /></a>
   <a href="docs/deployment.md"><img src="https://img.shields.io/badge/platform-Linux-555" alt="Linux" /></a>
 </p>

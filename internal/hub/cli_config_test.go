@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,30 +22,47 @@ func TestCLIConfigRelayBudgetExceedsBridgeProbeBudget(t *testing.T) {
 }
 
 func TestReviewedModelCatalogUsesCLIAndVerifiedNativeLevels(t *testing.T) {
-	tests := []struct{ cli, model, effort string }{
-		{"codex", "gpt-5.6", "none"},
-		{"codex", "gpt-5.6-terra", "xhigh"},
-		{"claude", "claude-opus-4-6", "max"},
+	tests := []struct {
+		model         string
+		levels        []string
+		defaultEffort string
+	}{
+		{"claude-opus-5", []string{"low", "medium", "high", "xhigh", "max"}, "high"},
+		{"claude-fable-5", []string{"low", "medium", "high", "xhigh", "max"}, "high"},
+		{"claude-opus-4.6", []string{"low", "medium", "high", "max"}, "high"},
+		{"gpt-5.6-sol", []string{"low", "medium", "high", "xhigh", "max"}, "medium"},
+		{"gpt-5.6-terra", []string{"none", "low", "medium", "high", "xhigh", "max"}, "medium"},
+		{"gpt-5.6-luna", []string{"low", "medium", "high", "xhigh", "max"}, "medium"},
+		{"gpt-5.5", []string{"low", "medium", "high", "xhigh"}, "medium"},
+		{"grok-4.6", []string{"low", "medium", "high", "xhigh"}, "medium"},
+		{"gemini-3.7-flash", []string{"low", "medium", "high"}, "medium"},
+		{"deepseek-v4-pro", []string{"low", "high", "max"}, "high"},
+		{"qwen3.8-max", []string{"xhigh"}, "xhigh"},
+		{"muse-spark-1.2", []string{"xhigh"}, "xhigh"},
+		{"claude-opus-4.8", []string{"low", "medium", "high", "xhigh", "max"}, "high"},
+		{"claude-sonnet-5", []string{"low", "medium", "high", "xhigh", "max"}, "high"},
+		{"deepseek-v4-flash", []string{"low", "high", "max"}, "high"},
+		{"gemini-3.6-flash", []string{"high"}, "high"},
+		{"glm-5.2", []string{"high", "max"}, "high"},
+		{"gemini-3.5-flash", []string{"high"}, "high"},
 	}
 	for _, tc := range tests {
-		t.Run(tc.model, func(t *testing.T) {
-			metadata := reviewedModelMetadata(tc.cli, tc.model)
-			if metadata == nil || !metadata.Reviewed || !containsString(metadata.SupportedReasoningLevels, tc.effort) {
-				t.Fatalf("catalog(%s, %q) = %#v", tc.cli, tc.model, metadata)
-			}
-		})
+		for _, cli := range []string{"codex", "claude"} {
+			t.Run(cli+"/"+tc.model, func(t *testing.T) {
+				metadata := reviewedModelMetadata(cli, tc.model)
+				if metadata == nil || !metadata.Reviewed || !slices.Equal(metadata.SupportedReasoningLevels, tc.levels) || metadata.DefaultReasoningLevel != tc.defaultEffort {
+					t.Fatalf("catalog(%s, %q) = %#v", cli, tc.model, metadata)
+				}
+			})
+		}
 	}
 }
 
-func TestReviewedModelCatalogDoesNotInventCrossCLIOrVendorLevels(t *testing.T) {
+func TestReviewedModelCatalogDoesNotInventUnmeasuredLevels(t *testing.T) {
 	for _, tc := range []struct{ cli, model string }{
-		{"claude", "gpt-5.6-terra"},
-		{"codex", "claude-opus-4-6"},
-		{"codex", "deepseek-v4-flash"},
-		{"claude", "kimi-k3"},
-		{"claude", "glm-5.2"},
+		{"codex", "gpt-5.6-cyber"},
 		{"codex", "gemini-3.1-pro"},
-		{"codex", "qwen3-max"},
+		{"claude", "qwen3.7-plus"},
 	} {
 		t.Run(tc.cli+"/"+tc.model, func(t *testing.T) {
 			if metadata := reviewedModelMetadata(tc.cli, tc.model); metadata != nil {
@@ -54,17 +72,25 @@ func TestReviewedModelCatalogDoesNotInventCrossCLIOrVendorLevels(t *testing.T) {
 	}
 }
 
+func TestReviewedModelCatalogNormalizesProviderAndOfficialAliases(t *testing.T) {
+	for _, model := range []string{"openai/gpt-5.6-sol", "models/gemini-3.7-flash", "xai/grok-4-6", "deepseek/DeepSeek-V4-Pro", "anthropic/claude-opus-4-8"} {
+		if metadata := reviewedModelMetadata("claude", model); metadata == nil {
+			t.Fatalf("catalog alias %q was not normalized", model)
+		}
+	}
+}
+
 func TestNormalizeReviewedPresetRefreshesLegacyReasoningLevels(t *testing.T) {
 	preset := store.CLIConfigPreset{CLI: "codex", Model: "gpt-5.6-terra", ReasoningEffort: "high"}
 	normalizeReviewedPreset(&preset)
-	if !containsString(preset.ReasoningLevels, "none") || !containsString(preset.ReasoningLevels, "xhigh") || preset.ReasoningDefault != "medium" {
+	if !containsString(preset.ReasoningLevels, "low") || !containsString(preset.ReasoningLevels, "xhigh") || preset.ReasoningDefault != "medium" {
 		t.Fatalf("legacy preset not refreshed: %#v", preset)
 	}
 }
 
 func TestNormalizeReviewedPresetClearsLegacyInventedLevels(t *testing.T) {
 	preset := store.CLIConfigPreset{
-		CLI: "codex", Model: "glm-5.2", ReasoningEffort: "max",
+		CLI: "codex", Model: "qwen3.7-plus", ReasoningEffort: "max",
 		ReasoningLevels: []string{"low", "medium", "high", "xhigh", "max"}, ReasoningDefault: "medium",
 	}
 	normalizeReviewedPreset(&preset)

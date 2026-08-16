@@ -1,3 +1,7 @@
+> **DEPRECATED - model families now share CLI-native effort values**
+>
+> Current design: [ADR-014](014-cross-cli-model-effort-values.md). Historical only; do not implement from this doc.
+
 # ADR-013: Hub Model Catalog And Claude Effort Persistence
 
 ## Status

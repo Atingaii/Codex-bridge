@@ -49,6 +49,8 @@
 3. Add a `make portable-package` target.
 4. Document the package path in `docs/deployment.md`, README files, and developer
    workflow notes.
+5. Publish the portable archive, checksum, and standalone Linux amd64 Bridge
+   binary from version tags through `.github/workflows/release.yml`.
 
 ## Exit Gates
 
@@ -60,6 +62,8 @@
 - `codex-bridge` logs show the Bridge reached `[bridge] connected`.
 - `./status.sh` reports both processes running, and `./stop.sh` stops them.
 - Go tests still pass.
+- Pushing a `v*` tag creates the GitHub Latest Release with the standalone
+  `codex-bridge-linux-amd64` asset and versioned portable archive.
 
 ## Reviewer Q&A
 

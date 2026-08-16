@@ -1,6 +1,6 @@
 > **DEPRECATED - the custom model catalog and machine-wide orchestration assumptions were replaced**
 >
-> Current design: [ADR-013](013-hub-model-catalog-and-claude-effort.md) and
+> Current design: [ADR-014](014-cross-cli-model-effort-values.md) and
 > [ADR-011](011-orchestration-worker-profiles-and-verdicts.md). Historical only;
 > do not implement from this doc.
 

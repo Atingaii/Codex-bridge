@@ -8,8 +8,8 @@
   probes, including a discovered `/v1` prefix, instead of the browser's raw
   convenience input.
 - Cover only model/CLI pairs whose documented native effort levels and
-  defaults have been reviewed; do not equate provider thinking parameters
-  with Codex or Claude effort fields.
+  defaults have been reviewed. Reuse a model's measured values across CLI
+  transports while writing only the selected CLI's native key.
 - Refresh legacy presets when they are read or bound to an orchestration.
 - Persist Claude Code effort in `settings.json` while preserving user values on
   reset.
@@ -47,7 +47,11 @@ The Bridge remains the endpoint probe authority: users may enter a root or
 versioned URL, but only the successful candidate returned by the Bridge is
 stored and shown in later preset and orchestration views.
 
-Provider-native thinking switches and token budgets are not interchangeable
-with `model_reasoning_effort` or Claude Code `effortLevel`. Therefore an
-unreviewed DeepSeek, Kimi, GLM, Gemini, Qwen, MiniMax, or Doubao alias remains
-usable but exposes no explicit effort selector and uses its native default.
+Codex writes the selected effort to `model_reasoning_effort`; Claude Code writes
+it to `effortLevel`. The allowed values come from each model's measured or
+vendor-documented set, not a universal enum: for example GPT-5.6 Sol has five
+levels, GLM 5.2 has `high` and `max`, and DeepSeek V4 Flash has `low`, `high`,
+and `max` with thinking enabled at the `high` default. DeepSeek's `medium` and
+`xhigh` inputs map to `high`, so Hub does not expose them as distinct choices.
+An unreviewed alias remains usable but exposes no explicit effort selector and
+uses its native default.

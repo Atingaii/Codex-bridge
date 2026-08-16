@@ -15,7 +15,7 @@ decrypts credentials and materializes native configuration. It does not infer
 capabilities or create a Codex model catalog. Codex gets `config.toml` and
 `auth.json`; Claude Code gets `settings.json`, including the selected
 `effortLevel` and Hub-reviewed context values. See
-[ADR-013](adr/013-hub-model-catalog-and-claude-effort.md).
+[ADR-014](adr/014-cross-cli-model-effort-values.md).
 
 ```text
 Browser UI (one selected run stream)

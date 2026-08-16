@@ -7,12 +7,10 @@ import (
 	"github.com/tencent/codex-bridge/internal/store"
 )
 
-// reviewedModelCatalog is deliberately explicit. Provider model listings are
-// transport data, not an approval source. These levels are the values exposed
-// through the CLI configuration files for the corresponding model families.
-type reviewedModelProfile struct {
-	CLI      string
-	Provider string
+// reviewedModelFamilies is deliberately explicit. Provider model listings are
+// transport data, not a policy source. Each listed family receives the native
+// effort values supported by the selected CLI.
+type reviewedModelFamily struct {
 	Prefixes []string
 	Exact    []string
 	Levels   []string
@@ -67,22 +65,31 @@ var reviewedClaudeContextProfiles = map[string]reviewedClaudeContextProfile{
 	"mistral-large-latest":   {Window: 128_000, DisableUnknownEnforcement: true},
 }
 
-var reviewedModelProfiles = []reviewedModelProfile{
-	{CLI: "codex", Provider: "openai", Exact: []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}, Levels: []string{"none", "low", "medium", "high", "xhigh", "max"}, Default: "medium"},
-	{CLI: "claude", Provider: "anthropic", Prefixes: []string{"claude-opus-5", "claude-sonnet-5", "claude-opus-4-7", "claude-opus-4-8"}, Levels: []string{"low", "medium", "high", "xhigh", "max"}, Default: "high"},
-	{CLI: "claude", Provider: "anthropic", Prefixes: []string{"claude-opus-4-6", "claude-sonnet-4-6"}, Levels: []string{"low", "medium", "high", "max"}, Default: "high"},
+var reviewedModelFamilies = []reviewedModelFamily{
+	{Exact: []string{"claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-opus-4.8", "claude-opus-4-8"}, Levels: []string{"low", "medium", "high", "xhigh", "max"}, Default: "high"},
+	{Exact: []string{"claude-opus-4.7", "claude-opus-4-7", "claude-sonnet-4.7", "claude-sonnet-4-7", "claude-sonnet-4.8", "claude-sonnet-4-8"}, Levels: []string{"low", "medium", "high", "xhigh", "max"}, Default: "high"},
+	{Exact: []string{"claude-opus-4.6", "claude-opus-4-6", "claude-sonnet-4.6", "claude-sonnet-4-6"}, Levels: []string{"low", "medium", "high", "max"}, Default: "high"},
+	{Exact: []string{"gpt-5.6", "gpt-5.6-terra"}, Levels: []string{"none", "low", "medium", "high", "xhigh", "max"}, Default: "medium"},
+	{Exact: []string{"gpt-5.6-sol", "gpt-5.6-luna"}, Levels: []string{"low", "medium", "high", "xhigh", "max"}, Default: "medium"},
+	{Exact: []string{"gpt-5.5", "grok-4.6", "grok-4-6"}, Levels: []string{"low", "medium", "high", "xhigh"}, Default: "medium"},
+	{Exact: []string{"gemini-3.7-flash"}, Levels: []string{"low", "medium", "high"}, Default: "medium"},
+	{Exact: []string{"glm-5.2"}, Levels: []string{"high", "max"}, Default: "high"},
+	{Exact: []string{"deepseek-v4-pro", "deepseek-v4-flash"}, Levels: []string{"low", "high", "max"}, Default: "high"},
+	{Exact: []string{"kimi-k3"}, Levels: []string{"max"}, Default: "max"},
+	{Exact: []string{"qwen3.8-max", "muse-spark-1.2"}, Levels: []string{"xhigh"}, Default: "xhigh"},
+	{Exact: []string{"gemini-3.6-flash", "gemini-3.5-flash"}, Levels: []string{"high"}, Default: "high"},
 }
 
 func reviewedModelMetadata(cli, model string) *protocol.CLIModelMetadata {
 	cli = strings.ToLower(strings.TrimSpace(cli))
+	if cli != "codex" && cli != "claude" {
+		return nil
+	}
 	name := normalizeCatalogModel(model)
 	if name == "" {
 		return nil
 	}
-	for _, profile := range reviewedModelProfiles {
-		if profile.CLI != cli {
-			continue
-		}
+	for _, profile := range reviewedModelFamilies {
 		matched := false
 		for _, exact := range profile.Exact {
 			matched = name == exact
@@ -109,7 +116,7 @@ func normalizeCatalogModel(model string) string {
 	name := strings.ToLower(strings.TrimSpace(model))
 	name = strings.TrimSuffix(name, "[1m]")
 	name = strings.TrimPrefix(name, "models/")
-	for _, prefix := range []string{"openai/", "anthropic/", "deepseek/", "moonshot/", "kimi/", "zhipu/", "glm/", "google/", "gemini/", "qwen/", "minimax/", "bytedance/"} {
+	for _, prefix := range []string{"openai/", "anthropic/", "deepseek/", "moonshot/", "kimi/", "zhipu/", "glm/", "google/", "gemini/", "xai/", "qwen/", "minimax/", "bytedance/"} {
 		name = strings.TrimPrefix(name, prefix)
 	}
 	return name

@@ -105,6 +105,20 @@ func TestClaudeEffortIsPersistedAndRestored(t *testing.T) {
 	}
 }
 
+func TestModelEffortUsesCLINativeConfigurationKey(t *testing.T) {
+	codex := updateCodexConfig("", "https://provider.example/v1", "gpt-5.5", "xhigh", false)
+	if !strings.Contains(codex, `model_reasoning_effort = "xhigh"`) || strings.Contains(codex, "effortLevel") {
+		t.Fatalf("Codex effort was not written to its native key: %s", codex)
+	}
+
+	manager := &cliConfigManager{}
+	settings := map[string]any{}
+	manager.setClaudeEffort(settings, "xhigh")
+	if settings["effortLevel"] != "xhigh" {
+		t.Fatalf("Claude effortLevel = %#v", settings["effortLevel"])
+	}
+}
+
 func TestCLIConfigApplyAndResetPreserveUnrelatedSettings(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

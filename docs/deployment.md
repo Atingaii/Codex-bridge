@@ -83,6 +83,14 @@ make portable-package
 # -> dist/codex-bridge-<version>-linux-amd64.tar.gz
 ```
 
+Version tags publish the same archive, its checksum, and the standalone
+`codex-bridge-linux-amd64` endpoint binary on GitHub Releases. The stable
+standalone download URL is:
+
+```text
+https://github.com/Atingaii/ProofBridge/releases/latest/download/codex-bridge-linux-amd64
+```
+
 Copy the archive to the target server and run:
 
 ```bash
